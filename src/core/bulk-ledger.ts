@@ -39,6 +39,7 @@ import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 import type { ContainmentMirror } from './history-markers.js';
 import { isSharedSuffix } from './public-suffix.js';
+import { SCHEMA_REFUSAL_KINDS, type SchemaRefusalKind } from './llm-helper.js';
 
 /** A target's stored `read_*` or `write_*` pair (engine.db v43). */
 interface ConnectionColumns {
@@ -191,6 +192,30 @@ export type BulkInvalidReason =
   | 'markup_dropped_before'
   /** an HTML value holds a shortcode whose text the canonical form the run sends would change */
   | 'shortcode_changed';
+
+/** The rule kinds a schema refusal names. */
+const BULK_REFUSAL_KINDS: ReadonlySet<string> = new Set(SCHEMA_REFUSAL_KINDS);
+
+/**
+ * With `verdict_invalid`: the field of the run's rule the judge's answer broke, the rule's kind
+ * and its bound. Every part comes from the rule's schema, never from the value the model
+ * wrote; the target keeps it so the owner and support can tell a refusal from a provider fault.
+ */
+export interface BulkRefusalDetail {
+  field: string;
+  kind: SchemaRefusalKind;
+  limit?: number;
+}
+
+/** `value` as a {@link BulkRefusalDetail}, or null: a field name of at most 80 characters, a known kind, a finite bound. */
+function refusalDetailShape(value: unknown): BulkRefusalDetail | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const { field, kind, limit } = value as Record<string, unknown>;
+  if (typeof field !== 'string' || field === '' || field.length > 80) return null;
+  if (typeof kind !== 'string' || !BULK_REFUSAL_KINDS.has(kind)) return null;
+  if (limit !== undefined && (typeof limit !== 'number' || !Number.isFinite(limit))) return null;
+  return { field, kind: kind as BulkRefusalDetail['kind'], ...(typeof limit === 'number' ? { limit } : {}) };
+}
 
 /** Every markup refusal is a reason a target can record. */
 const _markupRefusalsAreReasons: MarkupRefusal extends BulkInvalidReason ? true : never = true;
@@ -680,9 +705,25 @@ export type TargetDiff =
   | { kind: 'text'; from: number; removed: string[]; added: string[] }
   | { kind: 'fields'; fields: { field: string; before: unknown; after: unknown }[] };
 
+/** The most code points a stored target title keeps: Shopify's own limit for a product title. */
+export const BULK_TARGET_TITLE_MAX = 255;
+
+/** A read's title as stored: cut by code point, never inside a character, and NULL stays NULL
+ *  (no empty string is stored for a title the read did not answer). */
+export function bulkTargetTitleCell(title: string | null | undefined): string | null {
+  if (typeof title !== 'string' || title === '') return null;
+  const points = [...title];
+  return points.length > BULK_TARGET_TITLE_MAX ? points.slice(0, BULK_TARGET_TITLE_MAX).join('') : title;
+}
+
 export interface PreviewTarget {
   seq: number;
   key: string;
+  /** A Shopify product target's title as the store answered the preview's read: what people
+   *  know the product by (the targets route: the owner and read-only mandates). Absent for an
+   *  image target, a target read before titles were kept, and a product without one. Text, never
+   *  markup. */
+  title?: string | undefined;
   /** External targets: fields the write sends although their value does not change —
    *  because the source named them, or the provider requires them on every edit. Shown so
    *  an owner does not read them as a mistake; the undo writes them back too. */
@@ -711,6 +752,10 @@ export interface PreviewTarget {
   /** A target refused for `new_link_domain` (1010): the domain the refused link points to, as the
    *  check read it (ASCII, lower case, Punycode). Absent on a row recorded before it was kept. */
   linkDomain?: string | undefined;
+  /** A target refused for `verdict_invalid`: which field of the rule broke which rule, and
+   *  the rule's bound. Absent on a row recorded before it was kept, and where the refusal named no
+   *  field of the rule; the page then reads the sentence without one. */
+  refusalDetail?: BulkRefusalDetail | undefined;
   /** A target refused for `shortcode_changed` (1130): each HTML field the value changes and whose
    *  shortcode the check refuses (against its before-image where the row holds one; a planned
    *  target refused at its read holds none), with its whole value as the planner or the judge
@@ -742,6 +787,11 @@ export interface PreviewTarget {
   /** A rollback or an undo took this run's write back (`undone_at`). After a rollback that did
    *  not complete, a target that is `written` and not `undone` is one lynox left as it was. */
   undone: boolean;
+  /** An undo's target that gives a value back and takes back a source target sent to without a
+   *  confirmed write: the undo reads it first and resets only where the source's value is in place.
+   *  The same targets {@link BulkLedger.countUndoOpenTargets} counts, taken out or not. Set only
+   *  where it holds. */
+  undoOpen?: true | undefined;
 }
 
 interface RunRow {
@@ -1722,13 +1772,13 @@ export class BulkLedger {
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (((applied_at IS NOT NULL AND found_unsent = 0) OR (applied_at IS NULL AND write_sent = 1 AND undone_at IS NULL)) AND ${WRITING_SQL}) AS written,
          undone_at IS NOT NULL AS undone,
-         shop_added_markup, host_rewrote, context_secret_field, link_domain
+         shop_added_markup, host_rewrote, context_secret_field, link_domain, target_title, refusal_detail
        FROM bulk_targets WHERE run_id = ?${opts.changed === true ? " AND change != 'unchanged' ORDER BY written DESC, seq" : ' ORDER BY seq'} LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
       deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
-      context_secret_field: number | null; link_domain: string | null;
+      context_secret_field: number | null; link_domain: string | null; target_title: string | null; refusal_detail: string | null;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
@@ -1741,6 +1791,8 @@ export class BulkLedger {
     // the text the apply wrote, which its own preview already named. An undo is never approved
     // from a preview, so the line that counts the marks would not show either.
     const seoNoted = run !== undefined && run.kind !== 'undo' && this.shopifyFormOfRun(run) === 'shopify_product';
+    // An undo's targets that take back a write never confirmed: the page names each in its row.
+    const undoOpen = run?.kind === 'undo' ? this.undoOpenSeqs(runId) : new Set<number>();
     return rows.map((r) => {
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
       // A judged target without its verdict holds the template (every field null), not a plan:
@@ -1794,6 +1846,8 @@ export class BulkLedger {
         ...(r.error === 'secret_in_context' && r.context_secret_field !== null && contextNames[r.context_secret_field] !== undefined
           ? { contextField: contextNames[r.context_secret_field]! } : {}),
         ...(r.error === 'new_link_domain' && r.link_domain !== null ? { linkDomain: this.engineDb.dec(r.link_domain) } : {}),
+        ...(r.target_title !== null ? { title: this.engineDb.dec(r.target_title) } : {}),
+        ...(r.error === 'verdict_invalid' && r.refusal_detail !== null ? this.refusalDetailOf(r.refusal_detail) : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
@@ -1801,6 +1855,7 @@ export class BulkLedger {
         ...(shopMarkedAt !== undefined ? { shopMarkedAt } : {}),
         ...(hiddenAdds.length > 0 ? { hiddenAdds } : {}),
         ...(hiddenUnchecked.length > 0 ? { hiddenUnchecked } : {}),
+        ...(undoOpen.has(r.seq) ? { undoOpen: true as const } : {}),
       };
     });
   }
@@ -2549,6 +2604,18 @@ export class BulkLedger {
     ).get(runId) as { n: number }).n;
   }
 
+  /** The seqs of the targets {@link countUndoOpenTargets} counts, those the owner took out
+   *  included: a row says what the undo does with it once it is put back. */
+  private undoOpenSeqs(runId: string): Set<number> {
+    return new Set((this.engineDb.getDb().prepare(
+      `SELECT u.seq FROM bulk_targets u
+         JOIN bulk_runs r ON r.id = u.run_id AND r.kind = 'undo'
+         JOIN bulk_targets s ON s.run_id = r.source_run_id AND s.seq = u.source_seq
+       WHERE u.run_id = ? AND u.change IN ('update','create')
+         AND s.applied_at IS NULL AND s.write_sent = 1`,
+    ).all(runId) as { seq: number }[]).map((x) => x.seq));
+  }
+
   /** The undo that took an undone run back, for the owner's page: the last finished undo started
    *  from it, and when its last target was taken back. Null for a run that is not `undone`.
    *  Only an undo carries a `source_run_id` ({@link planUndo}), so the source link alone finds it.
@@ -2844,11 +2911,11 @@ export class BulkLedger {
     }
     const external = externalHostOf(src.target_system) !== null;
     const rows = db.prepare(
-      `SELECT seq, target_key, change, before, after_planned, after_actual,
+      `SELECT seq, target_key, change, before, after_planned, after_actual, target_title,
          read_connection_id, read_grant_id, write_connection_id, write_grant_id FROM bulk_targets
        WHERE run_id = ? AND ${undoEligible(external)}
        ORDER BY seq DESC`,
-    ).all(sourceRunId) as ({ seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null } & ConnectionColumns)[];
+    ).all(sourceRunId) as ({ seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null; target_title: string | null } & ConnectionColumns)[];
     if (rows.length === 0) return { ok: false, reason: 'nothing_to_undo' };
 
     const htmlFields = this.htmlFieldsOf(sourceRunId);
@@ -2878,7 +2945,9 @@ export class BulkLedger {
       // before-image while that write was still unmarked or before the refusal existed.
       const tainted = !after.absent && ((htmlFields.length > 0 && this.restoresShopAddedMarkup(sourceRunId, r.seq, after.value, htmlFields))
         || this.shopMarkedWriteOf(t.key, after.value, sourceRunId) !== null);
-      return { key: t.key, sourceSeq: r.seq, expected, after, change, read, tainted };
+      // The title the source's read stored goes along as it is (the same key encrypts both rows), so
+      // the owner taking a run back sees each product by its name; NULL stays NULL.
+      return { key: t.key, sourceSeq: r.seq, expected, after, change, read, tainted, title: r.target_title };
     });
     const id = randomUUID();
     const undoKinds = new Set(planned.map((t) => undoFor(t.expected)));
@@ -2889,11 +2958,11 @@ export class BulkLedger {
       for (const t of planned) { yield String(t.sourceSeq); yield t.key; }
     }
     const insertTarget = db.prepare(
-      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, source_seq, read_connection_id, read_grant_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, source_seq, read_connection_id, read_grant_id, target_title)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertInvalid = db.prepare(
-      `INSERT INTO bulk_targets (run_id, seq, target_key, change, source_seq, error) VALUES (?, ?, ?, 'invalid', ?, ?)`,
+      `INSERT INTO bulk_targets (run_id, seq, target_key, change, source_seq, error, target_title) VALUES (?, ?, ?, 'invalid', ?, ?, ?)`,
     );
     db.transaction(() => {
       // An undo reads and writes what its source did: it is contained wherever its source is,
@@ -2909,7 +2978,7 @@ export class BulkLedger {
         planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json, ...planner(OWNER_PRINCIPAL));
       planned.forEach((t, seq) => {
         if (t.tainted) {
-          insertInvalid.run(id, seq, this.engineDb.enc(t.key), t.sourceSeq, 'shop_added_markup' satisfies BulkInvalidReason);
+          insertInvalid.run(id, seq, this.engineDb.enc(t.key), t.sourceSeq, 'shop_added_markup' satisfies BulkInvalidReason, t.title);
           return;
         }
         insertTarget.run(
@@ -2918,6 +2987,7 @@ export class BulkLedger {
           t.after.absent ? null : this.engineDb.enc(JSON.stringify(t.after.value ?? null)),
           t.sourceSeq,
           t.read?.id ?? null, t.read?.grantId ?? null,
+          t.title,
         );
       });
       // An undo is the owner's: the owner's rule, over all planners.
@@ -3176,8 +3246,10 @@ export class BulkLedger {
     via: AttachedConnection | null = null,
     /** The after-state the read completed (a Shopify target's seo pair): stored with the image, in one transaction, and classified against. */
     completedAfter?: Readonly<Record<string, unknown>>,
-    /** The title the same read answered, on a run compared in its store's saved form
-     *  ({@link comparedInSavedForm}): classified with, never stored. */
+    /** The title the same read answered: on a run compared in its store's saved form
+     *  ({@link comparedInSavedForm}) classified with, and stored for the targets route to show the target
+     *  by (`target_title`, at most {@link BULK_TARGET_TITLE_MAX} code points). Never the plan's
+     *  title and never a model's: only the store's answer to this read comes in here. */
     titleNow?: string | null,
     /** The context C the same read answered (PRD shopify-preset §20.2 item 7): stored beside the
      *  image for the judge, never part of it — not compared, not diffed, not undone. */
@@ -3198,8 +3270,11 @@ export class BulkLedger {
     const run = this.runRow(runId);
     if (run !== undefined && run.kind !== 'undo'
       && this.shopMarkedWriteOf(this.engineDb.dec(row.target_key), read.before, runId) !== null) {
-      return db.prepare(`UPDATE bulk_targets SET before = ?, change = 'invalid', undo = NULL, error = ? WHERE ${guard}`)
-        .run(this.engineDb.enc(JSON.stringify(before)), 'before_has_shop_markup' satisfies BulkInvalidReason, runId, seq, runId).changes === 1;
+      // The title this read answered goes along, so the owner sees which product was left out.
+      const title = bulkTargetTitleCell(titleNow);
+      return db.prepare(`UPDATE bulk_targets SET before = ?, change = 'invalid', undo = NULL, error = ?, target_title = ? WHERE ${guard}`)
+        .run(this.engineDb.enc(JSON.stringify(before)), 'before_has_shop_markup' satisfies BulkInvalidReason,
+          title === null ? null : this.engineDb.enc(title), runId, seq, runId).changes === 1;
     }
     // Stored canonical in its HTML fields (1130): the preview checked this after-state against this
     // before-image just now, and the write sends what is stored.
@@ -3213,10 +3288,12 @@ export class BulkLedger {
       && sameValue(read.before, shopifySavedForm(after, titleNow), html);
     const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : saved ? 'unchanged' : classifyChange(before, after, html);
     return db.transaction((): boolean => {
-      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ?, context = ? WHERE ${guard}`)
+      const title = bulkTargetTitleCell(titleNow);
+      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ?, context = ?, target_title = ? WHERE ${guard}`)
         .run(
           this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)),
-          context === undefined ? null : this.engineDb.enc(JSON.stringify(context)), runId, seq, runId,
+          context === undefined ? null : this.engineDb.enc(JSON.stringify(context)),
+          title === null ? null : this.engineDb.enc(title), runId, seq, runId,
         ).changes === 1;
       if (stored) this.noteConnection(runId, seq, 'read', via);
       return stored;
@@ -3308,6 +3385,24 @@ export class BulkLedger {
   startDomainsOf(runId: string): string[] {
     const run = this.runRow(runId);
     return run ? this.startDomainsOfRow(run) ?? [] : [];
+  }
+
+  /** The `refusal_detail` cell of a refused target: the field, rule and bound, encrypted, only with
+   *  `verdict_invalid` and only in the shape {@link BulkRefusalDetail} has. */
+  private refusalDetailCell(reason: BulkInvalidReason, refusal: BulkRefusalDetail | undefined): string | null {
+    if (reason !== 'verdict_invalid' || refusal === undefined) return null;
+    const detail = refusalDetailShape(refusal);
+    return detail === null ? null : this.engineDb.enc(JSON.stringify(detail));
+  }
+
+  /** A stored `refusal_detail` as the page reads it; a cell that does not decode to the shape reads as none. */
+  private refusalDetailOf(cell: string): { refusalDetail: BulkRefusalDetail } | Record<string, never> {
+    try {
+      const detail = refusalDetailShape(JSON.parse(this.engineDb.dec(cell)) as unknown);
+      return detail === null ? {} : { refusalDetail: detail };
+    } catch {
+      return {};
+    }
   }
 
   /** The `link_domain` cell of a refused target: the domain, encrypted, only with `new_link_domain`
@@ -3558,7 +3653,7 @@ export class BulkLedger {
     runId: string, seq: number, token: string,
     /** `contextField`: with `secret_in_context`, the index in the rule's `context` of the field that held it.
      *  `linkDomain`: with `new_link_domain`, the domain the refused link points to (1010). */
-    verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown> | undefined; contextField?: number | undefined; linkDomain?: string | undefined },
+    verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown> | undefined; contextField?: number | undefined; linkDomain?: string | undefined; refusal?: BulkRefusalDetail | undefined },
     now: number = Date.now(),
   ): boolean {
     const db = this.engineDb.getDb();
@@ -3570,8 +3665,8 @@ export class BulkLedger {
         const kept = verdict.invalid === 'shortcode_changed' && verdict.refused !== undefined
           ? this.engineDb.enc(JSON.stringify(verdict.refused)) : null;
         return db.prepare(
-          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, after_planned = COALESCE(?, after_planned), context_secret_field = ?, link_domain = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-        ).run(verdict.invalid, kept, verdict.contextField ?? null, this.linkDomainCell(verdict.invalid, verdict.linkDomain), at, runId, seq, token, runId).changes === 1;
+          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, after_planned = COALESCE(?, after_planned), context_secret_field = ?, link_domain = ?, refusal_detail = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+        ).run(verdict.invalid, kept, verdict.contextField ?? null, this.linkDomainCell(verdict.invalid, verdict.linkDomain), this.refusalDetailCell(verdict.invalid, verdict.refusal), at, runId, seq, token, runId).changes === 1;
       }
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;

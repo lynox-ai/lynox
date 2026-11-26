@@ -43,8 +43,9 @@ export const SPAWN_TIMEOUT = 10 * 60 * 1000;
 /**
  * What a child's run is debited with: its OWN spend. What was booked onto it
  * from outside is left out: a grandchild it delegated to records and debits its own spend,
- * and an in-run helper call debits itself (spawned children run none, see
- * `recordExternalCost`). The child's ceiling still counts it (`estimatedCostUSD`, which
+ * and an in-run helper call debits itself. A child runs none of the agent's own helper
+ * fallbacks, but its tools' helper calls (a rerank, a docs extraction, a plan) charge its
+ * guard like that and debit themselves (`recordExternalCost`). The child's ceiling still counts it (`estimatedCostUSD`, which
  * `onSettled` hands to the delegating run, together with the bounds of the child's ended calls
  * for its ceiling only). The child's run row adds one display term on top, see
  * {@link childRowCostUSD}.
@@ -1943,7 +1944,14 @@ async function executeThinker(
     });
 
     // Same per-turn time anchor as top-level chat / pipeline steps.
-    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), { disposableDeadline: deadline?.signal });
+    // A parent run admitted with a spending bound of its own hands that kind of bound on: the
+    // child runs under its share as a run ceiling too, so whatever is refused under such a bound
+    // (an in-session workflow, whose steps no guard of this run sees) is refused in the child.
+    const parentBounded = parentAgent.hasRunCostCeiling();
+    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), {
+      disposableDeadline: deadline?.signal,
+      ...(parentBounded ? { runCostCeilingUSD: budgetUSD } : {}),
+    });
     // Built HERE, not at the return: `runHistory.updateRun` below stores
     // `responseText`, and appending the note only on the way out left the run row
     // holding a version of the result the parent never saw — the one place

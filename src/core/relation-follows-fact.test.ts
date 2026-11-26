@@ -258,7 +258,7 @@ function seedOldEngine(path: string): void {
   // One edge per triple in engine.db: a kind per source keeps them apart.
   for (const k of ['a', 'b', 'c', 'e', 'f']) rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: `rel_${k}`, description: k, sourceMemoryId: `m-${k}` });
   db.prepare('DELETE FROM schema_version WHERE version >= 72').run();
-  db.exec('DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause;');
+  db.exec('ALTER TABLE bulk_targets DROP COLUMN refusal_detail; ALTER TABLE bulk_targets DROP COLUMN target_title; DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause;');
   engine.close();
 }
 

@@ -106,6 +106,21 @@ const mockSetApiKey = vi.fn();
 const mockGetApiStore = vi.fn().mockReturnValue(null);
 const mockSecretIsEnvironment = vi.fn().mockReturnValue(false);
 
+// Document extraction, held on demand: a test pushes a promise and the next upload's extraction
+// waits on it.
+const { extractHolds } = vi.hoisted(() => ({ extractHolds: [] as Array<Promise<void>> }));
+vi.mock('../core/document-extract.js', async (importActual) => {
+  const actual = await importActual<typeof import('../core/document-extract.js')>();
+  return {
+    ...actual,
+    extractDocumentText: async (...args: Parameters<typeof actual.extractDocumentText>) => {
+      const hold = extractHolds.shift();
+      if (hold) await hold;
+      return actual.extractDocumentText(...args);
+    },
+  };
+});
+
 // Capture-telemetry recorder — the funnel/proposal emit sites are fire-and-forget; this
 // records every call so a test can assert an event actually fired (the RF-GAP1/GAP2
 // regression guard: the events existed as types but no site emitted them).
@@ -4765,6 +4780,185 @@ describe('LynoxHTTPApi', () => {
       } finally {
         if (prev === undefined) delete process.env['LYNOX_RUN_WALL_CLOCK_MS'];
         else process.env['LYNOX_RUN_WALL_CLOCK_MS'] = prev;
+      }
+    });
+
+    // A run waiting on its own question counts against the run cap until it is answered,
+    // stopped or expires.
+    it('counts runs waiting on their own questions against the run cap', async () => {
+      const { db, store } = await promptDb();
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown; getRunExecutor: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      const originalGetRunExecutor = engineRef.getRunExecutor;
+      const { RunExecutor } = await import('../core/run-executor.js');
+      const ex = new RunExecutor(5);
+      engineRef.getPromptStore = (): unknown => store;
+      engineRef.getRunExecutor = (): unknown => ex;
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      const sids = ['waiting-cap-1', 'waiting-cap-2', 'waiting-cap-3', 'waiting-cap-4', 'waiting-cap-5'];
+      const open: Response[] = [];
+      try {
+        for (const sid of sids) {
+          repayRateWindow();
+          mockSessionRun.mockImplementationOnce(async () => {
+            const promptUser = mockSessionInstance.promptUser as (q: string, o?: string[]) => Promise<string>;
+            return `settled:${await promptUser('Which repo did you mean?', ['lynox', 'other'])}`;
+          });
+          const res = await jsonFetch(`/api/sessions/${sid}/run`, {
+            method: 'POST',
+            body: JSON.stringify({ task: 'sort the invoices', protocol: 1 }),
+          });
+          expect(res.status).toBe(200);
+          open.push(res);
+          for (let i = 0; i < 400 && !store.getPending(sid); i++) await new Promise<void>((r) => setTimeout(r, 5));
+          expect(store.getPending(sid), 'positive control: the run waits on its question').toBeDefined();
+        }
+        expect(ex.activeCount, 'positive control: five runs are held').toBe(5);
+        repayRateWindow();
+        const sixth = await jsonFetch('/api/sessions/waiting-cap-6/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'something else', protocol: 1 }),
+        });
+        expect(sixth.status).toBe(429);
+        expect(await sixth.json()).toEqual({ error: 'run_queue_full', capacity: 5 });
+        // A stopped run gives its place back.
+        const stop = await jsonFetch('/api/sessions/waiting-cap-1/abort', { method: 'POST' });
+        expect(stop.status, await stop.text()).toBe(200);
+        await expectSlotReclaimed(slots, 'waiting-cap-1');
+        for (let i = 0; i < 400 && ex.activeCount === 5; i++) await new Promise<void>((r) => setTimeout(r, 5));
+        expect(ex.activeCount).toBe(4);
+        expect(ex.atCapacity()).toBe(false);
+      } finally {
+        for (const sid of sids) {
+          await jsonFetch(`/api/sessions/${sid}/abort`, { method: 'POST' }).then((r) => r.text()).catch(() => undefined);
+        }
+        for (const sid of sids) await expectSlotReclaimed(slots, sid);
+        for (const res of open) await res.body?.cancel().catch(() => undefined);
+        engineRef.getPromptStore = originalGetPromptStore;
+        engineRef.getRunExecutor = originalGetRunExecutor;
+        db.close();
+      }
+    });
+
+    // A run that ends only releases the slot it owns.
+    it('does not release a slot a finishing run no longer owns', async () => {
+      const slots = (api as unknown as { runningSessions: Map<string, { takeover: unknown }> }).runningSessions;
+      const sid = 'own-slot-1';
+      let openA!: () => void;
+      let openB!: () => void;
+      extractHolds.push(new Promise<void>((r) => { openA = r; }), new Promise<void>((r) => { openB = r; }));
+      let finishA: ((v: string) => void) | undefined;
+      let finishB: ((v: string) => void) | undefined;
+      mockSessionRun
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishA = r; }))
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishB = r; }));
+      const files = [{ name: 'notes.txt', type: 'text/plain', data: Buffer.from('hello').toString('base64') }];
+      const send = (task: string): Promise<Response> => {
+        repayRateWindow();
+        return jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task, files, protocol: 1 }) });
+      };
+      const wait = async (done: () => boolean): Promise<void> => {
+        for (let i = 0; i < 400 && !done(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+      };
+      let a: Promise<Response> | undefined;
+      let b: Promise<Response> | undefined;
+      try {
+        a = send('first');
+        await wait(() => extractHolds.length === 1);
+        b = send('second');
+        await wait(() => extractHolds.length === 0);
+        expect(extractHolds.length, 'positive control: setup reached').toBe(0);
+        expect(slots.has(sid), 'positive control: no slot set').toBe(false);
+        openA();
+        await wait(() => finishA !== undefined);
+        const slotA = slots.get(sid);
+        expect(slotA, 'positive control: first slot set').toBeDefined();
+        openB();
+        await wait(() => finishB !== undefined);
+        const slotB = slots.get(sid);
+        expect(slotB, 'positive control: slot replaced').not.toBe(slotA);
+        finishA!('first done');
+        await (await a).text();
+        expect(slots.get(sid), 'the current slot stays').toBe(slotB);
+        repayRateWindow();
+        const third = await jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task: 'third', protocol: 1 }) });
+        expect(third.status).toBe(409);
+        await third.text();
+      } finally {
+        openA?.();
+        openB?.();
+        extractHolds.length = 0;
+        finishA?.('first done');
+        finishB?.('second done');
+        await a?.then((r) => r.text()).catch(() => undefined);
+        await b?.then((r) => r.text()).catch(() => undefined);
+        await expectSlotReclaimed(slots, sid);
+      }
+    });
+
+    // A run's heartbeat refreshes only the slot it owns.
+    it('refreshes only its own slot on a heartbeat', async () => {
+      const slots = (api as unknown as { runningSessions: Map<string, { lastEventAt: number }> }).runningSessions;
+      const sid = 'own-beat-1';
+      let openA!: () => void;
+      let openB!: () => void;
+      extractHolds.push(new Promise<void>((r) => { openA = r; }), new Promise<void>((r) => { openB = r; }));
+      let finishA: ((v: string) => void) | undefined;
+      let finishB: ((v: string) => void) | undefined;
+      mockSessionRun
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishA = r; }))
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishB = r; }));
+      const files = [{ name: 'notes.txt', type: 'text/plain', data: Buffer.from('hello').toString('base64') }];
+      const send = (task: string): Promise<Response> => {
+        repayRateWindow();
+        return jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task, files, protocol: 1 }) });
+      };
+      const wait = async (done: () => boolean): Promise<void> => {
+        for (let i = 0; i < 400 && !done(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+      };
+      // Only the heartbeat's interval is faked: sockets and the waits above keep real time, and
+      // the slot's clock is read against a marker rather than a faked Date.
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      let a: Promise<Response> | undefined;
+      let b: Promise<Response> | undefined;
+      try {
+        a = send('first');
+        await wait(() => extractHolds.length === 1);
+        b = send('second');
+        await wait(() => extractHolds.length === 0);
+        expect(extractHolds.length, 'positive control: setup reached').toBe(0);
+        openA();
+        await wait(() => finishA !== undefined);
+        const slotA = slots.get(sid);
+        expect(slotA, 'positive control: first slot set').toBeDefined();
+        // The first run's heartbeats fall on 10 s, 20 s, ...
+        slotA!.lastEventAt = 1;
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(slotA!.lastEventAt, 'a heartbeat refreshes the run\'s own slot').toBeGreaterThan(1);
+        await vi.advanceTimersByTimeAsync(5_000);
+        // The second run starts at 15 s, so its own heartbeats fall on 25 s, 35 s, ...
+        openB();
+        await wait(() => finishB !== undefined);
+        const slotB = slots.get(sid);
+        expect(slotB, 'positive control: slot replaced').not.toBe(slotA);
+        slotB!.lastEventAt = 1;
+        // 20 s: only the first run's heartbeat is due.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(slotB!.lastEventAt, 'another run\'s heartbeat leaves the slot as it was').toBe(1);
+        // 25 s: the second run's own heartbeat refreshes it.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(slotB!.lastEventAt, 'positive control: the slot\'s own heartbeat refreshes it').toBeGreaterThan(1);
+      } finally {
+        // Real timers first, so a failure above cannot leave the file on faked intervals.
+        vi.useRealTimers();
+        openA?.();
+        openB?.();
+        extractHolds.length = 0;
+        finishA?.('first done');
+        finishB?.('second done');
+        await a?.then((r) => r.text()).catch(() => undefined);
+        await b?.then((r) => r.text()).catch(() => undefined);
+        await expectSlotReclaimed(slots, sid);
       }
     });
 
@@ -12386,7 +12580,7 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, another helper to a helper as another mandate, and the owner\'s own by none', async () => {
+    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, another helper to a helper as another mandate, a helper\'s own address under another grant as its own, and the owner\'s own by none', async () => {
       const AT = '2026-11-10T00:00:00.000Z';
       const rows = [
         { id: 'trg-anna', title: 'Preise beobachten', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT },
@@ -12400,8 +12594,11 @@ describe('LynoxHTTPApi', () => {
         { id: 'trg-old', title: 'Alt' },
         // A helper's mark from before grant ids were stored: whose grant it was is not known.
         { id: 'trg-legacy', title: 'Ohne Grant', created_by: 'mandate:anna@example.com' },
+        // Bea's address under an earlier grant, and with no grant id: hers, as the trigger masking reads it.
+        { id: 'trg-bea-old', title: 'Früher', created_by: 'mandate:bea@example.com', created_mandate_id: 'grant-b-old', created_at: AT },
+        { id: 'trg-bea-legacy', title: 'Alt von Bea', created_by: 'mandate:bea@example.com' },
       ];
-      const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' };
+      const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.', 'grant-b-old': 'Beatrice (old grant)' };
       const reads: string[] = [];
       // A helper's read is recorded in the trail before it is answered, so the trail takes rows too.
       let trail: { displayNameOf: (id: string) => string | null; record: () => void } | null = { displayNameOf: (id) => { reads.push(id); return shown[id] ?? null; }, record: () => undefined };
@@ -12424,9 +12621,11 @@ describe('LynoxHTTPApi', () => {
             'trg-own': [],
             'trg-old': [],
             'trg-legacy': [{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }],
+            'trg-bea-old': [{ kind: 'set_up_by', name: 'Beatrice (old grant)', takenOver: false }],
+            'trg-bea-legacy': [{ kind: 'set_up_by', name: 'bea@example.com', takenOver: false }],
           });
           // Two triggers of grant-a, one request: the trail is read once per grant.
-          expect([...reads].sort()).toEqual(['grant-a', 'grant-b']);
+          expect([...reads].sort()).toEqual(['grant-a', 'grant-b', 'grant-b-old']);
           // A helper reads its own grant's name, and another grant as another mandate: not its own,
           // never whose. (Whether the row's own fields still carry the other address is the
           // route's field question, not the setup lines'.)
@@ -12435,8 +12634,15 @@ describe('LynoxHTTPApi', () => {
           expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
           expect(bea.byId['trg-taken']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: true }]);
           expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
-          // Without a grant id it cannot be told to be hers or another's: it says neither.
+          // Another address without a grant id: not hers, and not whose.
           expect(bea.byId['trg-legacy']).toEqual([{ kind: 'set_up_by', name: 'some mandate', takenOver: false }]);
+          // Her own address under another grant or none: hers, named as her own grant.
+          const readsAsBea = reads.length;
+          const beaAgain = await setupOf();
+          expect(beaAgain.byId['trg-bea-old']).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+          expect(beaAgain.byId['trg-bea-legacy']).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+          expect(reads.slice(readsAsBea)).not.toContain('grant-b-old');
+          expect(beaAgain.text).not.toContain('Beatrice (old grant)');
           expect(bea.text).not.toContain('Anna A.');
           expect(JSON.stringify(Object.values(bea.byId))).not.toContain('anna@example.com');
           // A session no scope names (a mandate without a grant): no lines at all, no read of the
@@ -12444,7 +12650,7 @@ describe('LynoxHTTPApi', () => {
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
           const readsBefore = reads.length;
           const none = await setupOf();
-          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-edit-taken', 'trg-own', 'trg-old', 'trg-legacy']) expect(none.byId[id]).toEqual([]);
+          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-edit-taken', 'trg-own', 'trg-old', 'trg-legacy', 'trg-bea-old', 'trg-bea-legacy']) expect(none.byId[id]).toEqual([]);
           expect(reads.length).toBe(readsBefore);
           for (const name of Object.values(shown)) expect(none.text).not.toContain(name);
           // A trail that cannot be read costs the owner the names, not the list: the address stands in.
@@ -19850,6 +20056,21 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(mockSpeakStream).not.toHaveBeenCalled();
     });
 
+    it('a refusal within the balance gets the voice sentence; a plain refusal keeps its own text', async () => {
+      // Kills: the voice sentence on every refusal, and the hook's budget text on a refusal within the balance.
+      repayRateWindow();
+      const { RunAdmissionRefusedError } = await import('../core/run-admission.js');
+      mockEngineHooks = [{ onBeforeRun: () => { throw new RunAdmissionRefusedError('AI budget for this period reached.'); } }];
+      const held = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(held.status).toBe(402);
+      expect(((await held.json()) as { error: string }).error).toBe('Not enough AI budget is free for voice right now. If another task is running, try again once it has finished; otherwise buy a credit pack or wait for your next billing cycle.');
+      repayRateWindow();
+      mockEngineHooks = [{ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } }];
+      const plain = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(((await plain.json()) as { error: string }).error).toBe('AI budget for this period reached.');
+      expect(mockSpeakStream).not.toHaveBeenCalled();
+    });
+
     it('blocks with 402 when the control plane is stale (fail-closed)', async () => {
       mockEngineHooks = [{ onBeforeRun: vi.fn(() => { throw new Error('Managed control plane temporarily unreachable'); }) }];
       const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
@@ -19988,6 +20209,23 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(costArg).toBeCloseTo(0.0013, 6);
     });
 
+    it('admits the request on the length text-prep turns it into, not on the raw length', async () => {
+      // Kills: admitting on the raw length, or on a fixed expansion factor (a table of arrows
+      // grows about eightfold in prep, and the call is billed on the prepared characters).
+      repayRateWindow();
+      const { prepareForSpeech } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
+      const text = `| a | b |\n|---|---|\n| ${'↓'.repeat(9_900)} | x |`;
+      const prepared = prepareForSpeech(text, 'de').length;
+      expect(prepared, 'positive control: prep grows this text beyond a 1.5x factor').toBeGreaterThan(text.length * 1.5);
+      const onBeforeRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun }];
+      mockSpeakStream.mockResolvedValue({ characters: prepared, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text, lang: 'de' }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(Math.ceil(prepared * 13 / 1_000_000 * 100));
+    });
+
     it('refuses a model other than the pinned one before the budget gate', async () => {
       repayRateWindow();
       const { VOXTRAL_TTS_MODEL } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
@@ -20067,6 +20305,18 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(body.error).toContain('AI budget');
       // Gate fired before any provider work — STT was never invoked.
       expect(mockExtractSessionContext).not.toHaveBeenCalled();
+      expect(mockTranscribeWithStream).not.toHaveBeenCalled();
+    });
+
+    it('a transcription refused within the balance gets the voice sentence', async () => {
+      // Kills: the STT route passing the hook's budget text through on a refusal within the balance.
+      repayRateWindow();
+      const { RunAdmissionRefusedError } = await import('../core/run-admission.js');
+      mockEngineHooks = [{ onBeforeRun: () => { throw new RunAdmissionRefusedError('AI budget for this period reached.'); } }];
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
+      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      expect(res.status).toBe(402);
+      expect(((await res.json()) as { error: string }).error).toBe('Not enough AI budget is free for voice right now. If another task is running, try again once it has finished; otherwise buy a credit pack or wait for your next billing cycle.');
       expect(mockTranscribeWithStream).not.toHaveBeenCalled();
     });
 
@@ -25604,6 +25854,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     };
     const HELD = { status: 409, code: 'review_pending', runId: 'run-held', runs: 0 };
     const RAN = { status: 200, code: undefined, runId: undefined, runs: 1 };
+    const OWNER_REVIEW = { status: 409, code: 'review_pending_owner', runId: undefined, runs: 0 };
     const card = async (id = OWN): Promise<{ hasChanges: boolean; runId?: string }> =>
       (await (await jsonFetch(`/api/sessions/${id}/changeset`)).json()) as { hasChanges: boolean; runId?: string };
     const answer = (action: string, id = OWN): Promise<Response> =>
@@ -25626,10 +25877,34 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(await outcome(await send())).toEqual(RAN);
     });
 
-    it('does not hold a mandate on the owner\'s review, and gives it no card, even when the mandate ran last', async () => {
-      review(OWNER_PRINCIPAL, { lastRun: MANDATE });
+    it('does not hold a mandate on the owner\'s review and gives it no card, but refuses its run with the way on, so the owner\'s backups stay', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL, { lastRun: MANDATE });
       asMandate();
       expect(await card()).toEqual({ hasChanges: false, files: [] });
+      expect(await outcome(await send()), 'not held on a card it cannot see: refused').toEqual(OWNER_REVIEW);
+      expect(await outcome(await send({ shows_changeset_review: undefined })), 'whatever the client').toEqual(OWNER_REVIEW);
+      expect(csm.isEmpty(), 'the owner\'s review is still there').toBe(false);
+      expect(csm.hasOriginal(file), 'with its backup').toBe(true);
+      // The owner can still roll their change back, and then the mandate runs.
+      api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+      expect((await answer('rollback')).status).toBe(200);
+      expect(readFileSync(file, 'utf-8')).toBe('before');
+      asMandate();
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('control: a mandate under the owner\'s review runs in a new conversation of its own', async () => {
+      review(OWNER_PRINCIPAL, { lastRun: MANDATE });
+      asMandate();
+      expect(await outcome(await send()), 'positive control: refused here').toEqual(OWNER_REVIEW);
+      // Another conversation is another session, without the owner's review.
+      sessionRanBy(MANDATE, { getChangesetManager: vi.fn(() => null) });
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('control: the owner\'s review that the card does not show (its only file was deleted) does not refuse the mandate', async () => {
+      review(OWNER_PRINCIPAL, { lastRun: MANDATE, change: 'delete' });
+      asMandate();
       expect(await outcome(await send())).toEqual(RAN);
     });
 
@@ -25787,14 +26062,77 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(await res.text(), 'not "stopped partway"').not.toContain('rollback_aborted');
     });
 
-    it('a rollback that stops partway answers with its own refusal, and the hold ends', async () => {
-      const { csm } = review(OWNER_PRINCIPAL);
+    it('a rollback that stops partway answers with its own refusal, keeps the review and its backups, and the hold stays', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
       vi.spyOn(csm, 'rollbackAll').mockImplementation(() => { throw new Error('stopped'); });
       const res = await answer('rollback');
       expect(res.status).toBe(500);
-      expect(((await res.json()) as { code?: string }).code).toBe('rollback_aborted');
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['a.txt'] });
+      expect(csm.isEmpty(), 'the review stays').toBe(false);
+      expect(csm.hasOriginal(file), 'with its backup').toBe(true);
+      expect(await outcome(await send())).toEqual(HELD);
+    });
+
+    it('when the second of two restores throws, the first is done, the second keeps its backup, and a second rollback finishes the job', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      const other = join(dirname(file), 'b.txt');
+      writeFileSync(other, 'b before', 'utf-8');
+      csm.backupBeforeWrite(other);
+      writeFileSync(other, 'b after', 'utf-8');
+      const inner = csm as unknown as { _rollbackOne: (abs: string, entry: unknown) => boolean };
+      const real = inner._rollbackOne.bind(csm);
+      const one = vi.spyOn(inner, '_rollbackOne').mockImplementation((abs, entry) => {
+        if (abs === other) throw new Error('disk full');
+        return real(abs, entry);
+      });
+      const res = await answer('rollback');
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['b.txt'] });
+      expect(readFileSync(file, 'utf-8'), 'the first file is restored').toBe('before');
+      expect(readFileSync(other, 'utf-8'), 'the second still carries the change').toBe('b after');
+      expect(csm.hasOriginal(other), 'and keeps its backup').toBe(true);
+      expect(csm.hasOriginal(file), 'the restored file is no longer held').toBe(false);
+      expect(await outcome(await send()), 'the hold stays while files are half restored').toEqual(HELD);
+      one.mockRestore();
+      const again = await answer('rollback');
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({ ok: true, notRestored: [] });
+      expect(readFileSync(other, 'utf-8')).toBe('b before');
       expect(csm.isEmpty()).toBe(true);
       expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('a partial rollback whose second chosen restore throws keeps that file\'s backup and forgets the first', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      const other = join(dirname(file), 'b.txt');
+      writeFileSync(other, 'b before', 'utf-8');
+      csm.backupBeforeWrite(other);
+      writeFileSync(other, 'b after', 'utf-8');
+      const inner = csm as unknown as { _rollbackOne: (abs: string, entry: unknown) => boolean };
+      const real = inner._rollbackOne.bind(csm);
+      vi.spyOn(inner, '_rollbackOne').mockImplementation((abs, entry) => {
+        if (abs === other) throw new Error('disk full');
+        return real(abs, entry);
+      });
+      const res = await jsonFetch(`/api/sessions/${OWN}/changeset/review`, { method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run-held', rolledBackFiles: ['a.txt', 'b.txt'] }) });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['b.txt'] });
+      expect(readFileSync(file, 'utf-8'), 'the first chosen file is restored').toBe('before');
+      expect(csm.hasOriginal(file), 'and no longer held').toBe(false);
+      expect(csm.hasOriginal(other), 'the second keeps its backup').toBe(true);
+    });
+
+    it('a partial rollback that stops partway names only the chosen files it has not restored', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      const other = join(dirname(file), 'b.txt');
+      writeFileSync(other, 'b before', 'utf-8');
+      csm.backupBeforeWrite(other);
+      writeFileSync(other, 'b after', 'utf-8');
+      vi.spyOn(csm, 'rollbackFiles').mockImplementation(() => { throw new Error('stopped'); });
+      const res = await jsonFetch(`/api/sessions/${OWN}/changeset/review`, { method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run-held', rolledBackFiles: ['b.txt'] }) });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['b.txt'] });
+      expect(csm.isEmpty()).toBe(false);
     });
   });
 

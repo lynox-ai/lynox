@@ -18,9 +18,10 @@
 	import MarkedLine from './MarkedLine.svelte';
 	import { shownValue, VALUE_OPEN } from '../utils/plan-takeover.js';
 	import {
-		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey,
+		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey, bulkRefusalSentence,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkShowsFailure,
 	} from './bulk-runs.js';
+	import { BulkLoadFailed, bulkLoadErrorKey } from './bulk-runs.js';
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
 
@@ -83,10 +84,12 @@
 	}
 
 	/** A page of the run's targets. A failed fetch throws: an empty page would read as a run
-	 *  with fewer targets than the approval covers. */
+	 *  with fewer targets than the approval covers. A refused answer throws with its status, so
+	 *  the page can say why ({@link bulkLoadErrorKey}). */
 	async function loadTargets(id: string, offset: number, limit: number, changed = false): Promise<BulkTarget[]> {
 		const r = await json<{ targets?: BulkTarget[] }>(`/bulk/runs/${encodeURIComponent(id)}/targets?offset=${offset}&limit=${limit}${changed ? '&changed=1' : ''}`);
-		if (!r.ok || !Array.isArray(r.body.targets)) throw new Error('targets');
+		if (!r.ok) throw new BulkLoadFailed(r.status);
+		if (!Array.isArray(r.body.targets)) throw new Error('targets');
 		return r.body.targets;
 	}
 
@@ -197,7 +200,7 @@
 		try {
 			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
 			if (left()) return false;
-			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
+			if (!r.ok) { if (!quiet) error = t(bulkLoadErrorKey([r.status])); loading = false; return false; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
@@ -244,9 +247,9 @@
 			unmeasuredOk = false;
 			probeOk = false;
 			supersedable = null;
-		} catch {
+		} catch (e) {
 			if (left()) return false;
-			if (!quiet) error = t('common.load_failed');
+			if (!quiet) error = t(bulkLoadErrorKey([e instanceof BulkLoadFailed ? e.status : null]));
 			loading = false;
 			return false;
 		}
@@ -272,9 +275,9 @@
 			targets = whole ? more : [...targets, ...more];
 			changedOnly = false;
 			return true;
-		} catch {
+		} catch (e) {
 			if (left()) return false;
-			actionError = t('common.load_failed');
+			actionError = t(bulkLoadErrorKey([e instanceof BulkLoadFailed ? e.status : null]));
 			return false;
 		}
 	}
@@ -660,6 +663,17 @@
 	const conflictsText = $derived(run ? bulkConflictsText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
+	// An undo the owner approves lists its targets as a write does (U-466): each product and the value
+	// it gets back. The entries it deletes are listed apart, in the box under the approval, so its table
+	// leaves them out.
+	const undoApproving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'undo');
+	const listed = $derived(undoApproving ? targets.filter((x) => x.change !== 'delete') : targets);
+	// A target is taken out of a write, and out of an undo, except of the undo of an atomic run: that
+	// restores all of its targets or none (the ledger refuses it, `atomic_undo`).
+	const takesOut = $derived(approving || (undoApproving && run !== null && !run.atomic));
+	// The owner took out one of the targets that get a value back: the undo's sentence says so once
+	// nothing but its deletes is left.
+	const undoTookOut = $derived(undoApproving && listed.some((x) => x.deselected));
 	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, view) : { text: null, nothing: false });
 	// Counted over the loaded targets: a preview the owner approves is loaded whole.
 	const seoEntity = $derived(approving ? bulkSeoEntityCount(targets) : 0);
@@ -667,7 +681,7 @@
 	let spreadShown = $state<{ run: string; kind: BulkMarkerKind } | null>(null);
 	const spreadKind = $derived(approving && run !== null && spreadShown?.run === run.id ? spreadShown.kind : null);
 	const spreadSeqs = $derived(bulkOutlierSpreadSeqs(approving ? run?.judgeOutliers : null, spreadKind));
-	const unfolded = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
+	const unfolded = $derived(showUnchanged ? listed : listed.filter((x) => x.change !== 'unchanged'));
 	const shownTargets = $derived(spreadSeqs === null ? unfolded : unfolded.filter((x) => spreadSeqs.has(x.seq)));
 	function toggleSpread(kind: BulkMarkerKind): void {
 		if (run === null) return;
@@ -695,7 +709,7 @@
 		if (i >= 0) spreadButtons[i]?.focus();
 	}
 	// The unchanged targets the run holds, as its counts say, while only the changed ones are loaded.
-	const foldedUnchanged = $derived(changedOnly && run !== null ? run.changes.unchanged : targets.length - unfolded.length);
+	const foldedUnchanged = $derived(changedOnly && run !== null ? run.changes.unchanged : listed.length - unfolded.length);
 	async function showUnchangedTargets(): Promise<void> {
 		// Unfolded only once they are on the page: a load that failed or was overtaken leaves the fold.
 		if (changedOnly && !(await showMore())) return;
@@ -705,7 +719,7 @@
 	// The sentence under a field not checked for hidden characters: the way out only where the owner
 	// can take the target out on this page (U-294).
 	const uncheckedNoteKey = (x: BulkTarget): string =>
-		approving && ownerActs && writes(x) && !x.deselected ? 'bulk.unchecked.field_take_out' : 'bulk.unchecked.field';
+		takesOut && ownerActs && writes(x) && !x.deselected ? 'bulk.unchecked.field_take_out' : 'bulk.unchecked.field';
 	// Hidden characters a target adds where text may carry one: the legend over the list
 	// once any shown target is marked, and the count wherever the run is approved or confirmed.
 	// A value taken back no longer holds what the legend says will be written (U-218): its mark
@@ -767,10 +781,15 @@
 <!-- The markup a target's new value adds and removes in an HTML field (1010), as code text with
      every attribute whole (sec-core M3): set as text, never rendered, and wrapped so a long value
      stays in view. On an undo it says what the undo writes back and takes out. -->
-{#snippet targetName(target: { key: string })}
+<!-- A product target by its title where the store's read answered one (as text, never markup),
+     with its admin link below; without a title, the link alone as before. -->
+{#snippet targetName(target: { key: string; title?: string | undefined })}
 	{@const name = bulkTargetName(run?.targetSystem ?? '', target)}
 	{#if name.adminUrl === null}
 		<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+	{:else if target.title}
+		<span class="block text-sm break-words" data-testid="bulk-target-title">{bulkVisibleText(target.title)}</span>
+		<a class="text-xs text-text-muted underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{t('bulk.target.open_in_shop')}<span aria-hidden="true"> ↗</span></a>
 	{:else}
 		<a class="text-sm underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{tf('bulk.target.product', { n: name.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
 	{/if}
@@ -871,9 +890,14 @@
 					{@render ruleOrigin('approve')}
 				</div>
 			{/if}
-			{#if run.kind === 'apply' && targets.length > 0}
+			{#if (run.kind === 'apply' || undoApproving) && listed.length > 0}
 				<div>
-					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(targets.length), n: String(run.total) })}</h2>
+					<!-- An undo's count leaves out the entries it deletes, which are not in its table. -->
+					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(listed.length), n: String(run.total - (targets.length - listed.length)) })}</h2>
+					{#if undoApproving && run.atomic && ownerActs}
+						<!-- Once over the table, instead of a button on each row that the ledger would refuse. -->
+						<p class="text-sm mb-2" data-testid="bulk-undo-atomic">{t('bulk.deselect.refused.atomic_undo')}</p>
+					{/if}
 					{#if skipped.text && !skipped.nothing}
 						<p class="text-sm mb-2">{skipped.text}</p>
 					{/if}
@@ -908,18 +932,26 @@
 						{/if}
 					</div>
 					<div class="overflow-x-auto">
-						<table class="w-full text-sm">
-							<thead>
+						<!-- The roles are not redundant here: on a narrow screen an undo's rows show as blocks, which drops them (U-266). -->
+						<!-- svelte-ignore a11y_no_redundant_roles -->
+						<table class="w-full text-sm" role="table">
+							<!-- On a narrow screen each target of an undo is one block: name and link first, its fields below (U-266). -->
+							<thead class={undoApproving ? 'hidden sm:table-header-group' : ''}>
 								<tr class="text-left text-xs text-text-subtle border-b border-border">
 									<th class="py-1.5 pr-3 font-medium">{t('bulk.head.target')}</th>
-									<th class="py-1.5 font-medium">{t('bulk.preview.before_after')}</th>
+									<th class="py-1.5 font-medium" data-testid="bulk-values-head">{t(undoApproving ? 'bulk.undo.now_back' : 'bulk.preview.before_after')}</th>
 								</tr>
 							</thead>
 							<tbody>
 								{#each orderedTargets as target (target.seq)}
-									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
-										<td class="py-1.5 pr-3">
+									<!-- svelte-ignore a11y_no_redundant_roles -->
+									<tr role="row" class="{undoApproving ? 'block sm:table-row ' : ''}border-b border-border align-top {target.deselected ? 'opacity-60' : ''}" data-testid="bulk-target-row">
+										<td role="cell" class={undoApproving ? 'block sm:table-cell pt-1.5 sm:pb-1.5 pr-3' : 'py-1.5 pr-3'}>
 											{@render targetName(target)}
+											{#if undoApproving && target.undoOpen && !target.deselected}
+												<!-- Of this target it is open whether the source's change arrived: the undo reads it first. -->
+												<p class="text-xs text-text-muted" data-testid="bulk-undo-row-open">{t('bulk.undo.row_open')}</p>
+											{/if}
 											{#if target.shopAddedMarkup}
 												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
 											{/if}
@@ -936,7 +968,9 @@
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
 											{/if}
 										</td>
-										<td class="py-1.5">
+										<td role="cell" class={undoApproving ? 'block sm:table-cell pb-1.5 pt-1 sm:pt-1.5' : 'py-1.5'}>
+											<!-- The column's head by the values on a narrow screen: only over a row that shows a pair of values. -->
+											{#if undoApproving && (target.diff.kind === 'fields' || target.diff.kind === 'text')}<div class="sm:hidden text-xs text-text-subtle" data-testid="bulk-values-label">{t('bulk.undo.now_back')}</div>{/if}
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}
 													<!-- A long value without spaces (HTML, a URL) breaks inside the cell instead of running past it. -->
@@ -957,9 +991,10 @@
 											{:else if target.error && target.change !== 'invalid'}
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
-											{@render markupList(target, false)}
+											<!-- An undo says by the field what it writes back and takes out (U-266 (2)). -->
+											{@render markupList(target, undoApproving)}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm" data-testid="bulk-invalid-text">{#if target.error === 'secret_in_context' && target.contextField !== undefined}{@render sentence(bulkSentenceParts(view.t(bulkSecretInContextKey(shopify, run.targetSystem === 'data_store')), 'field', {}), [target.contextField])}{:else}{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', listForm: run.listForm, judgesHtml: run.judgesHtml, markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}{/if}</p>
+												<p class="text-sm" data-testid="bulk-invalid-text">{#if target.error === 'secret_in_context' && target.contextField !== undefined}{@render sentence(bulkSentenceParts(view.t(bulkSecretInContextKey(shopify, run.targetSystem === 'data_store')), 'field', {}), [target.contextField])}{:else if target.error === 'verdict_invalid' && target.refusalDetail !== undefined && bulkRefusalSentence(target.refusalDetail, shopify, view) !== null}{@const refused = bulkRefusalSentence(target.refusalDetail, shopify, view)!}{@render sentence(bulkSentenceParts(refused.template, 'field', { rule: refused.rule }), [target.refusalDetail.field])}{:else}{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', listForm: run.listForm, judgesHtml: run.judgesHtml, markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}{/if}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
 													{#each target.refusedValues as { field, value, codePoints } (field)}
 														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle" data-testid="bulk-refused-field">{@render fieldName(field)}:</div>{/if}
@@ -967,7 +1002,7 @@
 													{/each}
 												{/if}
 											{/if}
-											{#if approving && (target.deselected || writes(target))}
+											{#if takesOut && (target.deselected || writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
 													{#if target.deselected}<span class="text-text-subtle">{view.t('bulk.deselect.taken_out')}</span>{/if}
 													{#if ownerActs}
@@ -1305,14 +1340,10 @@
 			{:else if run.kind === 'undo' && run.phase === 'previewed'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.undo.approve_title')}</h2>
-					<!-- The targets that get a value back; the entries the source created are listed apart. -->
-					<p class="text-sm" data-testid="bulk-undo-approve-explain">{bulkUndoApproveText(run, i18n)}</p>
-					{#each targets.filter((x) => (x.markupChanges?.length ?? 0) > 0) as target (target.seq)}
-						<div class="text-sm" data-testid="bulk-undo-markup">
-							{@render targetName(target)}
-							{@render markupList(target, true)}
-						</div>
-					{/each}
+					<!-- The targets that get a value back are in the table above, each with the markup it writes
+					     back; the entries the source created are listed here. With nothing left to write, the
+					     sentence says why the approval is locked. -->
+					<p id="bulk-undo-approve-explain" class="text-sm" data-testid="bulk-undo-approve-explain">{bulkUndoApproveText(run, i18n, { tookOut: undoTookOut, listed: listed.length > 0 })}</p>
 					{#if run.changes.delete > 0}
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p data-testid="bulk-undo-creates">{run.changes.delete === 1 ? t('bulk.undo.creates_one') : tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
@@ -1322,8 +1353,9 @@
 						</div>
 					{/if}
 					<div class="flex flex-wrap gap-2">
-						<button type="button" class={btnPrimary} disabled={busy || hopelessReason !== null || creates.length !== run.changes.delete}
-							aria-describedby={hopelessReason !== null ? 'bulk-approve-hopeless' : undefined} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
+						<!-- The ledger refuses an approval with nothing to write (`nothing_to_apply`): every target that would get a value back taken out, or every target refused. -->
+						<button type="button" class={btnPrimary} disabled={busy || hopelessReason !== null || creates.length !== run.changes.delete || bulkWriting(run) === 0}
+							aria-describedby={hopelessReason !== null ? 'bulk-approve-hopeless' : bulkWriting(run) === 0 ? 'bulk-undo-approve-explain' : undefined} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
 					{#if hopelessReason !== null}

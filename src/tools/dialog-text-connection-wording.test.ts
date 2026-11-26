@@ -15,7 +15,7 @@ describe('the API connection questions say connection', () => {
   });
 
   it('asks to save a connection', () => {
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save(word, 'CRM', [], ''))).toBe('⚠ API: saving "CRM" needs your acceptance.\n\nAccept and save this connection?');
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save(word, 'CRM', [], ''))).toBe('⚠ API: saving “CRM” needs your acceptance.\n\nAccept and save this connection?');
     expect(flattenPrompt(API_SETUP_DIALOG.de.save(word, 'CRM', [], ''))).toBe('⚠ API: Zum Speichern von „CRM“ braucht es deine Zustimmung.\n\nDiese Verbindung annehmen und speichern?');
   });
 
@@ -50,12 +50,12 @@ describe('the API connection questions say connection', () => {
 
   it('says why no authorization address could be derived, about the connection', () => {
     expect(PRESET_NOTE.en.unknownProvider('google')).toBe('No authorization address could be derived: this connection names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: google.');
-    expect(PRESET_NOTE.en.badPreset('x', 'bad')).toBe('No authorization address could be derived: the built-in provider "x" is defined wrongly in this engine — bad. Nothing on this connection fixes that; report it.');
-    expect(PRESET_NOTE.en.missingParam('x', 'the shop', 'shop')).toBe('No authorization address could be derived: the provider "x" needs the shop (auth.oauth.preset_params.shop), which this connection does not supply. Set it with api_setup update — the host is disclosed then.');
-    expect(PRESET_NOTE.en.refusedParam('x', 'the shop', 'shop')).toBe('No authorization address could be derived: the value this connection supplies for the shop (auth.oauth.preset_params.shop) is not one the provider "x" accepts. Correct it with api_setup update — the host is disclosed then.');
+    expect(PRESET_NOTE.en.badPreset('x', 'bad')).toBe('No authorization address could be derived: the built-in provider “x” is defined wrongly in this engine — bad. Nothing on this connection fixes that; report it.');
+    expect(PRESET_NOTE.en.missingParam('x', 'the shop', 'shop')).toBe('No authorization address could be derived: the provider “x” needs the shop (auth.oauth.preset_params.shop), which this connection does not supply. Set it with api_setup update — the host is disclosed then.');
+    expect(PRESET_NOTE.en.refusedParam('x', 'the shop', 'shop')).toBe('No authorization address could be derived: the value this connection supplies for the shop (auth.oauth.preset_params.shop) is not one the provider “x” accepts. Correct it with api_setup update — the host is disclosed then.');
     expect(PRESET_NOTE.de.unknownProvider('google')).toBe('Es liess sich keine Anmeldeadresse ableiten: Diese Verbindung nennt einen Anbieter, den lynox nicht eingebaut hat, daher gibt es hier nichts offenzulegen oder anzunehmen. Eingebaut sind: google.');
-    expect(PRESET_NOTE.de.badPreset('x', 'bad')).toBe('Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter "x" ist in lynox falsch definiert — bad. An dieser Verbindung lässt sich das nicht beheben; melde es.');
-    expect(PRESET_NOTE.de.missingParam('x', 'den Shop', 'shop')).toBe('Es liess sich keine Anmeldeadresse ableiten: Der Anbieter "x" braucht den Shop (auth.oauth.preset_params.shop), und diese Verbindung gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.');
-    expect(PRESET_NOTE.de.refusedParam('x', 'den Shop', 'shop')).toBe('Es liess sich keine Anmeldeadresse ableiten: Der Wert, den diese Verbindung für den Shop (auth.oauth.preset_params.shop) angibt, ist keiner, den der Anbieter "x" annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.');
+    expect(PRESET_NOTE.de.badPreset('x', 'bad')).toBe('Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter „x“ ist in lynox falsch definiert — bad. An dieser Verbindung lässt sich das nicht beheben; melde es.');
+    expect(PRESET_NOTE.de.missingParam('x', 'den Shop', 'shop')).toBe('Es liess sich keine Anmeldeadresse ableiten: Der Anbieter „x“ braucht den Shop (auth.oauth.preset_params.shop), und diese Verbindung gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.');
+    expect(PRESET_NOTE.de.refusedParam('x', 'den Shop', 'shop')).toBe('Es liess sich keine Anmeldeadresse ableiten: Der Wert, den diese Verbindung für den Shop (auth.oauth.preset_params.shop) angibt, ist keiner, den der Anbieter „x“ annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.');
   });
 });

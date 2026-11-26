@@ -290,6 +290,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       // Account the annotation's pool-key spend to the local session cap +
       // the tenant balance (no-op on self-host / BYOK).
       meteredHost: agent.toolContext.meteredHost,
+      chargeRun: (usd: number) => { agent.chargeExternalCost?.(usd); },
       sessionCounters: agent.sessionCounters,
       // A stop of the run, or the tool's time limit, ends the extraction call.
       signal: currentCallSignal(),

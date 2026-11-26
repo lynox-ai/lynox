@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isStepIdShape, runStepIds, shownRunStepId, stepRunNames, storedSteps, shownStepId, stepIdIssue, stepIdRefusal, storedStepOrder, STEP_ID_MAX } from './step-id.js';
+import { resolveTaskTemplate } from './context.js';
 import { RunHistory } from '../core/run-history.js';
 import { EngineDb } from '../core/engine-db.js';
 import { createToolContext } from '../core/tool-context.js';
@@ -270,6 +271,64 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
     // `{{Fetch it.all.result}}` starts with both `Fetch it.` and `Fetch it.all.`: the longer one is meant.
     const out = runStepIds([{ id: 'Fetch it', task: 'a' }, { id: 'Fetch it.all', task: '{{Fetch it.all.result}} {{Fetch it.result}}' }]);
     expect(out[1]!.task).toBe('{{step-2.result}} {{step-1.result}}');
+  });
+
+  it('leaves {{a.result}} on step a where a stored id reads as a plus a context key, so it reads what it read before run names', () => {
+    const out = runStepIds([
+      { id: 'a', task: 'A' },
+      { id: 'a.result', task: 'R' },
+      { id: 'a.costUsd', task: 'C' },
+      { id: 'send', task: 'Send {{a.result}} at {{a.costUsd}}', input_from: ['a', 'a.result', 'a.costUsd'] },
+    ]);
+    // The steps and their references still run under their names.
+    expect(out.map(s => s.id)).toEqual(['a', 'step-2', 'step-3', 'send']);
+    expect(out[3]!.input_from).toEqual(['a', 'step-2', 'step-3']);
+    expect(out[3]!.task).toBe('Send {{a.result}} at {{a.costUsd}}');
+    const ctx = { a: { result: 'from a', costUsd: 0.5 }, 'step-2': { result: 'from a.result', costUsd: 1 }, 'step-3': { result: 'from a.costUsd', costUsd: 2 } };
+    expect(resolveTaskTemplate(out[3]!.task, ctx)).toBe('Send from a at 0.5');
+  });
+
+  it('leaves such a placeholder alone also in a run whose copy dropped step a', () => {
+    const stored = [{ id: 'a', task: 'A' }, { id: 'a.result', task: 'R' }, { id: 'send', task: '{{a.result}}', input_from: ['a.result'] }];
+    const out = runStepIds([stored[1]!, stored[2]!], stepRunNames(stored), stored.map(s => s.id));
+    expect(out.map(s => s.id)).toEqual(['step-2', 'send']);
+    expect(out[1]!.task).toBe('{{a.result}}');
+  });
+
+  it('moves {{foo.result}} to a stored step foo.result where no step foo exists, as before the rule', () => {
+    const out = runStepIds([{ id: 'foo.result', task: 'R' }, { id: 'send', task: 'Send {{foo.result}}', input_from: ['foo.result'] }]);
+    expect(out.map(s => s.id)).toEqual(['step-1', 'send']);
+    // The placeholder names the step whole, as it did before run names; it now names its run name.
+    expect(out[1]!.task).toBe('Send {{step-1}}');
+  });
+
+  it('reads the head against step ids, not against other stored ids that begin with it', () => {
+    // foo.result and foo.costUsd both begin with `foo.`, but neither is a step foo: both placeholders move.
+    const out = runStepIds([
+      { id: 'foo.result', task: 'R' },
+      { id: 'foo.costUsd', task: 'C' },
+      { id: 'send', task: '{{foo.result.result}} {{foo.costUsd.result}}', input_from: ['foo.result', 'foo.costUsd'] },
+    ]);
+    expect(out[2]!.task).toBe('{{step-1.result}} {{step-2.result}}');
+  });
+
+  it('moves {{Fetch it.result}} to step "Fetch it", not to a stored step "Fetch it.result", where both ids are outside the shape', () => {
+    const out = runStepIds([{ id: 'Fetch it', task: 'A' }, { id: 'Fetch it.result', task: 'R' }, { id: 'send', task: '{{Fetch it.result}}', input_from: ['Fetch it', 'Fetch it.result'] }]);
+    expect(out.map(s => s.id)).toEqual(['step-1', 'step-2', 'send']);
+    expect(out[2]!.task).toBe('{{step-1.result}}');
+  });
+
+  it('moves {{Fetch it.result}} to step "Fetch it" also in a run whose copy dropped that step', () => {
+    const stored = [{ id: 'Fetch it', task: 'A' }, { id: 'Fetch it.result', task: 'R' }, { id: 'send', task: '{{Fetch it.result}}', input_from: ['Fetch it', 'Fetch it.result'] }];
+    const out = runStepIds([stored[1]!, stored[2]!], stepRunNames(stored));
+    expect(out[1]!.task).toBe('{{step-1.result}}');
+  });
+
+  it('still moves {{a.b.result}} to step a.b, whose id reads as no context key', () => {
+    const out = runStepIds([{ id: 'a', task: 'A' }, { id: 'a.b', task: 'B' }, { id: 'send', task: 'Send {{a.b.result}}', input_from: ['a', 'a.b'] }]);
+    expect(out[2]!.task).toBe('Send {{step-2.result}}');
+    const ctx = { a: { result: 'from a', costUsd: 0 }, 'step-2': { result: 'from a.b', costUsd: 0 } };
+    expect(resolveTaskTemplate(out[2]!.task, ctx)).toBe('Send from a.b');
   });
 
   it('takes the next free name, step-<n>a, where step-<n> is already a stored id', () => {

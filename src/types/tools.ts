@@ -12,7 +12,19 @@ import type { SendTarget } from '../core/send-target.js';
 import type { HostPolicyContext } from '../core/network-guard.js';
 
 export type ToolHandler<TInput = unknown> =
-  (input: TInput, agent: IAgent) => Promise<string>;
+  (input: TInput, agent: IAgent, call?: ToolCallContext) => Promise<string>;
+
+/**
+ * What the engine settled about one call before its handler runs. `writeTarget` is the file a
+ * tool with `ToolEntry.writeTarget` writes, resolved ONCE for the call: the Permission Guard
+ * judged this file, so the handler writes exactly it and does not resolve the path again (a link
+ * set between the two would otherwise redirect the write to a file nobody judged). `null`: the
+ * path resolved to nothing writable, and the handler refuses. Absent: nothing was resolved for
+ * this call (a direct call), and the handler resolves the path itself.
+ */
+export interface ToolCallContext {
+  readonly writeTarget?: string | null | undefined;
+}
 
 /**
  * Structured payload a tool's `destructive.check` may return INSTEAD of a plain
@@ -108,7 +120,8 @@ export interface ToolEntry<TInput = unknown> {
    * directory), or `null` when the handler would refuse the path. The Permission Guard reads its
    * sensitive-path rules against this as well as against the path as written, so a link or a
    * confinement cannot put the file written out of the rules' sight. Declared here, next to the
-   * handler that resolves the same way, so the guard needs no import of the tool.
+   * handler that resolves the same way, so the guard needs no import of the tool. The engine calls
+   * it once per call and hands the result to the guard and to the handler (`ToolCallContext`).
    */
   writeTarget?: ((path: string) => string | null) | undefined;
   /**
@@ -376,7 +389,7 @@ export type StreamEvent =
   // `subAgent`/`subAgentId` are set when the error was raised inside a spawned
   // child and forwarded by `spawn` — same stamp as `tool_call`/`tool_result`.
   | { type: 'error';       message: string; fatal?: boolean | undefined; agent: string; subAgent?: string | undefined; subAgentId?: string | undefined }
-  | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
+  | { type: 'warning';     code: string; detail?: string | undefined; agent: string; reason?: string | undefined }
   // `afterTurnEnd`: the failed attempt had already sent its `turn_end` (its reply reached
   // `message_delta`), so a consumer that marks call boundaries at `turn_end` knows the end it
   // saw was this attempt's own, not the previous call's.

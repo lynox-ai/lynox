@@ -18,7 +18,7 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 import { promptSegments, promptValue, pv, singleLine } from '../core/prompt-value.js';
 import { dialogToolHead, dialogToolWord } from './tool-words.js';
-import { GUARD_TEXT, actionWords, ruleLabel, type DialogLanguage } from './dialog-text.js';
+import { GUARD_TEXT, QUOTE_MARKS, actionWords, endsSentence, escapeQuoted, ruleLabel, type DialogLanguage } from './dialog-text.js';
 import { BUILTIN_TOOL_NAMES } from '../core/builtin-tool-names.js';
 
 // lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
@@ -662,18 +662,18 @@ function extractDangerPayload(toolName: string, input: unknown, autonomy: Autono
  * this directly to also receive `payload`, so the GO can offer a cheaper tier
  * when `payload.downgradeTo` is set.
  */
-export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract, parentProvider?: ProviderConfigSnapshot | null, language: DialogLanguage = 'en'): DangerSignal | null {
-  const signal = _decideDanger(toolName, input, autonomy, entry, runId, contract, parentProvider, language);
+export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract, parentProvider?: ProviderConfigSnapshot | null, language: DialogLanguage = 'en', writeTarget?: string | null): DangerSignal | null {
+  const signal = _decideDanger(toolName, input, autonomy, entry, runId, contract, parentProvider, language, writeTarget);
   // Observed against the FINAL decision: a call a contract lets
   // through runs without a question, and is recorded as one that does.
   observeBashProof(toolName, input, autonomy, signal?.warning ?? null, runId);
   return signal;
 }
 
-function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined, parentProvider: ProviderConfigSnapshot | null | undefined, language: DialogLanguage): DangerSignal | null {
+function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined, parentProvider: ProviderConfigSnapshot | null | undefined, language: DialogLanguage, writeTarget: string | null | undefined): DangerSignal | null {
   // The rules run in English, whose text is the warning the audit and the `[BLOCKED` checks
   // read, and which decides; the person is asked in `language`, by the same rule.
-  const danger = _detectDanger(toolName, input, autonomy, entry, parentProvider);
+  const danger = _detectDanger(toolName, input, autonomy, entry, parentProvider, asIs, 'en', writeTarget);
   if (!danger) return null;
   const { warning } = danger;
 
@@ -709,7 +709,7 @@ function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel
   let prompt = danger.prompt;
   if (language !== 'en') {
     try {
-      prompt = _detectDanger(toolName, input, autonomy, entry, parentProvider, asIs, language)?.prompt ?? danger.prompt;
+      prompt = _detectDanger(toolName, input, autonomy, entry, parentProvider, asIs, language, writeTarget)?.prompt ?? danger.prompt;
     } catch {
       prompt = danger.prompt;
     }
@@ -1942,10 +1942,15 @@ function system(text: string): SystemText {
 /** Mark the tool a danger prompt is about: its dialog word, or an external tool's name as a value. */
 interface ToolText { readonly toolName: string; readonly language: DialogLanguage }
 
-/** `\` and `"` escaped, so the quotes around a value are the prompt's own. */
+/** `\` and every quote-like character escaped, so the marks around a value are the prompt's own. */
 function quoted(text: string): string {
-  return text.replace(/[\\"]/g, (c) => `\\${c}`);
+  return escapeQuoted(text);
 }
+
+/** A value longer than a line, in characters: the sentence ends with a colon and the value
+ *  follows, still between its marks, on a line of its own, where it can wrap without leaving a
+ *  lone mark at the end of the sentence. */
+const LONG_VALUE = 80;
 
 /** A danger as `_detectDanger` returns it: the prompt the person is asked with, the warning, and
  *  whether it is a hard block (see {@link hardBlock}). */
@@ -1971,6 +1976,11 @@ function askable(danger: Danger): Danger {
   return danger;
 }
 
+/** `text` with its first character upper-cased when it is a lower-case letter. */
+function capitalFirst(text: string, language: DialogLanguage): string {
+  return text.replace(/^\p{Ll}/u, (c) => c.toLocaleUpperCase(language));
+}
+
 /**
  * The danger prompts' template. Every interpolation says who wrote it, by type: {@link agentText}
  * becomes a value in `prompt`, {@link system} frame, and {@link tool} the tool's dialog word (frame)
@@ -1978,17 +1988,53 @@ function askable(danger: Danger): Danger {
  * each one is marked by hand; marking the agent's text with `system` is not caught here. `warning` is the same text with the
  * agent's part as it was written, for the audit and the `[BLOCKED` checks.
  */
-function framed(strings: TemplateStringsArray, ...values: ReadonlyArray<AgentText | SystemText | ToolText>): Danger {
-  const prompt = pv(strings, ...values.map((v) => ('agentText' in v
-    ? promptValue(quoted(singleLine(v.agentText)))
-    : 'toolName' in v
-      ? dialogToolHead(v.toolName, v.language)
-      : { [PROMPT_TEXT_BRAND]: true as const, segments: promptSegments(v.systemText) })));
-  let warning = strings[0] ?? '';
-  values.forEach((v, i) => {
-    warning += ('agentText' in v ? v.agentText : 'toolName' in v ? dialogToolWord(v.toolName, v.language) : v.systemText) + (strings[i + 1] ?? '');
-  });
-  return { prompt, warning };
+function framedIn(language: DialogLanguage): (strings: TemplateStringsArray, ...values: ReadonlyArray<AgentText | SystemText | ToolText>) => Danger {
+  const [open, close] = QUOTE_MARKS[language];
+  return (strings, ...values) => {
+    // The template writes a value's quotes as `"`; the prompt shows the language's marks, and puts
+    // a long value after a colon on a line of its own, the rest of the sentence on the next. The
+    // warning keeps the template's text as it is. A rest on its own line reads as a sentence: it
+    // starts with a capital and ends with a full stop.
+    const frames = [...strings];
+    const capitalized = new Set<number>();
+    let restOwnLine = false;
+    values.forEach((v, i) => {
+      if (!('agentText' in v) || !frames[i]!.endsWith('"') || !frames[i + 1]!.startsWith('"')) return;
+      const before = frames[i]!.slice(0, -1);
+      const after = frames[i + 1]!.slice(1);
+      if (Array.from(singleLine(v.agentText)).length > LONG_VALUE) {
+        frames[i] = `${before.replace(/\s*(?:—\s*)?$/u, '').replace(/:?$/u, ':')}\n${open}`;
+        const rest = after.trimStart().replace(/^—\s*/u, '');
+        // The rest after the dash is the engine's own text (a `system` value, capitalised below)
+        // or a `[BLOCKED …]` marker, which stays as it is.
+        frames[i + 1] = after === '' ? close : `${close}\n${rest}`;
+        const next = values[i + 1];
+        if (after !== '' && rest === '' && next !== undefined && 'systemText' in next) capitalized.add(i + 1);
+        if (after !== '') restOwnLine = true;
+      } else {
+        frames[i] = before + open;
+        frames[i + 1] = close + after;
+      }
+    });
+    if (restOwnLine) {
+      // The end of the sentence: the last frame, or the value before it when that frame is empty.
+      // A `[BLOCKED …]` marker is left as it is.
+      const last = frames.length - 1;
+      const lastValue = values[last - 1];
+      const end = frames[last] !== '' ? frames[last]! : lastValue !== undefined && 'systemText' in lastValue ? lastValue.systemText : '';
+      if (end !== '' && !endsSentence(end)) frames[last] = `${frames[last]!.trimEnd()}.`;
+    }
+    const prompt = pv(Object.assign(frames, { raw: frames }) as unknown as TemplateStringsArray, ...values.map((v, i) => ('agentText' in v
+      ? promptValue(quoted(singleLine(v.agentText)))
+      : 'toolName' in v
+        ? dialogToolHead(v.toolName, v.language)
+        : { [PROMPT_TEXT_BRAND]: true as const, segments: promptSegments(capitalized.has(i) ? capitalFirst(v.systemText, language) : v.systemText) })));
+    let warning = strings[0] ?? '';
+    values.forEach((v, i) => {
+      warning += ('agentText' in v ? v.agentText : 'toolName' in v ? dialogToolWord(v.toolName, v.language) : v.systemText) + (strings[i + 1] ?? '');
+    });
+    return { prompt, warning };
+  };
 }
 
 /** How a rule below reads an input field as a file path: the field's name and its value. Every
@@ -2010,11 +2056,12 @@ export function pathFieldsRead(toolName: string, input: unknown, autonomy?: Auto
   return [...fields];
 }
 
-function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, parentProvider?: ProviderConfigSnapshot | null, asPath: AsPath = asIs, language: DialogLanguage = 'en'): Danger | null {
+function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, parentProvider?: ProviderConfigSnapshot | null, asPath: AsPath = asIs, language: DialogLanguage = 'en', writeTarget?: string | null): Danger | null {
   // The dialog's words in `language`: the tool's word, the fixed sentence parts, a rule's label.
   const tool = (name: string): ToolText => ({ toolName: name, language });
   const T = GUARD_TEXT[language];
   const L = (label: string): string => ruleLabel(label, language);
+  const framed = framedIn(language);
   if (toolName === 'bash' && input && typeof input === 'object' && 'command' in input) {
     const rawCmd = String((input as { command: unknown }).command);
 
@@ -2070,7 +2117,9 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // The file the tool writes, as its handler resolves it (`ToolEntry.writeTarget`): without a
     // workspace a path is confined to the data dir's workspace and a link in it is followed, so the
     // file written need not be the path as written. Both are read; null means the tool refuses it.
-    const target = entry?.writeTarget?.(rawPath) ?? null;
+    // The engine resolves it once for the call and hands the same file to the handler, which then
+    // writes exactly it (`ToolCallContext`); a caller that hands none gets it resolved here.
+    const target = writeTarget !== undefined ? writeTarget : entry?.writeTarget?.(rawPath) ?? null;
     for (const judged of target !== null && target !== filePath ? [filePath, target] : [filePath]) {
       if (isSensitivePath(judged)) {
         if (autonomy === 'autonomous') {

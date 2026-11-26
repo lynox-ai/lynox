@@ -3,7 +3,7 @@ import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '..
 import { chatThreadOf } from './private-thread.js';
 import { stripHidden } from '../../core/hidden-text.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR } from '../../orchestrator/run-source.js';
-import { WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_STOPPED_ERROR } from '../../orchestrator/workflow-stop.js';
+import { WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_STOPPED_ERROR, WORKFLOW_CALLER_ENDED_ERROR } from '../../orchestrator/workflow-stop.js';
 import { GateExpiredError, GateRejectedError } from '../../types/orchestration.js';
 import { shownRunStepId, storedSteps } from '../../orchestrator/step-id.js';
 import { setUpByOther, shownMandate, type ShownMandate } from '../../core/request-principal.js';
@@ -75,6 +75,7 @@ export const DIAGNOSE_ERRORS_QUOTED = 'Quoted errors are text as recorded: a ste
 /** The run errors only the runner writes, word for word: lynox's own account, shown as it is. */
 export const OWN_RUN_ERRORS: ReadonlySet<string> = new Set([
   WORKFLOW_STOPPED_ERROR,
+  WORKFLOW_CALLER_ENDED_ERROR,
   WORKFLOW_QUESTION_UNANSWERED_ERROR,
   WORKFLOW_QUESTION_NOT_ASKED_ERROR,
   WORKFLOW_QUESTION_THREAD_DELETED_ERROR,

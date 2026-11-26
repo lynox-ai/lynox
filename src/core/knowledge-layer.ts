@@ -84,6 +84,9 @@ function addCreated(into: KnowledgeCreatedCounts, made: Partial<KnowledgeCreated
   into.subjects += made.subjects ?? 0;
 }
 
+/** The `metrics` row name for an entity extraction refused only because a run held the balance. */
+export const KG_EXTRACTION_REFUSED_METRIC = 'kg_extraction_refused_within_balance';
+
 /**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
  *
@@ -568,6 +571,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // stub now would leave one no purge can reach — purges find stubs through legacy ids.
     if (options?.cancelled?.()) return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false, created: noneCreated() };
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;
+    if (extractGate?.refusedWithinBalance === true) this.noteExtractionRefusedWithinBalance(memoryId);
 
     // Slice B (Context-Hierarchy Scoping): if this memory's source thread is anchored
     // to a subject (project/client via set_thread_context), that anchor becomes the
@@ -1654,6 +1658,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     return this.subjectGraphEnabled && this.subjectStore === null;
   }
 
+  /**
+   * Whether this layer reads the subject graph (engine.db). Fixed at boot: a config reload that
+   * turns the switch later does not rebuild the layer, so a reader asking which database the
+   * graph came from asks here, not the current config.
+   */
+  get readsSubjectGraph(): boolean {
+    return this.subjectGraphEnabled;
+  }
+
   private _readFallbacks = 0;
 
   private _logReadFallback(method: string, err: unknown): void {
@@ -1885,6 +1898,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Records that the entity extraction for `memoryId` was refused only because a run held the
+   * balance: the memory is stored, its graph entities are not, and nothing extracts them later
+   * unless the memory is edited. One `metrics` row per memory (`metric_name` =
+   * {@link KG_EXTRACTION_REFUSED_METRIC}, `scope_type` 'memory', `scope_id` the memory id,
+   * `value` how often), so the gap can be counted and found again. No text is written.
+   * Best-effort: a failed write never affects the memory write.
+   */
+  noteExtractionRefusedWithinBalance(memoryId: string): void {
+    if (!memoryId) return;
+    try {
+      const prior = this.db.getMetric(KG_EXTRACTION_REFUSED_METRIC, 'memory', memoryId);
+      const count = (prior?.value ?? 0) + 1;
+      this.db.upsertMetric({ metricName: KG_EXTRACTION_REFUSED_METRIC, value: count, sampleCount: count, scopeType: 'memory', scopeId: memoryId });
+    } catch { /* best-effort record */ }
+  }
+
+  /**
    * Erasure PR — PHYSICALLY delete every memory whose text matches `pattern`, in
    * BOTH stores (GDPR Art. 17 hard-delete). This is the terminal end of the Validity
    * axis: {@link deactivateByPattern} is the SOFT state (`is_active = 0` — the row,
@@ -1995,6 +2025,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;
+    if (extractGate?.refusedWithinBalance === true) this.noteExtractionRefusedWithinBalance(id);
     if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
       const createdAt = this.db.getMemoryCreatedAt(id);
       // Slice B: keep the memory's project/client anchor across a text edit — resolve
