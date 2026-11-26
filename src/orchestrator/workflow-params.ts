@@ -6,6 +6,43 @@ export type ParamBindResult =
   | { ok: false; error: string };
 
 /**
+ * A parameter name as a message may quote it. The messages here reach the model (a run's error) and
+ * the owner, and a name stored by an earlier save can hold any visible text, a sentence included.
+ * A name of ASCII letters, digits, `_` and `-` (at most 40, as a step id) is quoted; any other is
+ * named by its place in the workflow's parameters, counted from 1 as the run form lists them
+ * (`Parameter 2 (lynox does not show its name)`), or described where no place is known. Never the
+ * stored text. ASCII, not any letter: a script without spaces carries a sentence in one token,
+ * and some letters (U+3164 and its kin) read as blanks.
+ */
+const PARAM_NAME_SHAPE = /^[A-Za-z0-9_-]{1,40}$/;
+export const PARAM_NAME_NOT_SHOWN = '(lynox does not show its name)';
+
+/** Whether a refusal quotes this parameter name as it is. */
+export function isShownParamName(name: string): boolean {
+  return PARAM_NAME_SHAPE.test(name);
+}
+
+export function shownParamName(name: string, index?: number): string {
+  if (PARAM_NAME_SHAPE.test(name)) return `"${name}"`;
+  return index === undefined ? PARAM_NAME_NOT_SHOWN : `${String(index + 1)} ${PARAM_NAME_NOT_SHOWN}`;
+}
+
+/**
+ * A contract's allowed values as a refusal says them: by how many there are, never by their text.
+ * The values are stored text and the refusal reaches the model; a list of plain words still reads
+ * as a sentence, so no shape makes them safe to list.
+ */
+export function shownAllowedValues(values: readonly unknown[]): string {
+  if (values.length === 0) return "one of the values this workflow allows, and it allows none";
+  return values.length === 1 ? "the one value this workflow allows" : `one of the ${String(values.length)} values this workflow allows`;
+}
+
+/** A contract's bound as a refusal may say it: a finite number as it is, else described. */
+function shownBound(bound: unknown, word: 'minimum' | 'maximum'): string {
+  return typeof bound === 'number' && Number.isFinite(bound) ? String(bound) : `the ${word} this workflow sets`;
+}
+
+/**
  * Validate + coerce caller-supplied parameter values against a saved workflow's
  * parameter schema, producing the `params` namespace for the run context
  * (`{{params.<name>}}` resolves against this). Used by every parametrised
@@ -37,7 +74,8 @@ export function bindWorkflowParameters(
   // stamp preview shows only own entries (`allowedShown`), and the run enforces what it shows.
   const rules = opts?.constraints;
   const ruleOf = (name: string): ParamConstraint | undefined => (typeof rules === 'object' && rules !== null && Object.hasOwn(rules, name) ? rules[name] : undefined);
-  for (const param of schema) {
+  for (const [at, param] of schema.entries()) {
+    const shown = shownParamName(param.name, at);
     const has = Object.prototype.hasOwnProperty.call(given, param.name);
     const raw = has ? given[param.name] : undefined;
     if (raw === undefined || raw === null) {
@@ -46,16 +84,16 @@ export function bindWorkflowParameters(
         // constrained too (a stored default can't dodge the contract).
         const defaultRule = ruleOf(param.name);
         const checkedDefault = defaultRule
-          ? applyConstraint(param.defaultValue, defaultRule, param.name)
+          ? applyConstraint(param.defaultValue, defaultRule, param.name, at)
           : { ok: true as const };
         if (!checkedDefault.ok) return checkedDefault;
         out[param.name] = param.defaultValue;
         continue;
       }
       if (!requireAll) continue; // leave unbound → placeholder stays unresolved
-      return { ok: false, error: `Missing required parameter "${param.name}".` };
+      return { ok: false, error: isShownParamName(param.name) ? `Missing required parameter ${shown}.` : `Missing required parameter: Parameter ${shown}.` };
     }
-    const coerced = coerceParam(raw, param);
+    const coerced = coerceParam(raw, param, shown);
     if (!coerced.ok) return coerced;
     // Capability-contract constraint (Slice B / S1): a contract-governed run
     // passes the contract's per-param constraints; a supplied value that flows
@@ -63,7 +101,7 @@ export function bindWorkflowParameters(
     // substituted raw, so a re-target param can't pick which data is exfiltrated.
     const constraint = ruleOf(param.name);
     if (constraint) {
-      const checked = applyConstraint(coerced.value, constraint, param.name);
+      const checked = applyConstraint(coerced.value, constraint, param.name, at);
       if (!checked.ok) return checked;
     }
     out[param.name] = coerced.value;
@@ -80,13 +118,15 @@ export function applyConstraint(
   value: unknown,
   c: ParamConstraint,
   name: string,
+  index?: number,
 ): { ok: true } | { ok: false; error: string } {
+  const shown = shownParamName(name, index);
   // An explicit `enum` is a closed allow-list — an EMPTY enum admits nothing
   // (deny-all), never everything. (A vacuous constraint is also rejected at
   // save by `validateContractAgainstSteps`; this is the defence-in-depth half.)
   if (c.enum !== undefined) {
     if (!c.enum.some(e => e === value)) {
-      return { ok: false, error: `Parameter "${name}" must be one of: ${c.enum.join(', ') || '(none)'}.` };
+      return { ok: false, error: `Parameter ${shown} must be ${shownAllowedValues(c.enum)}.` };
     }
   }
   if (c.regex !== undefined) {
@@ -101,14 +141,14 @@ export function applyConstraint(
       // and let a re-target value smuggle an unconstrained prefix/suffix.
       re = new RegExp(`^(?:${c.regex})$`);
     } catch {
-      return { ok: false, error: `Parameter "${name}" has an invalid constraint pattern.` };
+      return { ok: false, error: `Parameter ${shown} has an invalid constraint pattern.` };
     }
     const s = String(value);
     if (s.length > 8192) {
-      return { ok: false, error: `Parameter "${name}" exceeds the maximum length (8192).` };
+      return { ok: false, error: `Parameter ${shown} exceeds the maximum length (8192).` };
     }
     if (!re.test(s)) {
-      return { ok: false, error: `Parameter "${name}" does not match the required pattern.` };
+      return { ok: false, error: `Parameter ${shown} does not match the required pattern.` };
     }
   }
   if (c.min !== undefined || c.max !== undefined) {
@@ -118,13 +158,13 @@ export function applyConstraint(
     // (which would let "0x10"/""/" " satisfy a numeric bound while a different
     // literal is substituted).
     if (typeof value !== 'number' || !Number.isFinite(value)) {
-      return { ok: false, error: `Parameter "${name}" must be a numeric parameter for its min/max constraint.` };
+      return { ok: false, error: `Parameter ${shown} must be a numeric parameter for its min/max constraint.` };
     }
     if (c.min !== undefined && value < c.min) {
-      return { ok: false, error: `Parameter "${name}" must be >= ${c.min}.` };
+      return { ok: false, error: `Parameter ${shown} must be >= ${shownBound(c.min, 'minimum')}.` };
     }
     if (c.max !== undefined && value > c.max) {
-      return { ok: false, error: `Parameter "${name}" must be <= ${c.max}.` };
+      return { ok: false, error: `Parameter ${shown} must be <= ${shownBound(c.max, 'maximum')}.` };
     }
   }
   return { ok: true };
@@ -133,33 +173,34 @@ export function applyConstraint(
 function coerceParam(
   raw: unknown,
   param: ProcessParameter,
+  shown: string,
 ): { ok: true; value: unknown } | { ok: false; error: string } {
   switch (param.type) {
     case 'number': {
       if (typeof raw === 'number') {
         return Number.isFinite(raw)
           ? { ok: true, value: raw }
-          : { ok: false, error: `Parameter "${param.name}" must be a number.` };
+          : { ok: false, error: `Parameter ${shown} must be a number.` };
       }
       const s = typeof raw === 'string' ? raw.trim() : '';
       // Strict decimal/float (optional sign + exponent). Rejects what Number()
       // would silently coerce: "" → 0, "  " → 0, "0x1f" → 31, "0b101" → 5.
       if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) {
-        return { ok: false, error: `Parameter "${param.name}" must be a number.` };
+        return { ok: false, error: `Parameter ${shown} must be a number.` };
       }
       // The pattern admits an exponent, and `1e999` is a valid decimal that Number()
       // turns into Infinity — which JSON then stores as null.
       const n = Number(s);
       return Number.isFinite(n)
         ? { ok: true, value: n }
-        : { ok: false, error: `Parameter "${param.name}" must be a finite number.` };
+        : { ok: false, error: `Parameter ${shown} must be a finite number.` };
     }
     case 'date': {
       const s = typeof raw === 'string' ? raw.trim() : '';
       // Require an ISO-8601 date (YYYY-MM-DD, optionally with a time part) AND a
       // real calendar date — Date.parse alone accepts "2026", "0", "garbage 2026".
       if (!/^\d{4}-\d{2}-\d{2}([T ]\S*)?$/.test(s) || Number.isNaN(Date.parse(s))) {
-        return { ok: false, error: `Parameter "${param.name}" must be an ISO date (YYYY-MM-DD).` };
+        return { ok: false, error: `Parameter ${shown} must be an ISO date (YYYY-MM-DD).` };
       }
       return { ok: true, value: s };
     }
