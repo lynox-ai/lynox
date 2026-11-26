@@ -345,6 +345,7 @@ describe('export with the knowledge graph switched off (real engine)', () => {
     expect(body.knowledge_graph).toEqual({ entities: [], relationships: [], enabled: false });
     expect(body.knowledge_graph_may_be_incomplete, 'off: what it held may still be stored and was not read').toBe(true);
     expect(body.durable_knowledge.enabled, 'durable memory is off too').toBe(false);
+    expect(body.durable_knowledge.may_be_incomplete, 'nothing durable is held, read in full').toBe(false);
   }, 60_000);
 });
 
