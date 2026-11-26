@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  approvalCard, approvalChatThread, approvalOutcome, approvalScopeOf, listScopeOf, mandateNamer, plainAddresses, replyRecipientDiffers, replyToElsewhere, setupLines, UNNAMED_MANDATE,
+  approvalCard, approvalChatThread, approvalOutcome, approvalScopeOf, listScopeOf, mandateNamer, OTHER_MANDATE, plainAddresses, SOME_MANDATE, replyRecipientDiffers, replyToElsewhere, setupLines, UNNAMED_MANDATE,
   type ApprovalCardSources, type DisplayNameOf, type MandateNamer, type SetupMarks,
 } from './approval-view.js';
 import type { ApprovalEntry, MailReplyPayload, MailSendPayload, StoredAddress } from './approval-store.js';
@@ -417,7 +417,7 @@ describe('who set an entry up', () => {
     expect(JSON.stringify(card.setup)).not.toContain('grant-x');
   });
 
-  describe('a mandate\'s card names another grant by its address only', () => {
+  describe('a mandate\'s card names another grant as another mandate only', () => {
     // Both grants have a name in the trail. Bea's entry: Anna set the trigger up, Bea changed it last.
     const beaEntry = entry(B);
     const both = { trigger: marks({ createdBy: A.createdBy, createdMandateId: 'grant-a', mandateEditor: B.createdBy, mandateEditorId: 'grant-b' }) };
@@ -427,10 +427,27 @@ describe('who set an entry up', () => {
         .toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
     });
 
-    it('Bea sees her own grant by its name and Anna\'s by its address, on the same entry', () => {
+    it('Bea sees her own grant by its name and Anna\'s as another mandate, neither by name nor by address, on the same entry', () => {
       const card = approvalCard(beaEntry, { ...owner, ...both, scope: { viewer: 'mandate', mandateId: 'grant-b' } });
-      expect(card.setup).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+      expect(card.setup).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: OTHER_MANDATE, takenOver: false }]);
       expect(JSON.stringify(card)).not.toContain('Anna A.');
+      expect(JSON.stringify(card.setup)).not.toContain('anna@example.com');
+    });
+
+    it('names to a mandate another grant\'s mark as another mandate, and a tag without a grant id as some mandate, never by name or address', () => {
+      const asBea = mandateNamer({ viewer: 'mandate', mandateId: 'grant-b' }, (id) => ({ 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' } as Record<string, string>)[id] ?? null);
+      expect(asBea('grant-a', 'mandate:anna@example.com')).toBe(OTHER_MANDATE);
+      // No grant id: it cannot be told to be hers or another's, even with her own address.
+      expect(asBea(null, 'mandate:bea@example.com')).toBe(SOME_MANDATE);
+      expect(asBea(null, 'mandate:anna@example.com')).toBe(SOME_MANDATE);
+      expect(asBea(null, null)).toBe(SOME_MANDATE);
+      expect(asBea('grant-b', 'mandate:bea@example.com')).toBe('Bea B.');
+      // Her own grant without a shown name: her address, as before.
+      expect(mandateNamer({ viewer: 'mandate', mandateId: 'grant-b' }, () => null)('grant-b', 'mandate:bea@example.com')).toBe('bea@example.com');
+      // The owner: unchanged, every name, else the address.
+      const asOwner = mandateNamer({ viewer: 'owner' }, (id) => (id === 'grant-a' ? 'Anna A.' : null));
+      expect(asOwner('grant-a', 'mandate:anna@example.com')).toBe('Anna A.');
+      expect(asOwner(null, 'mandate:anna@example.com')).toBe('anna@example.com');
     });
   });
 });

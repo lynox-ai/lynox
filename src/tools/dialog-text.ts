@@ -265,7 +265,7 @@ export const ACTION_WORDS: Readonly<Record<string, Readonly<Record<string, Reado
     format: { en: 'format cells', de: 'Zellen formatieren' },
   },
   api_setup: {
-    delete: { en: 'delete profile', de: 'Profil löschen' },
+    delete: { en: 'delete connection', de: 'Verbindung löschen' },
   },
 };
 
@@ -402,13 +402,13 @@ export interface BindingDialog {
 export const BINDING_DIALOG: Readonly<Record<DialogLanguage, BindingDialog>> = {
   en: {
     question: (name, bound, added) => bound.length === 0
-      ? pv`${name} is stored in your vault and is not yet limited to any address.\n\nThis profile would send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there? From then on it goes only to the addresses you have allowed.`
-      : pv`${name} is sent only to: ${bound.join(', ')}.\n\nThis profile would also send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there as well?`,
+      ? pv`${name} is stored in your vault and is not yet limited to any address.\n\nThis connection would send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there? From then on it goes only to the addresses you have allowed.`
+      : pv`${name} is sent only to: ${bound.join(', ')}.\n\nThis connection would also send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there as well?`,
   },
   de: {
     question: (name, bound, added) => bound.length === 0
-      ? pv`${name} liegt in deinem Vault und ist noch an keine Adresse gebunden.\n\nDieses Profil würde den Wert senden an: ${added.join(', ')}.\n\nDarf ${name} dorthin gesendet werden? Danach geht der Wert nur noch an die Adressen, die du erlaubt hast.`
-      : pv`${name} wird nur gesendet an: ${bound.join(', ')}.\n\nDieses Profil würde den Wert auch senden an: ${added.join(', ')}.\n\nDarf ${name} auch dorthin gesendet werden?`,
+      ? pv`${name} liegt in deinem Vault und ist noch an keine Adresse gebunden.\n\nDiese Verbindung würde den Wert senden an: ${added.join(', ')}.\n\nDarf ${name} dorthin gesendet werden? Danach geht der Wert nur noch an die Adressen, die du erlaubt hast.`
+      : pv`${name} wird nur gesendet an: ${bound.join(', ')}.\n\nDiese Verbindung würde den Wert auch senden an: ${added.join(', ')}.\n\nDarf ${name} auch dorthin gesendet werden?`,
   },
 };
 
@@ -423,18 +423,18 @@ export interface PresetNote {
 
 export const PRESET_NOTE: Readonly<Record<DialogLanguage, PresetNote>> = {
   en: {
-    unknownProvider: (known) => `No authorization address could be derived: this profile names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known}.`,
+    unknownProvider: (known) => `No authorization address could be derived: this connection names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known}.`,
     noProviders: 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.',
-    badPreset: (id, detail) => `No authorization address could be derived: the built-in provider "${id}" is defined wrongly in this engine — ${detail}. Nothing on this profile fixes that; report it.`,
-    missingParam: (id, describe, name) => `No authorization address could be derived: the provider "${id}" needs ${describe} (auth.oauth.preset_params.${name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`,
-    refusedParam: (id, describe, name) => `No authorization address could be derived: the value this profile supplies for ${describe} (auth.oauth.preset_params.${name}) is not one the provider "${id}" accepts. Correct it with api_setup update — the host is disclosed then.`,
+    badPreset: (id, detail) => `No authorization address could be derived: the built-in provider "${id}" is defined wrongly in this engine — ${detail}. Nothing on this connection fixes that; report it.`,
+    missingParam: (id, describe, name) => `No authorization address could be derived: the provider "${id}" needs ${describe} (auth.oauth.preset_params.${name}), which this connection does not supply. Set it with api_setup update — the host is disclosed then.`,
+    refusedParam: (id, describe, name) => `No authorization address could be derived: the value this connection supplies for ${describe} (auth.oauth.preset_params.${name}) is not one the provider "${id}" accepts. Correct it with api_setup update — the host is disclosed then.`,
   },
   de: {
-    unknownProvider: (known) => `Es liess sich keine Anmeldeadresse ableiten: Dieses Profil nennt einen Anbieter, den lynox nicht eingebaut hat, daher gibt es hier nichts offenzulegen oder anzunehmen. Eingebaut sind: ${known}.`,
+    unknownProvider: (known) => `Es liess sich keine Anmeldeadresse ableiten: Diese Verbindung nennt einen Anbieter, den lynox nicht eingebaut hat, daher gibt es hier nichts offenzulegen oder anzunehmen. Eingebaut sind: ${known}.`,
     noProviders: 'Es liess sich keine Anmeldeadresse ableiten: lynox hat noch keine eingebauten Anbieter, daher gibt es hier nichts offenzulegen oder anzunehmen.',
-    badPreset: (id, detail) => `Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter "${id}" ist in lynox falsch definiert — ${detail}. An diesem Profil lässt sich das nicht beheben; melde es.`,
-    missingParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Anbieter "${id}" braucht ${describe} (auth.oauth.preset_params.${name}), und dieses Profil gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.`,
-    refusedParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Wert, den dieses Profil für ${describe} (auth.oauth.preset_params.${name}) angibt, ist keiner, den der Anbieter "${id}" annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.`,
+    badPreset: (id, detail) => `Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter "${id}" ist in lynox falsch definiert — ${detail}. An dieser Verbindung lässt sich das nicht beheben; melde es.`,
+    missingParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Anbieter "${id}" braucht ${describe} (auth.oauth.preset_params.${name}), und diese Verbindung gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.`,
+    refusedParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Wert, den diese Verbindung für ${describe} (auth.oauth.preset_params.${name}) angibt, ist keiner, den der Anbieter "${id}" annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.`,
   },
 };
 
@@ -509,29 +509,29 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
       const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
       const changeBlock = changeList === undefined ? pv`` : pv`This save changes:${changeList}\n\n`;
       const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
-      return pv`⚠ ${word}: saving "${name}" needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this profile?`;
+      return pv`⚠ ${word}: saving "${name}" needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this connection?`;
     },
     outsideSubProcessors: (oauth, _hosts, disclosures) => `This engine will send data${oauth ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${disclosures}`,
-    redirect: (hosts) => `You will be sent to ${hosts.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`,
-    deleteUnreadable: (word, id, source) => pv`⚠ ${word}: delete the stored API profile ${id}, which could not be read (${source})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
-    deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: delete the API profile ${name} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
-    losesTokens: (tokens) => pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again.`,
+    redirect: (hosts) => `You will be sent to ${hosts.join(' and ')} in your own browser to authorize this connection. You sign in there, to that provider — not to lynox — and what comes back is stored here for this connection.`,
+    deleteUnreadable: (word, id, source) => pv`⚠ ${word}: delete the stored API connection ${id}, which could not be read (${source})? Every vault name it carries is free for other connections once it is gone. Delete it?`,
+    deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: delete the API connection ${name} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
+    losesTokens: (tokens) => pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it, also where another connection reads them, which then has to be authorized again.`,
     losesSettings: pv` Its settings (endpoints, guidelines, sign-in method) are removed.`,
     release: (word, p) => {
       const moreSentence = p.more === 0 ? ''
         : p.more === 1
-          ? pv` 1 more setting of this profile (such as its auth type, scopes, path or query) is part of the release too; a change to it ends it. To see it first, deny, ask here to view API profile ${p.trailId}, then ask to release ${p.name} again.`
-          : pv` ${String(p.more)} more settings of this profile (such as its auth type, scopes, path or query) are part of the release too; a change to any of them ends it. To see them first, deny, ask here to view API profile ${p.trailId}, then ask to release ${p.name} again.`;
+          ? pv` 1 more setting of this connection (such as its auth type, scopes, path or query) is part of the release too; a change to it ends it. To see it first, deny, ask here to view API connection ${p.trailId}, then ask to release ${p.name} again.`
+          : pv` ${String(p.more)} more settings of this connection (such as its auth type, scopes, path or query) are part of the release too; a change to any of them ends it. To see them first, deny, ask here to view API connection ${p.trailId}, then ask to release ${p.name} again.`;
       const versionSentence = p.viewed === undefined ? ''
         : p.viewed.unchanged
           ? pv` These settings were last read in one of your chats at ${p.viewed.clock} and have not changed since (version ${p.version}).`
-          : pv` These settings changed after they were last read in one of your chats at ${p.viewed.clock}; deny and view the profile again before you allow it (version ${p.version}).`;
+          : pv` These settings changed after they were last read in one of your chats at ${p.viewed.clock}; deny and view the connection again before you allow it (version ${p.version}).`;
       const clientIdSentence = p.clientId ? pv` A client ID also goes into the sign-in link, to the browser of whoever opens it.` : '';
-      return pv`⚠ ${word}: release the vault key ${p.name} to API profile ${p.trailId}? It was set up in the session of ${p.author}. If you allow it, lynox sends the value of ${p.name}, as ${roleText('en', p.slots)}, to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}, with every request and run through this profile, your own and bulk runs included, until that mandate ends or you withdraw the release.${moreSentence}${versionSentence}${clientIdSentence} The vault ${p.held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where the value goes ends the release. Release it?`;
+      return pv`⚠ ${word}: release the vault key ${p.name} to API connection ${p.trailId}? It was set up in the session of ${p.author}. If you allow it, lynox sends the value of ${p.name}, as ${roleText('en', p.slots)}, to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}, with every request and run through this connection, your own and bulk runs included, until that mandate ends or you withdraw the release.${moreSentence}${versionSentence}${clientIdSentence} The vault ${p.held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where the value goes ends the release. Release it?`;
     },
     adopt: (word, p) => {
       const shown = p.names.slice(0, ADOPT_NAMES_SHOWN).join(', ') + (p.names.length > ADOPT_NAMES_SHOWN ? ` and ${String(p.names.length - ADOPT_NAMES_SHOWN)} more` : '');
-      return pv`⚠ ${word}: adopt the connection of API profile ${p.name} (id ${p.id})? It was authorized at the provider in the session of ${p.by}, ${p.known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the profile is yours. The engine then sends to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}, for your requests and runs, the connection's tokens and the vault names this profile names, read like any of your profiles, values from the environment included: ${shown.length > 0 ? shown : 'none'}. Adopt it?`;
+      return pv`⚠ ${word}: adopt the sign-in of API connection ${p.name} (id ${p.id})? It was authorized at the provider in the session of ${p.by}, ${p.known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the connection is yours. The engine then sends to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}, for your requests and runs, the sign-in's tokens and the vault names this connection names, read like any of your connections, values from the environment included: ${shown.length > 0 ? shown : 'none'}. Adopt it?`;
     },
   },
   de: {
@@ -539,31 +539,31 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
       const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
       const changeBlock = changeList === undefined ? pv`` : pv`Das Speichern ändert:${changeList}\n\n`;
       const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
-      return pv`⚠ ${word}: Zum Speichern von „${name}“ braucht es deine Zustimmung.\n\n${changeBlock}${disclosureBlock}Dieses Profil annehmen und speichern?`;
+      return pv`⚠ ${word}: Zum Speichern von „${name}“ braucht es deine Zustimmung.\n\n${changeBlock}${disclosureBlock}Diese Verbindung annehmen und speichern?`;
     },
     outsideSubProcessors: (oauth, hosts, disclosures) => `lynox sendet Daten${oauth ? ' – und für das OAuth-Token das verwaltete access_token –' : ''} an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox: ${hosts.join(', ')}.\n\n${disclosures}`,
-    redirect: (hosts) => `Zur Freigabe dieses Profils öffnet sich ${hosts.join(' und ')} in deinem eigenen Browser. Du meldest dich dort beim Anbieter an, nicht bei lynox, und was zurückkommt, wird hier für dieses Profil gespeichert.`,
-    deleteUnreadable: (word, id, source) => pv`⚠ ${word}: das gespeicherte API-Profil ${id} löschen, das sich nicht lesen liess (${source})? Jeder Vault-Name darin ist danach für andere Profile frei. Löschen?`,
-    deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: das API-Profil ${name} löschen (Id ${id}${host ? pv`, Host ${host}` : pv``})?${loses} Löschen?`,
+    redirect: (hosts) => `Zur Freigabe dieser Verbindung öffnet sich ${hosts.join(' und ')} in deinem eigenen Browser. Du meldest dich dort beim Anbieter an, nicht bei lynox, und was zurückkommt, wird hier für diese Verbindung gespeichert.`,
+    deleteUnreadable: (word, id, source) => pv`⚠ ${word}: die gespeicherte API-Verbindung ${id} löschen, die sich nicht lesen liess (${source})? Jeder Vault-Name darin ist danach für andere Verbindungen frei. Löschen?`,
+    deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: die API-Verbindung ${name} löschen (Id ${id}${host ? pv`, Host ${host}` : pv``})?${loses} Löschen?`,
     losesTokens: (tokens) => tokens === 1
-      ? pv` Das Token, das seine Anmeldung gespeichert hat, wird mit ihm aus dem Vault entfernt, auch dort, wo ein anderes Profil es liest; die Verbindung muss dann neu autorisiert werden.`
-      : pv` Die ${tokens} Tokens, die seine Anmeldung gespeichert hat, werden mit ihm aus dem Vault entfernt, auch dort, wo ein anderes Profil sie liest; die Verbindung muss dann neu autorisiert werden.`,
-    losesSettings: pv` Seine Einstellungen (Endpunkte, Richtlinien, Anmeldeart) werden entfernt.`,
+      ? pv` Das Token, das ihre Anmeldung gespeichert hat, wird mit ihr aus dem Vault entfernt, auch dort, wo eine andere Verbindung es liest; diese muss dann neu autorisiert werden.`
+      : pv` Die ${tokens} Tokens, die ihre Anmeldung gespeichert hat, werden mit ihr aus dem Vault entfernt, auch dort, wo eine andere Verbindung sie liest; diese muss dann neu autorisiert werden.`,
+    losesSettings: pv` Die Einstellungen der Verbindung (Endpunkte, Richtlinien, Anmeldeart) werden entfernt.`,
     release: (word, p) => {
       const moreSentence = p.more === 0 ? ''
         : p.more === 1
-          ? pv` 1 weitere Einstellung dieses Profils (etwa Anmeldeart, Scopes, Pfad oder Query) gehört ebenfalls zur Freigabe; eine Änderung daran beendet sie. Um sie zuerst anzusehen, lehne ab, bitte hier darum, das API-Profil ${p.trailId} anzuzeigen, und bitte dann erneut darum, ${p.name} freizugeben.`
-          : pv` ${String(p.more)} weitere Einstellungen dieses Profils (etwa Anmeldeart, Scopes, Pfad oder Query) gehören ebenfalls zur Freigabe; eine Änderung an einer davon beendet sie. Um sie zuerst anzusehen, lehne ab, bitte hier darum, das API-Profil ${p.trailId} anzuzeigen, und bitte dann erneut darum, ${p.name} freizugeben.`;
+          ? pv` 1 weitere Einstellung dieser Verbindung (etwa Anmeldeart, Scopes, Pfad oder Query) gehört ebenfalls zur Freigabe; eine Änderung daran beendet sie. Um sie zuerst anzusehen, lehne ab, bitte hier darum, die API-Verbindung ${p.trailId} anzuzeigen, und bitte dann erneut darum, ${p.name} freizugeben.`
+          : pv` ${String(p.more)} weitere Einstellungen dieser Verbindung (etwa Anmeldeart, Scopes, Pfad oder Query) gehören ebenfalls zur Freigabe; eine Änderung an einer davon beendet sie. Um sie zuerst anzusehen, lehne ab, bitte hier darum, die API-Verbindung ${p.trailId} anzuzeigen, und bitte dann erneut darum, ${p.name} freizugeben.`;
       const versionSentence = p.viewed === undefined ? ''
         : p.viewed.unchanged
           ? pv` Diese Einstellungen wurden zuletzt um ${p.viewed.clock} in einem deiner Chats gelesen und haben sich seither nicht geändert (Version ${p.version}).`
-          : pv` Diese Einstellungen haben sich geändert, nachdem sie zuletzt um ${p.viewed.clock} in einem deiner Chats gelesen wurden; lehne ab und sieh dir das Profil erneut an, bevor du zustimmst (Version ${p.version}).`;
+          : pv` Diese Einstellungen haben sich geändert, nachdem sie zuletzt um ${p.viewed.clock} in einem deiner Chats gelesen wurden; lehne ab und sieh dir die Verbindung erneut an, bevor du zustimmst (Version ${p.version}).`;
       const clientIdSentence = p.clientId ? pv` Eine Client-ID steht ausserdem im Anmeldelink und geht an den Browser dessen, der ihn öffnet.` : '';
-      return pv`⚠ ${word}: Den Vault-Schlüssel ${p.name} für das API-Profil ${p.trailId} freigeben? Es wurde in der Sitzung von ${p.author} eingerichtet. Wenn du zustimmst, sendet lynox den Wert von ${p.name} als ${roleText('de', p.slots)} an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'}, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst.${moreSentence}${versionSentence}${clientIdSentence} Unter diesem Namen ${p.held ? 'liegt im Vault ein Wert' : 'liegt im Vault noch kein Wert'}. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?`;
+      return pv`⚠ ${word}: Den Vault-Schlüssel ${p.name} für die API-Verbindung ${p.trailId} freigeben? Sie wurde in der Sitzung von ${p.author} eingerichtet. Wenn du zustimmst, sendet lynox den Wert von ${p.name} als ${roleText('de', p.slots)} an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'}, bei jeder Anfrage und jedem Lauf über diese Verbindung, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst.${moreSentence}${versionSentence}${clientIdSentence} Unter diesem Namen ${p.held ? 'liegt im Vault ein Wert' : 'liegt im Vault noch kein Wert'}. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?`;
     },
     adopt: (word, p) => {
       const shown = p.names.slice(0, ADOPT_NAMES_SHOWN).join(', ') + (p.names.length > ADOPT_NAMES_SHOWN ? ` und ${String(p.names.length - ADOPT_NAMES_SHOWN)} weitere` : '');
-      return pv`⚠ ${word}: Die Verbindung des API-Profils ${p.name} (Id ${p.id}) übernehmen? Sie wurde beim Anbieter in der Sitzung von ${p.by} autorisiert, ${p.known ? 'deren Zugang nicht mehr aktiv ist' : 'und lynox kann nicht feststellen, ob dieser Zugang noch aktiv ist'}. Nach der Übernahme gehört das Profil dir. lynox sendet dann bei deinen Anfragen und Läufen an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'} die Tokens der Verbindung und die Vault-Namen, die dieses Profil nennt. Sie werden gelesen wie bei jedem deiner Profile, Werte aus der Umgebung eingeschlossen: ${shown.length > 0 ? shown : 'keine'}. Übernehmen?`;
+      return pv`⚠ ${word}: Die Anmeldung der API-Verbindung ${p.name} (Id ${p.id}) übernehmen? Sie wurde beim Anbieter in der Sitzung von ${p.by} autorisiert, ${p.known ? 'deren Zugang nicht mehr aktiv ist' : 'und lynox kann nicht feststellen, ob dieser Zugang noch aktiv ist'}. Nach der Übernahme gehört die Verbindung dir. lynox sendet dann bei deinen Anfragen und Läufen an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'} die Tokens der Anmeldung und die Vault-Namen, die diese Verbindung nennt. Sie werden gelesen wie bei jeder deiner Verbindungen, Werte aus der Umgebung eingeschlossen: ${shown.length > 0 ? shown : 'keine'}. Übernehmen?`;
     },
   },
 };

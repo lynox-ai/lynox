@@ -18,7 +18,7 @@
 	import MarkedLine from './MarkedLine.svelte';
 	import { shownValue, VALUE_OPEN } from '../utils/plan-takeover.js';
 	import {
-		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep,
+		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkShowsFailure,
 	} from './bulk-runs.js';
 
@@ -738,7 +738,7 @@
 {#snippet undoOffer()}
 	<div class="space-y-3 border-t border-border pt-4">
 		<h2 class="text-sm font-medium">{t('bulk.undo.title')}</h2>
-		<p class="text-sm">{t('bulk.undo.explain')}</p>
+		<p class="text-sm" data-testid="bulk-undo-explain">{bulkUndoExplainText(run!, i18n)}</p>
 		<button type="button" class={btnPlain} disabled={busy} onclick={planUndo}>{t('bulk.undo.prepare')}</button>
 	</div>
 {/snippet}
@@ -1189,11 +1189,9 @@
 						{#if resumeText.kept}
 							<p class="text-sm text-text-muted">{@render hostText(resumeText.kept)}</p>
 						{/if}
-						{#if resumeText.allows}
-							<p class="text-sm">{@render hostText(resumeText.allows)}</p>
-						{/if}
 						{#if resumeKind !== 'check'}
-							<p class="text-sm text-text-muted">{resumeWords!.window}</p>
+							<!-- The window sentence first: what the failures allow then hangs on it ("Dabei …"). -->
+							<p class="text-sm" data-testid="bulk-resume-window">{resumeText.allows ? `${resumeWords!.window} ` : resumeWords!.window}{#if resumeText.allows}{@render hostText(resumeText.allows)}{/if}</p>
 						{/if}
 						<div class="flex flex-wrap gap-2">
 							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{resumeKind === 'check' ? t('bulk.resume.check') : resumeWords!.button}</button>
@@ -1300,7 +1298,7 @@
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.undo.approve_title')}</h2>
 					<!-- The targets that get a value back; the entries the source created are listed apart. -->
-					<p class="text-sm">{tf(bulkOne('bulk.undo.approve_explain', run.changes.update + run.changes.create), { n: String(run.changes.update + run.changes.create) })}</p>
+					<p class="text-sm" data-testid="bulk-undo-approve-explain">{bulkUndoApproveText(run, i18n)}</p>
 					{#each targets.filter((x) => (x.markupChanges?.length ?? 0) > 0) as target (target.seq)}
 						<div class="text-sm" data-testid="bulk-undo-markup">
 							{@render targetName(target)}

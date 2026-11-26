@@ -15,7 +15,7 @@ import { errorText, errorTextReduced, FixedTextError, processErrorText } from '.
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { noticeLanguage } from './notice-language.js';
-import { WatchHttpStatusError, watchFetchCause } from './watch-fetch-cause.js';
+import { WatchFetchFailure, WatchHttpStatusError, watchFetchCause } from './watch-fetch-cause.js';
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
@@ -52,7 +52,7 @@ import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { stripHidden } from './hidden-text.js';
 import { runTaskPrompt, RUN_TASK_ANSWERED, RUN_TASK_ANSWER_PREAMBLE } from './run-task-turn.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
-import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal } from './task-manager.js';
+import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type RunCause } from './task-manager.js';
 import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -849,7 +849,7 @@ export class WorkerLoop {
     result: string,
     status: RunEndStatus,
     run?: RunStarterSlot | null,
-    opts?: { readonly keepSchedule?: true; readonly noRetry?: true },
+    opts?: { readonly keepSchedule?: true; readonly noRetry?: true; readonly cause?: RunCause },
   ): boolean {
     // A request of this run that would have carried someone else's own login was refused: its
     // line goes under the result, and what ends as a success halts (`withMemberNotes`).
@@ -877,7 +877,12 @@ export class WorkerLoop {
     // A webhook run's event takes the end where nothing more specific was set: lynox's own
     // sentence, or the masked error of a run that threw.
     endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
-    const record = { ...(startedByOther(slot) || opts?.noRetry === true ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
+    const record = {
+      ...(startedByOther(slot) || opts?.noRetry === true ? { noRetry: true } : {}),
+      ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}),
+      // Why this run failed, as a cause lynox knows; the run's end stores it, or clears it.
+      ...(opts?.cause !== undefined ? { cause: opts.cause } : {}),
+    };
     return tm?.recordTaskRun(id, result, status, ...(Object.keys(record).length > 0 ? [record] : [])) ?? false;
   }
 
@@ -2369,7 +2374,10 @@ export class WorkerLoop {
       const taskManager = this.engine.getTaskManager();
       const refusedNotice = typeof err === 'object' && err !== null ? ORIGIN_NOTICE_OF_ERROR.get(err) : undefined;
       const recordedError = refusedNotice === undefined ? errorMsg : `${refusedNotice}\n\n${errorMsg}`;
-      const willRetry = this.#recordRun(taskManager, task.id, recordedError, status, entry);
+      // A watch that could not read its page failed for a cause lynox told: stored with the run, so
+      // the trigger list can say it (`blocked_reason`). Any other error stores none.
+      const runCause: RunCause | undefined = status === 'failed' && err instanceof WatchFetchFailure ? { kind: 'watch_fetch', cause: err.watchCause } : undefined;
+      const willRetry = this.#recordRun(taskManager, task.id, recordedError, status, entry, runCause === undefined ? undefined : { cause: runCause });
 
       // If the task was parked on a human it was interrupted while waiting.
       // It used to be RESOLVED with 'Task failed while waiting for your
@@ -4119,7 +4127,8 @@ export class WorkerLoop {
         this.#recordRun(taskManager, task.id, refusedBy.privateAddress === true
           // The address may carry a key; the run's catch masks a thrown failure, this one is recorded here.
           ? maskSecretPatterns(this.#notices().watchFetchFailed(config.url, { kind: 'blocked' }), { includeGeneric: true })
-          : `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed');
+          : `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed',
+          undefined, refusedBy.privateAddress === true ? { cause: { kind: 'watch_fetch', cause: { kind: 'blocked' } } } : undefined);
       }
       return;
     }
@@ -4159,7 +4168,7 @@ export class WorkerLoop {
       // The owner reads lynox's own sentence for the cause, in the instance's language; the raw
       // error goes with it as the cause, to the error report, and is not shown.
       const cause = watchFetchCause(err, { timeoutSeconds: WATCH_FETCH_TIMEOUT_MS / 1000, maxBytes: WATCH_MAX_BODY_BYTES, timedOut: deadline.aborted });
-      throw new Error(this.#notices().watchFetchFailed(config.url, cause), { cause: err });
+      throw new WatchFetchFailure(this.#notices().watchFetchFailed(config.url, cause), cause, { cause: err });
     }
 
     // Reduce to a stable visible-content signal before hashing. Hashing the raw

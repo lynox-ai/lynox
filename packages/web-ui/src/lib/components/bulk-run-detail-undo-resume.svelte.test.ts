@@ -117,10 +117,17 @@ describe('a halted undo continues in its own words', () => {
 		expect(await render({ applied: 0, resumeTries: 1 })).toContain(t('bulk.resume.kept_undo_none_capped'));
 	});
 
-	it('says what continuing lets fail with "continuing"', async () => {
+	it('says the undo window first and what may fail then right behind it, with the undo\'s word', async () => {
 		const text = await render({ haltKey: 'failureRate', failureLimit: 0 });
-		expect(text).toContain(t('bulk.resume.allows_again_zero_undo'));
+		expect(text).toContain(`${t('bulk.resume.window_undo')} ${t('bulk.resume.allows_again_zero_undo')}`);
 		expect(text).not.toContain(t('bulk.resume.allows_again_zero'));
+		// The window sentence carries the verb; no failure sentence says it a second time, in either language.
+		const undoAllows = ['allows_again', 'allows_again_few', 'allows_again_one', 'allows_again_zero', 'allows_only_consecutive', 'allows_no_failure_stop', 'allows_no_failure_stop_one'];
+		for (const lang of ['de', 'en'] as const) {
+			setLocale(lang);
+			for (const k of undoAllows) expect(t(`bulk.resume.${k}_undo`), `${lang} ${k}_undo`).not.toMatch(/fortsetz|fortf|weiterschreib|continu|resum|go on|writing on/i);
+		}
+		setLocale('de');
 	});
 
 	// One word on the whole page: the halt and the step before continuing say "undo" too.

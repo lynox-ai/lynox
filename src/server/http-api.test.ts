@@ -4770,6 +4770,118 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    // A shell command can work silently for longer than the stale window; taken over in the
+    // middle of it, the run was lost.
+    it('does not take over a dropped run whose shell command is still within its own limit', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-working-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        await onStream({ type: 'tool_call', name: 'bash', input: { command: 'sleep 150', timeout_ms: 180_000 }, agent: 'main', toolUseId: 'tu-sleep' });
+        // The response that made the call ends before the call runs; that alone releases nothing.
+        await onStream({ type: 'turn_end', stop_reason: 'tool_use', usage: {}, agent: 'main' });
+        (slots.get('tool-working-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        const next = await jsonFetch('/api/sessions/tool-working-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+        // Its result arrives: the run is silent again past the window, and now it is taken over.
+        await onStream({ type: 'tool_result', name: 'bash', result: 'done', agent: 'main', toolUseId: 'tu-sleep' });
+        (slots.get('tool-working-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        mockSessionRun.mockResolvedValueOnce('second response');
+        const after = await jsonFetch('/api/sessions/tool-working-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+        });
+        expect(after.status).toBe(200);
+        await after.text();
+        expect(mockSessionAbort).toHaveBeenCalled();
+      });
+    });
+
+    it('takes over a dropped run whose tool hangs past its own limit', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-hung-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        const realNow = Date.now.bind(Date);
+        const opened = realNow();
+        await onStream({ type: 'tool_call', name: 'http_request', input: { url: 'https://example.com' }, agent: 'main', toolUseId: 'tu-hang' });
+        (slots.get('tool-hung-1') as { lastEventAt: number }).lastEventAt = opened - 61_000;
+        // The request's own limit is a minute: 30 seconds in, it still holds the run.
+        let ahead = 30_000;
+        const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ahead);
+        try {
+          const held = await jsonFetch('/api/sessions/tool-hung-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(held.status).toBe(409);
+          await held.text();
+          expect(mockSessionAbort).not.toHaveBeenCalled();
+          // 66 seconds in, it is past its limit and the margin.
+          ahead = 66_000;
+          mockSessionRun.mockResolvedValueOnce('second response');
+          const next = await jsonFetch('/api/sessions/tool-hung-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(next.status).toBe(200);
+          await next.text();
+          expect(mockSessionAbort).toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    // A run that waits on a person does not spend its tool's limit: the wait is added to it.
+    it('does not count a wait on a person against a tool\'s limit after the stream dropped', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-wait-1', 'own-then-work', async ({ prompts, slots, drop, questionId }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        const realNow = Date.now.bind(Date);
+        let ahead = 0;
+        const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ahead);
+        try {
+          await onStream({ type: 'tool_call', name: 'http_request', input: { url: 'https://example.com' }, agent: 'main', toolUseId: 'tu-wait' });
+          // The person answers 100 seconds later; the run works on.
+          ahead = 100_000;
+          expect(prompts.answerUser(questionId!, 'lynox', OWNER_PRINCIPAL)).toBe(true);
+          const slot = slots.get('tool-wait-1') as { parked: () => boolean; lastEventAt: number };
+          for (let i = 0; i < 1000 && slot.parked(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+          expect(slot.parked(), 'positive control: the run is no longer parked').toBe(false);
+          // 130 seconds in: past the request's own minute, but not past it plus the wait.
+          ahead = 130_000;
+          slot.lastEventAt = Date.now() - 61_000;
+          const held = await jsonFetch('/api/sessions/tool-wait-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(held.status).toBe(409);
+          await held.text();
+          expect(mockSessionAbort).not.toHaveBeenCalled();
+          // 170 seconds in, it is past both, and the run is taken over.
+          ahead = 170_000;
+          slot.lastEventAt = Date.now() - 61_000;
+          mockSessionRun.mockResolvedValueOnce('second response');
+          const next = await jsonFetch('/api/sessions/tool-wait-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(next.status).toBe(200);
+          await next.text();
+          expect(mockSessionAbort).toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
     it('takes over a dropped run whose engine has been silent past the stale window', async () => {
       repayRateWindow();
       await withDroppableRun('stale-silent-1', 'none', async ({ slots, drop }) => {
@@ -12172,6 +12284,80 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, another helper to a helper as another mandate, and the owner\'s own by none', async () => {
+      const AT = '2026-11-10T00:00:00.000Z';
+      const rows = [
+        { id: 'trg-anna', title: 'Preise beobachten', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT },
+        { id: 'trg-bea', title: 'Wochenbericht', created_by: 'owner', mandate_editor: 'mandate:bea@example.com', mandate_editor_id: 'grant-b', mandate_edited_at: AT },
+        { id: 'trg-taken', title: 'Übernommen', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT,
+          covered_created_by: 'mandate:anna@example.com', covered_created_id: 'grant-a', covered_created_at: AT },
+        // The owner took over the change a helper made last: the same line, said as taken over.
+        { id: 'trg-edit-taken', title: 'Geändert, übernommen', created_by: 'owner', mandate_editor: 'mandate:bea@example.com', mandate_editor_id: 'grant-b', mandate_edited_at: AT,
+          covered_edited_by: 'mandate:bea@example.com', covered_edited_id: 'grant-b', covered_edited_at: AT },
+        { id: 'trg-own', title: 'Eigener', created_by: 'owner' },
+        { id: 'trg-old', title: 'Alt' },
+        // A helper's mark from before grant ids were stored: whose grant it was is not known.
+        { id: 'trg-legacy', title: 'Ohne Grant', created_by: 'mandate:anna@example.com' },
+      ];
+      const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' };
+      const reads: string[] = [];
+      // A helper's read is recorded in the trail before it is answered, so the trail takes rows too.
+      let trail: { displayNameOf: (id: string) => string | null; record: () => void } | null = { displayNameOf: (id) => { reads.push(id); return shown[id] ?? null; }, record: () => undefined };
+      type Lines = { triggers: Array<{ id: string; setup?: unknown }> };
+      const setupOf = async (): Promise<{ text: string; byId: Record<string, unknown> }> => {
+        const res = await jsonFetch('/api/triggers');
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        return { text, byId: Object.fromEntries((JSON.parse(text) as Lines).triggers.map((t) => [t.id, t.setup])) };
+      };
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => rows }), getWorkerLoop: () => null, getAuditLog: () => trail }, async () => {
+          const owner = await setupOf();
+          expect(owner.byId).toEqual({
+            'trg-anna': [{ kind: 'set_up_by', name: 'Anna A.', takenOver: false }],
+            'trg-bea': [{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }],
+            'trg-taken': [{ kind: 'set_up_by', name: 'Anna A.', takenOver: true }],
+            'trg-edit-taken': [{ kind: 'last_changed_by', name: 'Bea B.', takenOver: true }],
+            'trg-own': [],
+            'trg-old': [],
+            'trg-legacy': [{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }],
+          });
+          // Two triggers of grant-a, one request: the trail is read once per grant.
+          expect([...reads].sort()).toEqual(['grant-a', 'grant-b']);
+          // A helper reads its own grant's name, and another grant as another mandate: not its own,
+          // never whose. (Whether the row's own fields still carry the other address is the
+          // route's field question, not the setup lines'.)
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com', mandateId: 'grant-b' }) as RequestPrincipal);
+          const bea = await setupOf();
+          expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
+          expect(bea.byId['trg-taken']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: true }]);
+          expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
+          // Without a grant id it cannot be told to be hers or another's: it says neither.
+          expect(bea.byId['trg-legacy']).toEqual([{ kind: 'set_up_by', name: 'some mandate', takenOver: false }]);
+          expect(bea.text).not.toContain('Anna A.');
+          expect(JSON.stringify(Object.values(bea.byId))).not.toContain('anna@example.com');
+          // A session no scope names (a mandate without a grant): no lines at all, no read of the
+          // trail, and no display name anywhere in the answer.
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
+          const readsBefore = reads.length;
+          const none = await setupOf();
+          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-edit-taken', 'trg-own', 'trg-old', 'trg-legacy']) expect(none.byId[id]).toEqual([]);
+          expect(reads.length).toBe(readsBefore);
+          for (const name of Object.values(shown)) expect(none.text).not.toContain(name);
+          // A trail that cannot be read costs the owner the names, not the list: the address stands in.
+          api.setPrincipalResolverForTesting(resolver);
+          trail = { displayNameOf: () => { throw new Error('trail down'); }, record: () => undefined };
+          expect((await setupOf()).byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+          // No trail on this instance: the same.
+          trail = null;
+          expect((await setupOf()).byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com', takenOver: false }]);
+        });
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+      }
+    });
+
     it('GET /api/triggers gives a bulk run\'s trigger the host its run works on, null without one or when its run cannot be read, and no other trigger the field', async () => {
       const bulk = [
         { id: 'bulk-ext', title: 'Bulk run r-ext', effect: 'bulk_apply', bulk_run_id: 'r-ext' },
@@ -12388,13 +12574,14 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('GET /api/triggers adds the two flags, the pause\'s, and whether its workflow waits for a stamp, and nothing else to a row', async () => {
+    it('GET /api/triggers adds the two flags, the pause\'s, whether its workflow waits for a stamp, and its setup lines, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
       // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's
-      // (`triggerForRoute`), on by default since the takeover is in the view.
+      // (`triggerForRoute`), on by default since the takeover is in the view. `setup` names
+      // the helpers in the stored marks, by the approval card's rule (its own test above).
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
-        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'recipients_unconfirmed', 'running', 'stoppable', 'title', 'workflow_awaits_stamp']);
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'recipients_unconfirmed', 'running', 'setup', 'stoppable', 'title', 'workflow_awaits_stamp']);
       });
     });
 
@@ -13226,7 +13413,7 @@ describe('LynoxHTTPApi', () => {
       expect(card!.setup).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
     });
 
-    it('names another grant to a mandate by its address only, and the owner sees both names, on the same entry', async () => {
+    it('names another grant to a mandate as another mandate, neither by name nor by address, and the owner sees both names, on the same entry', async () => {
       const log = new AuditLog(qDb.getDb());
       for (const [email, display, mandateId] of [['anna@example.com', 'Anna A.', 'grant-a'], ['bea@example.com', 'Bea B.', 'grant-b']] as const) {
         log.record({ principal: { kind: 'mandate', email, display, mandateId }, action: 'x', phase: 'read', correlationId: `c-${mandateId}` });
@@ -13238,8 +13425,9 @@ describe('LynoxHTTPApi', () => {
       const text = await res.text();
       const mine = (JSON.parse(text) as { entries: Card[] }).entries;
       expect(mine.map((e) => e.id)).toEqual([id]);
-      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
       expect(text).not.toContain('Anna A.');
+      expect(text).not.toContain('anna@example.com');
       // Counter-witness: the same entry, the same trail, read by the owner.
       as(OWNER_PRINCIPAL);
       const theirs = (await list('all')).entries.find((e) => e.id === id)!;
@@ -14379,6 +14567,8 @@ describe('LynoxHTTPApi', () => {
       bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 1, 'already');
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
       expect(await runOf()).toMatchObject({ probe: null, haltKey: 'maxTargets', undoable: 1 });
+      // The page names that one apart from the written targets: none written, one open.
+      expect(await runOf()).toMatchObject({ undoableParts: { written: 0, open: 1 }, undoOpen: 0 });
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(409);
     });
 

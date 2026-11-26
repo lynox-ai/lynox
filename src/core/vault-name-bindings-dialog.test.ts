@@ -21,16 +21,16 @@ const values = (p: PromptText): string[] => p.segments.filter((s) => s.kind === 
 describe('the vault-binding question', () => {
   it('reads in English as it was approved, in both forms', () => {
     for (const q of [bindingQuestion('CRM_KEY', [], ['api.crm.example'], 'en')]) {
-      expect(flattenPrompt(q)).toBe('CRM_KEY is stored in your vault and is not yet limited to any address.\n\nThis profile would send it to: api.crm.example.\n\nAllow CRM_KEY to be sent there? From then on it goes only to the addresses you have allowed.');
+      expect(flattenPrompt(q)).toBe('CRM_KEY is stored in your vault and is not yet limited to any address.\n\nThis connection would send it to: api.crm.example.\n\nAllow CRM_KEY to be sent there? From then on it goes only to the addresses you have allowed.');
     }
     expect(flattenPrompt(bindingQuestion('CRM_KEY', ['api.crm.example'], ['eu.crm.example', 'x.example'], 'en')))
-      .toBe('CRM_KEY is sent only to: api.crm.example.\n\nThis profile would also send it to: eu.crm.example, x.example.\n\nAllow CRM_KEY to be sent there as well?');
+      .toBe('CRM_KEY is sent only to: api.crm.example.\n\nThis connection would also send it to: eu.crm.example, x.example.\n\nAllow CRM_KEY to be sent there as well?');
   });
 
   it('keeps the English segments as they were, frame and value alike', () => {
     expect(bindingQuestion('K', [], ['a.example'], 'en').segments).toEqual([
       { kind: 'value', text: 'K' },
-      { kind: 'frame', text: ' is stored in your vault and is not yet limited to any address.\n\nThis profile would send it to: ' },
+      { kind: 'frame', text: ' is stored in your vault and is not yet limited to any address.\n\nThis connection would send it to: ' },
       { kind: 'value', text: 'a.example' },
       { kind: 'frame', text: '.\n\nAllow ' },
       { kind: 'value', text: 'K' },
@@ -40,7 +40,7 @@ describe('the vault-binding question', () => {
       { kind: 'value', text: 'K' },
       { kind: 'frame', text: ' is sent only to: ' },
       { kind: 'value', text: 'a.example' },
-      { kind: 'frame', text: '.\n\nThis profile would also send it to: ' },
+      { kind: 'frame', text: '.\n\nThis connection would also send it to: ' },
       { kind: 'value', text: 'b.example' },
       { kind: 'frame', text: '.\n\nAllow ' },
       { kind: 'value', text: 'K' },
@@ -50,9 +50,9 @@ describe('the vault-binding question', () => {
 
   it('reads in German for a German session, in both forms', () => {
     expect(flattenPrompt(bindingQuestion('CRM_KEY', [], ['api.crm.example'], 'de')))
-      .toBe('CRM_KEY liegt in deinem Vault und ist noch an keine Adresse gebunden.\n\nDieses Profil würde den Wert senden an: api.crm.example.\n\nDarf CRM_KEY dorthin gesendet werden? Danach geht der Wert nur noch an die Adressen, die du erlaubt hast.');
+      .toBe('CRM_KEY liegt in deinem Vault und ist noch an keine Adresse gebunden.\n\nDiese Verbindung würde den Wert senden an: api.crm.example.\n\nDarf CRM_KEY dorthin gesendet werden? Danach geht der Wert nur noch an die Adressen, die du erlaubt hast.');
     expect(flattenPrompt(bindingQuestion('CRM_KEY', ['api.crm.example'], ['eu.crm.example', 'x.example'], 'de')))
-      .toBe('CRM_KEY wird nur gesendet an: api.crm.example.\n\nDieses Profil würde den Wert auch senden an: eu.crm.example, x.example.\n\nDarf CRM_KEY auch dorthin gesendet werden?');
+      .toBe('CRM_KEY wird nur gesendet an: api.crm.example.\n\nDiese Verbindung würde den Wert auch senden an: eu.crm.example, x.example.\n\nDarf CRM_KEY auch dorthin gesendet werden?');
   });
 
   it('keeps the name and the addresses values in both languages; the frame carries none of them', () => {
@@ -120,13 +120,13 @@ describe('the language of the binding question comes from the session', () => {
   it('a German session is asked both forms in German, a session without a language in English', async () => {
     const de = await asked('de');
     expect(de.filter((q) => /^SVC_C(ID|SECRET) liegt in deinem Vault und ist noch an keine Adresse gebunden\./.test(q)).length, 'first form').toBeGreaterThan(0);
-    expect(de.filter((q) => /^SVC_C(ID|SECRET) wird nur gesendet an: .+\n\nDieses Profil würde den Wert auch senden an: https:\/\/auth\.openai\.com\//.test(q)).length, 'second form').toBeGreaterThan(0);
+    expect(de.filter((q) => /^SVC_C(ID|SECRET) wird nur gesendet an: .+\n\nDiese Verbindung würde den Wert auch senden an: https:\/\/auth\.openai\.com\//.test(q)).length, 'second form').toBeGreaterThan(0);
     expect(de.filter((q) => / is stored in your vault| is sent only to: /.test(q)), 'no English binding question').toEqual([]);
     rmSync(dir, { recursive: true, force: true });
     dir = mkdtempSync(join(tmpdir(), 'binding-de-'));
     store = new ApiStore(join(dir, 'apis'));
     const en = await asked(undefined);
     expect(en.filter((q) => /^SVC_C(ID|SECRET) is stored in your vault and is not yet limited to any address\./.test(q)).length, 'first form').toBeGreaterThan(0);
-    expect(en.filter((q) => /^SVC_C(ID|SECRET) is sent only to: .+\n\nThis profile would also send it to: https:\/\/auth\.openai\.com\//.test(q)).length, 'second form').toBeGreaterThan(0);
+    expect(en.filter((q) => /^SVC_C(ID|SECRET) is sent only to: .+\n\nThis connection would also send it to: https:\/\/auth\.openai\.com\//.test(q)).length, 'second form').toBeGreaterThan(0);
   });
 });
