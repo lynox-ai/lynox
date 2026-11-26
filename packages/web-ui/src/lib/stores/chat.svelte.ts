@@ -1677,6 +1677,18 @@ async function reviewPendingIn(res: Response): Promise<boolean> {
 	}
 }
 
+/** Whether a refused `/run` says another person's open review in this conversation keeps the
+ *  run from starting (`code: 'review_pending_owner'`): the sender cannot answer it, so waiting
+ *  would never end. Reads a copy of the body, as {@link reviewPendingIn} does. */
+async function ownerReviewPendingIn(res: Response): Promise<boolean> {
+	try {
+		const body = (await res.clone().json()) as { code?: unknown } | null;
+		return body?.code === 'review_pending_owner';
+	} catch {
+		return false;
+	}
+}
+
 async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {
 	// The opening of the thread this turn started in: a hold below acts on its list only.
 	const turnGen = _resumeGeneration;
@@ -1891,6 +1903,30 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		return;
 	}
 
+	// Polling would not help: only the owner's answer, or a new chat, lets a run start here.
+	const refusedForOwnerReview = (): void => {
+		// The messages and the error belong to this thread; after a switch they are another's.
+		if (sessionId === sid) {
+			if (messages[userMsgIdx]) {
+				messages[userMsgIdx]!.queued = false;
+				messages[userMsgIdx]!.failed = true;
+			}
+			if (messages[assistantIdx] && !messages[assistantIdx]!.content) {
+				messages.splice(assistantIdx, 1);
+			}
+			chatError = t('changeset.review_pending_owner');
+			chatErrorDetail = null;
+		}
+		endStreaming(turn.assistantMsg);
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+	};
+	if (res.status === 409 && await ownerReviewPendingIn(res)) {
+		refusedForOwnerReview();
+		return;
+	}
+
 	if (res.status === 409) {
 		// Fast-fail when we already know the engine is blocked on a prompt
 		// from this client. Polling for up to 6 min won't unblock anything —
@@ -1930,6 +1966,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		const signal = _queuePollController.signal;
 		let bailedOut = false;
 		let heldForReview = false;
+		let heldByOwnerReview = false;
 		try {
 			for (let attempt = 1; attempt <= MAX_POLLS && res.status === 409; attempt++) {
 				// Stop / thread-switch: drop out of the loop without another fetch.
@@ -1956,6 +1993,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 					throw err;
 				}
 				if (res.status === 409 && await reviewPendingIn(res)) { heldForReview = true; break; }
+				if (res.status === 409 && await ownerReviewPendingIn(res)) { heldByOwnerReview = true; break; }
 			}
 		} finally {
 			retryStatus = null;
@@ -1964,6 +2002,10 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 
 		if (heldForReview) {
 			await holdForReview();
+			return;
+		}
+		if (heldByOwnerReview) {
+			refusedForOwnerReview();
 			return;
 		}
 
@@ -3600,6 +3642,14 @@ async function loadChangeset(): Promise<boolean> {
 /** The most file names the "not restored" message lists before it counts the rest. */
 const NOT_RESTORED_SHOWN = 5;
 
+/** File names for a message the person acts on: at most {@link NOT_RESTORED_SHOWN}, then a count. */
+function namedFiles(names: string[]): string {
+	const shown = names.slice(0, NOT_RESTORED_SHOWN).join(', ');
+	return names.length > NOT_RESTORED_SHOWN
+		? tf('changeset.not_restored_more', { files: shown, n: String(names.length - NOT_RESTORED_SHOWN) })
+		: shown;
+}
+
 export async function submitChangesetReview(
 	action: 'accept' | 'rollback' | 'partial',
 	rolledBackFiles?: string[],
@@ -3649,25 +3699,25 @@ export async function submitChangesetReview(
 		const names = Array.isArray(notRestored) ? notRestored.filter((f): f is string => typeof f === 'string') : [];
 		if (names.length > 0) {
 			// The person has to act on this list: it stays until they close it, and names at most five.
-			const shown = names.slice(0, NOT_RESTORED_SHOWN).join(', ');
-			const files = names.length > NOT_RESTORED_SHOWN
-				? tf('changeset.not_restored_more', { files: shown, n: String(names.length - NOT_RESTORED_SHOWN) })
-				: shown;
-			addToast(tf(reasonUnknown ? 'changeset.not_restored_unknown' : 'changeset.not_restored', { files }), 'error', null);
+			addToast(tf(reasonUnknown ? 'changeset.not_restored_unknown' : 'changeset.not_restored', { files: namedFiles(names) }), 'error', null);
 		}
 		// The turns queued behind the run that opened the review go now.
 		if (!stale()) drainQueueSoon(100);
 		return;
 	}
-	// The rollback stopped partway. The server closed the review, so the card goes; what
-	// happened stays on screen until the person closes it.
-	const failedCode = await res.json().then(
-		(j: unknown) => (j as { code?: unknown } | null)?.code,
-		() => undefined,
+	const failed = await res.json().then(
+		(j: unknown) => j as { code?: unknown; notRestored?: unknown } | null,
+		() => null,
 	);
-	if (failedCode === 'rollback_aborted') {
-		addToast(t('changeset.rollback_aborted'), 'error', null);
-		if (!stale()) drainQueueSoon(100);
+	if (failed?.code === 'rollback_aborted') {
+		// The rollback stopped partway. The server keeps the review with what is left, and its
+		// backups: the card comes back with those files, so the person can try again or accept
+		// them, and the held messages keep waiting on it. What is left stays on screen until closed.
+		const left = Array.isArray(failed.notRestored) ? failed.notRestored.filter((f): f is string => typeof f === 'string') : [];
+		addToast(tf('changeset.rollback_aborted', { files: namedFiles(left) }), 'error', null);
+		if (stale()) return;
+		// Nothing left (the throw came after the last file was back): the review is over.
+		if (await fetchChangeset() && !stale() && pendingChangeset === null) drainQueueSoon(100);
 		return;
 	}
 	// The answer did nothing. Closing the review silently would read as done: say so, and show

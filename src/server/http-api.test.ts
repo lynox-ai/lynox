@@ -25527,6 +25527,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     };
     const HELD = { status: 409, code: 'review_pending', runId: 'run-held', runs: 0 };
     const RAN = { status: 200, code: undefined, runId: undefined, runs: 1 };
+    const OWNER_REVIEW = { status: 409, code: 'review_pending_owner', runId: undefined, runs: 0 };
     const card = async (id = OWN): Promise<{ hasChanges: boolean; runId?: string }> =>
       (await (await jsonFetch(`/api/sessions/${id}/changeset`)).json()) as { hasChanges: boolean; runId?: string };
     const answer = (action: string, id = OWN): Promise<Response> =>
@@ -25549,10 +25550,34 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(await outcome(await send())).toEqual(RAN);
     });
 
-    it('does not hold a mandate on the owner\'s review, and gives it no card, even when the mandate ran last', async () => {
-      review(OWNER_PRINCIPAL, { lastRun: MANDATE });
+    it('does not hold a mandate on the owner\'s review and gives it no card, but refuses its run with the way on, so the owner\'s backups stay', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL, { lastRun: MANDATE });
       asMandate();
       expect(await card()).toEqual({ hasChanges: false, files: [] });
+      expect(await outcome(await send()), 'not held on a card it cannot see: refused').toEqual(OWNER_REVIEW);
+      expect(await outcome(await send({ shows_changeset_review: undefined })), 'whatever the client').toEqual(OWNER_REVIEW);
+      expect(csm.isEmpty(), 'the owner\'s review is still there').toBe(false);
+      expect(csm.hasOriginal(file), 'with its backup').toBe(true);
+      // The owner can still roll their change back, and then the mandate runs.
+      api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+      expect((await answer('rollback')).status).toBe(200);
+      expect(readFileSync(file, 'utf-8')).toBe('before');
+      asMandate();
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('control: a mandate under the owner\'s review runs in a new conversation of its own', async () => {
+      review(OWNER_PRINCIPAL, { lastRun: MANDATE });
+      asMandate();
+      expect(await outcome(await send()), 'positive control: refused here').toEqual(OWNER_REVIEW);
+      // Another conversation is another session, without the owner's review.
+      sessionRanBy(MANDATE, { getChangesetManager: vi.fn(() => null) });
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('control: the owner\'s review that the card does not show (its only file was deleted) does not refuse the mandate', async () => {
+      review(OWNER_PRINCIPAL, { lastRun: MANDATE, change: 'delete' });
+      asMandate();
       expect(await outcome(await send())).toEqual(RAN);
     });
 
@@ -25710,14 +25735,57 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(await res.text(), 'not "stopped partway"').not.toContain('rollback_aborted');
     });
 
-    it('a rollback that stops partway answers with its own refusal, and the hold ends', async () => {
-      const { csm } = review(OWNER_PRINCIPAL);
+    it('a rollback that stops partway answers with its own refusal, keeps the review and its backups, and the hold stays', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
       vi.spyOn(csm, 'rollbackAll').mockImplementation(() => { throw new Error('stopped'); });
       const res = await answer('rollback');
       expect(res.status).toBe(500);
-      expect(((await res.json()) as { code?: string }).code).toBe('rollback_aborted');
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['a.txt'] });
+      expect(csm.isEmpty(), 'the review stays').toBe(false);
+      expect(csm.hasOriginal(file), 'with its backup').toBe(true);
+      expect(await outcome(await send())).toEqual(HELD);
+    });
+
+    it('when the second of two restores throws, the first is done, the second keeps its backup, and a second rollback finishes the job', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      const other = join(dirname(file), 'b.txt');
+      writeFileSync(other, 'b before', 'utf-8');
+      csm.backupBeforeWrite(other);
+      writeFileSync(other, 'b after', 'utf-8');
+      const inner = csm as unknown as { _rollbackOne: (abs: string, entry: unknown) => boolean };
+      const real = inner._rollbackOne.bind(csm);
+      const one = vi.spyOn(inner, '_rollbackOne').mockImplementation((abs, entry) => {
+        if (abs === other) throw new Error('disk full');
+        return real(abs, entry);
+      });
+      const res = await answer('rollback');
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['b.txt'] });
+      expect(readFileSync(file, 'utf-8'), 'the first file is restored').toBe('before');
+      expect(readFileSync(other, 'utf-8'), 'the second still carries the change').toBe('b after');
+      expect(csm.hasOriginal(other), 'and keeps its backup').toBe(true);
+      expect(csm.hasOriginal(file), 'the restored file is no longer held').toBe(false);
+      expect(await outcome(await send()), 'the hold stays while files are half restored').toEqual(HELD);
+      one.mockRestore();
+      const again = await answer('rollback');
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({ ok: true, notRestored: [] });
+      expect(readFileSync(other, 'utf-8')).toBe('b before');
       expect(csm.isEmpty()).toBe(true);
       expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('a partial rollback that stops partway names only the chosen files it has not restored', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      const other = join(dirname(file), 'b.txt');
+      writeFileSync(other, 'b before', 'utf-8');
+      csm.backupBeforeWrite(other);
+      writeFileSync(other, 'b after', 'utf-8');
+      vi.spyOn(csm, 'rollbackFiles').mockImplementation(() => { throw new Error('stopped'); });
+      const res = await jsonFetch(`/api/sessions/${OWN}/changeset/review`, { method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run-held', rolledBackFiles: ['b.txt'] }) });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['b.txt'] });
+      expect(csm.isEmpty()).toBe(false);
     });
   });
 

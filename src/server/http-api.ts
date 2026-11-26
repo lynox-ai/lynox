@@ -5200,6 +5200,15 @@ export class LynoxHTTPApi {
         errorResponse(res, 409, 'The changes of the last run wait for a review', 'review_pending', { runId: heldBy.runId });
         return;
       }
+      // A review the sender may not answer (a mandate, under the owner's review in its own
+      // conversation) is not held for it above, so it is not left waiting on a card it cannot
+      // see. But its run would replace that review, and the owner's changes would stand with no
+      // way back. Refused instead, whatever the client, with the way on: the owner answers, or
+      // the mandate starts a new conversation, which has a review of its own.
+      if (heldBy !== null && !mayAnswerReview(heldBy, this._principalOf(req)) && heldBy.hasChanges()) {
+        errorResponse(res, 409, 'This conversation still has changes waiting for the owner\'s review', 'review_pending_owner');
+        return;
+      }
 
       // Global concurrency cap (Tier 2, AC6). Bound how many chat runs execute
       // at once across all threads — many parallel headless runs would otherwise
@@ -6709,6 +6718,10 @@ export class LynoxHTTPApi {
       // which the answer must say. Cleared once it returned, so a throw after a finished rollback
       // is not reported as one that stopped partway.
       let rollbackStarted = false;
+      // The files the rollback was asked to restore, by name: all of them, or the ones chosen.
+      // A rollback that stops partway names those of them it has not restored yet.
+      let asked: Set<string> | null = null;
+      let aborted = false;
       try {
         let accepted: number | null = 0;
         let rolledBack: number | null = 0;
@@ -6751,6 +6764,7 @@ export class LynoxHTTPApi {
           }
 
           if (toRollback.length > 0) {
+            asked = new Set(toRollback.map((abs) => nameOf(abs)));
             rollbackStarted = true;
             const left = csm.rollbackFiles(toRollback);
             rollbackStarted = false;
@@ -6763,11 +6777,16 @@ export class LynoxHTTPApi {
         jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
       } catch (err) {
         if (!rollbackStarted) throw err;
-        errorResponse(res, 500, 'The rollback stopped partway', 'rollback_aborted');
+        // Stopped partway: what it restored is forgotten, the rest keeps its backup and stays
+        // in the review, and so does the hold on the next message. A second rollback can finish
+        // the job; the answer names what is left.
+        aborted = true;
+        const left = csm.pendingNames().filter((name) => asked === null || asked.has(name));
+        errorResponse(res, 500, 'The rollback stopped partway', 'rollback_aborted', { notRestored: left });
       } finally {
-        // Every answer ends the review, a failed one too: the hold on the next message never
-        // outlives it.
-        csm.cleanup();
+        // Every other answer ends the review, a failed one too: the hold on the next message
+        // never outlives it.
+        if (!aborted) csm.cleanup();
       }
     }, OWN));
 

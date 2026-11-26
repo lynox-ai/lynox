@@ -16,7 +16,7 @@ const json = (body: unknown, status = 200): Response =>
 const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)); };
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-type RunAnswer = 'busy' | 'held' | 'ok';
+type RunAnswer = 'busy' | 'held' | 'owner' | 'ok';
 
 let store: Store;
 let saved: Map<string, string>;
@@ -46,6 +46,7 @@ function serve(): void {
 			const answer = runAnswers.shift() ?? 'ok';
 			if (answer === 'busy') return json({ error: 'A run is already in progress for this session' }, 409);
 			if (answer === 'held') return json({ error: 'The changes of the last run wait for a review', code: 'review_pending', runId: 'run-7' }, 409);
+			if (answer === 'owner') return json({ error: 'This conversation still has changes waiting for the owner\'s review', code: 'review_pending_owner' }, 409);
 			const enc = new TextEncoder();
 			const held = runTasks.length === 1 ? holdFirstRun : null;
 			return new Response(new ReadableStream<Uint8Array>({
@@ -239,19 +240,65 @@ describe('a rollback the server could not do', () => {
 		expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
 	};
 
-	it.each([
-		['rollback_aborted', 'changeset.rollback_aborted'],
-	] as const)('%s shows its own message until closed, as an error, and sends the held message', async (code, key) => {
+	it('a rollback that stopped partway names what is left until closed, shows the card again with it, and the held message keeps waiting', async () => {
 		await openReview();
-		const { t } = await import('../i18n.svelte.js');
-		reviewAnswer = { status: 500, body: { error: 'failed', code } };
+		const { t, tf } = await import('../i18n.svelte.js');
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
 		await store.submitChangesetReview('rollback');
 		await settle();
-		expect(t(key), 'positive control: the key has a text').not.toBe(key);
-		expect(toasts).toContainEqual([t(key), 'error', null]);
-		expect(store.getPendingChangeset()).toBeNull();
+		expect(t('changeset.rollback_aborted'), 'positive control: the key has a text').not.toBe('changeset.rollback_aborted');
+		expect(toasts).toContainEqual([tf('changeset.rollback_aborted', { files: 'notes.md' }), 'error', null]);
+		expect(store.getPendingChangeset(), 'the card is back with what is left').not.toBeNull();
 		await wait(200);
 		await settle();
-		expect(runTasks, 'the review is over: the held message goes').toEqual(['next step', 'next step']);
+		expect(runTasks, 'the review is still open: the held message waits').toEqual(['next step']);
+		// Answered again, the review ends and the message goes.
+		reviewAnswer = { status: 200, body: { ok: true, accepted: 0, rolledBack: 1, notRestored: [] } };
+		await store.submitChangesetReview('rollback');
+		await wait(200);
+		await settle();
+		expect(runTasks).toEqual(['next step', 'next step']);
+	});
+
+	it('a rollback that stopped partway with nothing left ends the review, and the held message goes', async () => {
+		await openReview();
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: [] } };
+		card = [];
+		await store.submitChangesetReview('rollback');
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset()).toBeNull();
+		expect(runTasks).toEqual(['next step', 'next step']);
+	});
+});
+
+describe('a run the owner\'s open review keeps from starting', () => {
+	it('fails the message with the way on, at once, and asks no second time', async () => {
+		runAnswers = ['owner'];
+		const { t } = await import('../i18n.svelte.js');
+		await store.sendMessage('next step');
+		await settle();
+		await wait(3_300); // past one busy-poll interval: a poll would have asked again
+		await settle();
+		expect(runTasks, 'asked once').toEqual(['next step']);
+		expect(message('next step')).toMatchObject({ queued: false, failed: true });
+		expect(t('changeset.review_pending_owner'), 'positive control: the key has a text').not.toBe('changeset.review_pending_owner');
+		expect(store.getChatError()).toBe(t('changeset.review_pending_owner'));
+		expect(store.getMessages().some((m) => m.role === 'assistant' && !m.content), 'no empty answer left').toBe(false);
+	});
+
+	it('ends a busy poll the same way when the refusal answers a later poll', async () => {
+		runAnswers = ['busy', 'owner', 'ok'];
+		const { t } = await import('../i18n.svelte.js');
+		void store.sendMessage('next step');
+		await settle();
+		await wait(3_300);
+		await settle();
+		expect(runTasks, 'positive control: the poll asked again').toEqual(['next step', 'next step']);
+		await wait(3_300);
+		await settle();
+		expect(runTasks, 'no poll after the refusal').toEqual(['next step', 'next step']);
+		expect(message('next step')).toMatchObject({ queued: false, failed: true });
+		expect(store.getChatError()).toBe(t('changeset.review_pending_owner'));
 	});
 });
