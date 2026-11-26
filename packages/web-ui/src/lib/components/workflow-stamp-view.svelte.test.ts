@@ -821,14 +821,35 @@ describe('the view keeps its head and its buttons in sight while the steps scrol
 		for (const c of ['flex', 'flex-col', 'max-h-[85vh]']) expect(frame.classList, c).toContain(c);
 		expect(frame.classList).not.toContain('overflow-y-auto');
 		for (const c of ['min-h-0', 'flex-1', 'overflow-y-auto']) expect(body!.classList, c).toContain(c);
-		// The head may not take the body's place: past its bound it scrolls on its own.
-		for (const c of ['shrink-0', 'max-h-[40vh]', 'overflow-y-auto']) expect(head!.classList, c).toContain(c);
+		// The head never scrolls, so its line and its error are always whole; only a long title is
+		// bounded, scrolling within itself, so the head cannot take the body's place.
+		expect(head!.classList).toContain('shrink-0');
+		expect(head!.className).not.toMatch(/max-h|overflow/);
+		const title = target.querySelector<HTMLElement>('[data-stamp-review-title]')!;
+		for (const c of ['max-h-[20vh]', 'overflow-y-auto']) expect(title.classList, c).toContain(c);
 		expect(foot!.classList).toContain('shrink-0');
 		expect(head!.contains(target.querySelector('[data-stamp-review-title]'))).toBe(true);
 		expect(head!.contains(q('stamp-line'))).toBe(true);
 		expect(body!.contains(q('stamp-step'))).toBe(true);
 		expect(foot!.contains(q('stamp-confirm'))).toBe(true);
 		expect(foot!.contains(byText('Abbrechen'))).toBe(true);
+	});
+
+	it('a failed confirm says so in the head, announced, outside every part that scrolls', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 500, body: {} }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		const err = q('stamp-error');
+		expect(err).not.toBeNull();
+		expect(err!.getAttribute('role')).toBe('alert');
+		expect(err!.closest('[data-dialog-head]')).not.toBeNull();
+		// No ancestor up to the dialog scrolls: the error cannot sit below a fold.
+		for (let el: HTMLElement | null = err!.parentElement; el && el !== q('stamp-dialog'); el = el.parentElement) {
+			expect(el.className, el.tagName).not.toMatch(/overflow-y-auto|overflow-auto/);
+		}
 	});
 
 	it('focuses its heading when it opens, so the confirm is not one Enter away', async () => {

@@ -59,10 +59,14 @@ describe('no view prints a stored tier, thoroughness or thinking value as text',
 			expect(reads, raw).toHaveLength(1);
 			expect(named(reads[0]!), raw).toBe(false);
 		}
-		for (const ok of ['{tierName(child.tier) ?? child.tier}', '{effortName(step.effort)}', "{t(`llm.tier.${tier.tier}`)}", '{@render modelValue(step.model)}']) {
+		for (const ok of ['{tierName(child.tier) ?? child.tier}', '{effortName(step.effort)}', '{@render modelValue(step.model)}']) {
 			const reads = fieldReads(ok);
-			expect(reads.every(named), ok).toBe(true);
+			expect(reads, ok).toHaveLength(1);
+			expect(named(reads[0]!), ok).toBe(true);
 		}
+		// Out of its reach, said so: an interpolation with a brace inside (a template literal's
+		// `${…}`, an object) is not read; the settings' keys built that way name nothing raw today.
+		expect(fieldReads("{t(`llm.tier.${tier.tier}`)}")).toEqual([]);
 		expect(fieldReads('data-x={r.tier}')).toEqual([]);
 		expect(fieldReads('{#if child.tier}')).toEqual([]);
 	});

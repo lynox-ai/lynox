@@ -1181,13 +1181,14 @@
 		data-testid="stamp-dialog"
 		bind:this={stampDialog}
 	>
-		<!-- The head (title, the line that says why it is open, an error) and the buttons stay in view;
-		     only the steps scroll between them, so after "changed" the line and the marked step are
-		     both in sight, and the buttons too. -->
+		<!-- The head (title, the line that says why it is open, an error) and the buttons stay in view,
+		     and only the steps scroll between them: after "changed" the line and the marked step are
+		     both in sight, and the buttons too. A long title scrolls within its own bound, so the line
+		     and the error below it are always whole. -->
 		<div data-dialog-frame class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] flex flex-col">
-			<div data-dialog-head class="shrink-0 max-h-[40vh] overflow-y-auto">
+			<div data-dialog-head class="shrink-0">
 			<!-- Where the owner approves the steps: a name a person with access gave is set apart, whole. -->
-			<h2 bind:this={stampHeading} tabindex="-1" class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
+			<h2 bind:this={stampHeading} tabindex="-1" class="text-sm font-medium mb-1 break-words max-h-[20vh] overflow-y-auto" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
 			{#if stampLine === 'steps_changed'}
 				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
 			{:else if stampLine === 'awaits_at_schedule' && stampPreview}
@@ -1199,7 +1200,7 @@
 			{/if}
 			<!-- The schedule's line for a preview that did not load already says it did not load. -->
 			{#if error && !(stampLine === 'awaits_at_schedule' && !stampPreview && !stampLoading)}
-				<p class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3"><MarkedLine text={error} /></p>
+				<p role="alert" data-testid="stamp-error" class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3"><MarkedLine text={error} /></p>
 			{/if}
 			</div>
 
