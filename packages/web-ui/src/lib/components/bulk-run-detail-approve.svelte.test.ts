@@ -907,7 +907,7 @@ describe('a run that writes through a connection a mandate set up', () => {
 		expect(line()?.textContent).toBe(tf('bulk.approve.connected_by', { provider: 'Shopify', person: t('takeover.connection_someone') }));
 		if (component) unmount(component);
 		component = undefined;
-		run = makeRun({ connectedBy: { provider: 'Shopify', by: 'eva‮@kanzlei.example' } });
+		run = makeRun({ connectedBy: { provider: 'Shopify', by: 'eva\u202E@kanzlei.example' } });
 		await render();
 		expect(line()?.textContent).toBe('lynox schreibt über die Shopify-Verbindung, die eva⟨U+202E⟩@kanzlei.example eingerichtet hat.');
 	});
