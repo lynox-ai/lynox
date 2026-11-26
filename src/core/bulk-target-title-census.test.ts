@@ -14,7 +14,7 @@ const SELECT_ALL = /SELECT\s+(?:\w+\.)?\*[^`'"]*\bFROM\s+bulk_targets\b/gi;
 /** Every file that names the column today, with why that is not a way to a model. */
 const EXPECTED: Record<string, { count: number; why: string }> = {
   'src/core/engine-db.ts': { count: 1, why: 'the migration that adds the column' },
-  'src/core/bulk-ledger.ts': { count: 11, why: 'recordRead writes it from the store\'s read (and its doc names it); getPreview reads it for the targets route (the owner and read-only mandates); planUndo copies it, still encrypted, from the source target to the undo target' },
+  'src/core/bulk-ledger.ts': { count: 12, why: 'recordRead writes it from the store\'s read (and its doc names it); getPreview reads it for the targets route (the owner and read-only mandates); planUndo copies it, still encrypted, from the source target to the undo target' },
   'src/core/export-tables.ts': { count: 1, why: 'the customer\'s data export decrypts it' },
 };
 

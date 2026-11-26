@@ -2072,6 +2072,8 @@ describe('applying a Shopify run', () => {
         expect(row(next)).toEqual({ change: 'invalid', error: 'before_has_shop_markup' });
         // Left out by its name: the title this read answered is kept, encrypted like the rest.
         expect(ledger.getPreview(next)[0]!.title).toBe('T1');
+        const cell = (engineDb.getDb().prepare('SELECT target_title FROM bulk_targets WHERE run_id = ? AND seq = 0').get(next) as { target_title: string | null }).target_title;
+        expect(cell !== null && cell !== 'T1').toBe(true);
         expect(stored(next, 'before')).toEqual({ absent: false, value: expect.objectContaining({ descriptionHtml: kept }) });
         expect(ledger.shopifyApplyOf(next)!.writes).toEqual([]);
       }
