@@ -178,6 +178,25 @@ describe('bindWorkflowParameters', () => {
       });
       expect(ok).toEqual({ ok: true, params: { n: 16 } });
     });
+
+    it('applies only the contract\'s own rule for a parameter, never one every object inherits', () => {
+      // An entry on Object.prototype is what a polluted prototype would carry. The stamp preview does
+      // not show it (it reads own entries only), so the run must not enforce it either.
+      const proto = Object.prototype as Record<string, unknown>;
+      proto['inherited'] = { enum: ['only-this'] };
+      try {
+        const schema = [param({ name: 'inherited', defaultValue: 'stored' })];
+        expect(bindWorkflowParameters(schema, { inherited: 'other' }, { constraints: {} })).toEqual({ ok: true, params: { inherited: 'other' } });
+        // The stored default is not held to it either.
+        expect(bindWorkflowParameters(schema, {}, { constraints: {} })).toEqual({ ok: true, params: { inherited: 'stored' } });
+        // CONTROL: the same rule as the contract's own entry is enforced, for a value and for the default.
+        const own = { constraints: { inherited: { enum: ['only-this'] } } };
+        expect(bindWorkflowParameters(schema, { inherited: 'other' }, own).ok).toBe(false);
+        expect(bindWorkflowParameters(schema, {}, own).ok).toBe(false);
+      } finally {
+        delete proto['inherited'];
+      }
+    });
   });
 });
 

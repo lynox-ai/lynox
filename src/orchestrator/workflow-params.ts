@@ -33,6 +33,10 @@ export function bindWorkflowParameters(
   const requireAll = opts?.requireAll ?? true;
   const out: Record<string, unknown> = {};
   const given = supplied ?? {};
+  // A rule is the contract's own entry for the parameter, never one an object inherits: the
+  // stamp preview shows only own entries (`allowedShown`), and the run enforces what it shows.
+  const rules = opts?.constraints;
+  const ruleOf = (name: string): ParamConstraint | undefined => (rules !== undefined && Object.hasOwn(rules, name) ? rules[name] : undefined);
   for (const param of schema) {
     const has = Object.prototype.hasOwnProperty.call(given, param.name);
     const raw = has ? given[param.name] : undefined;
@@ -40,8 +44,9 @@ export function bindWorkflowParameters(
       if (param.defaultValue !== undefined && param.defaultValue !== null) {
         // A defaulted value still flows into the literal call, so it is
         // constrained too (a stored default can't dodge the contract).
-        const checkedDefault = opts?.constraints?.[param.name]
-          ? applyConstraint(param.defaultValue, opts.constraints[param.name]!, param.name)
+        const defaultRule = ruleOf(param.name);
+        const checkedDefault = defaultRule
+          ? applyConstraint(param.defaultValue, defaultRule, param.name)
           : { ok: true as const };
         if (!checkedDefault.ok) return checkedDefault;
         out[param.name] = param.defaultValue;
@@ -56,7 +61,7 @@ export function bindWorkflowParameters(
     // passes the contract's per-param constraints; a supplied value that flows
     // into a literal tool call must satisfy enum/regex/min-max BEFORE it is
     // substituted raw, so a re-target param can't pick which data is exfiltrated.
-    const constraint = opts?.constraints?.[param.name];
+    const constraint = ruleOf(param.name);
     if (constraint) {
       const checked = applyConstraint(coerced.value, constraint, param.name);
       if (!checked.ok) return checked;
