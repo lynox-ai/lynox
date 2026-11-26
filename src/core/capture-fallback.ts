@@ -77,7 +77,7 @@ export const CAPTURE_TOOL: BetaTool = {
         items: {
           type: 'object',
           properties: {
-            text: { type: 'string', description: 'The fact, as one self-contained sentence.' },
+            text: { type: 'string', description: 'The fact, as one self-contained sentence in the language the operator writes in.' },
             subject: {
               type: 'string',
               description:
@@ -165,6 +165,18 @@ export const CAPTURE_SYSTEM = [
   'Most turns hold nothing. Returning an empty list is the correct and expected answer.',
   'Return at most a handful, each as one self-contained sentence that will still make sense',
   'read alone in six months.',
+  '',
+  'Write each fact in the language the operator writes in under the operator label: the',
+  'same language as the operator\'s own sentences, whichever it is. This holds for a fact',
+  'from the assistant half too: a fact from an English mail in a German conversation is',
+  'written in German. Judge the language by the sentences, not by the names, places or',
+  'company forms in them: an English sentence about a German company stays English. A',
+  'bracketed time stamp the system puts in front of the message is not the operator',
+  'writing; read the words after it. Proper nouns stay as they are.',
+  '',
+  '"Operator" and "user" are the labels of this excerpt, not words for the person who reads',
+  'the fact later, who may be the owner or someone working for them. A fact never names its',
+  'person that way: state the rule itself, or make the business or a named person its subject.',
 ].join('\n');
 
 /**

@@ -137,7 +137,8 @@ describe('the head counts of a run', () => {
   it('a target found already holding its value and never sent to is unchanged, not written', () => {
     expect(classes(EXTERNAL, [
       { applied: true, found: true },
-      // Sent to and then found so: a loop that died wrote it, so it was written.
+      // Not a state a pass leaves (a target is marked found only while never sent to): it pins that
+      // the head reads found only together with no send, so a sent one stays written.
       { applied: true, found: true, sent: true },
       { applied: true },
       // Taken back ranks first, as before.
@@ -173,7 +174,9 @@ describe('the head counts of a run', () => {
       }
       expect(ledger.claimTarget(id, 0, at + BULK_CLAIM_STALE_MS + 1)).toBe(true);
     });
-    it('names a stale target in the pass count too, as the head does', () => {
+    it('the pass count reads the same stale bound as the head', () => {
+      // A built state, not one a pass leaves (recording a failure gives the claim back): it pins
+      // only that the pass count binds the bound where the head does.
       const id = run(EXTERNAL, [{ ...held, error: 'write_failed', failedOnce: true }]);
       expect(ledger.getStatus(id, LIVE)!.passUnclear).toBe(0);
       expect(ledger.getStatus(id, at + BULK_CLAIM_STALE_MS + 1)!.passUnclear).toBe(1);

@@ -51,7 +51,7 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
 		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
@@ -179,5 +179,21 @@ describe('the resume block after a halt on failures', () => {
 		expect(text('bulk-resume-window')).toBe(`${t('bulk.resume.window')} Dabei dürfen noch einmal bis zu 50 Ziele scheitern, oder drei in Folge, bevor der Lauf wieder anhält.`);
 		// No sentence of the block starts with the button's word twice any more.
 		expect(target.textContent ?? '').not.toContain('Mit dem Weiterschreiben dürfen');
+	});
+});
+
+describe('the undo offer and approval sentences', () => {
+	it('keep each number with its word: a no-break space between them, in both languages', () => {
+		const keys = ['bulk.undo.approve_explain', 'bulk.undo.approve_explain_one', 'bulk.undo.approve_written', 'bulk.undo.approve_written_one',
+			'bulk.undo.approve_open_more', 'bulk.undo.approve_open_only', 'bulk.undo.explain_open', 'bulk.undo.explain_open_only'];
+		for (const lang of ['de', 'en'] as const) {
+			setLocale(lang);
+			for (const k of keys) {
+				const s = t(k);
+				expect(s, `${lang} ${k}`).toMatch(/(\{[nw]\}|\b1)\u00a0\S/);
+				expect(s, `${lang} ${k}`).not.toMatch(/(\{[nw]\}|\b1) /);
+			}
+		}
+		setLocale('de');
 	});
 });
