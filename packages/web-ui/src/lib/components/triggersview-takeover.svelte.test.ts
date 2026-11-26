@@ -301,6 +301,10 @@ describe('Delete and the switch at a paused plan, which the route refuses to a h
 		await remount();
 		expect(target.querySelector('[data-trigger-paused-done-hint]')).not.toBeNull();
 		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
+		// Nor a Resume where the owner had also switched it off before: it still never runs again.
+		rows = [{ ...PAUSED, status: 'completed', enabled: 0 }];
+		await remount();
+		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
 		// CONTROL: the same plan completed without a pause keeps its switch.
 		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
 		await remount();
