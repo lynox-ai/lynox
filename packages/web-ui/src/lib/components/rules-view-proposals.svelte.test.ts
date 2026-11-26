@@ -664,7 +664,7 @@ describe('RulesView — what a "then" choice says it does', () => {
 	it('says under "file as handled" where the mail goes and that the mailbox stays as it is, and nothing under the other choice', async () => {
 		await render({ viewer: 'owner', rules: [] });
 		await openForm();
-		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox legt die Mail unter „Erledigt heute“ ab. In deinem Postfach bleibt sie unverändert.');
+		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox legt die Mail unter „Erledigt heute“ ab, ausser sie wirkt sensibel; dann kommt sie unter „Braucht dich“. In deinem Postfach bleibt sie unverändert.');
 		// A screen reader reads the sentence with the choice it belongs to.
 		const effectId = byTestId('rules-then-effect')!.id;
 		expect(effectId).not.toBe('');
@@ -680,7 +680,31 @@ describe('RulesView — what a "then" choice says it does', () => {
 		setLocale('en');
 		await render({ viewer: 'owner', rules: [] });
 		await openForm();
-		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox files the mail under “Handled today”. It stays unchanged in your mailbox.');
+		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox files the mail under “Handled today”, unless it looks sensitive; then it goes to “Needs you”. It stays unchanged in your mailbox.');
+	});
+
+	// A description rule also leaves a mail a person forwarded under "Needs you"; a fixed rule does not.
+	it('names the forwarded exception for a description rule only, and changes the sentence with the kind', async () => {
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		const fixed = 'lynox legt die Mail unter „Erledigt heute“ ab, ausser sie wirkt sensibel; dann kommt sie unter „Braucht dich“. In deinem Postfach bleibt sie unverändert.';
+		const description = 'lynox legt die Mail unter „Erledigt heute“ ab, ausser sie wirkt sensibel oder ist weitergeleitet; dann kommt sie unter „Braucht dich“. In deinem Postfach bleibt sie unverändert.';
+		for (const kind of ['from', 'subject_contains'] as const) {
+			await choose('rule-match-kind', kind);
+			expect(byTestId('rules-then-effect')?.textContent, kind).toBe(fixed);
+		}
+		await choose('rule-match-kind', 'matches_description');
+		expect(byTestId('rules-then-effect')?.textContent).toBe(description);
+		await choose('rule-match-kind', 'from');
+		expect(byTestId('rules-then-effect')?.textContent).toBe(fixed);
+	});
+
+	it('names the forwarded exception for a description rule in English too', async () => {
+		setLocale('en');
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		await choose('rule-match-kind', 'matches_description');
+		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox files the mail under “Handled today”, unless it looks sensitive or was forwarded; then it goes to “Needs you”. It stays unchanged in your mailbox.');
 	});
 
 	it.each(['archive', 'mark_read'])('shows a stored handled rule with action "%s" as "file as handled"', async (action) => {
