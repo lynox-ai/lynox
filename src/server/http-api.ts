@@ -15240,6 +15240,48 @@ export class LynoxHTTPApi {
       }
       if (!omitted) exportData['workspace_archive'] = '/api/export/workspace';
 
+      // A database set aside as corrupt (`<name>.corrupt-<ms>`: by the boot for history.db and
+      // engine.db, by a restore for any of the four) leaves an empty or restored one in its
+      // place. The blocks read from it then look complete while older data sits in the set-aside
+      // file. Name the file (not its content) and mark every block read from that database:
+      // history.db holds the threads; engine.db the durable knowledge, and the knowledge graph
+      // while the subject graph is on; agent-memory.db the knowledge graph otherwise; datastore.db
+      // the contacts, deals and tables. A data directory that cannot be listed marks all of them.
+      {
+        let setAside: Set<string>;
+        try {
+          const { getLynoxDir } = await import('../core/config.js');
+          const { listSetAsideStores } = await import('../core/set-aside-stores.js');
+          const found = listSetAsideStores(getLynoxDir());
+          if (found.length > 0) exportData['set_aside_databases'] = found;
+          setAside = new Set(found.map((s) => s.database));
+        } catch (err: unknown) {
+          exportData['set_aside_databases_unknown'] = err instanceof Error ? err.name : 'error';
+          setAside = new Set(['history.db', 'engine.db', 'datastore.db', 'agent-memory.db']);
+        }
+        // The layer fixes the switch at boot; the config can say otherwise after a reload.
+        const subjectGraphOn = engine.getKnowledgeLayer()?.readsSubjectGraph === true
+          || engine.getUserConfig().subject_graph_enabled === true;
+        if (setAside.has('history.db')) exportData['threads_may_be_incomplete'] = true;
+        if (setAside.has('agent-memory.db') || (subjectGraphOn && setAside.has('engine.db'))) {
+          exportData['knowledge_graph_may_be_incomplete'] = true;
+        }
+        if (setAside.has('engine.db')) {
+          const durable = exportData['durable_knowledge'];
+          if (durable !== null && typeof durable === 'object') {
+            exportData['durable_knowledge'] = { ...(durable as Record<string, unknown>), may_be_incomplete: true };
+          }
+        }
+        if (setAside.has('datastore.db')) {
+          exportData['contacts_may_be_incomplete'] = true;
+          exportData['deals_may_be_incomplete'] = true;
+          exportData['datastore_may_be_incomplete'] = true;
+        }
+        if (setAside.size > 0) {
+          process.stderr.write('⚠ /api/export: a database was set aside as corrupt — blocks read from it marked incomplete\n');
+        }
+      }
+
       // For the control plane, the act is the handover: its `done` row is written before the
       // body leaves, so a connection that drops while it streams does not erase it — and after
       // the body is made, so an export that cannot be serialised is not recorded as handed over.
