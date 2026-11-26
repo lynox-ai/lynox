@@ -113,6 +113,30 @@ describe('a schedule near midnight names the local day', () => {
 		expect(scheduleOf('Einunddreissigster')).toBe('Monthly on the 31st at 15:00');
 	});
 
+	it('a day that moves is said as the local day, with that day\'s English ordinal', async () => {
+		// The ordinal belongs to the day the reader lives, not to the day in the cron: 1 becomes the
+		// 2nd and 10 the 11th forward; 2 becomes the 1st and 23 the 22nd back.
+		const moved = (): Record<string, unknown>[] => [
+			{ ...BASE, id: 'f1', title: 'Vor', schedule_cron: '0 23 1 * *' },
+			{ ...BASE, id: 'f10', title: 'Vor Zehn', schedule_cron: '0 23 10 * *' },
+			{ ...BASE, id: 'b2', title: 'Zurück', schedule_cron: '0 2 2 * *' },
+			{ ...BASE, id: 'b23', title: 'Zurück Dreiundzwanzig', schedule_cron: '0 2 23 * *' },
+		];
+		inZone(-60);
+		setLocale('en');
+		rows = moved();
+		await render();
+		expect(scheduleOf('Vor')).toBe('Monthly on the 2nd at 00:00');
+		expect(scheduleOf('Vor Zehn')).toBe('Monthly on the 11th at 00:00');
+		unmount(component!);
+		component = undefined;
+		inZone(480);
+		rows = moved();
+		await render();
+		expect(scheduleOf('Zurück')).toBe('Monthly on the 1st at 18:00');
+		expect(scheduleOf('Zurück Dreiundzwanzig')).toBe('Monthly on the 22nd at 18:00');
+	});
+
 	it('across a clock change: a weekday that summer would move stays in UTC', async () => {
 		// Winter today, summer in July: 22:00 UTC is Monday 23:00 now and Tuesday 00:00 then.
 		vi.spyOn(Date.prototype, 'getTimezoneOffset').mockImplementation(function (this: Date) { return this.getMonth() >= 3 && this.getMonth() <= 9 ? -120 : -60; });
