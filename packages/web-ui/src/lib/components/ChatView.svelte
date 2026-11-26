@@ -106,10 +106,9 @@
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
-	import { isPipelineRunning } from '../utils/pipeline-status.js';
+	import { isPipelineRunning, prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
 	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
-	import { linesLeftBelow, splitPromptHead } from '../utils/prompt-head.js';
-	import { prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
+	import { linesLeftBelow, readOnStep, splitPromptHead } from '../utils/prompt-head.js';
 	import PromptQuestionField from './PromptQuestionField.svelte';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
@@ -715,14 +714,13 @@
 		const el = questionBox();
 		questionBelow = el ? linesLeftBelow(el, parseFloat(getComputedStyle(el).lineHeight) || 22) : 0;
 	}
-	/** On by the whole lines seen above the fade, so the line under the fade or cut at the edge is
-	 *  the first one after, and no line is passed over. */
+	/** On by the whole lines seen above the fade (`readOnStep`): no line is passed over. */
 	function readOnQuestion(): void {
 		const el = questionBox();
 		if (!el) return;
 		const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22;
-		const seen = Math.max(1, Math.floor((el.clientHeight - 32) / lineHeight));
-		el.scrollBy({ top: seen * lineHeight, behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
+		const fade = el.parentElement?.querySelector<HTMLElement>('[data-prompt-fade]')?.offsetHeight ?? 32;
+		el.scrollBy({ top: readOnStep(el.clientHeight, lineHeight, fade), behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
 	}
 	$effect(() => {
 		void pendingPermission?.promptId;
@@ -735,10 +733,14 @@
 			cancelAnimationFrame(frame);
 			frame = requestAnimationFrame(measureQuestion);
 		};
-		untrack(() => { questionBelow = 0; });
+		questionBelow = 0;
 		let ro: ResizeObserver | null = null;
-		// The box renders after this effect's own pass; it is looked up once the DOM is updated.
+		let disposed = false;
+		// The box renders after this effect's own pass; it is looked up once the DOM is updated, and
+		// measured at once, so the count is there on the first painted frame.
 		void tick().then(() => {
+			if (disposed) return;
+			measureQuestion();
 			const el = questionBox();
 			if (el && typeof ResizeObserver !== 'undefined') {
 				ro = new ResizeObserver(schedule);
@@ -749,6 +751,7 @@
 		});
 		if (typeof window !== 'undefined') window.addEventListener('resize', schedule);
 		return () => {
+			disposed = true;
 			ro?.disconnect();
 			if (typeof window !== 'undefined') window.removeEventListener('resize', schedule);
 			if (typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(frame);
@@ -3634,7 +3637,8 @@
 						     prompt sideways. -->
 						<!-- While its end lies below the box's edge, a fade on the box and a button on its own row
 						     under it say how many lines, as the engine's own confirmation does. -->
-						<div class="relative flex flex-1 min-w-0 flex-col">
+						<div class="flex flex-1 min-w-0 flex-col">
+						<div class="relative flex min-w-0 flex-col">
 						<div data-prompt-question data-prompt-markdown onscroll={measureQuestion} class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
 							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list; segment values are spliced in afterwards, HTML-escaped -->
 							{@html pendingPermission.segments
@@ -3642,7 +3646,10 @@
 								: renderPromptMarkdown(pendingPermission.question)}
 						</div>
 						{#if questionBelow > 0}
-							<div data-prompt-fade class="pointer-events-none absolute inset-x-0 bottom-7 h-8 bg-gradient-to-t from-bg-subtle to-transparent"></div>
+							<div data-prompt-fade class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-bg-subtle to-transparent"></div>
+						{/if}
+						</div>
+						{#if questionBelow > 0}
 							<div class="flex shrink-0 justify-end pt-1">
 								<button data-prompt-read-more type="button" onclick={readOnQuestion} class="whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-xs text-text-muted hover:text-text">{questionBelowLabel} <span aria-hidden="true">↓</span></button>
 							</div>

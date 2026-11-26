@@ -53,12 +53,25 @@ export function linesBelow(lineBoxes: readonly { top: number; bottom: number }[]
 /**
  * How many lines of a scrolled box lie below its visible part, for a box whose lines are not
  * elements of their own (rendered markup): what is left to scroll, in lines of `lineHeight`,
- * rounded up so a cut line counts. 0 once the end is in view.
+ * rounded up so a cut line counts. 0 once less than half a line is left: the sizes are rounded
+ * pixels and the scroll position is not (fractional zoom leaves a pixel at the very end), and a
+ * paragraph's bottom margin scrolls without holding text. Less than half a line hides no line.
  */
 export function linesLeftBelow(box: { scrollHeight: number; clientHeight: number; scrollTop: number }, lineHeight: number): number {
+	const line = Math.max(1, lineHeight);
 	const left = box.scrollHeight - box.clientHeight - box.scrollTop;
-	if (left <= 0.5) return 0;
-	return Math.max(1, Math.ceil((left - 0.5) / Math.max(1, lineHeight)));
+	if (left < line / 2) return 0;
+	return Math.ceil(left / line - 0.01);
+}
+
+/**
+ * How far one "read more" scrolls a box of `clientHeight` with a fade of `fadeHeight` at its
+ * bottom: by the whole lines seen above the fade, at least one. The line under the fade, or cut
+ * by the edge, is then on screen after; no line is passed over.
+ */
+export function readOnStep(clientHeight: number, lineHeight: number, fadeHeight: number): number {
+	const line = Math.max(1, lineHeight);
+	return Math.max(1, Math.floor((clientHeight - fadeHeight) / line)) * line;
 }
 
 /**

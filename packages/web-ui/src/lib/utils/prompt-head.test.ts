@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { linesBelow, linesLeftBelow, promptFieldTooLow, splitPromptHead } from './prompt-head.js';
+import { linesBelow, linesLeftBelow, promptFieldTooLow, readOnStep, splitPromptHead } from './prompt-head.js';
 
 const many = Array.from({ length: 3 }, (_, i) => `rm -rf ./release/build-${i + 1}/artifacts`).join('\n');
 
@@ -70,17 +70,42 @@ describe('linesLeftBelow', () => {
 	it('counts what is left to scroll in lines, a cut line as a whole one', () => {
 		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 0 }, 22)).toBe(14);
 		expect(linesLeftBelow({ scrollHeight: 300, clientHeight: 256, scrollTop: 0 }, 22)).toBe(2);
-		expect(linesLeftBelow({ scrollHeight: 260, clientHeight: 256, scrollTop: 0 }, 22)).toBe(1);
+		expect(linesLeftBelow({ scrollHeight: 268, clientHeight: 256, scrollTop: 0 }, 22)).toBe(1);
 	});
 
-	it('is 0 once the end is in view, a rounded pixel included', () => {
+	it('counts an exact number of lines as that many, and one pixel more as one more', () => {
+		expect(linesLeftBelow({ scrollHeight: 278, clientHeight: 256, scrollTop: 0 }, 22)).toBe(1);
+		expect(linesLeftBelow({ scrollHeight: 279, clientHeight: 256, scrollTop: 0 }, 22)).toBe(2);
+		expect(linesLeftBelow({ scrollHeight: 300, clientHeight: 256, scrollTop: 0 }, 22)).toBe(2);
+		expect(linesLeftBelow({ scrollHeight: 301, clientHeight: 256, scrollTop: 0 }, 22)).toBe(3);
+	});
+
+	it('is 0 once less than half a line is left: a rounded pixel at the end, or a paragraph margin', () => {
 		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 302 }, 22)).toBe(0);
-		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 301.6 }, 22)).toBe(0);
+		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 255, scrollTop: 302.2 }, 22)).toBe(0);
+		expect(linesLeftBelow({ scrollHeight: 260, clientHeight: 256, scrollTop: 0 }, 22)).toBe(0);
+		expect(linesLeftBelow({ scrollHeight: 266.9, clientHeight: 256, scrollTop: 0 }, 22)).toBe(0);
+		expect(linesLeftBelow({ scrollHeight: 267, clientHeight: 256, scrollTop: 0 }, 22)).toBe(1);
 		expect(linesLeftBelow({ scrollHeight: 200, clientHeight: 256, scrollTop: 0 }, 22)).toBe(0);
 	});
 
 	it('counts down as the box is scrolled', () => {
 		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 200 }, 22)).toBe(5);
+	});
+});
+
+describe('readOnStep', () => {
+	it('scrolls by the whole lines seen above the fade, never more than that', () => {
+		// 224 px seen above the fade: 10 lines of 22 px, 9 of 22.75 px.
+		expect(readOnStep(256, 22, 32)).toBe(220);
+		expect(readOnStep(256, 22.75, 32)).toBe(9 * 22.75);
+		// 219 px seen: 9 whole lines, the tenth is partly under the fade and comes after.
+		expect(readOnStep(251, 22, 32)).toBe(198);
+		expect(readOnStep(252, 22, 32)).toBe(220);
+	});
+
+	it('at least one line, even in a box hardly taller than its fade', () => {
+		expect(readOnStep(40, 22, 32)).toBe(22);
 	});
 });
 

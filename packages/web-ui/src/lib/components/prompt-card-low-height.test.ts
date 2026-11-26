@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -16,6 +17,7 @@ import { fileURLToPath } from 'node:url';
  * template, the instrument `secret-prompt-frame.test.ts` uses on this file for the same reason.
  */
 const CHATVIEW = readFileSync(fileURLToPath(new URL('./ChatView.svelte', import.meta.url)), 'utf-8');
+const SRC = fileURLToPath(new URL('../../', import.meta.url));
 
 /** The classes of the one opening tag that carries `marker`. */
 function classesOf(marker: string): string[] {
@@ -83,22 +85,40 @@ describe('a question without a consent kind that runs past its box', () => {
 	// The model's own question and a tool's confirmation (a sheet's formulas, a mail) are rendered
 	// markup in a box of fixed height. Its end may be what the yes is for, so a count and a fade say
 	// that more follows, as the engine's own confirmation does. The measurement is in the shots.
-	it('its box is the one the count is measured on, and is measured again when it scrolls', () => {
+	const boxTag = (): string => {
 		const tags = [...CHATVIEW.matchAll(/<div\b[^>]*>/g)].map((m) => m[0]).filter((t) => t.includes('data-prompt-markdown'));
 		expect(tags).toHaveLength(1);
-		expect(tags[0]).toContain('onscroll={measureQuestion}');
-		expect(tags[0]).toContain('max-h-64');
+		return tags[0]!;
+	};
+
+	it('its box is the card\'s one box with that mark, measured again when it scrolls', () => {
+		expect(permissionCard()).toContain(boxTag());
+		expect(boxTag()).toContain('onscroll={measureQuestion}');
 		expect(CHATVIEW).toContain("document.querySelector<HTMLElement>('[data-pending-prompt] [data-prompt-markdown]')");
+		// No other file of the web UI carries the mark, so the lookup cannot land elsewhere.
+		const files = readdirSync(SRC, { recursive: true, encoding: 'utf-8' }).filter((f) => /\.(svelte|ts)$/.test(f) && !/\.test\.ts$/.test(f));
+		expect(files.filter((f) => readFileSync(join(SRC, f), 'utf-8').includes('data-prompt-markdown')).map((f) => f.replace(/\\/g, '/'))).toEqual(['lib/components/ChatView.svelte']);
 	});
 
-	it('shows a fade and a button with the count, in the card, only while lines lie below', () => {
+	it('the box scrolls and cuts nothing off any other way', () => {
+		const cls = boxTag().match(/\bclass="([^"]*)"/)![1]!.split(/\s+/);
+		expect(cls).toContain('max-h-64');
+		expect(cls).toContain('overflow-y-auto');
+		expect(cls.filter((c) => /(^|:)(overflow-hidden|overflow-y-hidden|overflow-clip|truncate|line-clamp-|hidden$|invisible|h-0$|max-h-0)/.test(c))).toEqual([]);
+	});
+
+	it('the fade sits on the box, in a frame of its own, only while lines lie below', () => {
 		const card = permissionCard();
-		const block = card.slice(card.indexOf('{#if questionBelow > 0}'));
-		expect(card.indexOf('{#if questionBelow > 0}')).toBeGreaterThan(card.indexOf('data-prompt-markdown'));
-		expect(block).toMatch(/^\{#if questionBelow > 0\}\s*<div data-prompt-fade [^>]*class="[^"]*\bpointer-events-none\b[^"]*\babsolute\b/);
-		expect(block).toContain('<button data-prompt-read-more type="button" onclick={readOnQuestion}');
-		expect(block).toContain('{questionBelowLabel} <span aria-hidden="true">↓</span>');
+		const frame = card.slice(card.lastIndexOf('<div class="relative flex min-w-0 flex-col">', card.indexOf('data-prompt-markdown')));
+		expect(frame.startsWith('<div class="relative flex min-w-0 flex-col">')).toBe(true);
+		const fadeIf = frame.slice(frame.indexOf('</div>', frame.indexOf('data-prompt-markdown')));
+		expect(fadeIf).toMatch(/^<\/div>\s*\{#if questionBelow > 0\}\s*<div data-prompt-fade class="pointer-events-none absolute inset-x-0 bottom-0 h-8 [^"]*"><\/div>\s*\{\/if\}\s*<\/div>/);
+	});
+
+	it('the button with the count stands under the box, only while lines lie below', () => {
+		const card = permissionCard();
+		const afterFrame = card.slice(card.indexOf('{/if}', card.indexOf('data-prompt-fade')) + '{/if}'.length);
+		expect(afterFrame).toMatch(/^\s*<\/div>\s*\{#if questionBelow > 0\}\s*<div class="flex shrink-0 justify-end pt-1">\s*<button data-prompt-read-more type="button" onclick=\{readOnQuestion\} [^>]*>\{questionBelowLabel\} <span aria-hidden="true">↓<\/span><\/button>\s*<\/div>\s*\{\/if\}/);
 		expect(CHATVIEW).toContain("questionBelow === 1 ? t('chat.prompt_read_more_one') : tf('chat.prompt_read_more', { n: String(questionBelow) })");
 	});
 });
-
