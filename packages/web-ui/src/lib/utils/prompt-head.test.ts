@@ -105,6 +105,8 @@ describe('contentBottomOf', () => {
 
 	it('is null when any other node, such as a comment, follows the last element', () => {
 		expect(contentBottomOf({ nodeType: 8, textContent: '', previousSibling: el(426) })).toBeNull();
+		// Only an element is where the content ends, whatever else the node can report.
+		expect(contentBottomOf({ nodeType: 8, textContent: '', previousSibling: el(426), getBoundingClientRect: () => ({ bottom: 999 }) })).toBeNull();
 	});
 });
 
