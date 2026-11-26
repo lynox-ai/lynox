@@ -165,6 +165,8 @@ export interface TakeoverPreview {
 	runsAs: string;
 	/** `from`: whose mark on the workflow the takeover reads, by address and role (engine `planMandate`). */
 	workflow: { id: string; name: string; takenOver: boolean; from?: { name: string; role: 'workflow-edited' | 'workflow-created' } | null } | null;
+	/** A workflow plan without its workflow (deleted, or never bound): it runs nothing as it is. */
+	workflowGone?: boolean;
 	memberChanges: TakeoverMemberChange[];
 	alsoReleased: Array<{ id: string; title: string }>;
 	connections: TakeoverConnection[];
@@ -174,7 +176,7 @@ export interface TakeoverPreview {
 
 /** One sentence of the confirmation; `kind` names the text it is (T-1 … T-6, F2), for tests and markup. */
 export interface TakeoverLine {
-	kind: 'role' | 'f2' | 'member_change' | 'connection' | 'runs_as_owner' | 'runs_as_member' | 'missed' | 'partial';
+	kind: 'role' | 'workflow_gone' | 'f2' | 'member_change' | 'connection' | 'runs_as_owner' | 'runs_as_member' | 'missed' | 'partial';
 	text: string;
 }
 
@@ -207,9 +209,10 @@ function roleLines(m: TakeoverMember, workflow: string | null, workflowRoles: Re
 	const lines: TakeoverLine[] = m.roles
 		.filter((role): role is 'created' | 'edited' => role === 'created' || role === 'edited')
 		.map((role) => ({ kind: 'role' as const, text: tf(`takeover.role.${role}`, { name: shownValue(m.name) }) }));
-	if (!m.roles.some((role) => role === 'workflow-created' || role === 'workflow-edited') || workflowRoles.size === 0) return lines;
+	// Without a workflow in the preview the line would quote nothing: it is not said.
+	if (workflow === null || !m.roles.some((role) => role === 'workflow-created' || role === 'workflow-edited') || workflowRoles.size === 0) return lines;
 	const key = workflowRoles.size === 2 ? 'takeover.role.workflow-created-edited' : `takeover.role.${[...workflowRoles][0]}`;
-	lines.push({ kind: 'role', text: tf(key, { name: shownValue(m.name), workflow: workflow === null ? '' : shownValue(workflow) }) });
+	lines.push({ kind: 'role', text: tf(key, { name: shownValue(m.name), workflow: shownValue(workflow) }) });
 	return lines;
 }
 
@@ -331,6 +334,8 @@ export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => s
 			lines.push(line);
 		}
 	}
+	// In place of the workflow roles, which have no workflow to name: the plan is a workflow plan, and its workflow is missing.
+	if (p.workflowGone === true) lines.push({ kind: 'workflow_gone', text: t('takeover.workflow_gone') });
 	if (f2 !== null) lines.push(f2.line);
 	// F2's last sentence lists the plans that run again; the T-2 line right below it may point back to that list.
 	lines.push(...memberChangeLines(p.memberChanges, f2 === null ? new Set() : new Set(p.alsoReleased.map((r) => r.id))));
