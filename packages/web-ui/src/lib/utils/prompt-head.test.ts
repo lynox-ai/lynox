@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { linesBelow, linesLeftBelow, promptFieldTooLow, readOnStep, splitPromptHead } from './prompt-head.js';
+import { contentLeftBelow, linesBelow, linesLeftBelow, promptFieldTooLow, readOnStep, splitPromptHead } from './prompt-head.js';
 
 const many = Array.from({ length: 3 }, (_, i) => `rm -rf ./release/build-${i + 1}/artifacts`).join('\n');
 
@@ -66,31 +66,54 @@ describe('linesBelow', () => {
 	});
 });
 
+describe('contentLeftBelow', () => {
+	const box = (scrollHeight: number, scrollTop = 0) => ({ scrollHeight, clientHeight: 256, scrollTop, bottom: 400 });
+
+	it('measures from where the content ends, so a trailing margin is not counted', () => {
+		// 4 px of margin under the last paragraph: 30 px left to scroll, 26 px of it text.
+		expect(contentLeftBelow(box(286), 426)).toBe(26);
+		// A list ends without a margin: everything left to scroll is text.
+		expect(contentLeftBelow(box(286), 430)).toBe(30);
+	});
+
+	it('never says more than is left to scroll, and counts down as the box is scrolled', () => {
+		expect(contentLeftBelow(box(286), 440)).toBe(30);
+		expect(contentLeftBelow(box(286, 20), 406)).toBe(6);
+	});
+
+	it('takes what is left to scroll when the content does not end in an element', () => {
+		expect(contentLeftBelow(box(286), null)).toBe(30);
+		expect(contentLeftBelow(box(286, 30), null)).toBe(0);
+	});
+});
+
 describe('linesLeftBelow', () => {
-	it('counts what is left to scroll in lines, a cut line as a whole one', () => {
-		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 0 }, 22)).toBe(14);
-		expect(linesLeftBelow({ scrollHeight: 300, clientHeight: 256, scrollTop: 0 }, 22)).toBe(2);
-		expect(linesLeftBelow({ scrollHeight: 268, clientHeight: 256, scrollTop: 0 }, 22)).toBe(1);
+	it('counts what is left in lines, a cut line as a whole one', () => {
+		expect(linesLeftBelow(302, 22)).toBe(14);
+		expect(linesLeftBelow(44, 22)).toBe(2);
+		expect(linesLeftBelow(12, 22)).toBe(1);
 	});
 
 	it('counts an exact number of lines as that many, and one pixel more as one more', () => {
-		expect(linesLeftBelow({ scrollHeight: 278, clientHeight: 256, scrollTop: 0 }, 22)).toBe(1);
-		expect(linesLeftBelow({ scrollHeight: 279, clientHeight: 256, scrollTop: 0 }, 22)).toBe(2);
-		expect(linesLeftBelow({ scrollHeight: 300, clientHeight: 256, scrollTop: 0 }, 22)).toBe(2);
-		expect(linesLeftBelow({ scrollHeight: 301, clientHeight: 256, scrollTop: 0 }, 22)).toBe(3);
+		expect(linesLeftBelow(22, 22)).toBe(1);
+		expect(linesLeftBelow(23, 22)).toBe(2);
+		expect(linesLeftBelow(45, 22)).toBe(3);
+		expect(linesLeftBelow(68.25, 22.75)).toBe(3);
+		// A line height floats cannot hold exactly: two of them are two lines, not three.
+		expect(linesLeftBelow(2 * 22.4, 22.4)).toBe(2);
+		expect(linesLeftBelow(3 * 22.1, 22.1)).toBe(3);
 	});
 
-	it('is 0 once less than half a line is left: a rounded pixel at the end, or a paragraph margin', () => {
-		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 302 }, 22)).toBe(0);
-		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 255, scrollTop: 302.2 }, 22)).toBe(0);
-		expect(linesLeftBelow({ scrollHeight: 260, clientHeight: 256, scrollTop: 0 }, 22)).toBe(0);
-		expect(linesLeftBelow({ scrollHeight: 266.9, clientHeight: 256, scrollTop: 0 }, 22)).toBe(0);
-		expect(linesLeftBelow({ scrollHeight: 267, clientHeight: 256, scrollTop: 0 }, 22)).toBe(1);
-		expect(linesLeftBelow({ scrollHeight: 200, clientHeight: 256, scrollTop: 0 }, 22)).toBe(0);
+	it('is 0 below one pixel, the rounding left at the very end by fractional zoom', () => {
+		expect(linesLeftBelow(0, 22)).toBe(0);
+		expect(linesLeftBelow(0.8, 22)).toBe(0);
+		expect(linesLeftBelow(-3, 22)).toBe(0);
 	});
 
-	it('counts down as the box is scrolled', () => {
-		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 200 }, 22)).toBe(5);
+	it('counts a line of which only a pixel or a few are hidden', () => {
+		expect(linesLeftBelow(1, 22)).toBe(1);
+		expect(linesLeftBelow(1.5, 22)).toBe(1);
+		expect(linesLeftBelow(11, 22.75)).toBe(1);
 	});
 });
 

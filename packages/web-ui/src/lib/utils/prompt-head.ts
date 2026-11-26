@@ -51,17 +51,25 @@ export function linesBelow(lineBoxes: readonly { top: number; bottom: number }[]
 }
 
 /**
- * How many lines of a scrolled box lie below its visible part, for a box whose lines are not
- * elements of their own (rendered markup): what is left to scroll, in lines of `lineHeight`,
- * rounded up so a cut line counts. 0 once less than half a line is left: the sizes are rounded
- * pixels and the scroll position is not (fractional zoom leaves a pixel at the very end), and a
- * paragraph's bottom margin scrolls without holding text. Less than half a line hides no line.
+ * How far the content of a scrolled box reaches below its visible part, in pixels, for a box whose
+ * lines are not elements of their own (rendered markup). Measured where the content ends — the
+ * bottom of its last element, `contentBottom` — so a trailing margin, which scrolls but holds no
+ * text, is not counted; never more than is left to scroll. `contentBottom` is null when the content
+ * does not end in an element (text after the last one): then what is left to scroll is taken.
  */
-export function linesLeftBelow(box: { scrollHeight: number; clientHeight: number; scrollTop: number }, lineHeight: number): number {
-	const line = Math.max(1, lineHeight);
-	const left = box.scrollHeight - box.clientHeight - box.scrollTop;
-	if (left < line / 2) return 0;
-	return Math.ceil(left / line - 0.01);
+export function contentLeftBelow(box: { scrollHeight: number; clientHeight: number; scrollTop: number; bottom: number }, contentBottom: number | null): number {
+	const toScroll = box.scrollHeight - box.clientHeight - box.scrollTop;
+	return contentBottom === null ? toScroll : Math.min(toScroll, contentBottom - box.bottom);
+}
+
+/**
+ * How many lines `left` pixels of content below a box's edge are, rounded up so a cut line counts.
+ * 0 below one pixel: the sizes are rounded pixels and the scroll position is not, so fractional
+ * zoom leaves up to a pixel at the very end. Any more, and part of a line is hidden.
+ */
+export function linesLeftBelow(left: number, lineHeight: number): number {
+	if (left < 1) return 0;
+	return Math.max(1, Math.ceil(left / Math.max(1, lineHeight) - 0.01));
 }
 
 /**

@@ -108,7 +108,7 @@
 	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning, prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
 	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
-	import { linesLeftBelow, readOnStep, splitPromptHead } from '../utils/prompt-head.js';
+	import { contentLeftBelow, linesLeftBelow, readOnStep, splitPromptHead } from '../utils/prompt-head.js';
 	import PromptQuestionField from './PromptQuestionField.svelte';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
@@ -712,14 +712,20 @@
 	}
 	function measureQuestion(): void {
 		const el = questionBox();
-		questionBelow = el ? linesLeftBelow(el, parseFloat(getComputedStyle(el).lineHeight) || 22) : 0;
+		if (!el) { questionBelow = 0; return; }
+		// Where the content ends: the last element, unless text follows it.
+		let tail: ChildNode | null = el.lastChild;
+		while (tail && tail.nodeType === Node.TEXT_NODE && (tail.textContent ?? '').trim() === '') tail = tail.previousSibling;
+		const contentBottom = tail instanceof Element ? tail.getBoundingClientRect().bottom : null;
+		const left = contentLeftBelow({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, scrollTop: el.scrollTop, bottom: el.getBoundingClientRect().bottom }, contentBottom);
+		questionBelow = linesLeftBelow(left, parseFloat(getComputedStyle(el).lineHeight) || 22);
 	}
 	/** On by the whole lines seen above the fade (`readOnStep`): no line is passed over. */
 	function readOnQuestion(): void {
 		const el = questionBox();
 		if (!el) return;
 		const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22;
-		const fade = el.parentElement?.querySelector<HTMLElement>('[data-prompt-fade]')?.offsetHeight ?? 32;
+		const fade = el.parentElement?.querySelector<HTMLElement>(':scope > [data-prompt-fade]')?.offsetHeight ?? 32;
 		el.scrollBy({ top: readOnStep(el.clientHeight, lineHeight, fade), behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
 	}
 	$effect(() => {

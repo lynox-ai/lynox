@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'svelte/compiler';
 
 /**
  * With little height (a phone in landscape with the keyboard open, a small window) a long
@@ -108,11 +109,27 @@ describe('a question without a consent kind that runs past its box', () => {
 	});
 
 	it('the fade sits on the box, in a frame of its own, only while lines lie below', () => {
-		const card = permissionCard();
-		const frame = card.slice(card.lastIndexOf('<div class="relative flex min-w-0 flex-col">', card.indexOf('data-prompt-markdown')));
-		expect(frame.startsWith('<div class="relative flex min-w-0 flex-col">')).toBe(true);
-		const fadeIf = frame.slice(frame.indexOf('</div>', frame.indexOf('data-prompt-markdown')));
-		expect(fadeIf).toMatch(/^<\/div>\s*\{#if questionBelow > 0\}\s*<div data-prompt-fade class="pointer-events-none absolute inset-x-0 bottom-0 h-8 [^"]*"><\/div>\s*\{\/if\}\s*<\/div>/);
+		// Read as Svelte parses it: the box's parent is the frame, the fade the frame's only other child.
+		type Node = { type: string; name?: string; attributes?: Array<{ type: string; name: string; value: unknown }>; fragment?: { nodes: Node[] }; consequent?: { nodes: Node[] }; alternate?: { nodes: Node[] } | null; test?: { start: number; end: number } };
+		const ast = parse(CHATVIEW, { modern: true }) as unknown as { fragment: { nodes: Node[] } };
+		const kids = (n: Node): Node[] => [...(n.fragment?.nodes ?? []), ...(n.consequent?.nodes ?? []), ...(n.alternate?.nodes ?? [])];
+		const has = (n: Node, attr: string): boolean => (n.attributes ?? []).some((a) => a.type === 'Attribute' && a.name === attr);
+		const cls = (n: Node): string => { const a = (n.attributes ?? []).find((x) => x.name === 'class'); return Array.isArray(a?.value) ? (a.value as Array<{ data?: string }>).map((v) => v.data ?? '').join('') : ''; };
+		const parents: Node[] = [];
+		const walk = (n: Node): void => { for (const k of kids(n)) { if (k.type === 'RegularElement' && kids(k).some((c) => c.type === 'RegularElement' && has(c, 'data-prompt-markdown'))) parents.push(k); walk(k); } };
+		walk({ type: 'Root', fragment: ast.fragment });
+		expect(parents).toHaveLength(1);
+		const frame = parents[0]!;
+		expect(cls(frame).split(/\s+/)).toContain('relative');
+		const children = kids(frame).filter((c) => c.type !== 'Comment' && !(c.type === 'Text'));
+		expect(children.map((c) => c.type)).toEqual(['RegularElement', 'IfBlock']);
+		expect(has(children[0]!, 'data-prompt-markdown')).toBe(true);
+		const fadeIf = children[1]!;
+		expect(CHATVIEW.slice(fadeIf.test!.start, fadeIf.test!.end)).toBe('questionBelow > 0');
+		const fade = (fadeIf.consequent?.nodes ?? []).filter((c) => c.type === 'RegularElement');
+		expect(fade).toHaveLength(1);
+		expect(has(fade[0]!, 'data-prompt-fade')).toBe(true);
+		expect(cls(fade[0]!).split(/\s+/)).toEqual(expect.arrayContaining(['pointer-events-none', 'absolute', 'inset-x-0', 'bottom-0']));
 	});
 
 	it('the button with the count stands under the box, only while lines lie below', () => {
