@@ -36,6 +36,11 @@ export interface StampPreview {
 	 * lost access (absent from an older engine: not ended). Null for any other.
 	 */
 	workflow: { name: string | null; confirmed: boolean; ended?: boolean } | null;
+	/**
+	 * The address of the person besides the owner whom the plan's questions reach once it is
+	 * stamped (a plan that runs an interactive workflow); null or absent when no one else.
+	 */
+	asks?: string | null;
 	connections: { id: string; profile: string; provider: string; account: string | null }[];
 }
 
@@ -60,7 +65,9 @@ export function readPreview(raw: unknown): StampPreview | null {
 	if (w !== null && !(isObj(w) && strOrNull(w['name']) && typeof w['confirmed'] === 'boolean' && (w['ended'] === undefined || typeof w['ended'] === 'boolean'))) return null;
 	const c = raw['connections'];
 	if (!Array.isArray(c) || !c.every((e) => isObj(e) && typeof e['id'] === 'string' && typeof e['profile'] === 'string' && typeof e['provider'] === 'string' && strOrNull(e['account']))) return null;
-	return raw as unknown as StampPreview;
+	// Who else answers only informs: a value of another shape shows no line, and the preview stands.
+	const asks = typeof raw['asks'] === 'string' && raw['asks'] !== '' ? raw['asks'] : null;
+	return { ...(raw as unknown as StampPreview), asks };
 }
 
 /** The fields of a trigger row the stamp predicates read (`GET /api/triggers`). */

@@ -4,7 +4,7 @@ import { isMandateConnection } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import type { StampEntry } from './plan-run-context.js';
 import { bindingOf, connectionShown, connectionWaits, memberConnectionReader } from './profile-secret-view.js';
-import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalTag, type RequestPrincipal } from './request-principal.js';
+import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { RunHistory } from './run-history.js';
 import type { TriggerRecord } from '../types/index.js';
 
@@ -256,6 +256,56 @@ export async function planOfTrigger(
   } catch {
     return only(true);
   }
+}
+
+/**
+ * Who a plan's questions reach besides the owner once the owner's stamp holds: the mandate the run
+ * acts for, read the way the run reads it (`planOfTrigger`, then the run's access gate). None for
+ * the owner's plan, for a plan whose authorship cannot be read, for a bulk effect (its run carries
+ * its own planner), and for a plan one of whose members has ended or names no grant: that run does
+ * not start, so nobody is asked.
+ */
+export async function planAsks(
+  task: TriggerRecord,
+  runHistory: RunHistory | null,
+  isLive: (mandateId: string) => boolean,
+): Promise<RequestPrincipal | undefined> {
+  if (task.effect.startsWith('bulk_')) return undefined;
+  const plan = await planOfTrigger(task, runHistory);
+  if (plan.unreadable || plan.of === undefined) return undefined;
+  if (plan.members.some((m) => principalHasEnded(m, isLive))) return undefined;
+  return plan.of;
+}
+
+/**
+ * Who may be asked a workflow's questions besides the owner when it runs on a schedule, one entry
+ * per person: whom each plan that runs it asks (`planAsks`), and whom a plan without a mark of its
+ * own would ask, the workflow's mandate. Empty when the workflow's own mandate has ended or names no
+ * grant (no plan of it runs), or its authorship cannot be read.
+ */
+export async function workflowAsks(
+  workflowId: string,
+  plans: readonly TriggerRecord[],
+  runHistory: RunHistory | null,
+  isLive: (mandateId: string) => boolean,
+): Promise<RequestPrincipal[]> {
+  let a: ReturnType<RunHistory['getWorkflowAuthorship']>;
+  try {
+    a = runHistory?.getWorkflowAuthorship(workflowId);
+  } catch {
+    return [];
+  }
+  if (a === undefined) return [];
+  const own = planMandate(planAuthorshipOfWorkflow(a))?.principal;
+  if (own !== undefined && principalHasEnded(own, isLive)) return [];
+  const asked = new Map<string, RequestPrincipal>();
+  if (own !== undefined) asked.set(principalTag(own), own);
+  for (const t of plans) {
+    if (t.effect !== 'run_workflow' || t.pipeline_id !== workflowId) continue;
+    const p = await planAsks(t, runHistory, isLive);
+    if (p !== undefined) asked.set(principalTag(p), p);
+  }
+  return [...asked.values()];
 }
 
 export const FOREIGN_WORKFLOW_SCHEDULE_REFUSAL =

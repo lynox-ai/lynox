@@ -40,7 +40,7 @@ import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
+import { planAsks, planOfTrigger, stampEntriesFor, workflowAsks, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -364,6 +364,11 @@ function stampShown(planned: PlannedPipeline): {
     })),
     runs: runsFrom(planned),
   };
+}
+
+/** Whether a workflow's questions reach anyone on a schedule: an interactive one a schedule may run. */
+function asksOnSchedule(planned: PlannedPipeline): boolean {
+  return planned.mode === 'interactive' && isSchedulableWorkflow(planned);
 }
 
 /** Where a workflow may run, as the stamp says it: `anywhere` is a chat, a schedule and an agent in
@@ -2858,6 +2863,35 @@ export class LynoxHTTPApi {
    */
   async #stampListFor(trigger: TriggerRecord): Promise<{ wf: string | null; entries: readonly StampEntry[] } | null> {
     return (await this.#stampPlanOf(trigger)).listed;
+  }
+
+  /**
+   * Whom the questions of a plan that runs an interactive workflow reach besides the owner, once
+   * the stamp holds, as the address the view names: read by `planAsks`, the run's own reading. Null
+   * for every other plan, and for one that asks only the owner.
+   */
+  async #planAsksShown(trigger: TriggerRecord): Promise<string | null> {
+    const history = this.engine?.getRunHistory();
+    if (!history || trigger.effect !== 'run_workflow' || !trigger.pipeline_id) return null;
+    const planned = history.getWorkflowExact(trigger.pipeline_id);
+    if (planned === undefined || !asksOnSchedule(planned)) return null;
+    const p = await planAsks(trigger, history, (id) => this._mandateLive(id));
+    return p !== undefined && p.kind === 'mandate' ? p.email : null;
+  }
+
+  /**
+   * Who may be asked an interactive workflow's questions besides the owner when it runs on a
+   * schedule (`workflowAsks`): how many people, and the address only when it is one — with more,
+   * each plan's own stamp says who it is. Null when that is no one, or the workflow does not ask
+   * on a schedule.
+   */
+  async #workflowAsksShown(planned: PlannedPipeline): Promise<{ count: number; name: string | null } | null> {
+    const history = this.engine?.getRunHistory();
+    if (!history || !asksOnSchedule(planned)) return null;
+    const plans = this.engine?.getTaskManager()?.listTriggers?.() ?? [];
+    const asked = (await workflowAsks(planned.id, plans, history, (id) => this._mandateLive(id))).filter((p) => p.kind === 'mandate');
+    if (asked.length === 0) return null;
+    return { count: asked.length, name: asked.length === 1 && asked[0]!.kind === 'mandate' ? asked[0]!.email : null };
   }
 
   /**
@@ -9746,6 +9780,7 @@ export class LynoxHTTPApi {
         changedBy: shaped ? 'mandate' : 'owner',
         awaitsStamp: state === 'awaits_owner_stamp',
         ...stampShown(planned),
+        asks: await this.#workflowAsksShown(planned),
         steps: await stepsShown(planned),
       });
     }, ownerOnly('see what stamping a workflow would confirm')));
@@ -10385,6 +10420,7 @@ export class LynoxHTTPApi {
       const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
       const { listed, by, workflow } = await this.#stampPlanOf(trigger);
+      const asks = await this.#planAsksShown(trigger);
       const entries = listed?.entries ?? [];
       const apiStore = engine.getApiStore();
       const profiles = apiStore ? stampProfiles(entries, apiStore) : [];
@@ -10398,6 +10434,7 @@ export class LynoxHTTPApi {
         subject,
         by,
         workflow,
+        asks,
         connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
       });
     }, ownerOnly('see what a schedule would be confirmed with')));

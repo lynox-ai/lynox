@@ -24676,6 +24676,72 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       }
     });
 
+    it('says whom the questions of a plan and of a workflow reach besides the owner, as the run reads it', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'], t: ref['getTaskManager'] };
+      const EVA = 'M-EVA';
+      const ARNO = 'M-ARNO';
+      const asking = { id: 'wf-arno', name: 'W', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, template: true, confirmedAt: '2026-10-07T00:00:00.000Z', mode: 'interactive', steps: [{ id: 's1', task: 'ask', tools: ['ask_user'] }] };
+      let planned: Record<string, unknown> = asking;
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-arno' ? planned : undefined));
+      const arnoWf = { createdBy: 'mandate:arno@kanzlei.example', createdMandateId: ARNO, createdAt: '2026-10-01 00:00:00', mandateEditor: null, mandateEditorId: null, mandateEditedAt: null };
+      let authorship: Record<string, unknown> = arnoWf;
+      const plan = (id: string, by: string, mid: string | undefined, at: string): Record<string, unknown> => ({ id, effect: 'run_workflow', pipeline_id: 'wf-arno', title: 'Report', description: 'Weekly', created_by: by, ...(mid ? { created_mandate_id: mid } : {}), created_at: at });
+      let plans: Array<Record<string, unknown>> = [];
+      let live = (_id: string): boolean => true;
+      ref['getRunHistory'] = () => ({
+        getTrigger: (id: string) => plans.find((t) => t['id'] === id),
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => authorship,
+        getWorkflowExact: (id: string) => (id === 'wf-arno' ? planned : undefined),
+        workflowStampDigest: () => 'd'.repeat(64),
+        workflowStampState: () => 'holds',
+        workflowMandateShaped: () => true,
+      });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      ref['getMandateEnds'] = () => ({ isLive: (id: string) => live(id), record: (): void => {} });
+      ref['getTaskManager'] = () => ({ listTriggers: () => plans });
+      const planAsks = async (id: string): Promise<unknown> => ((await (await jsonFetch(`/api/tasks/${id}/stamp-preview`)).json()) as { asks: unknown }).asks;
+      const workflowAsks = async (): Promise<unknown> => ((await (await jsonFetch('/api/workflows/wf-arno/stamp-preview')).json()) as { asks: unknown }).asks;
+      try {
+        // Arno's workflow, no plan yet: a plan on it would ask Arno.
+        expect(await workflowAsks()).toEqual({ count: 1, name: 'arno@kanzlei.example' });
+        // The owner's plan on it asks Arno; Eva's, set up later, asks Eva; Eva's set up at the same
+        // instant as the workflow asks Eva too (the schedule's mark wins a tie).
+        plans = [plan('p-own', 'owner', undefined, '2026-10-02T00:00:00.000Z'), plan('p-eva', 'mandate:eva@kanzlei.example', EVA, '2026-10-05T00:00:00.000Z'), plan('p-tie', 'mandate:eva@kanzlei.example', EVA, '2026-10-01T00:00:00.000Z')];
+        expect([await planAsks('p-own'), await planAsks('p-eva'), await planAsks('p-tie')]).toEqual(['arno@kanzlei.example', 'eva@kanzlei.example', 'eva@kanzlei.example']);
+        // Two people: the workflow's stamp counts them and names no one.
+        expect(await workflowAsks()).toEqual({ count: 2, name: null });
+        // Arno changes the workflow after Eva's plan: that plan asks Arno now, and one person is left.
+        authorship = { ...arnoWf, mandateEditor: 'mandate:arno@kanzlei.example', mandateEditorId: ARNO, mandateEditedAt: '2026-10-06 00:00:00' };
+        expect(await planAsks('p-eva')).toBe('arno@kanzlei.example');
+        expect(await workflowAsks()).toEqual({ count: 1, name: 'arno@kanzlei.example' });
+        // Arno's access ended: no plan of the workflow runs, so nobody is asked.
+        authorship = arnoWf;
+        live = (id) => id !== ARNO;
+        expect([await planAsks('p-own'), await planAsks('p-eva'), await workflowAsks()]).toEqual([null, null, null]);
+        // The owner took the workflow over: the owner's plan asks only the owner, Eva's still Eva.
+        authorship = { ...arnoWf, coveredCreatedBy: arnoWf.createdBy, coveredCreatedId: ARNO, coveredCreatedAt: arnoWf.createdAt };
+        expect([await planAsks('p-own'), await planAsks('p-eva')]).toEqual([null, 'eva@kanzlei.example']);
+        expect(await workflowAsks()).toEqual({ count: 1, name: 'eva@kanzlei.example' });
+        // A mark that names no grant runs nothing: no one is named.
+        live = () => true;
+        authorship = arnoWf;
+        plans = [plan('p-bare', 'mandate:eva@kanzlei.example', undefined, '2026-10-05T00:00:00.000Z')];
+        expect(await planAsks('p-bare')).toBeNull();
+        expect(await workflowAsks()).toEqual({ count: 1, name: 'arno@kanzlei.example' });
+        // A workflow that asks no one on a schedule: neither stamp says anything.
+        planned = { ...asking, steps: [{ id: 's1', task: 'ask', tools: ['ask_user'] }, { id: 's2', task: 'key', tools: ['ask_secret'] }] };
+        plans = [plan('p-eva', 'mandate:eva@kanzlei.example', EVA, '2026-10-05T00:00:00.000Z')];
+        expect([await planAsks('p-eva'), await workflowAsks()]).toEqual([null, null]);
+        planned = { ...asking, mode: 'autonomous', steps: [{ id: 's1', task: 'look', tools: ['memory_recall'] }] };
+        expect([await planAsks('p-eva'), await workflowAsks()]).toEqual([null, null]);
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e; ref['getTaskManager'] = saved.t;
+        mockGetPipeline.mockReset();
+      }
+    });
+
     it('confirming a workflow schedule never stamps the workflow, which every schedule naming it shares', async () => {
       mockConfirmTrigger.mockReturnValueOnce({ id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-sched', confirmed_at: '2026-10-08T00:00:00.000Z' });
       storeWf(); // an unstamped workflow

@@ -864,3 +864,46 @@ describe('the stamp says where the workflow may run, from the rule a schedule as
 		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
 	});
 });
+
+describe('the stamp says who else may answer its questions when it runs on a schedule', () => {
+	async function asksLine(asks: unknown): Promise<HTMLElement | null> {
+		const p = preview('d1');
+		if (asks !== undefined) p['asks'] = asks;
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		return q('stamp-asks');
+	}
+	const again = (): void => {
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+	};
+
+	it('one person: names them, set apart, and says the first answer steers the run', async () => {
+		const line = await asksLine({ count: 1, name: 'lena@kanzlei.example' });
+		expect(line?.textContent).toBe('Läuft er geplant, kann auch lena@kanzlei.example seine Fragen beantworten; wer zuerst antwortet, lenkt den Lauf.');
+		expect([...line!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual(['lena@kanzlei.example']);
+		again();
+		const { setLocale, getLocale } = await import('../i18n.svelte.js');
+		const was = getLocale();
+		setLocale('en');
+		try {
+			expect((await asksLine({ count: 1, name: 'lena@kanzlei.example' }))?.textContent).toBe('When it runs on a schedule, lena@kanzlei.example can answer its questions too; whoever answers first steers the run.');
+		} finally { setLocale(was); }
+	});
+
+	it('more people: counts them and names no one, pointing to each plan\'s confirmation', async () => {
+		const line = await asksLine({ count: 3, name: null });
+		expect(line?.textContent).toBe('Läuft er geplant, kann je nach Plan auch eine Person mit Zugang seine Fragen beantworten – bei diesem Workflow sind es 3\u00a0Personen. Wer zuerst antwortet, lenkt den Lauf. Wer es bei einem Plan ist, zeigt seine Bestätigung.');
+		expect(line!.querySelector('[data-foreign-value]')).toBeNull();
+	});
+
+	it('no one, an engine that sends no such field, or a value of another shape: no line, and the preview stands', async () => {
+		for (const asks of [undefined, null, { count: 0, name: null }, { count: 2, name: 'lena@kanzlei.example' }, { count: 1, name: null }, { count: 1.5, name: 'x' }, 'lena@kanzlei.example']) {
+			expect(await asksLine(asks)).toBeNull();
+			expect(q('stamp-step')).not.toBeNull();
+			expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
+			again();
+		}
+	});
+});
