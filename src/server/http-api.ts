@@ -15006,16 +15006,25 @@ export class LynoxHTTPApi {
       // The remembered texts both stores hold, read the same way on either path and masked as the
       // durable knowledge block is; read before the graph, so a graph read that fails does not
       // take them with it.
+      // Graph rows no block carries (subjects the graph block does not list; with the subject
+      // graph on, the older store's entities and relations) are counted, and any marks the
+      // block too: the export says "complete" only when nothing stored is left out.
       let memoryTexts: { block: Record<string, unknown>; mayBeIncomplete: boolean };
       try {
-        const { readMemoryTextsForExport } = await import('../core/graph-export.js');
+        const { graphHoldsRowsNotExported, readMemoryTextsForExport } = await import('../core/graph-export.js');
         const exportSecrets = engine.getSecretStore();
+        const agentMemoryFile = join(getLynoxDir(), 'agent-memory.db');
         const read = readMemoryTextsForExport({
-          agentMemoryFile: join(getLynoxDir(), 'agent-memory.db'),
+          agentMemoryFile,
           engineDb: engine.getEngineDb(),
           mask: (t: string) => maskSecretPatterns(exportSecrets ? exportSecrets.maskSecrets(t) : t),
         });
-        memoryTexts = { block: { 'agent-memory.db': read['agent-memory.db'], 'engine.db': read['engine.db'] }, mayBeIncomplete: read.mayBeIncomplete };
+        const notExported = graphHoldsRowsNotExported({
+          agentMemoryFile,
+          engineDb: engine.getEngineDb(),
+          subjectGraph: engine.getUserConfig().subject_graph_enabled === true,
+        });
+        memoryTexts = { block: { 'agent-memory.db': read['agent-memory.db'], 'engine.db': read['engine.db'] }, mayBeIncomplete: read.mayBeIncomplete || notExported };
       } catch {
         memoryTexts = { block: {}, mayBeIncomplete: true };
         process.stderr.write('⚠ /api/export: remembered texts could not be read — knowledge graph marked incomplete\n');

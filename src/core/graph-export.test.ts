@@ -8,7 +8,7 @@ import { AgentMemoryDb, AGENT_MEMORY_SCHEMA_VERSION } from './agent-memory-db.js
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
-import { MEMORY_TEXTS_RELATIONSHIPS_NOTE, MEMORY_TEXT_EXPORT_CAP, UNREADABLE_MEMORY_TEXT, readHeldGraph, readMemoryTextsForExport } from './graph-export.js';
+import { MEMORY_TEXTS_RELATIONSHIPS_NOTE, MEMORY_TEXT_EXPORT_CAP, UNREADABLE_MEMORY_TEXT, graphHoldsRowsNotExported, readHeldGraph, readMemoryTextsForExport } from './graph-export.js';
 import { EXPORT_RELATIONS_PER_ENTITY } from './knowledge-layer.js';
 
 /**
@@ -465,5 +465,109 @@ describe('readMemoryTextsForExport', () => {
       mayBeIncomplete: false,
     });
     expect(existsSync(file)).toBe(false);
+  });
+});
+
+describe('graphHoldsRowsNotExported', () => {
+  let dir: string;
+  let file: string;
+  let engineDb: EngineDb;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-not-exported-'));
+    file = join(dir, 'agent-memory.db');
+    engineDb = new EngineDb(join(dir, 'engine.db'), 'not-exported-test-key');
+  });
+
+  afterEach(() => {
+    engineDb.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const held = (subjectGraph: boolean, db: EngineDb | null = engineDb) => graphHoldsRowsNotExported({ agentMemoryFile: file, engineDb: db, subjectGraph });
+
+  it('finds nothing left out when every source is empty, on either setting', () => {
+    new AgentMemoryDb(file).close();
+    expect(held(true), 'subject graph on').toBe(false);
+    expect(held(false), 'subject graph off').toBe(false);
+  });
+
+  it('with the subject graph on, finds an agent-memory.db entity, which the block then does not read', () => {
+    const db = new AgentMemoryDb(file);
+    db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    db.close();
+    expect(held(true)).toBe(true);
+    expect(held(false), 'with it off the block reads agent-memory.db').toBe(false);
+  });
+
+  it('with the subject graph on, finds an agent-memory.db relation on its own', () => {
+    const db = new AgentMemoryDb(file);
+    seedGraph(db);
+    db.close();
+    const raw = new Database(file);
+    raw.exec('PRAGMA foreign_keys = OFF; DELETE FROM entities');
+    raw.close();
+    expect(held(true), 'a relation with no entity left').toBe(true);
+  });
+
+  it('with the subject graph on, finds an archived subject', () => {
+    const subjects = new SubjectStore(engineDb);
+    const bob = subjects.createSubject({ kind: 'person', name: 'Bob' });
+    expect(held(true), 'fixture: a listed subject is exported').toBe(false);
+    subjects.archiveSubject(bob);
+    expect(held(true)).toBe(true);
+  });
+
+  it('with the subject graph on, finds a subject of a kind the block maps to no entity', () => {
+    new SubjectStore(engineDb).createSubject({ kind: 'service', name: 'Hosting' });
+    expect(held(true), 'service').toBe(true);
+    engineDb.getDb().prepare("UPDATE subjects SET kind = 'other'").run();
+    expect(held(true), 'other').toBe(true);
+  });
+
+  it('with the subject graph off, finds any subject, since the block then reads agent-memory.db', () => {
+    new SubjectStore(engineDb).createSubject({ kind: 'person', name: 'Bob' });
+    expect(held(false)).toBe(true);
+  });
+
+  it('answers true when a count cannot be taken: no engine.db, a closed one, a missing table, a newer or broken file', () => {
+    expect(held(false, null), 'no engine.db').toBe(true);
+    const closed = new EngineDb(join(dir, 'closed.db'), 'not-exported-test-key');
+    closed.close();
+    expect(held(false, closed), 'closed engine.db').toBe(true);
+
+    const db = new AgentMemoryDb(file);
+    db.close();
+    const drop = new Database(file);
+    drop.exec('DROP TABLE relations');
+    drop.close();
+    expect(held(true), 'agent-memory.db without its relations table').toBe(true);
+
+    rmSync(file);
+    new AgentMemoryDb(file).close();
+    const stamp = new Database(file);
+    stamp.prepare('INSERT INTO schema_version (version) VALUES (?)').run(AGENT_MEMORY_SCHEMA_VERSION + 1);
+    stamp.close();
+    expect(held(true), 'a newer agent-memory.db').toBe(true);
+
+    rmSync(file);
+    writeFileSync(file, 'not a database');
+    expect(held(true), 'a file that is not a database').toBe(true);
+  });
+
+  it('counts the rows still in a -wal and changes neither file', () => {
+    const writer = new AgentMemoryDb(file);
+    writer.createEntity({ canonicalName: 'Eve', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    const image = join(dir, 'image.db');
+    copyFileSync(file, image);
+    copyFileSync(`${file}-wal`, `${image}-wal`);
+    writer.close();
+    expect(statSync(`${image}-wal`).size, 'fixture: the entity is in the -wal').toBeGreaterThan(0);
+    const before = fileState(image);
+
+    expect(graphHoldsRowsNotExported({ agentMemoryFile: image, engineDb, subjectGraph: true }), 'the row in the -wal is counted').toBe(true);
+    const after = fileState(image);
+    expect(after.main, 'main file unchanged: no checkpoint ran').toBe(before.main);
+    expect(after.wal, 'the -wal is unchanged').toBe(before.wal);
   });
 });

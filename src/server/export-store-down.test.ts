@@ -298,6 +298,20 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     expect(after.knowledge_graph_may_be_incomplete).toBe(false);
   }, 60_000);
 
+  it('marks the knowledge graph while engine.db holds a subject no block lists, on the layer path', async () => {
+    expect(h.engine().getKnowledgeLayer(), 'fixture: the knowledge graph opened').not.toBeNull();
+    const engineDb = h.engine().getEngineDb() as EngineDb;
+    const id = new SubjectStore(engineDb).createSubject({ kind: 'service', name: 'Hosting' });
+    try {
+      const held = await h.exportBody();
+      expect(held.knowledge_graph_may_be_incomplete, 'with the subject graph off, a stored subject is in no block').toBe(true);
+    } finally {
+      engineDb.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(id);
+    }
+    const after = await h.exportBody();
+    expect(after.knowledge_graph_may_be_incomplete, 'with it gone nothing is left out').toBe(false);
+  }, 60_000);
+
   it('lists a secret written to the vault after boot by name, not by value', async () => {
     const vault = h.engine().secretVault;
     expect(vault, 'fixture: the vault opened').not.toBeNull();
@@ -446,6 +460,17 @@ describe('export with the knowledge graph switched off after it held entities an
     expect(legacy?.mentions, 'and its mention of Alice').toHaveLength(1);
     expect(body.knowledge_graph_may_be_incomplete, 'read in full, the remembered text included').toBe(false);
   }, 60_000);
+
+  it('marks the held graph while engine.db holds a subject no block lists', async () => {
+    const engineDb = h.engine().getEngineDb() as EngineDb;
+    const id = new SubjectStore(engineDb).createSubject({ kind: 'person', name: 'Bob' });
+    try {
+      const body = await h.exportBody();
+      expect(body.knowledge_graph_may_be_incomplete, 'with the subject graph off, a stored subject is in no block').toBe(true);
+    } finally {
+      engineDb.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(id);
+    }
+  }, 60_000);
 });
 
 describe('export with the knowledge graph switched off and durable memory on (real engine)', () => {
@@ -464,7 +489,7 @@ describe('export with the knowledge graph switched off and durable memory on (re
 
     const body = await h.exportBody();
     expect(body.knowledge_graph).toMatchObject({ entities: [], relationships: [], enabled: false });
-    expect(body.knowledge_graph_may_be_incomplete, 'off, and the graph holds nothing: read in full').toBe(false);
+    expect(body.knowledge_graph_may_be_incomplete, 'the entry\'s subject ACME is stored, and with the subject graph off no block lists it').toBe(true);
     expect(body.durable_knowledge.enabled, 'durable memory on').toBe(true);
     expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['Quotes are valid for 30 days']);
     expect(body.durable_knowledge.may_be_incomplete, 'the graph being off does not mark durable knowledge').toBe(false);

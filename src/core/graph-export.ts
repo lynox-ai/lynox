@@ -296,3 +296,42 @@ export function readMemoryTextsForExport(opts: {
 
   return { 'agent-memory.db': legacyHalf, 'engine.db': engineHalf, mayBeIncomplete: incomplete };
 }
+
+/**
+ * Whether the stores hold graph rows that no block of the export carries, counted, never read:
+ *  - engine.db subjects the graph block does not list: with the subject graph on, archived ones
+ *    and those of a kind it maps to no entity; with it off, every subject, since the block is
+ *    then read from agent-memory.db;
+ *  - with the subject graph on, agent-memory.db entities and relations, since the block is then
+ *    read from engine.db.
+ * The export says "complete" only when nothing stored is left out, so any such row marks the
+ * graph block. A count that cannot be taken (no engine.db, a newer or unreadable
+ * agent-memory.db, a failed query) cannot show there are none, and answers `true` as well.
+ */
+export function graphHoldsRowsNotExported(opts: {
+  agentMemoryFile: string;
+  engineDb: EngineDb | null;
+  subjectGraph: boolean;
+}): boolean {
+  if (!opts.engineDb) return true;
+  try {
+    const subjects = new SubjectStore(opts.engineDb);
+    const all = subjects.count({ includeArchived: true });
+    const listed = opts.subjectGraph ? subjects.count({ kinds: ENTITY_MAPPABLE_SUBJECT_KINDS }) : 0;
+    if (all > listed) return true;
+  } catch {
+    return true;
+  }
+  if (!opts.subjectGraph || !existsSync(opts.agentMemoryFile)) return false;
+  let legacy: Database.Database | null = null;
+  try {
+    legacy = new Database(opts.agentMemoryFile, { readonly: true, fileMustExist: true });
+    if (agentMemoryVersionOn(legacy) > AGENT_MEMORY_SCHEMA_VERSION) return true;
+    const rows = legacy.prepare('SELECT (SELECT COUNT(*) FROM entities) + (SELECT COUNT(*) FROM relations) AS n').get() as { n: number };
+    return rows.n > 0;
+  } catch {
+    return true;
+  } finally {
+    try { legacy?.close(); } catch { /* ignore */ }
+  }
+}

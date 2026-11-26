@@ -92,7 +92,12 @@
   texts are stored. It turns `true` when one of these tables could not be read,
   a table returned more than 20,000 rows (the rest is left out), a text could not
   be decrypted, `engine.db` is not open, or `agent-memory.db` comes from a newer
-  build. Both files are only read, as for the entities and relations.
+  build. It also stays `true` while graph rows are stored that no block carries:
+  subjects the graph block does not list (archived ones and those of kind
+  `service` or `other` with the subject graph on, every subject with it off),
+  and with the subject graph on the entities and relations of `agent-memory.db`.
+  Those are counted, not read. Both files are only read, as for the entities and
+  relations.
 - When a database was set aside as corrupt (`<name>.corrupt-<ms>`: by the boot
   for `history.db` and `engine.db`, by a restore for those and `datastore.db`
   and `agent-memory.db`, and an `engine.db.migration-tmp.corrupt-<ms>` left by
