@@ -53,3 +53,30 @@ describe('the review card while a message waits for it', () => {
 		expect(root.querySelector('[data-testid="changeset-message-waiting"]')).toBeNull();
 	});
 });
+
+describe('the review card after a rollback stopped partway', () => {
+	it('says in the card, as a warning, which files are not restored yet, each name a unit of its own', async () => {
+		const root = await render({ rollbackStopped: ['preise-2027.csv', 'angebot.md'] });
+		const p = root.querySelector('[data-testid="changeset-rollback-stopped"]');
+		expect(t('changeset.rollback_aborted'), 'positive control: the key has a text').toContain('{files}');
+		const [before, after] = t('changeset.rollback_aborted').split('{files}');
+		expect(p?.textContent).toBe(`${before}preise-2027.csv, angebot.md${after}`);
+		expect(p?.className).toContain('text-warning');
+		expect([...(p?.querySelectorAll('span.inline-block') ?? [])].map((s) => s.textContent)).toEqual(['preise-2027.csv', 'angebot.md']);
+	});
+
+	it('names five files and counts the rest', async () => {
+		const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((n) => `${n}.md`);
+		const root = await render({ rollbackStopped: names });
+		const p = root.querySelector('[data-testid="changeset-rollback-stopped"]');
+		expect(p?.querySelectorAll('span.inline-block').length).toBe(5);
+		const { tf } = await import('../i18n.svelte.js');
+		expect(p?.textContent).toContain(tf('changeset.not_restored_more', { files: '', n: '2' }));
+	});
+
+	it('says nothing of the kind without a stopped rollback', async () => {
+		const root = await render({});
+		expect(root.textContent, 'positive control: the card is there').toContain('notes.md');
+		expect(root.querySelector('[data-testid="changeset-rollback-stopped"]')).toBeNull();
+	});
+});

@@ -617,6 +617,10 @@ function isInstanceSuppliedLlm(): boolean {
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 /** The run whose changes `pendingChangeset` shows; the review answer sends it back. */
 let pendingChangesetRunId: string | null = null;
+/** A rollback of the open review that stopped partway: the files it has not restored, for the
+ *  card to say so until the review is decided or a later answer succeeds. Tied to the review's
+ *  run, so a review of a later run never shows it. */
+let rollbackStopped = $state<{ runId: string | null; files: string[] } | null>(null);
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
 /** The open chat read data through a store connection (`contained` on the thread). */
@@ -3638,6 +3642,7 @@ async function loadChangeset(): Promise<boolean> {
 			pendingChangeset = data.files;
 			pendingChangesetRunId = data.runId ?? null;
 		}
+		if (rollbackStopped && (!data.hasChanges || rollbackStopped.runId !== (data.runId ?? null))) rollbackStopped = null;
 		return true;
 	} catch { return false; /* best-effort — don't block UX */ }
 	finally { changesetLoading = false; }
@@ -3689,6 +3694,7 @@ export async function submitChangesetReview(
 		pendingChangesetRunId = null;
 	}
 	if (status >= 200 && status < 300) {
+		if (!stale()) rollbackStopped = null;
 		// A rollback leaves a file as it is when it was replaced or linked since the review, or
 		// could not be written. Closing the review without a word would read as all restored.
 		const answer = await res.json().then(
@@ -3715,12 +3721,12 @@ export async function submitChangesetReview(
 	);
 	if (failed?.code === 'rollback_aborted') {
 		// The rollback stopped partway. The server keeps the review with what is left, and its
-		// backups: the card comes back with those files, so the person can try again or accept
-		// them, and the held messages keep waiting on it. What is left stays on screen until closed.
+		// backups: the card comes back with those files and says what is not restored yet, so the
+		// person can try again or accept them, and the held messages keep waiting on it.
 		const left = Array.isArray(failed.notRestored) ? failed.notRestored.filter((f): f is string => typeof f === 'string') : [];
-		// Nothing named: the throw came after the last file was back, and there is nothing to retry.
-		if (left.length > 0) addToast(tf('changeset.rollback_aborted', { files: namedFiles(left) }), 'error', null);
 		if (stale()) return;
+		// Nothing named: the throw came after the last file was back, and there is nothing to retry.
+		rollbackStopped = left.length > 0 ? { runId: typeof body['runId'] === 'string' ? body['runId'] : null, files: left } : null;
 		// Nothing left (the throw came after the last file was back): the review is over.
 		if (await fetchChangeset() && !stale() && pendingChangeset === null) drainQueueSoon(100);
 		return;
@@ -3969,6 +3975,11 @@ export function clearError() {
 	chatErrorDetail = null;
 	authError = false;
 }
+/** The files a stopped rollback of the open review has not restored yet, or null. */
+export function getRollbackStopped(): string[] | null {
+	return rollbackStopped?.files ?? null;
+}
+
 export function getPendingChangeset() {
 	return pendingChangeset;
 }
@@ -4160,6 +4171,7 @@ export function newChat() {
 	pendingSecretPrompt = null;
 	pendingMailConnect = null;
 	pendingChangeset = null;
+	rollbackStopped = null;
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;
@@ -4548,6 +4560,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	pendingSecretPrompt = null;
 	pendingMailConnect = null;
 	pendingChangeset = null;
+	rollbackStopped = null;
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;

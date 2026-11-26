@@ -114,6 +114,7 @@ export {
 	resumeThread,
 	submitChangesetReview,
 	getPendingChangeset,
+	getRollbackStopped,
 	getChangesetLoading,
 	getRetryStatus,
 	getIsOffline,
