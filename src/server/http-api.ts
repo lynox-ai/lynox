@@ -174,6 +174,7 @@ import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
 import { ArtifactFileRefusedError, ArtifactPlaceholderError } from '../core/artifact-store.js';
 import { findHiddenChar } from '../core/hidden-text.js';
+import { ToolSilenceClock } from '../core/tool-silence.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -2071,9 +2072,10 @@ export class LynoxHTTPApi {
   // run waits on its own question (that one waits for its answer, a stop, or its TTL).
   /** `parked` says whether the run waits on a question it asked itself. The thread's one open
    *  question can be a scheduled run's instead, asked beside a working chat run. `streamGone`
-   *  says whether the run's own stream has dropped. A slot without them is read as not parked,
-   *  with `streamAlive` as its stream. */
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; streamGone?: () => boolean }>();
+   *  says whether the run's own stream has dropped. `toolWorking` says whether one of its tool
+   *  calls is still within its own limit (`ToolSilenceClock`). A slot without them is read as
+   *  not parked and not working a tool, with `streamAlive` as its stream. */
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; streamGone?: () => boolean; toolWorking?: () => boolean }>();
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -5063,12 +5065,16 @@ export class LynoxHTTPApi {
       // from the client's perspective — every /run retry gets 409 until the 30-min
       // streamTimeout fires server-side. A run waiting on its OWN question is not taken over:
       // it is silent by design, its question waits for an answer (or a stop, or its TTL), and
-      // a new message gets the 409 the chat shows as blocked by that question.
+      // a new message gets the 409 the chat shows as blocked by that question. Nor is a run
+      // one of whose tools is still within its own limit: a shell command can work silently for
+      // up to fifteen minutes, and the run taken over in the middle of it was lost.
       const STALE_RUN_SILENCE_MS = 60_000;
       const existingSlot = this.runningSessions.get(sessionId);
       if (existingSlot && (!existingSlot.streamAlive || existingSlot.streamGone?.() === true)) {
         // A scheduled run's question in this thread is not the run's: it does not hold it back.
-        const stale = existingSlot.parked?.() !== true && Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
+        const stale = existingSlot.parked?.() !== true
+          && existingSlot.toolWorking?.() !== true
+          && Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
         if (stale) {
           // Taking over ends the run: only that run's principal (or the owner) may, even in the
           // mandate's own conversation (§3.13 E7).
@@ -5589,6 +5595,9 @@ export class LynoxHTTPApi {
       // and a reconnecting client can replay-then-tail (Tier 2).
       const runId = randomUUID();
       const runBuffer = this.engine?.getRunBufferManager()?.create(runId) ?? null;
+      // The run's open tool calls, each until its own limit: what keeps a tool that works
+      // silently from reading as a stuck run (the takeover above).
+      const toolClock = new ToolSilenceClock();
 
       // Wire streaming. Every rendered event is appended to the buffer (which
       // assigns a monotonic seq) and emitted with an `id:` line so a client can
@@ -5601,6 +5610,7 @@ export class LynoxHTTPApi {
       // used 20 lines below — would have dropped `fatal` from every error on the
       // wire without a single test or type failing.
       session.onStream = async (event: EmittedStreamEvent) => {
+        toolClock.note(event);
         const seq = runBuffer?.append(event);
         // Every engine event counts as activity, also once the stream is gone: a run that
         // keeps working headless is not stale. Only an engine silent for the stale window is.
@@ -5945,6 +5955,7 @@ export class LynoxHTTPApi {
       // far. Idempotent — with no live timer it is a no-op, so a defensive
       // double-pause can never double-subtract the budget.
       const pauseWallClock = (): void => {
+        toolClock.pause();
         if (streamTimeout === undefined) return;
         clearTimeout(streamTimeout);
         streamTimeout = undefined;
@@ -5955,6 +5966,7 @@ export class LynoxHTTPApi {
       // works on headless and keeps its ceiling. Skips once the wall-clock itself
       // has fired, and if a timer is somehow already live so it never stacks two.
       const resumeWallClock = (): void => {
+        toolClock.resume();
         // The answer is activity too: a run that waited long for it is not silent from here on,
         // and a new message must not take it over before its next engine event.
         const live = this.runningSessions.get(sessionId);
@@ -6021,7 +6033,7 @@ export class LynoxHTTPApi {
         const pending = promptStore?.getPending(sessionId);
         if (pending) promptStore?.expirePrompt(pending.id, reason);
       };
-      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt, streamGone: () => aborted });
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt, streamGone: () => aborted, toolWorking: () => toolClock.holds() });
       // A client that left while this request was still being set up (a file being read, a
       // takeover draining) closed the response before anyone listened: its close is past, so
       // the drop is taken now, once the slot it marks exists.

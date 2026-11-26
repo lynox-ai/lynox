@@ -4770,6 +4770,118 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    // A shell command can work silently for longer than the stale window; taken over in the
+    // middle of it, the run was lost.
+    it('does not take over a dropped run whose shell command is still within its own limit', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-working-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        await onStream({ type: 'tool_call', name: 'bash', input: { command: 'sleep 150', timeout_ms: 180_000 }, agent: 'main', toolUseId: 'tu-sleep' });
+        // The response that made the call ends before the call runs; that alone releases nothing.
+        await onStream({ type: 'turn_end', stop_reason: 'tool_use', usage: {}, agent: 'main' });
+        (slots.get('tool-working-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        const next = await jsonFetch('/api/sessions/tool-working-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+        // Its result arrives: the run is silent again past the window, and now it is taken over.
+        await onStream({ type: 'tool_result', name: 'bash', result: 'done', agent: 'main', toolUseId: 'tu-sleep' });
+        (slots.get('tool-working-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        mockSessionRun.mockResolvedValueOnce('second response');
+        const after = await jsonFetch('/api/sessions/tool-working-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+        });
+        expect(after.status).toBe(200);
+        await after.text();
+        expect(mockSessionAbort).toHaveBeenCalled();
+      });
+    });
+
+    it('takes over a dropped run whose tool hangs past its own limit', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-hung-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        const realNow = Date.now.bind(Date);
+        const opened = realNow();
+        await onStream({ type: 'tool_call', name: 'http_request', input: { url: 'https://example.com' }, agent: 'main', toolUseId: 'tu-hang' });
+        (slots.get('tool-hung-1') as { lastEventAt: number }).lastEventAt = opened - 61_000;
+        // The request's own limit is a minute: 30 seconds in, it still holds the run.
+        let ahead = 30_000;
+        const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ahead);
+        try {
+          const held = await jsonFetch('/api/sessions/tool-hung-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(held.status).toBe(409);
+          await held.text();
+          expect(mockSessionAbort).not.toHaveBeenCalled();
+          // 66 seconds in, it is past its limit and the margin.
+          ahead = 66_000;
+          mockSessionRun.mockResolvedValueOnce('second response');
+          const next = await jsonFetch('/api/sessions/tool-hung-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(next.status).toBe(200);
+          await next.text();
+          expect(mockSessionAbort).toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    // A run that waits on a person does not spend its tool's limit: the wait is added to it.
+    it('does not count a wait on a person against a tool\'s limit after the stream dropped', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-wait-1', 'own-then-work', async ({ prompts, slots, drop, questionId }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        const realNow = Date.now.bind(Date);
+        let ahead = 0;
+        const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ahead);
+        try {
+          await onStream({ type: 'tool_call', name: 'http_request', input: { url: 'https://example.com' }, agent: 'main', toolUseId: 'tu-wait' });
+          // The person answers 100 seconds later; the run works on.
+          ahead = 100_000;
+          expect(prompts.answerUser(questionId!, 'lynox', OWNER_PRINCIPAL)).toBe(true);
+          const slot = slots.get('tool-wait-1') as { parked: () => boolean; lastEventAt: number };
+          for (let i = 0; i < 1000 && slot.parked(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+          expect(slot.parked(), 'positive control: the run is no longer parked').toBe(false);
+          // 130 seconds in: past the request's own minute, but not past it plus the wait.
+          ahead = 130_000;
+          slot.lastEventAt = Date.now() - 61_000;
+          const held = await jsonFetch('/api/sessions/tool-wait-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(held.status).toBe(409);
+          await held.text();
+          expect(mockSessionAbort).not.toHaveBeenCalled();
+          // 170 seconds in, it is past both, and the run is taken over.
+          ahead = 170_000;
+          slot.lastEventAt = Date.now() - 61_000;
+          mockSessionRun.mockResolvedValueOnce('second response');
+          const next = await jsonFetch('/api/sessions/tool-wait-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(next.status).toBe(200);
+          await next.text();
+          expect(mockSessionAbort).toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
     it('takes over a dropped run whose engine has been silent past the stale window', async () => {
       repayRateWindow();
       await withDroppableRun('stale-silent-1', 'none', async ({ slots, drop }) => {
