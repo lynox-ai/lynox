@@ -2703,8 +2703,8 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     });
   });
 
-  // The chat's stop reaches the run as its `stopSignal`, so a stop that lands between steps, or
-  // under `on_failure: continue`, starts no further step (`stoppedByOwner` reads only this). The
+  // The chat's stop reaches the run as its `endSignal`, so a stop that lands between steps, or
+  // under `on_failure: continue`, starts no further step (`endedWithCaller` reads it). The
   // scope above ends the step agents already running; it cannot hold back the next one.
   describe('the calling chat\'s stop reaches the run', () => {
     function agentWithStop(): { agent: IAgent; signal: AbortSignal } {

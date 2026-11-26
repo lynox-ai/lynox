@@ -379,6 +379,11 @@ export interface RunUsageSummary {
   durationMs?: number;
 }
 
+/** How long a plugin's tool gate may take before the call is refused. The gate sits in front of
+ *  every tool, also the ones without the per-tool time limit (`ask_user`, `run_workflow`, …), so
+ *  without its own bound a gate that never answers would hold the call, and a stopped run, open. */
+export const PLUGIN_GATE_TIMEOUT_MS = 30_000;
+
 /**
  * Wrap each tool's handler with the plugin tool-gate, preserving the REST of the
  * ToolEntry via a spread. Spreading `...entry` — not cherry-picking a field subset —
@@ -388,11 +393,6 @@ export interface RunUsageSummary {
  * it also dropped `detailedGuidance`, so #1006's on-use guidance never fired on a
  * plugin-enabled instance. The spread keeps those, and any field added to ToolEntry later.
  */
-/** How long a plugin's tool gate may take before the call is refused. The gate sits in front of
- *  every tool, also the ones without the per-tool time limit (`ask_user`, `run_workflow`, …), so
- *  without its own bound a gate that never answers would hold the call, and a stopped run, open. */
-export const PLUGIN_GATE_TIMEOUT_MS = 30_000;
-
 export function applyPluginToolGate(entries: ToolEntry[], pluginManager: PluginManager): ToolEntry[] {
   return entries.map(entry => wrapHandler(entry, async (input, _agent, run): Promise<string> => {
     // The gate is plugin code and gets no signal, so the wait on it hears the run's stop here
