@@ -144,9 +144,14 @@ describe('export with the stores down at boot (real engine)', () => {
   it('reads the knowledge graph without its layer when the layer is missing, and marks it while engine.db is down', async () => {
     expect(h.engine().getUserConfig().knowledge_graph_enabled, 'fixture: not switched off').not.toBe(false);
     expect(h.engine().getKnowledgeLayer(), 'fixture: no layer without the history database').toBeNull();
+    // What the graph held before this boot; no layer holds the file now.
+    const db = new AgentMemoryDb(join(h.dir(), 'agent-memory.db'));
+    db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    db.close();
 
     const body = await h.exportBody();
-    expect(body.knowledge_graph).toMatchObject({ entities: [], relationships: [], enabled: true });
+    const graph = body.knowledge_graph as unknown as { entities: Array<{ canonicalName: string }>; enabled: boolean };
+    expect(graph.entities.map(e => e.canonicalName), 'read from its store without the layer').toEqual(['Alice']);
     expect(body.knowledge_graph_may_be_incomplete, 'engine.db did not open: the texts it may hold cannot be counted').toBe(true);
     expect(body.knowledge_graph.enabled, 'not switched off').toBe(true);
   }, 60_000);

@@ -95,7 +95,8 @@ const NO_STATS: KnowledgeGraphStats = { memoryCount: 0, entityCount: 0, relation
  * Do not "clean them up" and do not open with `immutable=1`, which ignores the `-wal`.
  *
  * A file stamped with an older schema (the graph was off while an update ran, so nothing migrated
- * it) is read and marked; a newer one, or any failure, gives an empty block, marked.
+ * it) is read and marked. One stamped with a newer schema is not guessed at: its half is left
+ * unread and the block marked. Any other failure gives an empty block, marked.
  */
 export async function readHeldGraph(opts: {
   agentMemoryFile: string;
@@ -109,15 +110,25 @@ export async function readHeldGraph(opts: {
     if (existsSync(opts.agentMemoryFile)) {
       legacy = new Database(opts.agentMemoryFile, { readonly: true, fileMustExist: true });
       const version = agentMemoryVersionOn(legacy);
-      if (version > AGENT_MEMORY_SCHEMA_VERSION) return empty;
-      if (version < AGENT_MEMORY_SCHEMA_VERSION) incomplete = true;
+      if (version > AGENT_MEMORY_SCHEMA_VERSION) {
+        legacy.close();
+        legacy = null;
+        incomplete = true;
+      } else if (version < AGENT_MEMORY_SCHEMA_VERSION) {
+        incomplete = true;
+      }
     }
     const db = legacy;
-    // Remembered texts are held but not in this block (as on the layer's path): a missing
-    // engine.db cannot show there are none.
-    const textsHeld = opts.engineDb === null
-      || countEngineMemoryRows(opts.engineDb) > 0
-      || (db !== null && memoryTextRowsOn(db) > 0);
+    // Remembered texts are held but not in this block (as on the layer's path). A missing
+    // engine.db, or a count that fails, cannot show there are none; neither empties the block.
+    let textsHeld = true;
+    try {
+      textsHeld = opts.engineDb === null
+        || countEngineMemoryRows(opts.engineDb) > 0
+        || (db !== null && memoryTextRowsOn(db) > 0);
+    } catch {
+      process.stderr.write('⚠ /api/export: remembered texts could not be counted — knowledge graph marked incomplete\n');
+    }
     const memoryCount = db ? activeMemoryCountOn(db) : 0;
 
     let source: GraphExportSource;
@@ -137,8 +148,8 @@ export async function readHeldGraph(opts: {
         communityCount: 0,
       };
     } else {
-      // The subject graph is on but engine.db is not open: what only engine.db holds is not read.
-      if (opts.subjectGraph) incomplete = true;
+      // With the subject graph on and engine.db not open, what only engine.db holds is not read;
+      // the block is marked by `textsHeld`, which a missing engine.db always sets.
       if (db) {
         source = {
           listEntities: (o) => listEntitiesOn(db, o).map(toEntityRecord),

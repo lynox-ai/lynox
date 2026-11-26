@@ -70,10 +70,10 @@
   switching it off deletes nothing: the block carries those entities and
   relations with `enabled: false` (or `true`). `agent-memory.db` is opened
   read-only for that: no migration and no checkpoint, so the file and its
-  `-wal` stay as they are; SQLite may create the `-shm` beside them. A file
-  from a newer build, or one that cannot be read, gives an empty block with
-  the flag `true`; one stamped with an older schema is read, and the flag is
-  `true`. `secrets` now also lists names
+  `-wal` stay as they are; SQLite may create the `-shm`, and an empty `-wal`
+  where none was, beside them. A file from a newer build is left unread, and
+  one that cannot be read gives an empty block, both with the flag `true`; one
+  stamped with an older schema is read, and the flag is `true`. `secrets` now also lists names
   written to the vault after boot (mail and OAuth credentials, for example).
   `secrets_may_be_incomplete` is `true` when the secret store or its vault did
   not open. `secrets_note` says that only secret names are exported, never

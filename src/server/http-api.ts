@@ -14983,11 +14983,11 @@ export class LynoxHTTPApi {
       // the setting, as on the durable knowledge block: whether the graph is switched on in the
       // config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
-      const { EXPORT_RELATIONSHIPS_NOTE, collectGraphForExport, readHeldGraph } = await import('../core/graph-export.js');
       const kg = engine.getKnowledgeLayer();
       if (kg) {
         const fallbacksBefore = kg.readFallbackCount;
         try {
+          const { EXPORT_RELATIONSHIPS_NOTE, collectGraphForExport } = await import('../core/graph-export.js');
           const { entities, relationships, truncated, relationCapHit } = await collectGraphForExport(kg);
           const stats = await kg.stats();
           exportData['knowledge_graph'] = {
@@ -15025,19 +15025,27 @@ export class LynoxHTTPApi {
         // database or the embedding model failed at boot). Switching it off deletes nothing, and
         // the export is the answer to an access request, so what the graph still holds is read
         // here from its stores, the way the layer reads them, without opening a layer.
-        const held = await readHeldGraph({
-          agentMemoryFile: join(getLynoxDir(), 'agent-memory.db'),
-          engineDb: engine.getEngineDb(),
-          subjectGraph: engine.getUserConfig().subject_graph_enabled === true,
-        });
-        exportData['knowledge_graph'] = {
-          entities: held.entities,
-          relationships: held.relationships,
-          relationships_note: EXPORT_RELATIONSHIPS_NOTE,
-          stats: held.stats,
-          enabled: graphEnabled,
-        };
-        exportData['knowledge_graph_may_be_incomplete'] = held.mayBeIncomplete;
+        if (graphEnabled) process.stderr.write('⚠ /api/export: knowledge graph layer unavailable — read from its stores\n');
+        try {
+          const { EXPORT_RELATIONSHIPS_NOTE, readHeldGraph } = await import('../core/graph-export.js');
+          const held = await readHeldGraph({
+            agentMemoryFile: join(getLynoxDir(), 'agent-memory.db'),
+            engineDb: engine.getEngineDb(),
+            subjectGraph: engine.getUserConfig().subject_graph_enabled === true,
+          });
+          exportData['knowledge_graph'] = {
+            entities: held.entities,
+            relationships: held.relationships,
+            relationships_note: EXPORT_RELATIONSHIPS_NOTE,
+            stats: held.stats,
+            enabled: graphEnabled,
+          };
+          exportData['knowledge_graph_may_be_incomplete'] = held.mayBeIncomplete;
+        } catch {
+          exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
+          exportData['knowledge_graph_may_be_incomplete'] = true;
+          process.stderr.write('⚠ /api/export: held knowledge graph read failed — exported empty and marked incomplete\n');
+        }
       }
 
       // Durable knowledge store (entries + the always-loaded memory blocks).

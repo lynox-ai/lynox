@@ -9,6 +9,7 @@ import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import { readHeldGraph } from './graph-export.js';
+import { EXPORT_RELATIONS_PER_ENTITY } from './knowledge-layer.js';
 
 /**
  * The knowledge graph's held data, read for the export while no layer is open. Real files: the
@@ -185,6 +186,32 @@ describe('readHeldGraph', () => {
     expect(held.mayBeIncomplete).toBe(true);
   });
 
+  it('keeps what it read when a text count fails, and marks the block', async () => {
+    const db = new AgentMemoryDb(file);
+    seedGraph(db);
+    db.close();
+    const closed = new EngineDb(join(dir, 'closed.db'));
+    closed.close();
+
+    const held = await readHeldGraph({ agentMemoryFile: file, engineDb: closed, subjectGraph: false });
+    expect(held.entities, 'the graph is still read').toHaveLength(2);
+    expect(held.mayBeIncomplete, 'a count that fails cannot show there are none').toBe(true);
+  });
+
+  it('marks the block when an entity reaches the per-entity relation limit', async () => {
+    const db = new AgentMemoryDb(file);
+    const hub = db.createEntity({ canonicalName: 'Hub', entityType: 'organization', scopeType: 'global', scopeId: 'global' });
+    for (let i = 0; i < EXPORT_RELATIONS_PER_ENTITY; i++) {
+      const spoke = db.createEntity({ canonicalName: `Spoke ${String(i)}`, entityType: 'person', scopeType: 'global', scopeId: 'global' });
+      db.createRelation(spoke, hub, 'works_at', '', `m-${String(i)}`);
+    }
+    db.close();
+
+    const held = await readHeldGraph({ agentMemoryFile: file, engineDb, subjectGraph: false });
+    expect(held.relationships).toHaveLength(EXPORT_RELATIONS_PER_ENTITY);
+    expect(held.mayBeIncomplete, 'the hub may hold more relations than were read').toBe(true);
+  });
+
   it('reads the subject graph from engine.db when it is on, not the legacy file, as the layer does', async () => {
     const db = new AgentMemoryDb(file);
     seedGraph(db);
@@ -199,6 +226,31 @@ describe('readHeldGraph', () => {
     expect(held.relationships.map(r => r.description)).toEqual(['Bob works at Globex']);
     expect(held.stats.entityCount).toBe(2);
     expect(held.mayBeIncomplete).toBe(false);
+  });
+
+  it('takes the memory count from agent-memory.db with the subject graph on, as the layer does', async () => {
+    const db = new AgentMemoryDb(file);
+    db.setEmbeddingDimensions(3);
+    db.createMemory({ text: 'Bob prefers mornings', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
+    db.close();
+    const held = await readHeldGraph({ agentMemoryFile: file, engineDb, subjectGraph: true });
+    expect(held.stats.memoryCount).toBe(1);
+    expect(held.mayBeIncomplete, 'the text itself is not in the block').toBe(true);
+  });
+
+  it('still reads the subject graph when agent-memory.db is stamped with a newer schema', async () => {
+    const db = new AgentMemoryDb(file);
+    seedGraph(db);
+    db.close();
+    const stamp = new Database(file);
+    stamp.prepare('INSERT INTO schema_version (version) VALUES (?)').run(AGENT_MEMORY_SCHEMA_VERSION + 1);
+    stamp.close();
+    const subjects = new SubjectStore(engineDb);
+    subjects.createSubject({ kind: 'person', name: 'Bob' });
+
+    const held = await readHeldGraph({ agentMemoryFile: file, engineDb, subjectGraph: true });
+    expect(held.entities.map(e => e.canonicalName)).toEqual(['Bob']);
+    expect(held.mayBeIncomplete, 'the newer file was left unread').toBe(true);
   });
 
   it('marks the block when the subject graph is on and engine.db is not open', async () => {
