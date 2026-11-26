@@ -341,6 +341,8 @@ export interface TriggerRecord {
   last_run_at?: string | undefined;
   last_run_result?: string | undefined;
   last_run_status?: string | undefined;
+  /** Why the last run failed, as a stored cause (`RunCause` JSON); read only through `storedRunCause`. */
+  last_run_cause?: string | undefined;
   /** When a parked trigger stops waiting (ISO-8601). Set only while `status` is
    *  `waiting`; undefined otherwise. Written by the park, read by the expiry
    *  sweep — see {@link TriggerStatus}. */

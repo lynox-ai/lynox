@@ -41,7 +41,7 @@ describe('host-disclosure (model-presets P1b)', () => {
   it('R2 gate: the Fireworks posture IS asserted now that its DPA is pinned', () => {
     expect(FIREWORKS_CONTRACT_CONFIRMED).toBe(true);
     expect(HOST_DISCLOSURES['api.fireworks.ai']!.postureConfirmed).toBe(true);
-    // The screen must agree with SUBPROCESSORS.md and the website DPA page, which
+    // The screen must agree with the website's sub-processor list and DPA page, which
     // assert contractual zero-retention (§4.5) and SOC 2. It said the OPPOSITE for
     // as long as the flag was off, on the very screen where the preset is chosen.
     expect(displayPosture('api.fireworks.ai')).toBe('US · zero-retention · SOC2');
