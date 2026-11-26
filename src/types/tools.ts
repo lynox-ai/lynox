@@ -235,9 +235,10 @@ export interface ToolEntry<TInput = unknown> {
    * the exception's message, and nothing runs. It reads the input as the model wrote it, before
    * `secret:` references are resolved: where the handler would see another value, it returns
    * `null`. The text is the tool's own wording, written by its code, never a value of the input
-   * taken as a whole.
+   * taken as a whole. `run` is the calling run's autonomy, for a refusal that depends on whether
+   * anybody watches it.
    */
-  refusesUnasked?: ((input: TInput, ctx: HostPolicyContext) => string | null) | undefined;
+  refusesUnasked?: ((input: TInput, ctx: HostPolicyContext, run: { readonly autonomy: AutonomyLevel | undefined }) => string | null) | undefined;
   /**
    * The address a call SAVES for later credentialed sends, exactly as the input names it: the
    * token endpoint a profile the call saves will post a client ID and client secret to (`api_setup`

@@ -5639,7 +5639,7 @@ export class Agent implements IAgent {
     if (tool.refusesUnasked !== undefined) {
       let unasked: string | null;
       try {
-        unasked = tool.refusesUnasked(tc.input, this.toolContext);
+        unasked = tool.refusesUnasked(tc.input, this.toolContext, { autonomy: this.autonomy });
       } catch {
         unasked = REFUSES_UNASKED_UNREADABLE;
       }

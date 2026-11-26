@@ -111,10 +111,11 @@ type Ask = (q: string | PromptText) => Promise<string>;
 /** Answers the acceptance of a host yes, and the question where a vault secret may go no. */
 const allowHostsDenySecrets: Ask = async (q) => (/to be sent there/.test(flattenPrompt(q)) ? 'deny' : 'allow');
 
-function agentOf(store: ApiStore, opts: { promptUser?: Ask; principal?: unknown; releases?: SecretReleases | null; ends?: unknown; autonomy?: string } = {}): never {
+function agentOf(store: ApiStore, opts: { promptUser?: Ask; principal?: unknown; releases?: SecretReleases | null; ends?: unknown; autonomy?: string; dialogLanguage?: 'de' | 'en' } = {}): never {
   return {
     principal: opts.principal ?? { kind: 'owner' },
     ...(opts.autonomy ? { autonomy: opts.autonomy } : {}),
+    ...(opts.dialogLanguage ? { dialogLanguage: opts.dialogLanguage } : {}),
     sessionCounters: { httpRequests: 0 },
     ...(opts.promptUser ? { promptUser: opts.promptUser } : {}),
     secretStore: {
@@ -683,5 +684,108 @@ describe('W-901D-switch: a profile switched from oauth2 by a save signs in with 
     expect(carried(minted)).toBe(false);
     // The whole sentence: the model is told to ask for a secret it no longer has, never to make one up.
     expect(out).toContain('but that vault name holds an OAuth access token of profile "owner", and its OAuth settings name no client secret. A token goes only where the client secret it was minted with may go, so with none named it goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, name the client secret again (auth.oauth.client_secret_key) with api_setup action="update"; if the client secret is no longer stored, ask the user to provide it, then get a new token with action="fetch_token" or by connecting again. If no user is in this conversation, stop here; the owner fixes this in a chat.');
+  });
+});
+
+describe('W-Recreate: a profile deleted and saved again under the same id is asked about its whole grant', () => {
+  // The record of where a vault secret may go outlives the profile, and it binds destinations, not
+  // grants. A new profile on those secrets has nothing stored to be compared with and no binding to
+  // ask about, so the save question lists everything it may do.
+  const svc = (scope: string): ApiProfile => ({
+    id: 'svc', name: 'Service', base_url: 'https://api.openai.com/v1', description: 'd', ...extra,
+    auth: { type: 'oauth2', vault_keys: ['OWN_CID', 'OWN_CSECRET'], oauth: { token_url: 'https://api.openai.com/oauth/token', grant_type: 'client_credentials', client_id_key: 'OWN_CID', client_secret_key: 'OWN_CSECRET', scope } },
+  } as ApiProfile);
+  const del = async (store: ApiStore, opts: Parameters<typeof agentOf>[1] = { promptUser: async () => 'allow' }): Promise<string> =>
+    String(await apiSetupTool.handler({ action: 'delete', id: 'svc' } as never, agentOf(store, opts)));
+  const create = async (store: ApiStore, p: ApiProfile, opts: Parameters<typeof agentOf>[1]): Promise<string> =>
+    String(await apiSetupTool.handler({ action: 'create', profile: structuredClone(p) } as never, agentOf(store, opts)));
+
+  it('the question lists everything the new profile may do, addresses and secrets first, and a no stores nothing', async () => {
+    expect(isVettedEgressHost('https://api.openai.com/v1')).toBe(true);
+    const store = boot(svc('read'));
+    expect(await del(store)).not.toMatch(/^(Error|Blocked)/);
+    expect(store.storedProfile('svc')).toBeUndefined();
+    const asked: string[] = [];
+    const out = await create(store, svc('read admin'), { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'deny'; } });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain([
+      'This connection is new, but its secrets may already be sent to these addresses. That is why everything it may do with them is listed:',
+      '- address (base_url): https://api.openai.com/v1',
+      '- token address (token_url): https://api.openai.com/oauth/token',
+      '- how the secret is attached (auth.type): oauth2',
+      '- secret read (1st): OWN_CID',
+      '- secret read (2nd): OWN_CSECRET',
+      '- secret read for the OAuth client id (oauth.client_id_key): OWN_CID',
+      '- secret read for the OAuth client secret (oauth.client_secret_key): OWN_CSECRET',
+      '- grant type: client_credentials',
+      '- scopes: read admin',
+    ].join('\n'));
+    expect(asked[0]).not.toContain('This save changes:');
+    expect(out).toMatch(/^Blocked: .*declined/);
+    expect(store.storedProfile('svc')).toBeUndefined();
+  });
+
+  it('a yes stores the new profile with its grant', async () => {
+    const store = boot(svc('read'));
+    await del(store);
+    const out = await create(store, svc('read admin'), { promptUser: async () => 'allow' });
+    expect(out).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect(store.storedProfile('svc')?.auth?.oauth?.scope).toBe('read admin');
+  });
+
+  it('a German session reads the sentence before the list in German', async () => {
+    const store = boot(svc('read'));
+    await del(store);
+    const asked: string[] = [];
+    await create(store, svc('read admin'), { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'deny'; }, dialogLanguage: 'de' });
+    expect(asked[0]).toContain('Die Verbindung ist neu, aber ihre Secrets dürfen schon an diese Adressen gehen. Darum steht hier alles, was sie damit tun darf:\n- Adresse (base_url): https://api.openai.com/v1');
+    expect(asked[0]).toContain('- Scopes: read admin');
+  });
+
+  it('an autonomous run that could still prompt refuses the create without asking, names what it would be allowed, and stores nothing', async () => {
+    const store = boot(svc('read'));
+    await del(store);
+    const asked: string[] = [];
+    const out = await create(store, svc('read admin'), { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'allow'; }, autonomy: 'autonomous' });
+    expect(asked).toEqual([]);
+    expect(out).toMatch(/^Blocked: connection "svc" not saved\. It is new, but its secrets may already be sent to its addresses, so saving it needs the user's acceptance/);
+    expect(out).toContain('\n\nIt would be allowed:\n- address (base_url): https://api.openai.com/v1\n');
+    expect(out).toContain('\n- scopes: read admin');
+    expect(store.storedProfile('svc')).toBeUndefined();
+  });
+
+  it('control: a new profile on a secret bound to nothing is asked only where the secret may go, without the list', async () => {
+    const store = boot();
+    const asked: string[] = [];
+    await create(store, bearerOn('fresh', 'api.openai.com', 'REPORT_KEY', extra), { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'deny'; } });
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.some((q) => q.includes('This connection is new'))).toBe(false);
+  });
+
+  it('control: an update of a stored profile is still compared with what is stored', async () => {
+    const store = boot(svc('read'));
+    const asked: string[] = [];
+    await apiSetupTool.handler({ action: 'update', profile: svc('read admin') } as never, agentOf(store, { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'deny'; } }));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('This save changes:\n- scopes added: admin');
+    expect(asked[0]).not.toContain('This connection is new');
+  });
+
+  it('an autonomous run that could still prompt does not delete a profile, and asks nothing', async () => {
+    const store = boot(svc('read'));
+    const asked: string[] = [];
+    const out = await del(store, { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'allow'; }, autonomy: 'autonomous' });
+    expect(out).toBe('Blocked: connection "svc" not deleted. Deleting a connection needs the user\'s acceptance, and a scheduled or background run cannot ask them. Nothing was deleted. Tell the user in one sentence that the connection was not deleted because this needs their acceptance, and that they can delete it by asking lynox for it in a chat. Do not try to delete it in another way.');
+    expect(asked).toEqual([]);
+    expect(store.storedProfile('svc')?.auth?.oauth?.scope).toBe('read');
+  });
+
+  it('the check before any question refuses an autonomous delete with the same text, and nothing else', () => {
+    const ctx = { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false };
+    const refuses = apiSetupTool.refusesUnasked!;
+    expect(refuses({ action: 'delete', id: 'svc' } as never, ctx, { autonomy: 'autonomous' })).toMatch(/^Blocked: connection "svc" not deleted\. /);
+    expect(refuses({ action: 'delete', id: 'svc' } as never, ctx, { autonomy: 'supervised' })).toBeNull();
+    expect(refuses({ action: 'delete', id: 'svc' } as never, ctx, { autonomy: undefined })).toBeNull();
+    expect(refuses({ action: 'create', profile: svc('read') } as never, ctx, { autonomy: 'autonomous' })).toBeNull();
   });
 });

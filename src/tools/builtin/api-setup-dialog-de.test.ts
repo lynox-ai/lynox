@@ -260,6 +260,11 @@ describe('the language comes from the session', () => {
     expect(src.match(/securityChanges\(/g)?.length).toBe(3);
     expect(src).toContain("securityChanges(prior, profile, agent.dialogLanguage ?? 'en')");
     expect(src).toContain("securityChanges(prior, profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`)");
-    expect(src).toContain("API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].save(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), profile.name, changes.map((c) => c.text), disclosureIn(agent.dialogLanguage ?? 'en'))");
+    expect(src).toContain("API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].save(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), profile.name, changes.map((c) => c.text), disclosureIn(agent.dialogLanguage ?? 'en'), listsAll)");
+    // The list of a new profile on secrets already bound: the session's language for the person,
+    // English in the refusal the model reads.
+    expect(src.match(/grantListed\(/g)?.length).toBe(3);
+    expect(src).toContain("grantListed(profile, agent.dialogLanguage ?? 'en')");
+    expect(src).toContain("grantListed(profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`)");
   });
 });
