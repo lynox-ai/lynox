@@ -31,7 +31,8 @@ interface Candidate {
   apiBaseURL?: string;
   keyName: 'anthropic' | 'mistral' | 'fireworks';
   expect: 'inline' | 'escalate';
-  /** The Anthropic stage this model holds today or is a candidate for; drives the cost comparison. */
+  /** The Anthropic stage this model holds today or is a candidate for. The cost comparison reads
+   *  `MODEL_MAP` and `STAGE_SUCCESSOR`; the suite holds both of each stage in this list, tagged. */
   stage?: ModelTier;
 }
 
@@ -113,6 +114,28 @@ export function turnCostUSD(modelId: string, usage: TurnUsage): { usd: number; p
   const long = ownEntry(LONG_PROMPT_PRICING, modelId);
   const usd = long !== undefined && prompt > long.overTokens ? base * long.factor : base;
   return { usd, priced: hasKnownPricing(modelId) };
+}
+
+/** Prompt length above which a provider may bill a long-context card the registry does not carry. */
+export const LONG_CONTEXT_WARN_TOKENS = 200_000;
+
+export interface PricedRun { how: string; usd: number; priced: boolean; hasUsage: boolean; promptTokens: number }
+
+/**
+ * The mean cost per turn of one candidate's runs. Only runs that answered AND reported usage
+ * count: an errored run has no reply, and a reply without usage would enter as $0 and pull
+ * the mean down. `priced` is false when any run fell back to the conservative rate;
+ * `longContext` when a prompt was long enough that a long-context card may apply.
+ */
+export function meanTurnCost(runs: readonly PricedRun[]): { mean: number; counted: number; priced: boolean; longContext: boolean } | undefined {
+  const counted = runs.filter(r => r.how !== 'ERROR' && r.hasUsage);
+  if (counted.length === 0) return undefined;
+  return {
+    mean: counted.reduce((sum, r) => sum + r.usd, 0) / counted.length,
+    counted: counted.length,
+    priced: runs.every(r => r.priced),
+    longContext: counted.some(r => r.promptTokens > LONG_CONTEXT_WARN_TOKENS),
+  };
 }
 
 /**
@@ -217,7 +240,7 @@ async function judgeSpokenEscalation(text: string, judgeKey: string): Promise<bo
   return out.includes('ESCALATE');
 }
 
-async function replayOne(c: Candidate, body: RawBody, key: string, judgeKey: string): Promise<{ how: string; tools: string[]; ms: number; text: string; inTok: number; outTok: number; usd: number; priced: boolean; error?: string }> {
+async function replayOne(c: Candidate, body: RawBody, key: string, judgeKey: string): Promise<{ how: string; tools: string[]; ms: number; text: string; inTok: number; outTok: number; usd: number; priced: boolean; hasUsage: boolean; promptTokens: number; error?: string }> {
   const started = Date.now();
   try {
     const client = createLLMClient({
@@ -253,9 +276,10 @@ async function replayOne(c: Candidate, body: RawBody, key: string, judgeKey: str
     else if (await judgeSpokenEscalation(text, judgeKey)) how = 'judge:offer';
     else if (spawn.delegated) how = 'spawn_agent{not-deep}';
     else how = 'inline';
-    return { how, tools: spawn.tools, ms: Date.now() - started, text, inTok: usage.input_tokens, outTok: usage.output_tokens, usd: cost.usd, priced: cost.priced };
+    const promptTokens = usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+    return { how, tools: spawn.tools, ms: Date.now() - started, text, inTok: usage.input_tokens, outTok: usage.output_tokens, usd: cost.usd, priced: cost.priced, hasUsage: u !== undefined, promptTokens };
   } catch (err) {
-    return { how: 'ERROR', tools: [], ms: Date.now() - started, text: '', inTok: 0, outTok: 0, usd: 0, priced: hasKnownPricing(c.modelId), error: err instanceof Error ? err.message : String(err) };
+    return { how: 'ERROR', tools: [], ms: Date.now() - started, text: '', inTok: 0, outTok: 0, usd: 0, priced: hasKnownPricing(c.modelId), hasUsage: false, promptTokens: 0, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -319,12 +343,12 @@ async function main(): Promise<void> {
     console.log(`      ↳ tools: ${toolsSeen.length ? JSON.stringify(toolsSeen.join(', ')) : '(none)'}  ·  tok in per run: ${perRunIn}  ·  avg out: ${avgOut}`);
     // Cost per turn, per run like the tokens: a cached repeat is cheaper than the cold call.
     // Errored runs are left out of the mean; their spend, if any, is not in the reply.
-    const validRuns = results.filter(r => r.how !== 'ERROR');
-    const priced = results.every(r => r.priced);
-    if (validRuns.length > 0) {
-      const mean = validRuns.reduce((s, r) => s + r.usd, 0) / validRuns.length;
-      if (priced) meanUsd.set(c.modelId, mean);
-      console.log(`      ↳ usd per turn: ${validRuns.map(r => r.usd.toFixed(5)).join('/')}  ·  mean ${mean.toFixed(5)}${priced ? '' : '  ⚠ no registered price, fallback rate — not a cost'}`);
+    const cost = meanTurnCost(results);
+    if (cost) {
+      if (cost.priced) meanUsd.set(c.modelId, cost.mean);
+      console.log(`      ↳ usd per turn: ${results.filter(r => r.how !== 'ERROR' && r.hasUsage).map(r => r.usd.toFixed(5)).join('/')}  ·  mean ${cost.mean.toFixed(5)} over ${String(cost.counted)}`
+        + `${cost.priced ? '' : '  ⚠ no registered price, fallback rate — not a cost'}`
+        + `${cost.longContext ? `  ⚠ prompt over ${String(LONG_CONTEXT_WARN_TOKENS)} tokens: a long-context card the registry does not carry may apply` : ''}`);
     }
     const snip = (results.find(r => r.text)?.text ?? '').replace(/\s+/g, ' ').slice(0, 320);
     console.log(`      ↳ response head: ${JSON.stringify(snip)}`);
