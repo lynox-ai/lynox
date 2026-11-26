@@ -96,7 +96,8 @@ const NO_STATS: KnowledgeGraphStats = { memoryCount: 0, entityCount: 0, relation
  *
  * A file stamped with an older schema (the graph was off while an update ran, so nothing migrated
  * it) is read and marked. One stamped with a newer schema is not guessed at: its half is left
- * unread and the block marked. Any other failure gives an empty block, marked.
+ * unread and the block marked. A count that fails (remembered texts, memories) marks the block and
+ * keeps what was read; any other failure gives an empty block, marked.
  */
 export async function readHeldGraph(opts: {
   agentMemoryFile: string;
@@ -129,7 +130,12 @@ export async function readHeldGraph(opts: {
     } catch {
       process.stderr.write('⚠ /api/export: remembered texts could not be counted — knowledge graph marked incomplete\n');
     }
-    const memoryCount = db ? activeMemoryCountOn(db) : 0;
+    let memoryCount = 0;
+    try {
+      memoryCount = db ? activeMemoryCountOn(db) : 0;
+    } catch {
+      incomplete = true;
+    }
 
     let source: GraphExportSource;
     let stats: KnowledgeGraphStats;

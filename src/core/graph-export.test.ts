@@ -238,6 +238,22 @@ describe('readHeldGraph', () => {
     expect(held.mayBeIncomplete, 'the text itself is not in the block').toBe(true);
   });
 
+  it('keeps the subject graph and marks the block when the memory count fails', async () => {
+    // A file whose `memories` table is gone: every count over it fails.
+    const db = new AgentMemoryDb(file);
+    db.close();
+    const drop = new Database(file);
+    drop.exec('DROP TABLE IF EXISTS mentions; DROP TABLE IF EXISTS memories');
+    drop.close();
+    const subjects = new SubjectStore(engineDb);
+    subjects.createSubject({ kind: 'person', name: 'Bob' });
+
+    const held = await readHeldGraph({ agentMemoryFile: file, engineDb, subjectGraph: true });
+    expect(held.entities.map(e => e.canonicalName), 'engine.db is still read').toEqual(['Bob']);
+    expect(held.stats.memoryCount).toBe(0);
+    expect(held.mayBeIncomplete).toBe(true);
+  });
+
   it('still reads the subject graph when agent-memory.db is stamped with a newer schema', async () => {
     const db = new AgentMemoryDb(file);
     seedGraph(db);
