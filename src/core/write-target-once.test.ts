@@ -273,6 +273,45 @@ describe('the review saves the file that is written', () => {
       manager.cleanup();
     }
   });
+
+  it('isolation, a new file in /tmp under a folder link moved after the judgement: the rollback deletes the file that was written', async () => {
+    setup(true);
+    mkdirSync(join(away, 'one'));
+    mkdirSync(join(away, 'two'));
+    symlinkSync(join(away, 'one'), join(away, 'dir'));
+    const manager = new ChangesetManager(ws, 'run', [realpathSync('/tmp')]);
+    try {
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', changesetManager: manager,
+        tools: [resolvingThen(writeFileTool, () => relink(join(away, 'dir'), join(away, 'two')))],
+      });
+      const result = await call(agent, 'write_file', { path: join(away, 'dir', 'new.txt'), content: 'new text' });
+      expect(result.is_error).not.toBe(true);
+      expect(readFileSync(join(away, 'one', 'new.txt'), 'utf-8')).toBe('new text');
+      manager.rollbackAll();
+      expect(existsSync(join(away, 'one', 'new.txt')), 'the file the run wrote is gone').toBe(false);
+    } finally {
+      manager.cleanup();
+    }
+  });
+
+  it('isolation: a call resolved to nothing writable saves nothing, so a rollback leaves the file as others left it', async () => {
+    setup(true);
+    writeFileSync(join(away, 'x.txt'), 'before\n');
+    const manager = new ChangesetManager(ws, 'run', [realpathSync('/tmp')]);
+    try {
+      const unwritable: ToolEntry = { ...writeFileTool, writeTarget: () => null };
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', changesetManager: manager, tools: [unwritable] });
+      const result = await call(agent, 'write_file', { path: join(away, 'x.txt'), content: 'new text' });
+      expect(result.is_error).toBe(true);
+      expect(String(result.content)).toContain('changed after it was checked; nothing was written');
+      writeFileSync(join(away, 'x.txt'), 'changed by someone else\n');
+      manager.rollbackAll();
+      expect(readFileSync(join(away, 'x.txt'), 'utf-8')).toBe('changed by someone else\n');
+    } finally {
+      manager.cleanup();
+    }
+  });
 });
 
 describe('the guard judges the file it is handed', () => {

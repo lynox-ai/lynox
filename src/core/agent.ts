@@ -329,7 +329,9 @@ export function readForDiffPreview(path: string): string {
 
 /**
  * The text a write to `rawPath` would change, for the diff preview: the file the write would
- * change, resolved as write_file and edit_file resolve it. A path they refuse throws.
+ * change. That is `writeTarget` when the call's file was resolved already (`writeTargetFor`);
+ * otherwise the path is resolved as write_file and edit_file resolve it, and a path they refuse
+ * throws.
  */
 export function diffPreviewText(rawPath: string, writeTarget?: string | null): string {
   return readForDiffPreview(typeof writeTarget === 'string' ? writeTarget : resolveWritablePath(rawPath));
@@ -5842,7 +5844,9 @@ export class Agent implements IAgent {
     // Saved for the review after every gate above, so a write that is refused or denied leaves
     // nothing in it, and what is saved is the file as it was just before this write, not before
     // a prompt the user may take a while to answer.
-    if (mutatesFile && this.changesetManager?.active) {
+    // Resolved to nothing writable (`writeTarget === null`), the handler refuses the call: nothing
+    // is saved for it either.
+    if (mutatesFile && this.changesetManager?.active && writeTarget !== null) {
       const reviewed = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
       // The file the handler writes, as resolved once for this call: the backup saves that file,
       // not one a second resolution would find.
