@@ -15,6 +15,7 @@ import { EngineDb } from '../../core/engine-db.js';
 import { SecretReleases } from '../../core/secret-releases.js';
 import { releaseBinding, slotMayReach, slotsToClearBeforeSave } from '../../core/profile-secret-view.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
+import { isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 import { apiSetupTool } from './api-setup.js';
@@ -499,16 +500,17 @@ describe('W-Question: the owner is asked with what is stored, and only then does
   it('refuses the save, without asking, in an autonomous run that could still prompt', async () => {
     const store = boot(reports());
     const asked: string[] = [];
-    const p = { ...bearerOn('crm2', 'crm2.example', 'REPORT_KEY'), ...extra };
+    // On a listed host, so neither the host acceptance nor a widening stops it first (a new
+    // profile changes nothing of an earlier one): what refuses it is the binding question.
+    expect(isVettedEgressHost('https://api.openai.com/v1')).toBe(true);
+    const p = { ...bearerOn('crm2', 'api.openai.com', 'REPORT_KEY'), ...extra };
     delete (p as Partial<ApiProfile>).custom_endpoint_ack;
     const ask: Ask = async (q) => { asked.push(flattenPrompt(q)); return 'allow'; };
     const out = String(await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store, { promptUser: ask, autonomy: 'autonomous' })));
-    // The host is outside the vetted list and nobody can accept it, so the save stops there,
-    // before the binding question.
-    expect(out).toMatch(/^Blocked: profile "crm2" egresses to a non-vetted sub-processor/);
+    expect(out).toBe('Blocked: Nothing was saved. The profile "crm2" would send "REPORT_KEY" to addresses that are not allowed for it, and no one can be asked in this run. To allow it, save the profile again in the chat and answer the question.');
     expect(store.get('crm2')).toBeUndefined();
-    expect(asked.some((q) => q.includes('REPORT_KEY'))).toBe(false);
-    expect(bindings()?.boundOf('REPORT_KEY')).not.toContain('https://crm2.example');
+    expect(asked).toEqual([]);
+    expect(bindings()?.boundOf('REPORT_KEY')).not.toContain('https://api.openai.com');
   });
 });
 
