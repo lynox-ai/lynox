@@ -878,6 +878,49 @@ describe('the reason under a value lynox leaves out, as the run\'s page words it
 	});
 });
 
+// Over whose connection the run writes, where a mandate set it up: one line directly above the
+// approve button, for the owner who approves (U-301).
+describe('a run that writes through a connection a mandate set up', () => {
+	const line = (): HTMLElement | null => target.querySelector('[data-bulk-connected-by]');
+	const locale = getLocale();
+	afterEach(() => setLocale(locale));
+
+	it('names the provider and the person, word for word in German and English, directly above the button', async () => {
+		run = makeRun({ connectedBy: { provider: 'Shopify', by: 'Eva Muster' } });
+		setLocale('de');
+		await render();
+		expect(line()?.textContent).toBe('lynox schreibt über die Shopify-Verbindung, die Eva Muster eingerichtet hat.');
+		// Directly above: the next element is the row that holds the approve button.
+		const row = line()?.nextElementSibling;
+		expect(row?.querySelector('button')?.textContent?.trim()).toBe(t('bulk.approve.write_only'));
+		if (component) unmount(component);
+		component = undefined;
+		setLocale('en');
+		await render();
+		expect(line()?.textContent).toBe('lynox writes through the Shopify connection that Eva Muster set up.');
+	});
+
+	it('names someone with access where the engine knows no person, and marks hidden characters in a name', async () => {
+		run = makeRun({ connectedBy: { provider: 'Shopify', by: null } });
+		setLocale('de');
+		await render();
+		expect(line()?.textContent).toBe(tf('bulk.approve.connected_by', { provider: 'Shopify', person: t('takeover.connection_someone') }));
+		if (component) unmount(component);
+		component = undefined;
+		run = makeRun({ connectedBy: { provider: 'Shopify', by: 'eva\u202E@kanzlei.example' } });
+		await render();
+		expect(line()?.textContent).toBe('lynox schreibt über die Shopify-Verbindung, die eva⟨U+202E⟩@kanzlei.example eingerichtet hat.');
+	});
+
+	it('shows no line for the owner\'s own connection', async () => {
+		run = makeRun({ connectedBy: null });
+		await render();
+		expect(line()).toBeNull();
+		// Control: the approval itself is there.
+		expect(buttonByText(t('bulk.approve.write_only'))?.disabled).toBe(false);
+	});
+});
+
 // A hidden character a target adds where text may carry one:
 // marked behind its grapheme, with the kind only in the label, a legend over the list, and a
 // count wherever the run is approved or its probe confirmed.
@@ -2142,6 +2185,23 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(note()).toBeUndefined();
 		expect(rowNames()).toHaveLength(25);
 		expect(document.activeElement).toBe(approveButton);
+	});
+
+	it('keeps the line on whose connection the run writes directly above the button while the table is filtered, below the note', async () => {
+		run = makeRun({ total: 25, changes: changes(25), connectedBy: { provider: 'Shopify', by: 'Eva Muster' }, judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25);
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		const note = target.querySelector('[data-testid="bulk-approve-filtered"]');
+		const line = target.querySelector('[data-bulk-connected-by]');
+		expect(note).not.toBeNull();
+		expect(line).not.toBeNull();
+		// The note first, then the line, then the row that holds the approve button.
+		expect(note!.nextElementSibling).toBe(line);
+		const row = line!.nextElementSibling;
+		expect([t('bulk.approve.write_one'), t('bulk.approve.approve')]).toContain(row?.querySelector('button')?.textContent?.trim());
 	});
 
 	it('counts the rows the filtered table shows, leaves out the unchanged rows and their button, and offers that button again after', async () => {

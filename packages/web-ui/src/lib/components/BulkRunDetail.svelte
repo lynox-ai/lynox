@@ -13,6 +13,7 @@
 	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
+	import { markHidden } from '../utils/trigger-consent.js';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import BulkHost from './BulkHost.svelte';
 	import MarkedLine from './MarkedLine.svelte';
@@ -1303,6 +1304,10 @@
 						<!-- The approval is for the whole run, the table may show part of it (U-417): of every verdict
 						     of the run, however the table folds the unchanged ones. -->
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-approve-filtered">{tf('bulk.approve.filtered', { n: String(shownTargets.length), m: String(targets.length) })} <button type="button" class="block sm:inline whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-approve-filtered-all" onclick={() => showAllAtApproval()}>{t('bulk.outliers.spread.show_all')}</button></p>
+					{/if}
+					{#if run.connectedBy}
+						<!-- Directly above the button: whose connection the write goes through, where a mandate set it up. -->
+						<p class="text-sm" data-bulk-connected-by>{tf('bulk.approve.connected_by', { provider: markHidden(run.connectedBy.provider), person: markHidden(run.connectedBy.by ?? t('takeover.connection_someone')) })}</p>
 					{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} bind:this={approveButton}

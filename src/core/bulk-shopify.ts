@@ -21,6 +21,7 @@ import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, asciiLower, isSho
 import { isFeatureEnabled } from './features.js';
 import { presetStoreHost, SHOPIFY_CONSENT_VERSION } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
+import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
 
 /**
  * What the store connection for `host` allows the bulk image form (`fileUpdate`):
@@ -36,12 +37,29 @@ import type { ApiProfile } from './api-store.js';
  * - `no_connection`: no single Shopify connection of this engine maps to `host` — none, another
  *   kind of profile, or one for another store. Nothing is known about what was asked or granted,
  *   so neither a refusal by Shopify nor a new link is the thing to say.
+ * - `revoked`: Shopify ended the connection's authorization (`oauth_grant.state`, the verdict
+ *   `fetch_token` records). No write gets through until the store is connected again, so what was
+ *   asked or granted does not matter yet.
+ * - `unbound`: the connection's token is not bound to the store (`oauth_grant.store_binding`
+ *   absent): it came into the slot some other way than the connect callback, which alone writes
+ *   the binding. The write refuses every request on it (`http.ts`, step 7) until the store is
+ *   connected again.
+ * - `expired`: a refresh of the connection's token failed (`oauth_grant.state` `refresh-dead`,
+ *   which the refresh writes and which also drops the binding). It is written for several causes
+ *   (for example the store refused the token, its answer was not usable, the vault changed meanwhile)
+ *   and the grant does not record which, so no cause is named; only a new connect helps, since
+ *   no refresh runs without the binding. Checked before the binding, which that refresh took away.
+ * The dead states come before the scope: on a connection that cannot write at all, adding a
+ * scope changes nothing.
  */
-export type ShopifyMediaAccess = 'writable' | 'not_asked' | 'not_granted' | 'no_connection';
+export type ShopifyMediaAccess = 'writable' | 'not_asked' | 'not_granted' | 'no_connection' | 'revoked' | 'expired' | 'unbound';
 
 export function shopifyMediaAccess(profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined, host: string): ShopifyMediaAccess {
   // Only the Shopify preset derives its API host from the store (`apiOnDerivedHost`), so a match is that preset.
   if (profile === undefined || presetStoreHost(profile) !== host) return 'no_connection';
+  if (profile.oauth_grant?.state === 'revoked') return 'revoked';
+  if (profile.oauth_grant?.state === 'refresh-dead') return 'expired';
+  if (typeof profile.oauth_grant?.store_binding !== 'string') return 'unbound';
   // What the person confirmed, as the connect callback recorded it — never the profile's scope,
   // which a save changes without a consent page. A grant from before it was recorded, or a
   // record that is no list, asked for nothing: a new link would ask, so that case is offered.
@@ -76,6 +94,28 @@ export function shopifyConsentBlock(
   const fields = new Set<string>();
   for (const w of apply.writes) for (const f of Object.keys(w.after)) if (!allowed.has(f)) fields.add(f);
   return [...fields].sort();
+}
+
+/**
+ * Who set up the store connection a Shopify run writes through, where a mandate did: the owner who
+ * approves the run reads over whose connection lynox writes. Null for the owner's own connection,
+ * and where no single Shopify connection of this engine maps to `host` (nothing to name). The person
+ * is the name the mandate's grant was shown under, else the address in its tag, else null (the page
+ * then says "someone"), the same order as a plan's stamp.
+ */
+export function shopifyConnectedBy(
+  profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined,
+  host: string,
+  displayNameOf: (mandateId: string) => string | null,
+): { by: string | null } | null {
+  if (profile === undefined || presetStoreHost(profile) !== host) return null;
+  const tag = profile.oauth_grant?.connected_by;
+  if (typeof tag !== 'string' || !isMandateTag(tag)) return null;
+  const mandateId = profile.oauth_grant?.connected_mandate_id;
+  const display = typeof mandateId === 'string' && mandateId !== '' ? displayNameOf(mandateId) : null;
+  if (display !== null && display !== '') return { by: display };
+  const address = tag.slice(MANDATE_TAG_PREFIX.length);
+  return { by: address === '' ? null : address };
 }
 
 /** Whether this instance reads Shopify stores in bulk runs. Asked when a run is planned and on

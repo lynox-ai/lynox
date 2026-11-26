@@ -33,7 +33,7 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
-import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyPairedAfter, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyConnectedBy, shopifyMediaAccess, shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyPairedAfter, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
 import { SHOPIFY_READ_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { MARKUP_MAX_TAGS, canonicalHtml, htmlEqual, normalizeHtml } from './html-tree.js';
@@ -60,7 +60,7 @@ const HOST = 'acme.myshopify.com';
 // The store connection of HOST, granted the scope image alt texts need (`shopifyMediaAccess`), so a
 // plan in the image form gets past the scope check to what this file tests.
 const IMAGE_WRITING_STORE = {
-  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] }, scope: 'read_products write_products write_files' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'], asked_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] }, scope: 'read_products write_products write_files' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'], asked_scope: ['read_products', 'write_products', 'write_files'], store_binding: 'bound' } } : undefined,
 };
 const ENDPOINT = `https://${HOST}/admin/api/2026-10/graphql.json`;
 const gid = (n: number): string => `gid://shopify/Product/${String(n)}`;
@@ -3099,3 +3099,74 @@ describe('a product target\'s title', () => {
   });
 });
 
+// What a store connection allows the image form. A connection that cannot write at all has its own
+// case, before the scope: Shopify ended its authorization, or its token is not bound to the store.
+describe('shopifyMediaAccess', () => {
+  const asked = ['read_products', 'write_files'];
+  const profile = (grant: Record<string, unknown> | undefined) => ({
+    base_url: `https://${HOST}`,
+    auth: { type: 'oauth2' as const, oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, scope: 'read_products write_files' } },
+    ...(grant === undefined ? {} : { oauth_grant: grant }),
+  }) as Parameters<typeof shopifyMediaAccess>[0];
+  const live = { asked_scope: asked, granted_scope: asked, store_binding: 'bound' };
+
+  it('is writable over a bound, live grant that asked for write_files and holds it', () => {
+    expect(shopifyMediaAccess(profile(live), HOST)).toBe('writable');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'connected' }), HOST)).toBe('writable');
+  });
+
+  it('is revoked where Shopify ended the authorization, whatever the scope or binding', () => {
+    expect(shopifyMediaAccess(profile({ ...live, state: 'revoked' }), HOST)).toBe('revoked');
+    expect(shopifyMediaAccess(profile({ state: 'revoked', store_binding: 'bound' }), HOST)).toBe('revoked');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'revoked', store_binding: undefined }), HOST)).toBe('revoked');
+  });
+
+  it('is unbound where the grant carries no store binding, whatever the scope', () => {
+    expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked }), HOST)).toBe('unbound');
+    expect(shopifyMediaAccess(profile({ granted_scope: ['read_products'] }), HOST)).toBe('unbound');
+    expect(shopifyMediaAccess(profile(undefined), HOST)).toBe('unbound');
+    // A refresh that left no refresh token is no revocation.
+    expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked, state: 'no-refresh' }), HOST)).toBe('unbound');
+  });
+
+  it('is expired where a refresh of the token failed, before the binding that refresh took away', () => {
+    // What the refresh leaves: the binding gone, the grant `refresh-dead`.
+    expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked, state: 'refresh-dead' }), HOST)).toBe('expired');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'refresh-dead' }), HOST)).toBe('expired');
+    // A revocation stays one; the refresh never overwrites it.
+    expect(shopifyMediaAccess(profile({ state: 'revoked', asked_scope: asked, granted_scope: asked }), HOST)).toBe('revoked');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'refresh-dead' }), 'other.myshopify.com')).toBe('no_connection');
+  });
+
+  it('keeps the scope cases on a bound grant, and no_connection before everything', () => {
+    expect(shopifyMediaAccess(profile({ store_binding: 'bound', granted_scope: asked }), HOST)).toBe('not_asked');
+    expect(shopifyMediaAccess(profile({ store_binding: 'bound', asked_scope: asked, granted_scope: ['read_products'] }), HOST)).toBe('not_granted');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'revoked' }), 'other.myshopify.com')).toBe('no_connection');
+    expect(shopifyMediaAccess(undefined, HOST)).toBe('no_connection');
+  });
+});
+
+// Who set up the store connection a run writes through: named only where a mandate did (U-301).
+describe('shopifyConnectedBy', () => {
+  const profile = (grant: Record<string, unknown>, shop = 'acme') => ({
+    base_url: `https://${shop}.myshopify.com`,
+    auth: { type: 'oauth2' as const, oauth: { preset_id: 'shopify', preset_params: { shop }, scope: 'read_products' } },
+    oauth_grant: grant,
+  }) as Parameters<typeof shopifyConnectedBy>[0];
+  const names: Record<string, string> = { 'grant-e': 'Eva Muster' };
+  const displayNameOf = (id: string): string | null => names[id] ?? null;
+
+  it('names a mandate by the name its grant was shown under, else by its address', () => {
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: 'grant-e' }), HOST, displayNameOf)).toEqual({ by: 'Eva Muster' });
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: 'grant-x' }), HOST, displayNameOf)).toEqual({ by: 'eva@kanzlei.example' });
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:eva@kanzlei.example' }), HOST, displayNameOf)).toEqual({ by: 'eva@kanzlei.example' });
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:' }), HOST, displayNameOf)).toEqual({ by: null });
+  });
+
+  it('names no one for the owner\'s own connection, one from before the tag, or another store\'s', () => {
+    expect(shopifyConnectedBy(profile({ connected_by: 'owner' }), HOST, displayNameOf)).toBeNull();
+    expect(shopifyConnectedBy(profile({}), HOST, displayNameOf)).toBeNull();
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:eva@kanzlei.example' }, 'other'), HOST, displayNameOf)).toBeNull();
+    expect(shopifyConnectedBy(undefined, HOST, displayNameOf)).toBeNull();
+  });
+});
