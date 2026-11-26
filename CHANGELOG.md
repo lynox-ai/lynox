@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.19.1 — 2026-11-26
+
+This release contains one security fix. Upgrading is recommended for every
+instance.
+
+### Security
+
+- Every node process in the image starts with Node's signal debugger off
+  (`--disable-sigusr1`): the engine and the two `node -e` calls of the
+  entrypoint in their argv, every other node through the image's
+  `NODE_OPTIONS`. The engine started from the image, the egress proxy and the
+  shell sidecar's exec daemon refuse to start when the flag is not in force,
+  and the refusal says how to start. (#2822)
+
+### Upgrade notes
+
+- The image's own entrypoint always passes the new start check. A setup that
+  starts the engine with its own command, bypassing the entrypoint, needs
+  `--disable-sigusr1` in that command, or a plain `NODE_OPTIONS` that contains
+  it; otherwise the engine does not start and says why. `npx` and a source
+  checkout are not checked.
+- Apart from this fix, the code is the same as 2.19.0. There are no database
+  migrations.
+
 ## 2.19.0 — 2026-11-26
 
 ### Upgrade notes
