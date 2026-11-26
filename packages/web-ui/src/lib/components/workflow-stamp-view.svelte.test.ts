@@ -147,8 +147,11 @@ describe('the owner stamps what the preview showed', () => {
 		await click(q('stamp-confirm'));
 		expect(q('stamp-dialog')).not.toBeNull();
 		expect(q('stamp-line')?.textContent).toContain('Die Schritte haben sich geändert');
-		// The line is at the head of the view, the button at its foot: it is scrolled into sight.
-		expect(scrolled).toContain(q('stamp-line'));
+		// The line stays in the view's head, outside the part that scrolls, so it stays in sight
+		// while the marked step is brought into view below it.
+		const line = q('stamp-line')!;
+		expect(line.closest('[data-dialog-head]')).not.toBeNull();
+		expect(line.closest('[data-dialog-body]')).toBeNull();
 		expect(q('stamp-step')?.textContent).toContain('Send it somewhere else');
 		expect(posts('/api/workflows/wf-1/confirm')).toHaveLength(1);
 		await click(q('stamp-confirm'));
@@ -373,14 +376,14 @@ describe('contract r3: what the view adds', () => {
 		await click(q('stamp-review'));
 		const step = q('stamp-step')?.textContent ?? '';
 		expect(q('stamp-role')?.textContent).toContain('Angaben der Rolle researcher');
-		expect(step).toContain('Aufwand: high');
-		expect(step).toContain('Nachdenken: adaptive');
+		expect(step).toContain('Gründlichkeit: Gründlich');
+		expect(step).toContain('Nachdenken: Automatisch');
 		expect(step).toContain('Zeitlimit: 2 min 30 s');
 		// What the role grants: the step's own tools are not all a run gets.
 		const grant = q('stamp-role-grant')?.textContent ?? '';
-		expect(grant).toContain('Modell: deep');
+		expect(grant).toContain('Modell: Tief');
 		// The step sets its own effort, which wins: the role's is not shown as if it applied.
-		expect(grant).not.toContain('Aufwand');
+		expect(grant).not.toContain('Gründlichkeit');
 		expect(grant).toContain('Erlaubt: web_search');
 		expect(grant).toContain('Sperrt: http_request');
 		expect(q('stamp-role')?.textContent).toContain('nur lesen');
@@ -489,7 +492,7 @@ describe('contract r3: what the view adds', () => {
 		await click(q('stamp-review'));
 		const grant = q('stamp-role-grant')?.textContent ?? '';
 		expect(grant).not.toContain('Modell');
-		expect(grant).toContain('Aufwand: max');
+		expect(grant).toContain('Gründlichkeit: Maximum');
 	});
 
 	it('a role the engine does not know says the step stops', async () => {
@@ -527,7 +530,7 @@ describe('contract r3: what the view adds', () => {
 		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { model: null, role: null, roleGrant: null });
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
-		expect(q('stamp-model-default')?.textContent).toContain('Modell: fast (Standard)');
+		expect(q('stamp-model-default')?.textContent).toContain('Modell: Schnell (Standard)');
 	});
 
 	it('no default model where the role names one', async () => {
@@ -536,7 +539,7 @@ describe('contract r3: what the view adds', () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
 		expect(q('stamp-model-default')).toBeNull();
-		expect(q('stamp-role-grant')?.textContent).toContain('Modell: deep');
+		expect(q('stamp-role-grant')?.textContent).toContain('Modell: Tief');
 	});
 
 	it('no default model where the role is unknown, since the step stops', async () => {
@@ -797,5 +800,105 @@ describe('what the contract allows, and a contract that grants nothing (U-451)',
 			await openPlan({ ...GRANT, hostPatterns: ['h\u202E.example'] });
 			expect(target.textContent).toContain('POST https://h<U+202E>.example/p');
 		});
+	});
+});
+
+describe('the view keeps its head and its buttons in sight while the steps scroll', () => {
+	it('the title, the line and the buttons sit outside the one part that scrolls, which holds the steps', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }, { status: 200, body: preview('d2', 'Send it somewhere else') }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		const dialog = q('stamp-dialog')!;
+		const frame = dialog.querySelector<HTMLElement>('[data-dialog-frame]')!;
+		const head = frame.querySelector<HTMLElement>(':scope > [data-dialog-head]');
+		const body = frame.querySelector<HTMLElement>(':scope > [data-dialog-body]');
+		const foot = frame.querySelector<HTMLElement>(':scope > [data-dialog-foot]');
+		expect(head && body && foot, 'head, body and foot are the frame\'s own parts').toBeTruthy();
+		// The frame is a column of a bounded height that does not scroll itself; only the body does.
+		for (const c of ['flex', 'flex-col', 'max-h-[85vh]']) expect(frame.classList, c).toContain(c);
+		expect(frame.classList).not.toContain('overflow-y-auto');
+		for (const c of ['min-h-0', 'flex-1', 'overflow-y-auto']) expect(body!.classList, c).toContain(c);
+		expect(head!.classList).toContain('shrink-0');
+		expect(foot!.classList).toContain('shrink-0');
+		expect(head!.contains(target.querySelector('[data-stamp-review-title]'))).toBe(true);
+		expect(head!.contains(q('stamp-line'))).toBe(true);
+		expect(body!.contains(q('stamp-step'))).toBe(true);
+		expect(foot!.contains(q('stamp-confirm'))).toBe(true);
+		expect(foot!.contains(byText('Abbrechen'))).toBe(true);
+	});
+
+	it('focuses its heading when it opens, so the confirm is not one Enter away', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
+		await click(q('stamp-review'));
+		const title = target.querySelector<HTMLElement>('[data-stamp-review-title]');
+		expect(title).not.toBeNull();
+		expect(document.activeElement).toBe(title);
+	});
+});
+
+describe('the stamp names a tier, a thoroughness and a thinking setting as the settings do', () => {
+	function stepWith(fields: Record<string, unknown>): Record<string, unknown> {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, fields);
+		return p;
+	}
+
+	it('a tier by its name, never the stored value; a model named by its id stays set apart as it is', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: stepWith({ model: 'balanced', effort: 'xhigh', thinking: 'enabled' }) }] });
+		await click(q('stamp-review'));
+		const step = q('stamp-step')!;
+		const text = step.textContent ?? '';
+		expect(text).toContain('Modell: Ausgewogen');
+		expect(text).toContain('Gründlichkeit: Sehr gründlich');
+		expect(text).toContain('Nachdenken: Immer');
+		for (const raw of ['balanced', 'xhigh', 'enabled']) expect(text).not.toContain(raw);
+		expect(step.querySelector('[data-model-tier="balanced"]')?.classList.contains('font-mono')).toBe(false);
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: stepWith({ model: 'claude-sonnet-4-5', effort: 'low', thinking: 'disabled' }) }] });
+		await click(q('stamp-review'));
+		const again = q('stamp-step')!;
+		expect(again.textContent).toContain('claude-sonnet-4-5');
+		expect(again.querySelector('[data-model-tier]')).toBeNull();
+		expect([...again.querySelectorAll('.font-mono')].some((el) => el.textContent === 'claude-sonnet-4-5')).toBe(true);
+		expect(again.textContent).toContain('Gründlichkeit: Schnell');
+		expect(again.textContent).toContain('Nachdenken: Deaktiviert');
+	});
+});
+
+describe('the stamp says where the workflow may run, from the rule a schedule asks', () => {
+	async function runsLine(runs: string | undefined): Promise<HTMLElement | null> {
+		const p = preview('d1');
+		if (runs !== undefined) p['runs'] = runs;
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		return q('stamp-runs');
+	}
+
+	it('an autonomous one: from a chat, on a schedule and by an agent in the background', async () => {
+		expect((await runsLine('anywhere'))?.textContent).toBe('aus dem Chat, geplant und von einem Agenten im Hintergrund');
+	});
+
+	it('an interactive one that asks only its owner: from a chat and on a schedule', async () => {
+		expect((await runsLine('chat_and_schedule'))?.textContent).toBe('aus dem Chat und geplant');
+	});
+
+	it('any other interactive one: from a chat, not on a schedule, and no word on a background agent', async () => {
+		const line = await runsLine('chat');
+		expect(line?.textContent).toBe('aus dem Chat, nicht geplant');
+		expect(line?.textContent).not.toContain('Hintergrund');
+	});
+
+	it('an engine that sends no such field shows no line, and a value it does not know refuses the preview', async () => {
+		expect(await runsLine(undefined)).toBeNull();
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		expect(await runsLine('everywhere')).toBeNull();
+		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(true);
 	});
 });

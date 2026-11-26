@@ -4,6 +4,7 @@
 	import MarkedLine from './MarkedLine.svelte';
 	import { modeKey, onFailureKey, templateText, timeoutText, visible, type StampChanges, type StampPreview } from '../utils/workflow-stamp.js';
 	import { allowedLines } from '../utils/stamp-contract.js';
+	import { effortName, thinkingName, tierName } from '../utils/tier-words.js';
 
 	// What a workflow's stamp binds, as the owner is shown it before confirming: its mode, failure
 	// strategy, limits, parameters with their defaults and contract, and every step as it runs. The
@@ -23,6 +24,12 @@
 	const WRAP = '[overflow-wrap:anywhere]';
 </script>
 
+<!-- A tier by its name, as the settings show it; a model the step names by its id, set apart, as it is. -->
+{#snippet modelValue(m: string)}
+	{@const name = tierName(m)}
+	{#if name !== null}<span data-model-tier={m}>{name}</span>{:else}<span class="font-mono {WRAP}">{visible(m)}</span>{/if}
+{/snippet}
+
 {#snippet changedMark()}
 	<span data-testid="stamp-changed-mark" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/40 bg-warning/10 px-1.5 text-warning font-medium"><Icon name="warning" size="xs" />{t('workflow_library.stamp.changed_mark')}</span>
 {/snippet}
@@ -38,6 +45,10 @@
 		{#if p.mode}
 			{@const key = modeKey(p.mode)}
 			<dt class="text-text-subtle">{t('workflow_library.stamp.mode')}</dt><dd data-testid="stamp-mode" class={key === null ? `font-mono ${WRAP}` : WRAP}>{key === null ? visible(p.mode) : t(key)}</dd>
+		{/if}
+		{#if p.runs}
+			<!-- Where it may run, from the rule a schedule asks: what the mode means for the owner. -->
+			<dt class="text-text-subtle">{t('workflow_library.stamp.runs')}</dt><dd data-testid="stamp-runs" data-runs={p.runs} class={WRAP}>{t(`workflow_library.stamp.runs_${p.runs}`)}</dd>
 		{/if}
 		{#if p.onFailure}
 			{@const key = onFailureKey(p.onFailure)}
@@ -125,8 +136,8 @@
 					<p class="mt-2" data-testid="stamp-role"><span class="text-text-subtle">{t('workflow_library.stamp.role_heading')}</span> <span class="font-mono {WRAP}">{visible(step.role)}</span>{#if g.readOnly} <span class="ml-1 rounded-[var(--radius-sm)] border border-border px-1 text-text-subtle">{t('workflow_library.stamp.role_read_only')}</span>{/if}</p>
 					<div data-testid="stamp-role-grant" class="ml-3">
 						<!-- The step's own value wins at run time; the role's applies only where the step sets none. -->
-						{#if g.model && !step.model}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono {WRAP}">{visible(g.model)}</span></p>{/if}
-						{#if g.effort && !step.effort}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.effort')}:</span> <span class="font-mono">{g.effort}</span></p>{/if}
+						{#if g.model && !step.model}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> {@render modelValue(g.model)}</p>{/if}
+						{#if g.effort && !step.effort}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.effort')}:</span> <span>{effortName(g.effort)}</span></p>{/if}
 						{#if g.allowTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_allows')}:</span> {#if g.allowTools.length === 0}<span>{t('workflow_library.stamp.no_tools')}</span>{:else}<span data-testid="stamp-tool-list" class="font-mono {WRAP}">{visible(g.allowTools.join(', '))}</span>{/if}</p>{/if}
 						{#if g.denyTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_blocks')}:</span> {#if g.denyTools.length === 0}<span>{t('workflow_library.stamp.no_tools')}</span>{:else}<span data-testid="stamp-tool-list" class="font-mono {WRAP}">{visible(g.denyTools.join(', '))}</span>{/if}</p>{/if}
 						{#if g.readOnly && g.allowTools !== null && g.allowTools.length > 0}<p class="mt-1 text-text-subtle" data-testid="stamp-role-read-only-allows">{t('workflow_library.stamp.role_read_only_allows')}</p>{/if}
@@ -142,16 +153,16 @@
 				<p class="mt-2"><span class="text-text-subtle">{t('workflow_library.stamp.tools')}:</span> <span data-testid="stamp-tool-list" class="font-mono {WRAP}">{visible(step.tools.join(', '))}</span></p>
 			{/if}
 			{#if step.model}
-				<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono {WRAP}">{visible(step.model)}</span></p>
+				<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> {@render modelValue(step.model)}</p>
 			{:else if !step.roleGrant?.model && !(step.role && !step.roleGrant)}
 				<!-- Neither the step nor its role names a model: the engine runs it on fast. An unknown role stops the step, so no model is claimed. -->
-				<p class="mt-1" data-testid="stamp-model-default"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono">{t('workflow_library.stamp.model_default')}</span></p>
+				<p class="mt-1" data-testid="stamp-model-default"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span>{t('workflow_library.stamp.model_default')}</span></p>
 			{/if}
 			{#if step.effort}
-				<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.effort')}:</span> <span class="font-mono">{step.effort}</span></p>
+				<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.effort')}:</span> <span>{effortName(step.effort)}</span></p>
 			{/if}
 			{#if step.thinking}
-				<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.thinking')}:</span> <span class="font-mono">{step.thinking}</span></p>
+				<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.thinking')}:</span> <span>{thinkingName(step.thinking)}</span></p>
 			{/if}
 			<!-- No limit set means the engine's default, which is a limit all the same. -->
 			<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.timeout')}:</span> <span class="font-mono">{step.timeoutMs === null ? t('workflow_library.stamp.timeout_default') : step.timeoutMs === 0 ? t('workflow_library.stamp.timeout_zero') : timeoutText(step.timeoutMs)}</span></p>
