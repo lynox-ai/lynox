@@ -347,9 +347,9 @@
 		return trigger.paused === true && trigger.status === 'completed';
 	}
 
-	// At a paused plan, open or completed, Delete and the switch are the owner's: the route refuses
-	// both to a helper (`paused`), so a helper is not offered them there. It waits for a known owner,
-	// as the confirm does.
+	// At a paused plan, open or completed, Delete is the owner's: the route refuses it to a helper
+	// (`paused`), so a helper is not offered it there. It waits for a known owner, as the confirm does.
+	// The switch is offered to nobody at a paused plan (see the row's buttons).
 	function ownerOnlyHere(trigger: Trigger): boolean {
 		return trigger.paused === true && !ownerActs;
 	}
@@ -804,10 +804,11 @@
 							{#if !held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !holdsNextRun(trigger.blocked_reason)}
 								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
-							<!-- Not at a plan that waits for its takeover: next to its badge the switch
-							     read as a second pause, and a helper's is refused. After the takeover it
-							     comes back, and an own pause set before stays. -->
-							{#if !pausedOpen(trigger) && !ownerOnlyHere(trigger)}
+							<!-- Not at a paused plan. Open, it waits for its takeover: next to its badge the switch
+							     read as a second pause, and a helper's is refused. After the takeover it comes
+							     back, and an own pause set before stays. Completed, it never runs again, whatever
+							     the switch says, as its line tells (U-275). -->
+							{#if trigger.paused !== true}
 								<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} data-trigger-toggle class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
 							{/if}
 							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
