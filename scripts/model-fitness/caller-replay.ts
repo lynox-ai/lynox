@@ -94,8 +94,10 @@ function resultText(content: unknown): string {
 
 /**
  * The tools whose call ends the turn (`endsTurn` on the tool entry): a final answer can carry
- * one beside its text (`suggest_follow_ups` today). Read from the entries, not named here, so
- * the next such tool is covered without an edit.
+ * one beside its text (`suggest_follow_ups` today). Read from the built-in entries
+ * (`src/tools/builtin/index.ts`), not named here, so the next built-in such tool is covered
+ * without an edit. A plugin tool can carry `endsTurn` too (the agent reads its whole tool
+ * list); this set does not see those, and a body that ends a turn on one reads as mid-turn.
  */
 export function endsTurnToolNames(entries: Record<string, unknown> = builtinTools): Set<string> {
   const out = new Set<string>();

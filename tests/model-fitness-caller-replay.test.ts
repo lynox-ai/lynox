@@ -117,7 +117,12 @@ describe('deriveCallerInputs', () => {
   it('finds the turn-ending tools on the tool entries, not by a fixed name', () => {
     expect(endsTurnToolNames().has(FOLLOW_UP_TOOL_NAME)).toBe(true);
     expect(endsTurnToolNames().has('web_research')).toBe(false);
-    expect([...endsTurnToolNames({ a: { endsTurn: true, definition: { name: 'x' } }, b: { endsTurn: false, definition: { name: 'y' } }, c: 5 })]).toEqual(['x']);
+    expect([...endsTurnToolNames({
+      a: { endsTurn: true, definition: { name: 'x' } },
+      b: { endsTurn: false, definition: { name: 'y' } },
+      c: 5,
+      d: { endsTurn: 1, definition: { name: 'z' } },
+    })]).toEqual(['x']);
   });
 
   it('reads only text blocks as the answer', () => {
