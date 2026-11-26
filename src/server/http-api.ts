@@ -14997,12 +14997,30 @@ export class LynoxHTTPApi {
         exportData['memory_scopes_may_be_incomplete'] = all.mayBeIncomplete;
       }
 
-      // Knowledge graph (entities + relations). `knowledge_graph_may_be_incomplete` says the block
-      // is not the whole of what the graph holds: a read threw, fell back or reached a cap, or
-      // remembered texts or mentions are stored, which the block does not carry yet. `enabled` is
-      // the setting, as on the durable knowledge block: whether the graph is switched on in the
-      // config.
+      // Knowledge graph (entities, relations, and under `memories` the remembered texts with what
+      // links them to the graph). `knowledge_graph_may_be_incomplete` says the block is not the
+      // whole of what the graph holds: a read threw, fell back or reached a cap, or a remembered
+      // text could not be decrypted. `enabled` is the setting, as on the durable knowledge block:
+      // whether the graph is switched on in the config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
+      // The remembered texts both stores hold, read the same way on either path and masked as the
+      // durable knowledge block is; read before the graph, so a graph read that fails does not
+      // take them with it.
+      let memoryTexts: { block: Record<string, unknown>; mayBeIncomplete: boolean };
+      try {
+        const { readMemoryTextsForExport } = await import('../core/graph-export.js');
+        const exportSecrets = engine.getSecretStore();
+        const read = readMemoryTextsForExport({
+          agentMemoryFile: join(getLynoxDir(), 'agent-memory.db'),
+          engineDb: engine.getEngineDb(),
+          subjectGraph: engine.getUserConfig().subject_graph_enabled === true,
+          mask: (t: string) => maskSecretPatterns(exportSecrets ? exportSecrets.maskSecrets(t) : t),
+        });
+        memoryTexts = { block: { 'agent-memory.db': read['agent-memory.db'], 'engine.db': read['engine.db'] }, mayBeIncomplete: read.mayBeIncomplete };
+      } catch {
+        memoryTexts = { block: {}, mayBeIncomplete: true };
+        process.stderr.write('⚠ /api/export: remembered texts could not be read — knowledge graph marked incomplete\n');
+      }
       const kg = engine.getKnowledgeLayer();
       if (kg) {
         const fallbacksBefore = kg.readFallbackCount;
@@ -15015,28 +15033,16 @@ export class LynoxHTTPApi {
             relationships,
             relationships_note: EXPORT_RELATIONSHIPS_NOTE,
             stats,
+            memories: memoryTexts.block,
             enabled: graphEnabled,
           };
           // A subject-graph read that fell back to the legacy store answered from another
           // store; what it returned may be partial.
           // The same holds when the subject graph is on but its store never opened.
           const fellBack = kg.readFallbackCount !== fallbacksBefore || kg.subjectGraphUnavailable;
-          // Remembered texts and their mentions (both stores) are held but not in this block, so
-          // while any is stored the block is not the whole of the graph. A count that cannot be
-          // taken, or a missing engine.db, cannot show there are none.
-          let textsHeld = true;
-          try {
-            const engineDb = engine.getEngineDb();
-            if (engineDb) {
-              const { countEngineMemoryRows } = await import('../core/memory-graph-store.js');
-              textsHeld = kg.countHeldMemoryTexts() > 0 || countEngineMemoryRows(engineDb) > 0;
-            }
-          } catch {
-            process.stderr.write('⚠ /api/export: remembered texts could not be counted — knowledge graph marked incomplete\n');
-          }
-          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack || textsHeld;
+          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack || memoryTexts.mayBeIncomplete;
         } catch {
-          exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
+          exportData['knowledge_graph'] = { entities: [], relationships: [], memories: memoryTexts.block, enabled: graphEnabled };
           exportData['knowledge_graph_may_be_incomplete'] = true;
           process.stderr.write('⚠ /api/export: knowledge graph read failed — exported empty and marked incomplete\n');
         }
@@ -15058,11 +15064,12 @@ export class LynoxHTTPApi {
             relationships: held.relationships,
             relationships_note: EXPORT_RELATIONSHIPS_NOTE,
             stats: held.stats,
+            memories: memoryTexts.block,
             enabled: graphEnabled,
           };
-          exportData['knowledge_graph_may_be_incomplete'] = held.mayBeIncomplete;
+          exportData['knowledge_graph_may_be_incomplete'] = held.mayBeIncomplete || memoryTexts.mayBeIncomplete;
         } catch {
-          exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
+          exportData['knowledge_graph'] = { entities: [], relationships: [], memories: memoryTexts.block, enabled: graphEnabled };
           exportData['knowledge_graph_may_be_incomplete'] = true;
           process.stderr.write('⚠ /api/export: held knowledge graph read failed — exported empty and marked incomplete\n');
         }
@@ -15311,8 +15318,8 @@ export class LynoxHTTPApi {
           setAside = new Set(['history.db', 'engine.db', 'datastore.db', 'agent-memory.db']);
         }
         if (setAside.has('history.db')) exportData['threads_may_be_incomplete'] = true;
-        // A set-aside engine.db is marked whatever the subject graph: it still holds remembered
-        // texts, and while those are stored the block is not the whole of the graph.
+        // A set-aside store is marked whatever the subject graph: the remembered texts it still
+        // holds are not read from it, so the block is not the whole of the graph.
         if (setAside.has('agent-memory.db') || setAside.has('engine.db')) {
           exportData['knowledge_graph_may_be_incomplete'] = true;
         }

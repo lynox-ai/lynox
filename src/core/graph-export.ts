@@ -4,11 +4,10 @@ import type { EntityRecord, KnowledgeGraphStats, RelationRecord } from '../types
 import type { EngineDb } from './engine-db.js';
 import {
   AGENT_MEMORY_SCHEMA_VERSION, activeMemoryCountOn, agentMemoryVersionOn, entityCountOn,
-  entityRelationsForExportOn, listEntitiesOn, memoryTextRowsOn, relationCountOn,
+  entityRelationsForExportOn, listEntitiesOn, relationCountOn,
 } from './agent-memory-db.js';
 import { toEntityRecord } from './entity-resolver.js';
 import { EXPORT_RELATIONS_PER_ENTITY, legacyRelationForExport, listSubjectEntitiesOn, relRowToRelationRecord } from './knowledge-layer.js';
-import { countEngineMemoryRows } from './memory-graph-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import { ENTITY_MAPPABLE_SUBJECT_KINDS, SubjectStore } from './subject-store.js';
 
@@ -76,7 +75,7 @@ export interface HeldGraph {
   relationships: ExportRelation[];
   stats: KnowledgeGraphStats;
   /** Not the whole of what is held: a read failed or was capped, the file's schema is not this
-   * build's, or remembered texts are stored that the block does not carry. */
+   * build's, or the subject graph is on and engine.db is not open. */
   mayBeIncomplete: boolean;
 }
 
@@ -96,8 +95,9 @@ const NO_STATS: KnowledgeGraphStats = { memoryCount: 0, entityCount: 0, relation
  *
  * A file stamped with an older schema (the graph was off while an update ran, so nothing migrated
  * it) is read and marked. One stamped with a newer schema is not guessed at: its half is left
- * unread and the block marked. A count that fails (remembered texts, memories) marks the block and
- * keeps what was read; any other failure gives an empty block, marked.
+ * unread and the block marked. A memory count that fails marks the block and keeps what was read;
+ * any other failure gives an empty block, marked. The remembered texts themselves are read by
+ * {@link readMemoryTextsForExport}.
  */
 export async function readHeldGraph(opts: {
   agentMemoryFile: string;
@@ -120,16 +120,8 @@ export async function readHeldGraph(opts: {
       }
     }
     const db = legacy;
-    // Remembered texts are held but not in this block (as on the layer's path). A missing
-    // engine.db, or a count that fails, cannot show there are none; neither empties the block.
-    let textsHeld = true;
-    try {
-      textsHeld = opts.engineDb === null
-        || countEngineMemoryRows(opts.engineDb) > 0
-        || (db !== null && memoryTextRowsOn(db) > 0);
-    } catch {
-      process.stderr.write('⚠ /api/export: remembered texts could not be counted — knowledge graph marked incomplete\n');
-    }
+    // With the subject graph on, what only engine.db holds cannot be read without it.
+    if (opts.subjectGraph && !opts.engineDb) incomplete = true;
     let memoryCount = 0;
     try {
       memoryCount = db ? activeMemoryCountOn(db) : 0;
@@ -155,7 +147,7 @@ export async function readHeldGraph(opts: {
       };
     } else {
       // With the subject graph on and engine.db not open, what only engine.db holds is not read;
-      // the block is marked by `textsHeld`, which a missing engine.db always sets.
+      // the block is marked above.
       if (db) {
         source = {
           listEntities: (o) => listEntitiesOn(db, o).map(toEntityRecord),
@@ -172,7 +164,7 @@ export async function readHeldGraph(opts: {
       entities: collected.entities,
       relationships: collected.relationships,
       stats,
-      mayBeIncomplete: incomplete || collected.truncated || collected.relationCapHit || textsHeld,
+      mayBeIncomplete: incomplete || collected.truncated || collected.relationCapHit,
     };
   } catch {
     process.stderr.write('⚠ /api/export: held knowledge graph could not be read — exported empty and marked incomplete\n');
@@ -180,4 +172,115 @@ export async function readHeldGraph(opts: {
   } finally {
     try { legacy?.close(); } catch { /* ignore */ }
   }
+}
+
+/** What a remembered text that could not be decrypted reads as in the export. */
+export const UNREADABLE_MEMORY_TEXT = '[not readable: stored encrypted and could not be decrypted]';
+
+/** Rows read per table. A table that returns more is cut here and marks the block. */
+export const MEMORY_TEXT_EXPORT_CAP = 20_000;
+
+type ExportRow = Record<string, unknown>;
+
+export interface HeldMemoryTexts {
+  /** The legacy store: each remembered text, and which entity it mentions. */
+  'agent-memory.db': { memories: ExportRow[]; mentions: ExportRow[] };
+  /** The subject-graph store: each remembered text and which subject it is about; with the
+   * subject graph off also the relations between subjects, which the graph block then leaves out. */
+  'engine.db': { memories: ExportRow[]; memory_subjects: ExportRow[]; relationships?: ExportRow[] };
+  /** Not the whole of what is held: a read failed or was cut at the cap, a text could not be
+   * decrypted, agent-memory.db has a newer schema than this build, or engine.db is not open. */
+  mayBeIncomplete: boolean;
+}
+
+/**
+ * Every remembered text both stores hold, and what links it to the graph, for the data export.
+ * Active or not: a text that was replaced or retired is still stored, and Art. 15 asks what is
+ * held. Each row carries its stored columns except the embedding (numbers, no content of their
+ * own). Every text, and a relationship's free-text description, goes through `mask`, as the
+ * other blocks do; engine.db texts are decrypted first, and one that cannot be is written as
+ * {@link UNREADABLE_MEMORY_TEXT}, never as ciphertext.
+ *
+ * agent-memory.db is opened read-only, as {@link readHeldGraph} opens it and for the same
+ * reasons; one stamped with a newer schema is left unread. engine.db is read on the engine's
+ * own handle. Each table is read on its own: one that fails is left empty and marks the block,
+ * the others are still read.
+ */
+export function readMemoryTextsForExport(opts: {
+  agentMemoryFile: string;
+  engineDb: EngineDb | null;
+  subjectGraph: boolean;
+  mask: (text: string) => string;
+  /** Rows per table; {@link MEMORY_TEXT_EXPORT_CAP} unless a test sets a smaller one. */
+  cap?: number;
+}): HeldMemoryTexts {
+  const cap = opts.cap ?? MEMORY_TEXT_EXPORT_CAP;
+  let incomplete = false;
+  const read = (db: Database.Database, sql: string, label: string): ExportRow[] => {
+    try {
+      const rows = db.prepare(`${sql} LIMIT ?`).all(cap + 1) as ExportRow[];
+      if (rows.length > cap) {
+        incomplete = true;
+        process.stderr.write(`⚠ /api/export: ${label} hit the ${String(cap)}-row cap — knowledge graph marked incomplete\n`);
+        rows.length = cap;
+      }
+      return rows;
+    } catch {
+      incomplete = true;
+      process.stderr.write(`⚠ /api/export: ${label} could not be read — knowledge graph marked incomplete\n`);
+      return [];
+    }
+  };
+  const withoutEmbedding = (row: ExportRow): ExportRow => {
+    const { embedding: _embedding, ...rest } = row;
+    return rest;
+  };
+
+  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [] };
+  let legacy: Database.Database | null = null;
+  try {
+    if (existsSync(opts.agentMemoryFile)) {
+      legacy = new Database(opts.agentMemoryFile, { readonly: true, fileMustExist: true });
+      if (agentMemoryVersionOn(legacy) > AGENT_MEMORY_SCHEMA_VERSION) {
+        incomplete = true;
+      } else {
+        legacyHalf.memories = read(legacy, 'SELECT * FROM memories ORDER BY created_at, id', 'agent-memory.db memories')
+          .map(r => {
+            const row = withoutEmbedding(r);
+            return typeof row['text'] === 'string' ? { ...row, text: opts.mask(row['text']) } : row;
+          });
+        legacyHalf.mentions = read(legacy, 'SELECT * FROM mentions ORDER BY created_at, memory_id, entity_id', 'agent-memory.db mentions');
+      }
+    }
+  } catch {
+    incomplete = true;
+    process.stderr.write('⚠ /api/export: agent-memory.db could not be opened for its remembered texts — knowledge graph marked incomplete\n');
+  } finally {
+    try { legacy?.close(); } catch { /* ignore */ }
+  }
+
+  const engineHalf: HeldMemoryTexts['engine.db'] = { memories: [], memory_subjects: [] };
+  if (opts.engineDb) {
+    const engineDb = opts.engineDb;
+    const db = engineDb.getDb();
+    engineHalf.memories = read(db, 'SELECT * FROM memories ORDER BY created_at, id', 'engine.db memories')
+      .map(r => {
+        const row = withoutEmbedding(r);
+        if (typeof row['text'] !== 'string') return row;
+        let plain: string | null = null;
+        try { plain = engineDb.tryDec(row['text']); } catch { plain = null; }
+        if (plain === null) { incomplete = true; return { ...row, text: UNREADABLE_MEMORY_TEXT }; }
+        return { ...row, text: opts.mask(plain) };
+      });
+    engineHalf.memory_subjects = read(db, 'SELECT * FROM memory_subjects ORDER BY created_at, memory_id, subject_id', 'engine.db memory_subjects');
+    if (!opts.subjectGraph) {
+      engineHalf.relationships = read(db, 'SELECT * FROM relationships ORDER BY created_at, id', 'engine.db relationships')
+        .map(r => typeof r['description'] === 'string' ? { ...r, description: opts.mask(r['description']) } : r);
+    }
+  } else {
+    // No engine.db: what it holds was not read, and cannot be shown to be nothing.
+    incomplete = true;
+  }
+
+  return { 'agent-memory.db': legacyHalf, 'engine.db': engineHalf, mayBeIncomplete: incomplete };
 }

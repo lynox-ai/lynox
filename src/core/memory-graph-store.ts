@@ -124,15 +124,6 @@ export interface TierDivergenceReport {
  * Written ADDITIVELY behind `subject_graph_enabled`; nothing reads engine.db
  * memories until the read-migration (S1d) + the memory sprint (S5).
  */
-/**
- * Every row of the engine.db `memories` table, active or not. Each carries a remembered text, and
- * the data export does not carry these yet, so it reads a count above zero as "not the whole of
- * what is held". Read on the engine's own handle; it writes nothing.
- */
-export function countEngineMemoryRows(engine: EngineDb): number {
-  return (engine.getDb().prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n;
-}
-
 export class MemoryGraphStore {
   private readonly db: Database.Database;
   /** Installed by the owner that can see every reference; null = no reap. */

@@ -375,11 +375,6 @@ export function activeMemoryCountOn(db: Database.Database): number {
   return (db.prepare('SELECT COUNT(*) as cnt FROM memories WHERE is_active = 1').get() as { cnt: number }).cnt;
 }
 
-/** Every row of `memories` (active or not) plus every row of `mentions`. */
-export function memoryTextRowsOn(db: Database.Database): number {
-  return (db.prepare('SELECT (SELECT COUNT(*) FROM memories) + (SELECT COUNT(*) FROM mentions) AS n').get() as { n: number }).n;
-}
-
 /** An entity's relations for the data export, those of a retired source included and marked. */
 export function entityRelationsForExportOn(db: Database.Database, entityId: string, limit = 50): Array<RelationRow & { source_deleted: 0 | 1 }> {
   const safeLimit = Math.max(1, Math.min(limit, 200));
@@ -1210,15 +1205,6 @@ export class AgentMemoryDb {
 
   getActiveMemoryCount(): number {
     return activeMemoryCountOn(this.db);
-  }
-
-  /**
-   * Every stored remembered text and every mention of an entity in one, active or not: the rows
-   * of `memories` plus the rows of `mentions`. The data export does not carry these texts yet, so
-   * it reads a count above zero as "the graph block is not the whole of what is held".
-   */
-  countMemoryTextRows(): number {
-    return memoryTextRowsOn(this.db);
   }
 
   /** Cosine similarity search over memory embeddings with in-place scoring. */
