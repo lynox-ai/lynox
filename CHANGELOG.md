@@ -53,6 +53,10 @@
   those blocks came out empty and marked complete, as if the account held no
   contacts, deals, tables, chats or memory entries. A client that reads the
   flags only as "a cap was reached" also sees them on such an instance.
+- The person erasure's done line uses the singular for a count of one, leaves
+  out a count of zero, and says "no entries and no memories" when both are zero.
+  On a narrow screen the subject panel is now opaque, so the page behind it no
+  longer shows through.
 
 ## 2.18.0 — 2026-11-17
 
