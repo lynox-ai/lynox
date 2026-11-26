@@ -1185,7 +1185,7 @@
 		     only the steps scroll between them, so after "changed" the line and the marked step are
 		     both in sight, and the buttons too. -->
 		<div data-dialog-frame class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] flex flex-col">
-			<div data-dialog-head class="shrink-0">
+			<div data-dialog-head class="shrink-0 max-h-[40vh] overflow-y-auto">
 			<!-- Where the owner approves the steps: a name a person with access gave is set apart, whole. -->
 			<h2 bind:this={stampHeading} tabindex="-1" class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
 			{#if stampLine === 'steps_changed'}

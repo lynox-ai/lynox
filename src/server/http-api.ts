@@ -367,15 +367,16 @@ function stampShown(planned: PlannedPipeline): {
 }
 
 /** Where a workflow may run, as the stamp says it: `anywhere` is a chat, a schedule and an agent in
- *  the background; `chat_and_schedule` a chat and a schedule; `chat` a chat and no schedule. */
+ *  the background; `chat_and_schedule` a chat and a schedule; `chat` a chat and an agent in the
+ *  background, and no schedule. */
 type StampRuns = 'anywhere' | 'chat_and_schedule' | 'chat';
 
 /**
  * Read from the rule every planning surface asks (`isSchedulableWorkflow`): an autonomous workflow
  * runs from a chat, on a schedule and from a background agent's `run_workflow`; an interactive one
  * that asks only through `ask_user` on a schedule too, where its questions reach the owner, but a
- * background agent's call refuses it (`run_workflow`); any other runs from a chat and no schedule.
- * That last kind says nothing about a background agent: whether one may start it is still open.
+ * background agent's call refuses it (`run_workflow`); any other runs from a chat and no schedule,
+ * and a background agent's `run_workflow` starts it once its stamp holds, as it does today.
  */
 function runsFrom(planned: PlannedPipeline): StampRuns {
   if (planned.mode === 'autonomous') return 'anywhere';

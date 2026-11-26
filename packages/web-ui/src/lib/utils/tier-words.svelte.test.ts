@@ -15,10 +15,13 @@ describe('the names of a tier, a thoroughness and a thinking setting', () => {
 		expect(['fast', 'balanced', 'deep'].map((v) => tierName(v))).toEqual(['Schnell', 'Ausgewogen', 'Tief']);
 		setLocale('en');
 		expect(['fast', 'balanced', 'deep'].map((v) => tierName(v))).toEqual(['Fast', 'Balanced', 'Deep']);
-		for (const id of ['claude-sonnet-4-5', 'Fast', 'fast ', '']) {
+		for (const id of ['claude-sonnet-4-5', 'Fast', 'fast ', 'Ausgewogen', '']) {
 			expect(tierName(id), id).toBeNull();
 			expect(isModelTier(id), id).toBe(false);
 		}
+		// An older alias runs as its tier, so it carries that tier's name.
+		setLocale('de');
+		expect(['haiku', 'sonnet', 'opus'].map((v) => tierName(v))).toEqual(['Schnell', 'Ausgewogen', 'Tief']);
 	});
 
 	it('names every thoroughness and every thinking setting a stamp can carry, short, in both languages', () => {

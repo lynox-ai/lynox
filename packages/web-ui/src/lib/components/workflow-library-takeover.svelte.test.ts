@@ -414,7 +414,7 @@ describe('the dialog', () => {
 		for (const c of ['flex', 'flex-col', 'max-h-[85vh]']) expect(frame.classList, c).toContain(c);
 		expect(frame.classList).not.toContain('overflow-y-auto');
 		for (const c of ['min-h-0', 'flex-1', 'overflow-y-auto']) expect(body!.classList, c).toContain(c);
-		expect(head!.classList).toContain('shrink-0');
+		for (const c of ['shrink-0', 'max-h-[40vh]', 'overflow-y-auto']) expect(head!.classList, c).toContain(c);
 		expect(foot!.classList).toContain('shrink-0');
 		expect(head!.contains(d.querySelector('#workflow-takeover-title'))).toBe(true);
 		expect(head!.contains(d.querySelector('[data-testid="takeover-changed"]'))).toBe(true);

@@ -182,8 +182,10 @@ export function parseStampPreview(body: unknown): StampPreview | null {
   const mode = optStr(body['mode']);
   const onFailure = optStr(body['onFailure']);
   const stampedAt = optStr(body['stampedAt']);
-  const runs = optOneOf(body['runs'], STAMP_RUNS);
-  if (mode === BAD || onFailure === BAD || stampedAt === BAD || runs === BAD) return null;
+  // Where it may run only informs: a value this view does not know shows no line, and the preview stands.
+  const runsRead = optOneOf(body['runs'], STAMP_RUNS);
+  const runs = runsRead === BAD ? null : runsRead;
+  if (mode === BAD || onFailure === BAD || stampedAt === BAD) return null;
   const changedBy = body['changedBy'];
   return {
     expect: body['expect'],

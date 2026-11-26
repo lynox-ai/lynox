@@ -3039,7 +3039,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.stamp.runs': { de: 'Läuft', en: 'Runs' },
 	'workflow_library.stamp.runs_anywhere': { de: 'aus dem Chat, geplant und von einem Agenten im Hintergrund', en: 'from a chat, on a schedule and by an agent in the background' },
 	'workflow_library.stamp.runs_chat_and_schedule': { de: 'aus dem Chat und geplant', en: 'from a chat and on a schedule' },
-	'workflow_library.stamp.runs_chat': { de: 'aus dem Chat, nicht geplant', en: 'from a chat, not on a schedule' },
+	'workflow_library.stamp.runs_chat': { de: 'aus dem Chat und von einem Agenten im Hintergrund, nicht geplant', en: 'from a chat and by an agent in the background, not on a schedule' },
 	'workflow_library.stamp.on_failure': { de: 'Bei Fehler', en: 'On failure' },
 	'workflow_library.stamp.mode_interactive': { de: 'Interaktiv', en: 'Interactive' },
 	'workflow_library.stamp.mode_autonomous': { de: 'Autonom', en: 'Autonomous' },

@@ -1,5 +1,5 @@
 import { t } from '../i18n.svelte.js';
-import type { ModelTier } from '../contract/vocab.js';
+import { normalizeTier, type ModelTier } from '../contract/vocab.js';
 import type { StampEffort, StampThinking } from './workflow-stamp.js';
 
 /**
@@ -14,9 +14,11 @@ export function isModelTier(v: string): v is ModelTier {
 	return (TIERS as readonly string[]).includes(v);
 }
 
-/** A tier's name, or null for anything that is not a tier (a model id), which is shown as it is. */
+/** A tier's name, or null for anything that is not a tier (a model id), which is shown as it is. An
+ *  older alias (`haiku`, `sonnet`, `opus`) runs as its tier (`normalizeTier`), so it is named as that. */
 export function tierName(v: string): string | null {
-	return isModelTier(v) ? t(`llm.tier.${v}`) : null;
+	const tier = normalizeTier(v);
+	return tier === undefined ? null : t(`llm.tier.${tier}`);
 }
 
 export function effortName(e: StampEffort): string {

@@ -9,6 +9,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
 	import MarkedLine from './MarkedLine.svelte';
+	import { tierName } from '../utils/tier-words.js';
 	import WatchAddress from './WatchAddress.svelte';
 	import WholeValue from './WholeValue.svelte';
 	import { setApart } from '../utils/plan-takeover.js';
@@ -161,7 +162,7 @@
 			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {markHidden(cronText(s.schedule_cron))}</p>
 		{/if}
 		{#if s.model_tier}
-			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {markHidden(s.model_tier)}</p>
+			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {tierName(s.model_tier) ?? markHidden(s.model_tier)}</p>
 		{/if}
 		{#if sentence}
 			<!-- One connection per line: in a run of boxes, where one ends and the next begins is lost. -->

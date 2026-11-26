@@ -821,7 +821,8 @@ describe('the view keeps its head and its buttons in sight while the steps scrol
 		for (const c of ['flex', 'flex-col', 'max-h-[85vh]']) expect(frame.classList, c).toContain(c);
 		expect(frame.classList).not.toContain('overflow-y-auto');
 		for (const c of ['min-h-0', 'flex-1', 'overflow-y-auto']) expect(body!.classList, c).toContain(c);
-		expect(head!.classList).toContain('shrink-0');
+		// The head may not take the body's place: past its bound it scrolls on its own.
+		for (const c of ['shrink-0', 'max-h-[40vh]', 'overflow-y-auto']) expect(head!.classList, c).toContain(c);
 		expect(foot!.classList).toContain('shrink-0');
 		expect(head!.contains(target.querySelector('[data-stamp-review-title]'))).toBe(true);
 		expect(head!.contains(q('stamp-line'))).toBe(true);
@@ -887,18 +888,19 @@ describe('the stamp says where the workflow may run, from the rule a schedule as
 		expect((await runsLine('chat_and_schedule'))?.textContent).toBe('aus dem Chat und geplant');
 	});
 
-	it('any other interactive one: from a chat, not on a schedule, and no word on a background agent', async () => {
-		const line = await runsLine('chat');
-		expect(line?.textContent).toBe('aus dem Chat, nicht geplant');
-		expect(line?.textContent).not.toContain('Hintergrund');
+	it('any other interactive one: from a chat and by an agent in the background, not on a schedule', async () => {
+		// A background agent's run_workflow starts it once the stamp holds, so the line says so.
+		expect((await runsLine('chat'))?.textContent).toBe('aus dem Chat und von einem Agenten im Hintergrund, nicht geplant');
 	});
 
-	it('an engine that sends no such field shows no line, and a value it does not know refuses the preview', async () => {
+	it('an engine that sends no such field, or a value the view does not know, shows no line, and the preview stands', async () => {
 		expect(await runsLine(undefined)).toBeNull();
+		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
 		if (component) unmount(component);
 		component = undefined;
 		target.innerHTML = '';
 		expect(await runsLine('everywhere')).toBeNull();
-		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(true);
+		expect(q('stamp-step')).not.toBeNull();
+		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
 	});
 });
