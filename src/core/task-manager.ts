@@ -8,13 +8,34 @@ import { isValidCron, nextOccurrence } from './cron-parser.js';
 import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
+import { assertHostPolicy, type HostPolicyContext } from './network-guard.js';
 import { isHandRunOf } from './hand-run-door.js';
-import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, ownedBy, principalTag, type RequestPrincipal } from './request-principal.js';
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
 import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
 import { stripHidden } from './hidden-text.js';
+import { EngineLessRefused } from './engine-less-refusal.js';
+import { watchPolicyWordsEn, type WatchPolicyReason } from './watch-policy-reason.js';
+import { parseWatchFetchCause, type WatchFetchCause } from './watch-fetch-cause.js';
+
+/**
+ * The start of the title the engine gave a workflow scheduled without one, before it stored the
+ * workflow's name alone: such plans still carry it. Read only by {@link titleIsWorkflowName}.
+ */
+export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
+
+/**
+ * Whether a plan's title is the name of the workflow it runs: as the engine titles a workflow
+ * scheduled without a title (the name alone, or, on plans from before, the prefix and the name).
+ * The view then puts its own words in front of the name in the reader's language. A title that
+ * starts with the prefix but goes on with anything else is not the name, and stays whole.
+ */
+export function titleIsWorkflowName(title: string, workflowName: string): boolean {
+  if (workflowName === '') return false;
+  return title === workflowName || title === `${SCHEDULED_TITLE_PREFIX}${workflowName}`;
+}
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -95,6 +116,41 @@ function refuseForeignTodo(task: TaskRecord, by: RequestPrincipal | undefined, w
 function refuseBulkTrigger(trigger: TriggerRecord): void {
   if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
 }
+
+/** The `task_update` fields a scheduled plan can change, by the names the tool takes. A test
+ *  holds this to the tool's schema, so a field added there fails until it is named here or listed
+ *  as a to-do's. The refusal below names them, so the model is told what it can do instead. A
+ *  plan started by a webhook takes no run time or schedule (`WebhookTriggerScheduleError`). */
+export const PLAN_UPDATE_FIELDS: readonly string[] = ['title', 'description', 'status', 'assignee', 'run_at', 'schedule'];
+const WEBHOOK_PLAN_UPDATE_FIELDS: readonly string[] = PLAN_UPDATE_FIELDS.filter((f) => f !== 'run_at' && f !== 'schedule');
+
+/**
+ * A change of a trigger that names only fields a trigger does not carry (a priority, a due date,
+ * tags: those are a to-do's). Nothing would be written, so it is refused rather than answered
+ * as a missing row.
+ */
+export class TriggerFieldsNotCarriedError extends Error {
+  /** What the model reads: the refusal plus what it can do instead, in the tool's field names
+   *  (U-284). An API client reads only `message`: its field names are not the tool's. */
+  readonly forModel: string;
+  constructor(readonly fields: readonly string[], webhook = false) {
+    super(fields.length > 0
+      ? `This is a scheduled plan, not a to-do: it has no ${fields.join(', ')}. Nothing was changed.`
+      : 'This change names no field of a scheduled plan. Nothing was changed.');
+    const can = `A scheduled plan can change ${(webhook ? WEBHOOK_PLAN_UPDATE_FIELDS : PLAN_UPDATE_FIELDS).join(', ')}.`;
+    this.forModel = fields.length > 0
+      ? `${this.message} ${can} Tell the user that ${fields.join(', ')} ${fields.length === 1 ? 'belongs' : 'belong'} to to-dos rather than trying again.`
+      : `${this.message} ${can}`;
+    this.name = 'TriggerFieldsNotCarriedError';
+  }
+}
+
+/**
+ * Called by `update` and `complete` with the trigger they are about to write, after every check
+ * they make and before the write. A request marks its change here (`markEditedBy`), so a change
+ * the manager refuses leaves no mark and takes no stamp off.
+ */
+export type BeforeTriggerWrite = (trigger: TriggerRecord) => void;
 
 /** A schedule on a `webhook` trigger: it would make the trigger due without an event. */
 export class WebhookTriggerScheduleError extends Error {
@@ -262,6 +318,26 @@ export function createsTrigger(params: Pick<TaskCreateParams, 'assignee' | 'next
 export class TaskManager {
   constructor(private history: RunHistory) {}
 
+  /** Set by an engine that started without engine.db: see {@link refuseTaskChangesWithoutStore}. */
+  private changesRefused = false;
+
+  /**
+   * Called by an engine that started without engine.db. A to-do is then written to history.db
+   * only. With the subject graph on, the next boot with engine.db reads its to-dos from engine.db,
+   * and the copy that would put the change there runs once per engine.db; with it off, the change
+   * is read, but missing from engine.db once the graph is switched on. So a change from here on is
+   * refused with a plain reason (`EngineLessRefused`) instead, whichever the flag. Triggers
+   * refuse on their own: their store is engine.db. A manager never told this writes as before.
+   */
+  refuseTaskChangesWithoutStore(): void {
+    this.changesRefused = true;
+  }
+
+  /** Throws the refusal when this manager refuses to-do changes; before anything is written. */
+  private refuseIfEngineLess(): void {
+    if (this.changesRefused) throw new EngineLessRefused('task');
+  }
+
   /**
    * Look up a USER-TODO by id (or id-prefix, for UX convenience). The optional
    * `scopeFilter` folds the ownership check into the same SQL read used by
@@ -279,6 +355,7 @@ export class TaskManager {
   }
 
   create(params: TaskCreateParams): TaskRecord | TriggerRecord {
+    if (!createsTrigger(params)) this.refuseIfEngineLess();
     const id = randomUUID().slice(0, 8);
 
     if (params.parentTaskId) {
@@ -377,7 +454,7 @@ export class TaskManager {
       dueDate: params.dueDate ? params.dueDate.slice(0, 10) : undefined,
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
-      ...(isMandateTag(params.createdBy) ? { createdBy: params.createdBy } : {}),
+      ...(isMandateTag(params.createdBy) || params.createdBy === principalTag(OWNER_PRINCIPAL) ? { createdBy: params.createdBy } : {}),
     });
 
     return this.history.getTask(id)!;
@@ -456,8 +533,9 @@ export class TaskManager {
   }
 
   /** @param by The request's principal, when a request completes it: a mandate completes only
-   *  a to-do of its own, and only its own subtasks with it. Absent for the engine. */
-  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
+   *  a to-do of its own, and only its own subtasks with it. Absent for the engine.
+   *  @param beforeTriggerWrite See {@link BeforeTriggerWrite}; not called for a to-do. */
+  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal, beforeTriggerWrite?: BeforeTriggerWrite): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
     // An AGENT-TRIGGER has no subtask cascade — just flip its status. Carry
@@ -467,6 +545,7 @@ export class TaskManager {
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
       refuseBulkTrigger(trigger);
+      beforeTriggerWrite?.(trigger);
       const ok = this.history.updateTrigger(trigger.id, { status: 'completed' }, scopeOpts);
       if (!ok) return undefined;
       return this.history.getTrigger(trigger.id, scopeOpts);
@@ -474,6 +553,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
     refuseForeignTodo(task, by, 'complete');
 
     const now = new Date().toISOString();
@@ -508,6 +588,7 @@ export class TaskManager {
    * legacy row is gone.
    */
   deleteTodo(id: string, by?: RequestPrincipal): boolean {
+    this.refuseIfEngineLess();
     if (by === undefined || isOwnerPrincipal(by)) return this.history.deleteTask(id);
     const { task, descendants } = this.history.getTaskDeleteSet(id);
     if (task === undefined) return false;
@@ -531,14 +612,16 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
 
     this.history.updateTask(task.id, { status: 'open', completedAt: '' }, scopeOpts);
     return this.history.getTask(task.id, scopeOpts);
   }
 
   /** @param by The request's principal, when a request changes it: a mandate changes only a
-   *  to-do of its own. Absent for the engine. */
-  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
+   *  to-do of its own. Absent for the engine.
+   *  @param beforeTriggerWrite See {@link BeforeTriggerWrite}; not called for a to-do. */
+  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal, beforeTriggerWrite?: BeforeTriggerWrite): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
     if (params.status && !VALID_STATUSES.has(params.status)) {
@@ -626,6 +709,17 @@ export class TaskManager {
         }
       }
 
+      // Only these reach a column (`trigger-store.ts` › `updateFields`; an assignee counts as a
+      // touch there). Without one the write would set nothing and its `false` would read as
+      // a missing row.
+      const { title, description, status, assignee, nextRunAt, scheduleCron, modelTier } = triggerUpdate;
+      if ([title, description, status, assignee, nextRunAt, scheduleCron, modelTier].every((v) => v === undefined)) {
+        const named = ([['priority', params.priority], ['due date', params.dueDate], ['tags', params.tags]] as const)
+          .filter(([, v]) => v !== undefined).map(([name]) => name);
+        throw new TriggerFieldsNotCarriedError(named, trigger.source === 'webhook');
+      }
+
+      beforeTriggerWrite?.(trigger);
       const ok = this.history.updateTrigger(trigger.id, triggerUpdate, scopeOpts);
       if (!ok) return undefined;
       return this.history.getTrigger(trigger.id, scopeOpts);
@@ -633,6 +727,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
     refuseForeignTodo(task, by, 'change');
 
     const updateParams: {
@@ -922,6 +1017,14 @@ export class TaskManager {
     return this.history.markTriggerEditedBy(trigger.id, editor, clearStamp);
   }
 
+  /** A run's change of a trigger under the owner's principal: see `TriggerStore.markEditedByRun`. */
+  markEditedByRun(id: string, runTag: string): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (!trigger) return false;
+    refuseBulkTrigger(trigger);
+    return this.history.markTriggerEditedByRun(trigger.id, runTag);
+  }
+
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */
   createWatch(params: TaskCreateParams & {
     watchUrl: string;
@@ -1086,7 +1189,10 @@ export class TaskManager {
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined; cause?: RunCause | undefined }): boolean {
+    // Written with the status on every run end, cleared when this run has none: a cause is never
+    // older than the status it explains.
+    const lastRunCause = opts?.cause === undefined ? null : JSON.stringify(opts.cause);
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
@@ -1121,6 +1227,7 @@ export class TaskManager {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,
         lastRunStatus: status,
+        lastRunCause,
         nextRunAt: undefined,
         retryCount: undefined,
       });
@@ -1216,6 +1323,7 @@ export class TaskManager {
       lastRunAt: now.toISOString(),
       lastRunResult: truncatedResult,
       lastRunStatus: status,
+      lastRunCause,
       nextRunAt,
       retryCount,
     });
@@ -1231,6 +1339,99 @@ export class TaskManager {
 }
 
 const MAX_RUN_RESULT_CHARS = 10_000;
+
+/**
+ * Why a trigger's last run failed, as a cause lynox knows: stored with the run (`last_run_cause`)
+ * and never read from its result, which can carry a model's reply or a page's text. Carries no
+ * string of its own.
+ */
+export type RunCause = { kind: 'watch_fetch'; cause: WatchFetchCause };
+
+/**
+ * Why a trigger's run does not do its work, for the Triggers view (`blocked_reason` in
+ * `GET /api/triggers`): a cause, never text, which the view says in its own language. Two
+ * meanings in one field: why the next run is held now (a watch the network policy refuses,
+ * read at load), or why the last run failed (a stored {@link RunCause}). The first wins.
+ */
+export type BlockedReason = { kind: 'watch_allow_list'; host: string } | { kind: 'watch_deny_all' } | { kind: 'watch_https' } | RunCause;
+
+/** The run statuses a stored cause explains; after any other the cause is not shown. */
+const CAUSE_SHOWN_AFTER: ReadonlySet<string> = new Set(['failed']);
+
+/**
+ * The stored cause of a trigger's last run, or null: none stored, the last run did not fail, or
+ * the column holds anything but a cause lynox writes (`parseWatchFetchCause`).
+ */
+export function storedRunCause(trigger: { readonly last_run_status?: string | undefined; readonly last_run_cause?: string | undefined }): RunCause | null {
+  if (trigger.last_run_cause === undefined || !CAUSE_SHOWN_AFTER.has(trigger.last_run_status ?? '')) return null;
+  let value: unknown;
+  try { value = JSON.parse(trigger.last_run_cause); } catch { return null; }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || (value as { kind?: unknown }).kind !== 'watch_fetch' || !Object.hasOwn(value, 'cause')) return null;
+  const cause = parseWatchFetchCause((value as { cause?: unknown }).cause);
+  return cause === null ? null : { kind: 'watch_fetch', cause };
+}
+
+const DENY_ALL_REFUSAL = 'Blocked: network access denied for this tool (network_policy=deny-all)';
+const ALLOW_LIST_REFUSAL_START = 'Blocked: hostname "';
+const ALLOW_LIST_REFUSAL_END = '" not in network allow-list';
+const HTTPS_REFUSAL_START = 'Blocked: HTTP not allowed';
+
+/**
+ * Why `network_policy` keeps a watch from reading `url`, or null when it may. A watch is a
+ * credential-free read, so it gets the `discovery` surface, as every other such read: under
+ * `allow-list` a host outside the list is refused, under `deny-all` every host, under `guarded`
+ * and `allow-all` it passes. Asked at creation and before every poll, so a watch the policy forbids
+ * is neither created nor read, and one created before the policy changed stops being read.
+ * The reason is told by the whole refusal, never by a word in it, since a host name can carry one.
+ */
+export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefined): { why: string; wayOut: string; reason: WatchPolicyReason; alsoHttps?: true; shown: BlockedReason | null; privateAddress?: true } | null {
+  const refused = (reason: WatchPolicyReason, shown: BlockedReason | null, extra: { alsoHttps?: true; privateAddress?: true } = {}) =>
+    ({ ...watchPolicyWordsEn(reason, extra.alsoHttps === true), reason, ...(extra.alsoHttps ? { alsoHttps: true as const } : {}), shown, ...(extra.privateAddress ? { privateAddress: true as const } : {}) });
+  try {
+    assertHostPolicy(url, { surface: 'discovery' }, ctx);
+    return null;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith('Blocked: unsupported protocol') || err instanceof TypeError) return refused({ kind: 'protocol' }, null);
+    // enforce_https is checked first; when the policy would refuse the https address too, that
+    // reason is the one to tell, since switching to https alone would not help, and the way out
+    // names both steps.
+    if (message.startsWith(HTTPS_REFUSAL_START) && /^http:/i.test(url)) {
+      const deeper = watchPolicyRefusal(`https:${url.slice('http:'.length)}`, ctx);
+      if (deeper !== null && deeper.shown !== null) return refused(deeper.reason, deeper.shown, { alsoHttps: true });
+      // Refused at https for a reason the view has no kind for (a private address, a policy this
+      // code does not know): that reason, told as is.
+      if (deeper !== null) return deeper;
+    }
+    if (message === DENY_ALL_REFUSAL) return refused({ kind: 'deny_all' }, { kind: 'watch_deny_all' });
+    if (message.startsWith(ALLOW_LIST_REFUSAL_START) && message.endsWith(ALLOW_LIST_REFUSAL_END)) {
+      // The host as the allow-list compared it (an IPv6 literal without its brackets), so an
+      // operator who copies it adds the entry that matches.
+      const host = message.slice(ALLOW_LIST_REFUSAL_START.length, -ALLOW_LIST_REFUSAL_END.length);
+      return refused({ kind: 'allow_list', host }, { kind: 'watch_allow_list', host });
+    }
+    if (message.startsWith(HTTPS_REFUSAL_START)) return refused({ kind: 'https' }, { kind: 'watch_https' });
+    // A private address literal (the host check resolves no name): the poll tells it as lynox's
+    // own sentence, as a fetch refused for the same reason (`watch-fetch-cause.ts`).
+    const privateAddress = message.startsWith('Blocked: private IP address "');
+    return refused({ kind: 'other', detail: message.replace(/^Blocked:\s*/, '') }, null, privateAddress ? { privateAddress: true } : {});
+  }
+}
+
+/**
+ * What the Triggers view says about a watch the policy keeps from its page, from the policy as it
+ * is now (the poll asks the same): null for a trigger that is no watch, a watch whose page is read,
+ * or one refused for a reason only the poll knows.
+ */
+export function watchRefusedNow(trigger: Pick<TriggerRecord, 'source' | 'watch_config'>, ctx: HostPolicyContext | undefined): BlockedReason | null {
+  if (trigger.source !== 'watch' || typeof trigger.watch_config !== 'string') return null;
+  let url: unknown;
+  try { url = (JSON.parse(trigger.watch_config) as { url?: unknown }).url; } catch { return null; }
+  if (typeof url !== 'string' || url === '') return null;
+  return watchPolicyRefusal(url, ctx)?.shown ?? null;
+}
 
 /** After "its address" or "watch_url": why an address a server may run as a write is not watched (`readAddressWrites`). */
 export const WATCH_OVERRIDE_REFUSAL = 'carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page.';

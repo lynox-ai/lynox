@@ -12,6 +12,23 @@
 	// renders unchanged.
 	const { hasDurableMemory = false }: { hasDurableMemory?: boolean } = $props();
 
+	/** A change the engine refused, with the key of the line to show for it. */
+	class ChangeRefused extends Error {
+		readonly key: string;
+		constructor(key: string) { super(key); this.key = key; }
+	}
+	/**
+	 * The refusal of a memory change: an engine that started without engine.db answers 409 with the
+	 * code `engine_less` and gets its own line; any other refusal the generic one.
+	 */
+	async function changeRefusal(res: Response): Promise<ChangeRefused> {
+		const body = (await res.json().catch(() => null)) as { code?: unknown } | null;
+		return new ChangeRefused(body?.code === 'engine_less' ? 'memory.change_engine_less' : 'common.save_failed');
+	}
+	function changeErrorKey(e: unknown): string {
+		return e instanceof ChangeRefused ? e.key : 'common.save_failed';
+	}
+
 	const namespaces = ['knowledge', 'methods', 'status', 'learnings'] as const;
 	let selectedNs = $state<(typeof namespaces)[number]>('knowledge');
 	let content = $state<string | null>(null);
@@ -137,10 +154,10 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ content: editContent })
 			});
-			if (!res.ok) throw new Error();
+			if (!res.ok) throw await changeRefusal(res);
 			await loadNamespace();
-		} catch {
-			error = t('common.save_failed');
+		} catch (e) {
+			error = t(changeErrorKey(e));
 		}
 		saving = false;
 	}
@@ -155,11 +172,11 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ text: '\n' + appendText })
 			});
-			if (!res.ok) throw new Error();
+			if (!res.ok) throw await changeRefusal(res);
 			appendText = '';
 			await loadNamespace();
-		} catch {
-			error = t('common.save_failed');
+		} catch (e) {
+			error = t(changeErrorKey(e));
 		}
 		saving = false;
 	}
@@ -174,12 +191,12 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ old_content: oldLine, new_content: newText })
 			});
-			if (!res.ok) throw new Error();
+			if (!res.ok) throw await changeRefusal(res);
 			editingIdx = null;
 			editingText = '';
 			await loadNamespace();
-		} catch {
-			error = t('common.save_failed');
+		} catch (e) {
+			error = t(changeErrorKey(e));
 		}
 		saving = false;
 	}
@@ -199,11 +216,11 @@
 			const res = await fetch(`${getApiBase()}/memory/${selectedNs}?pattern=${encodeURIComponent(pattern)}`, {
 				method: 'DELETE'
 			});
-			if (!res.ok) throw new Error();
+			if (!res.ok) throw await changeRefusal(res);
 			deletePattern = '';
 			await loadNamespace();
-		} catch {
-			error = t('common.save_failed');
+		} catch (e) {
+			error = t(changeErrorKey(e));
 		}
 		saving = false;
 	}
@@ -219,10 +236,10 @@
 			const res = await fetch(`${getApiBase()}/memory/${selectedNs}?pattern=${encodeURIComponent(line)}`, {
 				method: 'DELETE'
 			});
-			if (!res.ok) throw new Error();
+			if (!res.ok) throw await changeRefusal(res);
 			await loadNamespace();
-		} catch {
-			error = t('common.save_failed');
+		} catch (e) {
+			error = t(changeErrorKey(e));
 		}
 		saving = false;
 	}

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_CALLER_ENDED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_CALLER_ENDED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, workflowBoundError } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { join } from 'node:path';
@@ -13,6 +13,7 @@ import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, contextForEventRun, resolveTaskTemplate, resolveInputTemplate } from './context.js';
+import { runStepsIssue } from './template-refs.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
 import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin, type StepSpawnResult } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
@@ -435,13 +436,13 @@ export function workflowBoundExceeded(
 ): string | null {
   if (!limits) return null;
   if (limits.maxIterations !== undefined && iterations >= limits.maxIterations) {
-    return `Workflow exceeded its step limit (${limits.maxIterations}) — aborting to prevent a runaway.`;
+    return workflowBoundError('step', String(limits.maxIterations));
   }
   if (limits.maxWallClockMs !== undefined && Date.now() - startMs > limits.maxWallClockMs) {
-    return `Workflow exceeded its wall-clock limit (${Math.round(limits.maxWallClockMs / 1000)}s) — aborting to prevent a runaway.`;
+    return workflowBoundError('wall-clock', `${Math.round(limits.maxWallClockMs / 1000)}s`);
   }
   if (limits.maxSpendUsd !== undefined && stepCounters.costUSD > limits.maxSpendUsd) {
-    return `Workflow exceeded its spend limit ($${limits.maxSpendUsd.toFixed(2)}) — aborting to prevent a runaway.`;
+    return workflowBoundError('spend', `$${limits.maxSpendUsd.toFixed(2)}`);
   }
   return null;
 }
@@ -598,6 +599,15 @@ async function runManifestInGroup(
   if (preApproving) {
     throw new Error(`Invalid manifest: agents.${preApproving.id}.pre_approve: ${PRE_APPROVE_REMOVED}`);
   }
+
+  // Every manifest that runs, a nested pipeline's and a direct caller's included: a step id the
+  // context already uses, or a reference no run resolves (`template-refs.ts`).
+  // A caller outside the type system may leave `context` out, as the run's own spread allows. A
+  // nested run's steps are a `runtime: 'pipeline'` step's `pipeline` list, which no saved workflow holds.
+  const nested = depth > 0;
+  const stepsIssue = runStepsIssue(manifest.agents, (manifest.context as Record<string, unknown> | undefined) ?? {},
+    nested ? 'pipeline' : 'agents', { saved: !nested });
+  if (stepsIssue !== null) throw new Error(`Invalid manifest: ${nested ? 'in a nested pipeline, ' : ''}${stepsIssue}`);
 
   assertGatesEnforceable(manifest, options.gateAdapter !== undefined);
   const agentsDir = options.agentsDir ?? config.agents_dir ?? join(process.cwd(), 'agents');

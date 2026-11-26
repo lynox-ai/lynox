@@ -20,7 +20,7 @@ function crmProfile(grantId: string): ApiProfile {
 
 async function attach(store: ApiStore, url: string): Promise<{ attached: ApiProfile | null; headers: Record<string, string> }> {
   const headers: Record<string, string> = {};
-  const attached = await attachStoredCredential(url, headers, false, {
+  const attached = await attachStoredCredential(url, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
     apiStore: store,
     secretStore: { resolve: (n: string) => (n === accessTokenKey('crm') ? TOKEN : null) } as never,
     principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),
@@ -76,7 +76,7 @@ describe('attachStoredCredential returns the profile it attached', () => {
     const renewed = Object.create(store) as ApiStore;
     renewed.get = (id: string) => (id === 'crm' && renewing ? crmProfile('g2') : store.get(id));
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, {
+    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: renewed,
       secretStore: { resolve: (n: string) => { if (n !== accessTokenKey('crm')) renewing = true; return n === accessTokenKey('crm') ? TOKEN : null; } } as never,
       principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(renewed),

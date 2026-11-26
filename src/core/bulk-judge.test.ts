@@ -6,7 +6,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
-import { BulkLedger, BULK_HALT_REASONS, BULK_JUDGED_RETENTION_MS, BULK_MAX_PREVIEWED_RUNS } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_JUDGED_RETENTION_MS, BULK_MAX_PREVIEWED_RUNS, OUTLIER_CHUNK } from './bulk-ledger.js';
 import { BULK_NOTICES } from './bulk-notices.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
@@ -16,7 +16,9 @@ import { judgeCallSchema, judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRul
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, attachExtractionSpend, validateAgainstSchema, type callForStructuredJson,
 } from './llm-helper.js';
-import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
+import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, verdictTextRefusal, emptiesDescription, type BulkJudgeDeps } from './bulk-judge.js';
+import { isEmptyShopifyDescription } from './bulk-list.js';
+import { MARKUP_MAX_DEPTH } from './html-tree.js';
 import { getPricing } from './pricing.js';
 import { abortedCallCounts } from './aborted-call.js';
 import { modelCapability, type IAgent, type MemoryScopeRef } from '../types/index.js';
@@ -147,7 +149,7 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
     const s = ledger.getStatus(id)!;
     expect(s.phase).toBe('planned');
     expect(s.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
-    expect(s.judge).toEqual({ tier: 'fast', unjudged: 2 });
+    expect(s.judge).toEqual({ tier: 'fast', unjudged: 2, judged: 0 });
     // A target without its verdict shows no after-state and no changed fields.
     const p = ledger.getPreview(id);
     expect(p.map((t) => [t.after, t.changedFields])).toEqual([[null, null], [null, null]]);
@@ -258,6 +260,144 @@ describe('the start: rule hash, a limit in whole cents, supersedes', () => {
   });
 });
 
+describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
+  const skus = Array.from({ length: 30 }, (_, i) => `P${String(i + 1).padStart(2, '0')}`);
+  const seed = (): void => {
+    store.insertRecords({
+      collection: 'products',
+      records: skus.map((sku, i) => ({ sku, title: `old ${sku.toLowerCase()} ${'tea '.repeat(i % 3)}`.trim(), note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+  };
+
+  it('flags the one verdict among 30 that adds a link its row did not hold, by its seq, with the reason', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const seq17 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'P17')!.seq;
+    expect(await ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [{ seq: seq17, reasons: ['new_link', 'length_jump'] }], spread: [] });
+  });
+
+  it('flags no verdict of 30 that only reword their row, and counts them as measured', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(await ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [], spread: [] });
+  });
+
+  it('keeps a target the owner took out in the statistics and flagged, so the marks do not move under the owner\'s hand', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const seq17 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'P17')!.seq;
+    expect(ledger.deselectTarget(id, seq17, { checksum: ledger.computeChecksum(id)! }).ok).toBe(true);
+    expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 30, flagged: [{ seq: seq17 }] });
+  });
+
+  it('counts a link to a start domain the owner gave as the run\'s own, not as new', async () => {
+    seed();
+    const id = await plan(skus);
+    engineDb.getDb().prepare('UPDATE bulk_runs SET start_domains = ? WHERE id = ?').run(engineDb.enc(JSON.stringify(['tea-deals.example.net'])), id);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect((await ledger.judgeOutliersOf(id))!.flagged.flatMap((f) => f.reasons)).not.toContain('new_link');
+  });
+
+  it('computes a run\'s marks once and gives the same result while its verdicts stand', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(ledger.judgeOutliersOf(id)).toBe(ledger.judgeOutliersOf(id));
+    expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 30 });
+  });
+
+  it('reads a run whose markup costs more than its length in parts by time, letting other work run', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => `N${String(i + 1).padStart(3, '0')}`);
+    // Short titles of deeply nested markup: far below one part in characters, slow for the parser.
+    const deep = '<div>'.repeat(1500);
+    store.insertRecords({
+      collection: 'products',
+      records: many.map((sku) => ({ sku, title: `old ${sku.toLowerCase()} ${deep}`, note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+    const id = await plan(many);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(30 * (deep.length + 20)).toBeLessThan(OUTLIER_CHUNK);
+
+    let done = false;
+    let turns = 0;
+    const other = (): void => { if (!done) { turns += 1; setImmediate(other); } };
+    setImmediate(other);
+    const result = await ledger.judgeOutliersOf(id);
+    done = true;
+    expect(result).toMatchObject({ decided: 30 });
+    expect(turns).toBeGreaterThanOrEqual(2);
+  });
+
+  it('reads a run whose texts exceed one part in parts, letting other work run before it is done', async () => {
+    const many = Array.from({ length: 60 }, (_, i) => `Q${String(i + 1).padStart(3, '0')}`);
+    // Long titles, so the run's text is more than one part.
+    const long = 'Grüntee aus Japan, mild und frisch. '.repeat(Math.ceil(2 * OUTLIER_CHUNK / many.length / 36));
+    store.insertRecords({
+      collection: 'products',
+      records: many.map((sku) => ({ sku, title: `old ${sku.toLowerCase()} ${long}`, note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+    const id = await plan(many);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+
+    // Other work, run again whenever the process is free: it runs between the parts, more than once.
+    let done = false;
+    let turns = 0;
+    const other = (): void => { if (!done) { turns += 1; setImmediate(other); } };
+    setImmediate(other);
+    const result = await ledger.judgeOutliersOf(id);
+    done = true;
+    expect(result).toMatchObject({ decided: 60, measured: true });
+    expect(turns).toBeGreaterThanOrEqual(2);
+  });
+
+  it('reads every page of a run of more than 200 verdicts, and flags a link added past the first', async () => {
+    const many = Array.from({ length: 210 }, (_, i) => `R${String(i + 1).padStart(3, '0')}`);
+    store.insertRecords({
+      collection: 'products',
+      records: many.map((sku) => ({ sku, title: `old ${sku.toLowerCase()}`, note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+    const id = await plan(many);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old r205') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const seq205 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'R205')!.seq;
+    expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 210, flagged: [{ seq: seq205, reasons: ['new_link', 'length_jump'] }] });
+  });
+
+  it('is null for a run without a rule', async () => {
+    expect(await ledger.judgeOutliersOf('no-such-run')).toBeNull();
+  });
+});
+
 describe('runBulkJudge over data-store rows', () => {
   it('judges every target, merges the verdict into the row without nulling another column, books every call', async () => {
     const id = await plan(['A', 'B']);
@@ -317,6 +457,27 @@ describe('runBulkJudge over data-store rows', () => {
     await runBulkJudge(id, h.deps);
     expect(h.calls).toHaveLength(1);
     expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
+  });
+
+  it('counts each verdict as it lands, a refused target included, out of the targets the judge reads', async () => {
+    const id = await plan(['A', 'B']);
+    expect(ledger.getStatus(id)!.judge).toMatchObject({ judged: 0, unjudged: 2 });
+    expect(start(id).ok).toBe(true);
+    // The first target read as absent: the judge refuses it without a call (seam as below).
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = (SELECT MIN(seq) FROM bulk_targets WHERE run_id = ?)')
+      .run(engineDb.enc(JSON.stringify({ absent: true })), id, id);
+    const seen: { judged: number; unjudged: number }[] = [];
+    const h = harness((user) => {
+      const j = ledger.getStatus(id)!.judge!;
+      seen.push({ judged: j.judged, unjudged: j.unjudged });
+      return { data: change({ title: title(user) }), costUsd: 0.01 };
+    });
+    await runBulkJudge(id, h.deps);
+    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
+    // While the second target is judged, the refused first one already counts.
+    expect(seen).toEqual([{ judged: 1, unjudged: 1 }]);
+    expect(ledger.getStatus(id)!.judge).toMatchObject({ judged: 2, unjudged: 0 });
   });
 
   it('a target read as absent (an external read that found nothing) is invalid not_found, without a call', async () => {
@@ -1024,6 +1185,52 @@ describe('what a verdict\'s text may not add (PRD shopify-preset §20.2 item 5)'
     expect(verdictTextRefusal({ description: '<p>New</p><img src="/a.png">' }, before, woo)).toBe('new_img');
     // An HTML field is not held to the plain-text rule: its markup is the point.
     expect(verdictTextRefusal({ description: '<p>New <strong>text</strong></p>' }, before, woo)).toBeNull();
+  });
+
+  // M6b (iii): Shopify ignores a null description and clears it on "". A verdict that turns a
+  // description into either gave no new text. Asked of a verdict only: a judged target's planned
+  // after-state is the rule's template, every field null, and passes the preview's check.
+  it('names a verdict that sets a Shopify description to null or an empty text, and keeps one already empty', () => {
+    const before = { title: 'T', descriptionHtml: '<p>Old</p>' };
+    for (const listForm of ['shopify', 'shopify_filtered'] as const) {
+      for (const empty of [null, '']) {
+        expect(emptiesDescription(listForm, { descriptionHtml: empty }, before), `${listForm} ${String(empty)}`).toBe(true);
+        expect(emptiesDescription(listForm, { title: 'Neu', descriptionHtml: empty }, before)).toBe(true);
+      }
+      expect(emptiesDescription(listForm, { descriptionHtml: '' }, { descriptionHtml: '' })).toBe(false);
+      expect(emptiesDescription(listForm, { descriptionHtml: '<p>Neu</p>' }, before)).toBe(false);
+      expect(emptiesDescription(listForm, { seo_title: '' }, { seo_title: 'S' })).toBe(false);
+      const shop = { listForm, storeHost: 'acme.myshopify.com', startDomains: [] as string[] };
+      expect(verdictTextRefusal({ descriptionHtml: null, title: null }, before, shop)).toBeNull();
+    }
+    // A field of the same name elsewhere is no Shopify description: a data-store column, a WooCommerce field, an image.
+    expect(emptiesDescription(null, { descriptionHtml: '' }, before)).toBe(false);
+    expect(emptiesDescription('woocommerce', { descriptionHtml: '' }, before)).toBe(false);
+    expect(emptiesDescription('woocommerce', { description: '' }, { description: '<p>Old</p>' })).toBe(false);
+    expect(emptiesDescription('shopify_media', { alt: '' }, { alt: 'Bild' })).toBe(false);
+  });
+
+  // A description of text elements and white space only leaves the product page as empty as "".
+  it('names a verdict whose description shows nothing as emptying it, and keeps an image or an attribute', () => {
+    const before = { descriptionHtml: '<p>Old</p>' };
+    for (const blank of [' ', '<p></p>', '<br>', '<p><br></p>', '<p>&nbsp;</p>', '<div><span>\u200b</span></div><!-- x -->']) {
+      expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', blank), JSON.stringify(blank)).toBe(true);
+      expect(emptiesDescription('shopify', { descriptionHtml: blank }, before), JSON.stringify(blank)).toBe(true);
+    }
+    // Control: an image, an embed or an attribute shows or carries something.
+    for (const shown of ['<p><img src="a.jpg"></p>', '<iframe src="https://v.example/1"></iframe>', '<p class="x"></p>', '<p>a</p>']) {
+      expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', shown), shown).toBe(false);
+      expect(emptiesDescription('shopify', { descriptionHtml: shown }, before), shown).toBe(false);
+    }
+    // Past the reading bounds the value is not walked and counts as not blank: the markup check
+    // refuses it before it is written (bulk-shopify.test.ts, "past the reading bounds").
+    const deep = '<div>'.repeat(MARKUP_MAX_DEPTH + 1);
+    expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', deep)).toBe(false);
+    // Control: the same shape within the bounds shows nothing.
+    expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', '<div>'.repeat(8))).toBe(true);
+    // A description that already showed nothing is not emptied by another blank one.
+    expect(emptiesDescription('shopify', { descriptionHtml: '<p></p>' }, { descriptionHtml: '' })).toBe(false);
+    expect(emptiesDescription('shopify', { descriptionHtml: '' }, { descriptionHtml: '<p><br></p>' })).toBe(false);
   });
 
   it('checks only a field whose value changes: a description the store holds open at its end stays as it is', () => {

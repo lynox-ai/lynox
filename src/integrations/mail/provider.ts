@@ -50,10 +50,19 @@ export interface MailEnvelope {
   messageId: string | undefined;
   /** Folder this envelope was fetched from (e.g. 'INBOX'). */
   folder: string;
-  /** Thread grouping key — In-Reply-To/References-derived, may equal messageId. */
+  /**
+   * Thread grouping key: the provider's own thread id (Gmail thread, Graph conversation, an IMAP
+   * server's thread id). Without one it equals messageId (or is unset), and the inbox finds the
+   * thread through inReplyTo and references instead.
+   */
   threadKey: string | undefined;
   /** In-Reply-To header — the immediate parent message-id, if this is a reply. */
   inReplyTo: string | undefined;
+  /**
+   * Message-IDs from the References header, oldest first, as far as the provider reads them
+   * (IMAP only; at most the newest few, see the provider). Sender-supplied, like inReplyTo.
+   */
+  references?: readonly string[] | undefined;
   from: MailAddress[];
   to: MailAddress[];
   cc: MailAddress[];
@@ -71,16 +80,17 @@ export interface MailEnvelope {
   /** Total RFC822 size in bytes, if reported. */
   sizeBytes: number | undefined;
   /**
-   * True if Auto-Submitted header indicates this is an auto-generated or
-   * auto-replied message. The agent must NEVER auto-reply to such messages
+   * True if the headers mark a machine-sent message: Auto-Submitted other than `no`,
+   * X-Autoreply, X-Autorespond, `Precedence: auto_reply`, or a delivery status report
+   * (`automaticMail` in automatic-mail.ts). The agent must NEVER auto-reply to such messages
    * to prevent reply loops with autoresponders.
    */
   isAutoReply: boolean;
   /**
-   * True when Auto-Submitted is `auto-replied` (RFC 3834: a reply to a message, such as an
-   * out-of-office note), as opposed to `auto-generated` mail (a dunning letter, a shop notice).
-   * False when the header is absent — on Microsoft 365's watch envelope, which carries no headers,
-   * always.
+   * True for an automatic reply to a message (RFC 3834 `auto-replied`, or one of the
+   * autoresponder headers above), such as an out-of-office note, as opposed to `auto-generated`
+   * mail (a dunning letter, a shop notice) or a bounce. False when the headers are absent — on
+   * Microsoft 365's watch envelope, which carries no headers, always.
    */
   isAutoReplied?: boolean | undefined;
 }
@@ -467,6 +477,10 @@ export type MailErrorCode =
   | 'rate_limited'
   | 'timeout'
   | 'unsupported'
+  // The session was lost between two steps of one read (the mailbox was deselected, or the
+  // server said BYE), so the read never ran. Not `connection_failed`, whose owner text says
+  // the server could not be reached, and not `not_found`: nothing is known about the mail.
+  | 'connection_dropped'
   | 'unknown';
 
 export class MailError extends Error {
