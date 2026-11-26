@@ -17,7 +17,7 @@
 	interface Targets { written: number; failed: number; atLeast: boolean }
 	interface Step { kind: 'step'; id: string; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
 	/** `auto`: a read on a route the person's web UI polls by itself, marked by the engine (row 1034). */
-	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true }
+	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true; count?: number; until?: string }
 	interface PlanRun { kind: 'plan'; run?: 'plan' | 'workflow'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
 	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; store?: 'files' | 'data_store' | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
 	type Entry = PlanRun | BulkRun | Step | Event;
@@ -176,6 +176,7 @@
 		<span class="text-xs text-text-subtle tabular-nums">{when(e.at)}</span>
 		<span class="text-text-muted">{kindText(e)}</span>
 		{#if !isRevoke(e)}<span class="font-mono text-xs break-all">{e.action}{#if e.target} · {e.target}{/if}</span>{/if}
+		{#if e.kind === 'event' && e.count !== undefined}<span class="text-xs text-text-muted" data-poll-day>{e.count === 1 ? tf('access_trail.poll_day_one', { time: when(e.at) }) : tf('access_trail.poll_day', { n: String(e.count), time: when(e.until ?? e.at) })}</span>{/if}
 		{#if e.kind === 'step'}
 			<span class="text-xs" data-status>{statusText(e.status)}</span>
 			{#if e.note !== undefined}<span class="text-xs text-text-muted" data-note>{noteText(e)}</span>{/if}
@@ -239,9 +240,9 @@
 							{#if item.entries[0]!.person.email && item.entries[0]!.person.display}<span class="text-xs text-text-subtle">{item.entries[0]!.person.email}</span>{/if}
 						</div>
 						<details>
-							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{item.entries.length === 1
+							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{item.reads === 1
 								? tf('access_trail.polls_one', { time: when(item.to) })
-								: tf('access_trail.polls_many', { n: String(item.entries.length), span: span(item.from, item.to) })}</summary>
+								: tf('access_trail.polls_many', { n: String(item.reads), span: span(item.from, item.to) })}</summary>
 							<div class="space-y-1 pt-1 pl-4">
 								{#each item.entries as p (p.id)}{@render line(p)}{/each}
 							</div>

@@ -6,6 +6,9 @@ import * as flowB from '../../scripts/model-fitness/setup-probe/flows/b-invoices
 import * as flowC from '../../scripts/model-fitness/setup-probe/flows/c-shop.mjs';
 import { cost } from '../../scripts/model-fitness/setup-probe/accounting.mjs';
 import * as policy from '../../scripts/model-fitness/setup-probe/policy.mjs';
+import { HTTP_DIALOG, exfilWarning } from '../../src/tools/dialog-text.js';
+import { toolWordFrame } from '../../src/tools/tool-words.js';
+import { flattenPrompt, onBoxBlock, pv } from '../../src/core/prompt-value.js';
 
 /**
  * Positive controls for the setup probe's end-state checks
@@ -101,7 +104,7 @@ describe('setup probe — flow B (invoices) check', () => {
   });
 
   it('denies an engine permission prompt and carries on after a model question', () => {
-    expect(flowB.answer({ promptId: 'p', question: '⚠ data_store_drop — destroys stored data', options: ['Allow', 'Deny', '\x00'] })).toBe('Deny');
+    expect(flowB.answer({ promptId: 'p', question: '⚠ Table deletion — destroys stored data', options: ['Allow', 'Deny', '\x00'] })).toBe('Deny');
     expect(flowB.answer({ promptId: 'p', question: 'Soll ich weitermachen?', options: ['Ja', 'Nein'] })).toBe(policy.CARRY_ON);
   });
 });
@@ -562,7 +565,7 @@ describe('setup probe — flow A operator answers', () => {
   });
 
   it('denies an engine permission prompt — no fixture of this flow is reached over HTTP', () => {
-    expect(ask('⚠ data_store_drop — destroys stored data', ['Allow', 'Deny', '\x00'])).toBe('Deny');
+    expect(ask('⚠ Table deletion — destroys stored data', ['Allow', 'Deny', '\x00'])).toBe('Deny');
   });
 
   it('a yes/no question that is not about sending is not declined', () => {
@@ -588,32 +591,36 @@ describe('setup probe — flow A operator answers', () => {
 describe('setup probe — operator permission policy', () => {
   it('allows only the outbound-consent prompt for exactly an allowed fixture host', () => {
     // the prompt as the engine words it (recorded in a real run)
-    expect(policy.permissionAnswer({ question: '⚠ http_request: POST to 203.0.113.40 — Allow outbound data?' }, ['203.0.113.40'])).toBe('Allow');
-    expect(policy.permissionAnswer({ question: '⚠ http_request: POST to 198.51.100.7 — Allow outbound data?' }, ['203.0.113.40'])).toBe('Deny');
+    expect(policy.permissionAnswer({ question: '⚠ API request: POST to 203.0.113.40 — Allow outbound data?' }, ['203.0.113.40'])).toBe('Allow');
+    expect(policy.permissionAnswer({ question: '⚠ API request: POST to 198.51.100.7 — Allow outbound data?' }, ['203.0.113.40'])).toBe('Deny');
     // a host that is only a prefix of the allowed one
-    expect(policy.permissionAnswer({ question: '⚠ http_request: POST to 203.0.113.4 — Allow outbound data?' }, ['203.0.113.40'])).toBe('Deny');
+    expect(policy.permissionAnswer({ question: '⚠ API request: POST to 203.0.113.4 — Allow outbound data?' }, ['203.0.113.40'])).toBe('Deny');
     // another tool's prompt that merely mentions the fixture host
-    expect(policy.permissionAnswer({ question: '⚠ bash: remove files — "rm x; curl http://203.0.113.40/"' }, ['203.0.113.40'])).toBe('Deny');
-    expect(policy.permissionAnswer({ question: '⚠ bash — runs a command' }, [])).toBe('Deny');
+    expect(policy.permissionAnswer({ question: '⚠ Command: remove files — "rm x; curl http://203.0.113.40/"' }, ['203.0.113.40'])).toBe('Deny');
+    expect(policy.permissionAnswer({ question: '⚠ Command — runs a command' }, [])).toBe('Deny');
   });
 
   it('reads the host of the consent prompt that names path, fields and a note (row 270), and only the host', () => {
-    expect(policy.permissionAnswer({ question: '⚠ http_request: DELETE to 203.0.113.40 /v1/orders/1 (no body) — Allow outbound data? A DELETE is asked every time.' }, ['203.0.113.40'])).toBe('Allow');
-    expect(policy.permissionAnswer({ question: '⚠ http_request: POST to 198.51.100.9 /x (fields "to 203.0.113.40") — Allow outbound data?' }, ['203.0.113.40'])).toBe('Deny');
+    expect(policy.permissionAnswer({ question: '⚠ API request: DELETE to 203.0.113.40 /v1/orders/1 (no body) — Allow outbound data? A DELETE is asked every time.' }, ['203.0.113.40'])).toBe('Allow');
+    expect(policy.permissionAnswer({ question: '⚠ API request: POST to 198.51.100.9 /x (fields "to 203.0.113.40") — Allow outbound data?' }, ['203.0.113.40'])).toBe('Deny');
     // …and the body's values on lines after the question (N12-4).
-    expect(policy.permissionAnswer({ question: '⚠ http_request: POST to 203.0.113.40 /x (fields "a") — Allow outbound data?\n\n```\n{\n  "a": 1\n}\n```' }, ['203.0.113.40'])).toBe('Allow');
+    expect(policy.permissionAnswer({ question: '⚠ API request: POST to 203.0.113.40 /x (fields "a") — Allow outbound data?\n\n```\n{\n  "a": 1\n}\n```' }, ['203.0.113.40'])).toBe('Allow');
     // …and the sentence that names the sent method when an override names another one.
-    expect(policy.permissionAnswer({ question: '⚠ http_request: PATCH to 203.0.113.40 /x (fields "a") — Allow outbound data? It is sent as a POST that also names PATCH; a server may run any of these.' }, ['203.0.113.40'])).toBe('Allow');
+    expect(policy.permissionAnswer({ question: '⚠ API request: PATCH to 203.0.113.40 /x (fields "a") — Allow outbound data? It is sent as a POST that also names PATCH; a server may run any of these.' }, ['203.0.113.40'])).toBe('Allow');
   });
 
-  it('stops as an instrument error when the HTTP consent prompt has an unknown shape', () => {
+  it('reads the same prompts from an engine image that still names the tool http_request', () => {
+    expect(policy.permissionAnswer({ question: '⚠ http_request: POST to 203.0.113.40 — Allow outbound data?' }, ['203.0.113.40'])).toBe('Allow');
+    expect(policy.permissionAnswer({ question: '⚠ http_request: POST to 198.51.100.7 — Allow outbound data?' }, ['203.0.113.40'])).toBe('Deny');
     expect(() => policy.permissionAnswer({ question: '⚠ http_request: allow POST to 203.0.113.40?' }, ['203.0.113.40'])).toThrow(/^instrument:/);
   });
 
-  it('knows every prompt shape the HTTP tool of this engine asks in (src/tools/builtin/http.ts)', () => {
+  it('stops as an instrument error when the HTTP consent prompt has an unknown shape', () => {
+    expect(() => policy.permissionAnswer({ question: '⚠ API request: allow POST to 203.0.113.40?' }, ['203.0.113.40'])).toThrow(/^instrument:/);
+  });
+
+  it('knows every prompt shape the HTTP tool of this engine asks in, in each language it asks in', () => {
     const src = readFileSync(join(__dirname, '../../src/tools/builtin/http.ts'), 'utf8');
-    const templates = [...src.matchAll(/pv`(⚠ http_request: [^`]*)`/g)].map(m => m[1]!);
-    expect(templates.length).toBeGreaterThanOrEqual(2);
     // every warning the exfiltration check can return, whatever its wording — a new one the
     // policy does not know must turn this red, not throw at run time
     const body = src.slice(src.indexOf('function detectGetExfiltration'));
@@ -622,24 +629,27 @@ describe('setup probe — operator permission policy', () => {
     expect(warnings.length).toBeGreaterThanOrEqual(2);
     // every return is either one of these strings or the `null` of "nothing found"
     expect((fn.match(/\breturn\b/g) ?? []).length).toBe(warnings.length + (fn.match(/\breturn null\b/g) ?? []).length);
-    const rendered = templates.flatMap(t => t.includes('${exfilWarning}')
-      ? warnings.map(w => t.replace('${exfilWarning}', w))
-      : [t.replace(/\$\{(\w+)\}/g, (whole, name: string) => ({
-          method: 'POST', gatedMethod: 'POST', hostname: '203.0.113.40', path: '/v1/orders?page=…', fields: 'fields "sku"', note: ' Allowing sends this request once, now; it will ask again next time.', sentNote: '', contextBlock: '', queryBlock: '',
-          headersBlock: ' It sets the headers Stripe-Account.\n\n```\nStripe-Account: acct_x\n```',
-          bodyBlock: '\n\n```\n{\n  "sku": "A-1"\n}\n```',
-        } as Record<string, string>)[name] ?? whole)]);
-    expect(rendered.every(q => !q.includes('${'))).toBe(true);
-    const answers = rendered.map(q => policy.permissionAnswer({ question: q }, ['203.0.113.40']));  // none may throw
-    expect(answers.filter(a => a === 'Allow')).toHaveLength(1);   // only the outbound consent for the fixture
+    // The tool asks only through its dialog table: render each of its questions as the tool does.
+    expect(src.match(/HTTP_DIALOG\[[^\]]+\]\.(\w+)\(/g)?.map(m => m.replace(/.*\]\./, '').replace('(', '')).sort()).toEqual(['exfil', 'outbound']);
+    for (const language of ['en', 'de'] as const) {
+      const said = HTTP_DIALOG[language];
+      const word = toolWordFrame('http_request', language);
+      const rendered = [
+        ...warnings.map(w => flattenPrompt(said.exfil(word, exfilWarning(w, language)))),
+        flattenPrompt(said.outbound(word, 'POST', '203.0.113.40', '/v1/orders?page=…', 'fields "sku"',
+          pv`${said.noteOnce}${said.headers('Stripe-Account', onBoxBlock('Stripe-Account: acct_x'))}${onBoxBlock('{\n  "sku": "A-1"\n}')}`)),
+      ];
+      const answers = rendered.map(q => policy.permissionAnswer({ question: q }, ['203.0.113.40']));  // none may throw
+      expect(answers, language).toEqual([...warnings.map(() => 'Deny'), 'Allow']);   // only the outbound consent for the fixture
+    }
   });
 
   it('denies the GET exfiltration warning', () => {
-    expect(policy.permissionAnswer({ question: '⚠ http_request: suspiciously long query string (>500 chars, possible data exfiltration) — Allow?' }, ['203.0.113.40'])).toBe('Deny');
+    expect(policy.permissionAnswer({ question: '⚠ API request: suspiciously long query string (>500 chars, possible data exfiltration) — Allow?' }, ['203.0.113.40'])).toBe('Deny');
   });
 
   it('stops on any other http_request prompt that ends in "Allow?"', () => {
-    expect(() => policy.permissionAnswer({ question: '⚠ http_request: send to 203.0.113.40 — Allow?' }, ['203.0.113.40'])).toThrow(/^instrument:/);
+    expect(() => policy.permissionAnswer({ question: '⚠ API request: send to 203.0.113.40 — Allow?' }, ['203.0.113.40'])).toThrow(/^instrument:/);
   });
 
   it('tells an engine permission prompt from a question of the model', () => {

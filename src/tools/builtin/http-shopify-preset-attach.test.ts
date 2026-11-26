@@ -34,7 +34,7 @@ async function attach(url: string, profile: ApiProfile): Promise<{ attached: Awa
   expect(store.register(profile)).toBe(true);
   const headers: Record<string, string> = {};
   const read: string[] = [];
-  const attached = await attachStoredCredential(url, headers, false, {
+  const attached = await attachStoredCredential(url, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
     apiStore: store,
     secretStore: { resolve: (n: string) => { read.push(n); return n === accessTokenKey(profile.id) ? TOKEN : null; } } as never,
     principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),
@@ -141,7 +141,7 @@ describe('a write to a store, while the store exchange is on', () => {
     const store = new ApiStore();
     expect(store.register(profile)).toBe(true);
     const headers: Record<string, string> = {};
-    await attachStoredCredential('https://acme.myshopify.com/admin/api/2025-10/products.json', headers, true, {
+    await attachStoredCredential('https://acme.myshopify.com/admin/api/2025-10/products.json', headers, true, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: store, secretStore: { resolve: (n: string) => (n === 'SHOP_TOKEN' ? TOKEN : null) } as never,
       principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),
     }, { bulkRunId: 'run-1' });

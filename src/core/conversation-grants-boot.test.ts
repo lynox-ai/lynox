@@ -83,6 +83,19 @@ describe('Engine boot — the conversation grant set', () => {
     expect(agentOf().conversationGrants).toBe(renewed);
   });
 
+  it('every agent of a conversation, a rebuilt one included, shares one record of what its searches listed; another conversation has its own', async () => {
+    const engine = await boot();
+    const session = engine.createSession({ sessionId: 'search-thread' });
+    const agentOf = (): Agent => (session as unknown as { agent: Agent }).agent;
+    const searches = agentOf().searchResultAddresses;
+    searches.noteResults('q', ['https://news.example/a']);
+    session._recreateAgent();
+    expect(agentOf().searchResultAddresses).toBe(searches);
+    expect(agentOf().searchResultAddresses.has('https://news.example/a')).toBe(true);
+    const other = engine.createSession({ sessionId: 'other-thread' });
+    expect((other as unknown as { agent: Agent }).agent.searchResultAddresses.has('https://news.example/a')).toBe(false);
+  });
+
   it('a new thread starts with an empty set', async () => {
     const engine = await boot();
     const session = engine.createSession({ sessionId: 'fresh-thread' });
