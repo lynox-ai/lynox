@@ -45,6 +45,17 @@
  *   · wording that marks a security finding as open or known, German and English
  *     (see OPEN_FINDING). A scanner's all-clear ("no known vulnerabilities") is
  *     not such wording.
+ *   · a raw invisible format character (see FORMAT_CHARS): direction controls,
+ *     zero-width characters, word joiners and invisible operators, the byte order
+ *     mark. In source a reader cannot see them, and the direction controls can show
+ *     a line in another order than the one it runs in. A test or a comment that
+ *     needs one writes its escape (`\u202E`), which is the same string at runtime.
+ *     The one exception by character is the zero-width joiner inside an emoji
+ *     sequence, where it joins two pictographs and its effect is the visible glyph
+ *     (see joinsEmoji); the one exception by file is a binary fixture
+ *     (FORMAT_EXEMPT_PATHS). The pragma does not let one pass: a direction control
+ *     can rearrange how the pragma's own line reads. Only added lines are read, so
+ *     a file that already carries one is not refused until a commit adds such a line.
  * Spellings produced by accident count as the plain form: fullwidth letters, the
  * Cyrillic and Greek letters that look like `E`, invisible format and combining
  * characters inside an id, the Unicode hyphens, and the NUL bytes of a UTF-16 file.
@@ -112,6 +123,43 @@ export function normalise(text) {
     .replace(/[\u0435\u03B5]/g, 'e')
     .replace(/(?<![A-Za-z])DEF[\u2014\u2015\uFE58]/gi, 'DEF-')
     .replace(/[\u2010-\u2013\u2212\uFE63]/g, '-');
+}
+
+/**
+ * Invisible format characters this repo does not carry raw: the Arabic letter mark,
+ * zero-width space to right-to-left mark, the embedding and override controls, word
+ * joiner to invisible plus, the isolates, and the byte order mark.
+ */
+export const FORMAT_CHARS = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/gu;
+
+/** Files whose bytes are data, not text: their added "lines" are not read for format characters. */
+export const FORMAT_EXEMPT_PATHS = new Set(['tests/fixtures/html-pages/en.wikipedia.org.html.gz']);
+
+const PICTOGRAPH = /\p{Extended_Pictographic}/u;
+/** Before a joiner inside an emoji sequence: a pictograph, a skin tone or the emoji presentation selector. */
+const JOINS_AFTER = (cp) => PICTOGRAPH.test(cp) || /[\u{1F3FB}-\u{1F3FF}\uFE0F]/u.test(cp);
+
+/**
+ * Whether the zero-width joiner at `at` (an index into the code points of a line)
+ * joins two emoji: the code point before it is a pictograph, a skin tone or U+FE0F,
+ * and the one after it is a pictograph. Checked per joiner, so a family of three
+ * passes and two joiners in a row do not.
+ */
+export function joinsEmoji(points, at) {
+  return at > 0 && at < points.length - 1 && JOINS_AFTER(points[at - 1]) && PICTOGRAPH.test(points[at + 1]);
+}
+
+/** The raw format characters in one line, as `U+XXXX`, each once, in order of first appearance. */
+export function formatCharsIn(line) {
+  const points = [...line];
+  const found = [];
+  points.forEach((cp, i) => {
+    if (!cp.match(FORMAT_CHARS)) return;
+    if (cp === '\u200D' && joinsEmoji(points, i)) return;
+    const name = `U+${cp.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+    if (!found.includes(name)) found.push(name);
+  });
+  return found;
 }
 
 /** The kinds of finding in one line of text (empty when clean or allowed). */
@@ -272,15 +320,27 @@ export function main(argv) {
     return 2;
   }
   let total = 0;
+  let formats = 0;
   for (const a of added) {
     for (const kind of findingsIn(a.text)) {
       console.log(`commit ${a.commit.slice(0, 9)} ${a.path}:${a.line}: ${kind}`);
       total++;
     }
+    if (FORMAT_EXEMPT_PATHS.has(a.path)) continue;
+    for (const cp of formatCharsIn(a.text)) {
+      console.log(`commit ${a.commit.slice(0, 9)} ${a.path}:${a.line}: raw invisible format character ${cp}, write it as \\u${cp.slice(2)}`);
+      total++;
+      formats++;
+    }
   }
   if (total > 0) {
     console.error(`\nadded-lines-guard: ${total} finding(s) in lines this range adds. This is the PUBLIC repo.`);
     console.error('Describe the behaviour instead of naming an internal id; describe the change, not an open finding.');
+    if (formats > 0) {
+      console.error('A raw invisible format character: write its escape instead (\\u202E, not the character); in a');
+      console.error('string it is the same value at runtime. The Edit and Write tools turn an escape into the raw');
+      console.error('character, so write the line through a script or check it after the edit.');
+    }
     console.error("An id-shaped test value: assemble an invented one, e.g. 'DEF-' + 'example'.");
     console.error('Rewrite the commit that ADDED it (rebase, amend) before the merge — a later commit that removes');
     console.error('it does not help: the earlier commit is still pushed and stays readable on the pull request.');

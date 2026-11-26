@@ -10,7 +10,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addedLines, findingsIn } from '../scripts/added-lines-guard.mjs';
+import { addedLines, findingsIn, formatCharsIn, FORMAT_EXEMPT_PATHS } from '../scripts/added-lines-guard.mjs';
 
 const GUARD = fileURLToPath(new URL('../scripts/added-lines-guard.mjs', import.meta.url));
 const ENTRY = fileURLToPath(new URL('../scripts/public-repo-guard.sh', import.meta.url));
@@ -339,3 +339,86 @@ describe('the pragma is an exception surface whose size is visible', () => {
     expect(used).toBe(PINNED_PRAGMA_LINES);
   });
 });
+
+describe('a raw invisible format character in an added line', () => {
+  // Every such character here is written as its escape, so this file carries none raw.
+  const RLO = '\u202E';
+
+  it('refuses one, naming the file, the line, the code point and the escape, never the character', () => {
+    const base = git('rev-parse', 'HEAD');
+    const adding = commit('t.ts', `ok\nconst s = 'a${RLO}b';\n`, 'add');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(`commit ${adding.slice(0, 9)} t.ts:2: raw invisible format character U+202E, write it as \\u202E`);
+    expect(r.out).toContain('write its escape instead');
+    expect(r.out).not.toContain(RLO);
+  });
+
+  it('passes the escape, which is the same string at runtime', () => {
+    const base = git('rev-parse', 'HEAD');
+    commit('t.ts', "const s = 'a\\u202Eb';\n", 'escaped');
+    expect(guard(base, 'HEAD').code).toBe(0);
+  });
+
+  it('is not let through by the pragma, which a direction control could rearrange', () => {
+    const base = git('rev-parse', 'HEAD');
+    commit('t.ts', `const s = 'a${RLO}b'; // public-repo-guard:allow: test\n`, 'pragma');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('U+202E');
+  });
+
+  it('does not read a binary fixture on the exempt list, and reads the same bytes anywhere else', () => {
+    const [exempt] = [...FORMAT_EXEMPT_PATHS];
+    const base = git('rev-parse', 'HEAD');
+    mkdirSync(join(dir, exempt!, '..'), { recursive: true });
+    commit(exempt!, `x${RLO}y\n`, 'fixture');
+    expect(guard(base, 'HEAD').code).toBe(0);
+    const base2 = git('rev-parse', 'HEAD');
+    commit('other.gz', `x${RLO}y\n`, 'elsewhere');
+    expect(guard(base2, 'HEAD').code).toBe(1);
+  });
+
+  it('does not check removed lines: a commit taking one out is not refused', () => {
+    commit('t.ts', `const s = 'a${RLO}b';\n`, 'legacy');
+    const base = git('rev-parse', 'HEAD');
+    commit('t.ts', "const s = 'a\\u202Eb';\n", 'escape it');
+    expect(guard(base, 'HEAD').code).toBe(0);
+  });
+
+  it('knows every range: Arabic letter mark, zero-width to direction marks, embeddings and overrides, joiners and invisible operators, isolates, byte order mark', () => {
+    const all = [0x061c, 0x200b, 0x200c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff];
+    for (const cp of all) {
+      const name = `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+      expect(formatCharsIn(`a${String.fromCodePoint(cp)}b`), name).toEqual([name]);
+    }
+    // Neighbours just outside the ranges are not format characters this check means.
+    for (const cp of [0x061b, 0x200a, 0x2010, 0x2029, 0x202f, 0x2065, 0x206a, 0xfefe]) {
+      expect(formatCharsIn(`a${String.fromCodePoint(cp)}b`), cp.toString(16)).toEqual([]);
+    }
+    expect(formatCharsIn('\uFEFFfirst line')).toEqual(['U+FEFF']);
+    expect(formatCharsIn(`a${RLO}b${RLO}c\u2066d`)).toEqual(['U+202E', 'U+2066']);
+  });
+
+  it('lets a zero-width joiner pass only between emoji, checked per joiner', () => {
+    // The sequences two test files at main carry raw: a family of three, and a kiss with skin tones.
+    expect(formatCharsIn('\u{1F468}\u200D\u{1F469}\u200D\u{1F467}')).toEqual([]);
+    expect(formatCharsIn('\u{1F469}\u{1F3FD}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}\u{1F3FB}')).toEqual([]);
+    // The presentation selector before the joiner, and the next emoji after it.
+    expect(formatCharsIn('\u2764\uFE0F\u200D\u{1F525}')).toEqual([]);
+  });
+
+  it('refuses a zero-width joiner between letters, at the end of a line after an emoji, and two in a row', () => {
+    expect(formatCharsIn('a\u200Db')).toEqual(['U+200D']);
+    expect(formatCharsIn('\u{1F469}\u200D')).toEqual(['U+200D']);
+    expect(formatCharsIn('\u200D\u{1F469}')).toEqual(['U+200D']);
+    expect(formatCharsIn('\u{1F468}\u200D\u200D\u{1F469}')).toEqual(['U+200D']);
+    expect(formatCharsIn('a\u200D\u{1F469}')).toEqual(['U+200D']);
+    expect(formatCharsIn('\u{1F469}\u200Db')).toEqual(['U+200D']);
+  });
+
+  it('keeps the id check apart: an id with a direction control inside is still read as the id', () => {
+    expect(findingsIn(ID.replace('F-', `F${RLO}-`))).toEqual(['internal register id']);
+  });
+});
+
