@@ -1783,6 +1783,8 @@ export function bulkInvalidText(
 	if (reason === 'verdict_invalid') {
 		const refused = bulkRefusalText(context?.refusal, shopify, context?.host ?? null, i18n);
 		if (refused !== null) return refused;
+		// Without that detail, a run that is not Shopify's says so for its target, not by the code.
+		if (!shopify) return i18n.t('bulk.invalid.verdict_invalid_target');
 	}
 	// The description an earlier run wrote and the store added markup to: named
 	// by that run's date, so the owner can find it; without the date where the run is gone.
