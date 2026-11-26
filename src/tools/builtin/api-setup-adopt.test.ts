@@ -177,7 +177,7 @@ describe('api_setup adopt_connection', () => {
     // The adoption, then where the profile's client secret may go: until now only the owner's
     // release covered it, and an owner's profile sends a secret only where it is bound to go.
     expect(questions).toHaveLength(2);
-    expect(questions[0]).toContain('adopt the connection');
+    expect(questions[0]).toContain('adopt the sign-in of API connection');
     expect(questions[1]).toContain('CRM_CLIENT_SECRET');
     expect(reply).toContain('Adopted: the connection of API profile "crm-api" is yours now');
     const saved = store.get('crm-api')!;

@@ -41,7 +41,7 @@ export interface BulkNotices {
   applyCounts(c: BulkApplyCounts): string;
   previewCounts(read: number, invalid: number, unread: number, total: number): string;
   judgeCounts(judged: number, invalid: number, unjudged: number, total: number): string;
-  /** The API calls of this pass at the profile's rate: an estimate, and it says so (ux U-096). */
+  /** The API calls of this pass at the price per call set in the API connection: an estimate, and it says so (U-096, U-459). */
   costs(calls: number, eachUsd: number): string;
   /** `reason` is the stored English text, one of `BULK_HALT_REASONS` or a cause the run named. */
   halted(phase: BulkPhase, reason: string): string;
@@ -167,7 +167,7 @@ const EN: BulkNotices = Object.freeze({
   judgeCounts: (judged: number, invalid: number, unjudged: number, total: number) =>
     `Judged ${String(judged)}, invalid ${String(invalid)}, without a verdict ${String(unjudged)} of ${String(total)} targets.`,
   costs: (calls: number, eachUsd: number) =>
-    `${String(calls)} API calls this pass, estimated $${(calls * eachUsd).toFixed(4)} ($${String(eachUsd)} each from the profile rate).`,
+    `${String(calls)} API calls this pass, estimated $${(calls * eachUsd).toFixed(4)} ($${String(eachUsd)} each, as set in the API connection).`,
   // The sentence alone: the push title names the stage and that it halted (U-324).
   halted: (phase: BulkPhase, reason: string) =>
     (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? EN_JUDGE_UNAVAILABLE : enHaltReason(reason)) ?? `${reason}.`,
@@ -243,7 +243,7 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   listReadFailed: 'The store answered a page of the list with an error.',
   shopInactive: 'The store is closed or frozen.',
   storeAccessEnded: 'lynox could not renew its access to the store. Ask lynox in the chat to connect the store again, then the run can be continued.',
-  storeClientMisnamed: 'The store profile keeps the app credentials under other names. Have lynox fix the profile in the chat, then the run can be continued.',
+  storeClientMisnamed: 'The Shopify connection keeps the app credentials under other names. Have lynox fix that in the chat, then the run can be continued.',
   formCost: 'The store refused a read as too costly.',
   shopifyReadOff: 'Reading Shopify stores in a bulk run is switched off on this instance.',
   shopifyWriteOff: 'Writing to Shopify stores in a bulk run is switched off on this instance. Once it is on again, the run can be continued.',
@@ -320,7 +320,7 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.listReadFailed]: 'Der Shop hat eine Seite der Liste mit einem Fehler beantwortet.',
     [BULK_HALT_REASONS.shopInactive]: 'Der Shop ist geschlossen oder gesperrt.',
     [BULK_HALT_REASONS.storeAccessEnded]: 'lynox konnte den Zugang zum Shop nicht erneuern. Bitte lynox im Chat, den Shop neu zu verbinden, dann lässt sich der Lauf fortsetzen.',
-    [BULK_HALT_REASONS.storeClientMisnamed]: 'Im Shop-Profil liegen die App-Zugangsdaten unter anderen Namen. Lass das Profil im Chat von lynox anpassen, dann lässt sich der Lauf fortsetzen.',
+    [BULK_HALT_REASONS.storeClientMisnamed]: 'In der Shopify-Verbindung liegen die App-Zugangsdaten unter anderen Namen. Lass das im Chat von lynox anpassen, dann lässt sich der Lauf fortsetzen.',
     [BULK_HALT_REASONS.formCost]: 'Der Shop hat eine Abfrage als zu aufwendig abgelehnt.',
     [BULK_HALT_REASONS.shopifyReadOff]: 'Lesen von Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.',
     [BULK_HALT_REASONS.shopifyWriteOff]: 'Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen.',
@@ -385,7 +385,7 @@ const DE: BulkNotices = Object.freeze({
   judgeCounts: (judged: number, invalid: number, unjudged: number, total: number) =>
     `Beurteilt ${String(judged)}, ungültig ${String(invalid)}, ohne Urteil ${String(unjudged)} von ${String(total)} Zielen.`,
   costs: (calls: number, eachUsd: number) =>
-    `${String(calls)} API-Abrufe in diesem Durchgang, geschätzt $${(calls * eachUsd).toFixed(4)} (je $${String(eachUsd)} laut Profil).`,
+    `${String(calls)} API-Abrufe in diesem Durchgang, geschätzt $${(calls * eachUsd).toFixed(4)} (je $${String(eachUsd)}, wie in der API-Verbindung eingetragen).`,
   // The sentence alone: the push title names the stage and that it halted (U-324).
   halted: (phase: BulkPhase, reason: string) =>
     (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? DE_JUDGE_UNAVAILABLE : deHaltReason(reason)) ?? `${reason}.`,
