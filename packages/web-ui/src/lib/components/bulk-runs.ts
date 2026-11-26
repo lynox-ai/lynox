@@ -1193,17 +1193,21 @@ export function bulkHostSplit(text: string, host: string | null): BulkSentencePa
 
 /** A run's label in parts: the host of an external run is the slot the page boxes; a system lynox
  *  names itself is text. While its counts are still pending (see bulkCountsPending) the size reads
- *  "–", as the head's counts do. */
-export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n, countsPending = false): BulkSentencePart[] {
-	if (!bulkHostOf(run.targetSystem)) return [{ text: bulkLabel(run, i18n, countsPending) }];
+ *  "–", as the head's counts do. A run whose list is not read yet (see bulkListUnread) is named by
+ *  that, not by a size of 0. */
+export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n, countsPending = false, listUnread = false): BulkSentencePart[] {
+	if (!bulkHostOf(run.targetSystem)) return [{ text: bulkLabel(run, i18n, countsPending, listUnread) }];
+	if (listUnread) return bulkSentenceParts(i18n.t('bulk.label_list_unread'), 'target', {});
 	const one = !countsPending && run.total === 1 ? '_one' : '';
 	const n = countsPending ? i18n.t('bulk.head.counts_pending') : String(run.total);
 	return bulkSentenceParts(i18n.t(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`), 'target', { n });
 }
 
 /** A run has no title: it is named by its size and where it writes. While its counts are still
- *  pending (see bulkCountsPending) the size reads "–", as the head's counts do. */
-export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n, countsPending = false): string {
+ *  pending (see bulkCountsPending) the size reads "–", as the head's counts do. A run whose list is
+ *  not read yet (see bulkListUnread) says so instead of a size of 0. */
+export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n, countsPending = false, listUnread = false): string {
+	if (listUnread) return i18n.tf('bulk.label_list_unread', { target: bulkSystemName(run.targetSystem, i18n) });
 	const one = !countsPending && run.total === 1 ? '_one' : '';
 	const n = countsPending ? i18n.t('bulk.head.counts_pending') : String(run.total);
 	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n, target: bulkSystemName(run.targetSystem, i18n) });
@@ -1294,6 +1298,14 @@ export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKe
  *  list's title and count then read „–“ as the page's do: nothing is counted yet. */
 export function bulkReadsList(run: Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason' | 'list'>): boolean {
 	return bulkEngineWorking(run) && run.list?.state === 'pending';
+}
+
+/** Whether a run planned from a list has not read it yet and knows no target: it waits for its
+ *  start, or the read halted before it found one. Its size of 0 would read as an empty list, and the
+ *  dash would read as a list being read now, so the title says the list is not read yet. A read that
+ *  halted part-way counts the targets it found; a run that ended before its list was read only counts. */
+export function bulkListUnread(run: Pick<BulkRun, 'phase' | 'total' | 'haltKey' | 'haltReason' | 'list'>): boolean {
+	return run.phase === 'planned' && run.total === 0 && run.list?.state === 'pending' && !bulkEngineWorking(run);
 }
 
 /** The step the engine is working on while it moves a run on by itself, for the page's working

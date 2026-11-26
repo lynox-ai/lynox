@@ -337,6 +337,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.unmeasured_chip': { de: 'ungeprüfte Art Änderung', en: 'unchecked kind of change' },
 	'bulk.kind_undo': { de: 'Rücknahme', en: 'Undo' },
 	'bulk.label': { de: '{n} Ziele · {target}', en: '{n} targets · {target}' },
+	'bulk.label_list_unread': { de: 'Liste noch nicht gelesen · {target}', en: 'List not read yet · {target}' },
 	'bulk.label_one': { de: '1 Ziel · {target}', en: '1 target · {target}' },
 	'bulk.label_undo': { de: 'Rücknahme · {n} Ziele · {target}', en: 'Undo · {n} targets · {target}' },
 	'bulk.label_undo_one': { de: 'Rücknahme · 1 Ziel · {target}', en: 'Undo · 1 target · {target}' },

@@ -19,7 +19,7 @@
 	import MarkedLine from './MarkedLine.svelte';
 	import { shownValue, VALUE_OPEN } from '../utils/plan-takeover.js';
 	import {
-		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey, bulkRefusalSentence, bulkSameValueOthers, bulkChoiceFields,
+		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkListUnread, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey, bulkRefusalSentence, bulkSameValueOthers, bulkChoiceFields,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkShowsFailure,
 	} from './bulk-runs.js';
 	import { BulkLoadFailed, bulkLoadErrorKey } from './bulk-runs.js';
@@ -609,6 +609,8 @@
 	// judge is fixed at planning, and approved and writing are both the write. An interrupted run
 	// that resumes later says so in its own line and gets no working line.
 	const workingStep = $derived(run && !run.resumesAt ? bulkWorkingStep(run) : null);
+	// A run whose list is not read yet names that in its title; its head has nothing to count yet.
+	const listUnread = $derived(run !== null && bulkListUnread(run));
 	const workingLine = $derived(run && workingStep !== null ? bulkWorkingLine(workingStep, run) : null);
 	// The probe's target by its title where the loaded targets hold its before-image.
 	const probeLabel = $derived(run?.probe ? bulkTargetLabel(run.targetSystem, { key: run.probe.key }, i18n) : '');
@@ -827,7 +829,7 @@
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">{error || t('common.load_failed')}</div>
 	{:else}
 		<section class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-4">
-			<h1 class="text-lg font-medium" data-testid="bulk-title">{#each bulkLabelParts(run, i18n, bulkCountsPending(workingStep)) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}</h1>
+			<h1 class="text-lg font-medium" data-testid="bulk-title">{#each bulkLabelParts(run, i18n, bulkCountsPending(workingStep), listUnread) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}</h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
 				{#each steps as s (s)}
@@ -846,8 +848,10 @@
 			<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
 				<dd>{#if host !== null}{@render hostBox()}{:else}{provider}{/if}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
+				{#if !listUnread}
 				<dt class="text-text-subtle">{t('bulk.head.status')}</dt>
 				<dd data-testid="bulk-counts">{bulkHeadCounts(workingStep, run, i18n)}</dd>
+				{/if}
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
 					<dt class="text-text-subtle">{t('bulk.head.cost')}</dt>
 					<dd class="font-mono">{formatCost(run.costUsd)}{run.costCapUsd !== null ? ` / ${formatCost(run.costCapUsd)}` : ''}</dd>
