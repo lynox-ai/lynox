@@ -1130,9 +1130,9 @@ describe('who mints a Shopify read grant', () => {
     for (const [f, found] of Object.entries(tree)) if (found[key] > 0) out[f] = found[key];
     return out;
   }
-  /** A pass over the whole tree takes several times longer on a busy shared runner than on a
-   *  quiet machine, and the default ten seconds were overrun there. The bound stays: a scan that
-   *  hangs still fails, just not one that is slow. */
+  /** A pass over the whole tree takes about twice as long on a busy shared runner as on a quiet
+   *  one, and the default ten seconds were overrun there. The bound stays: a pass that takes over
+   *  a minute still fails, a slow one does not. */
   const TREE_SCAN_MS = 60_000;
 
   it('sees a call, an alias, a destructure, a property, a re-export and an escape — and not a comment', () => {
