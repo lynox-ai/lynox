@@ -2070,6 +2070,8 @@ describe('applying a Shopify run', () => {
         const next = await previewedWith({ descriptionHtml: '<p>Neuer</p>' });
         expect(ledger.getRunForApply(next)).toMatchObject({ kind: 'apply' });
         expect(row(next)).toEqual({ change: 'invalid', error: 'before_has_shop_markup' });
+        // Left out by its name: the title this read answered is kept, encrypted like the rest.
+        expect(ledger.getPreview(next)[0]!.title).toBe('T1');
         expect(stored(next, 'before')).toEqual({ absent: false, value: expect.objectContaining({ descriptionHtml: kept }) });
         expect(ledger.shopifyApplyOf(next)!.writes).toEqual([]);
       }

@@ -3220,8 +3220,11 @@ export class BulkLedger {
     const run = this.runRow(runId);
     if (run !== undefined && run.kind !== 'undo'
       && this.shopMarkedWriteOf(this.engineDb.dec(row.target_key), read.before, runId) !== null) {
-      return db.prepare(`UPDATE bulk_targets SET before = ?, change = 'invalid', undo = NULL, error = ? WHERE ${guard}`)
-        .run(this.engineDb.enc(JSON.stringify(before)), 'before_has_shop_markup' satisfies BulkInvalidReason, runId, seq, runId).changes === 1;
+      // The title this read answered goes along, so the owner sees which product was left out.
+      const title = bulkTargetTitleCell(titleNow);
+      return db.prepare(`UPDATE bulk_targets SET before = ?, change = 'invalid', undo = NULL, error = ?, target_title = ? WHERE ${guard}`)
+        .run(this.engineDb.enc(JSON.stringify(before)), 'before_has_shop_markup' satisfies BulkInvalidReason,
+          title === null ? null : this.engineDb.enc(title), runId, seq, runId).changes === 1;
     }
     // Stored canonical in its HTML fields (1130): the preview checked this after-state against this
     // before-image just now, and the write sends what is stored.
