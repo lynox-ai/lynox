@@ -14,10 +14,10 @@
  * refuses every other form:
  * - the flag exactly as `--disable-sigusr1` in the argv (the entrypoint's), or in a `NODE_OPTIONS`
  *   without quotes, backslashes or line breaks;
- * - and no other spelling of it anywhere (`--no-disable-sigusr1`, `_` for `-`, `=value`), and no
+ * - and no other spelling of it anywhere (`--no-disable-sigusr1`, `_` for `-`, `=value`, any case), and no
  *   option that opens a debugger without a signal (`--inspect…` but the port settings).
  * To find those two, `NODE_OPTIONS` is read wider than node reads it (quotes and backslashes
- * dropped, split at any whitespace, `_` read as `-`): that can only refuse more, never less.
+ * dropped, split at any whitespace): that can only refuse more, never less.
  *
  * What it cannot see: code a `--require` or `--import` loads, and a node that ignores
  * `NODE_OPTIONS` in secure mode (setuid or file capabilities on the binary; the image has
@@ -38,7 +38,7 @@ function opensDebugger(option: string): boolean {
 
 /** Every fragment of `NODE_OPTIONS` that node could read as an option, and more. */
 function widerFragments(nodeOptions: string | undefined): string[] {
-  return (nodeOptions ?? '').replace(/["'\\]/g, '').split(/\s+/).filter((t) => t !== '').map((t) => t.replace(/_/g, '-'));
+  return (nodeOptions ?? '').replace(/["'\\]/g, '').split(/\s+/).filter((t) => t !== '');
 }
 
 /** `NODE_OPTIONS` that node splits at spaces only and that holds nothing to unquote. */
@@ -50,8 +50,7 @@ function plainOptions(nodeOptions: string | undefined): string[] | null {
 
 /** Whether the flag is in force, and no debugger opened, for a process started with this argv and `NODE_OPTIONS`. */
 export function signalDebuggerOff(execArgv: readonly string[], nodeOptions: string | undefined): boolean {
-  const argv = execArgv.map((t) => t.replace(/_/g, '-'));
-  const every = [...widerFragments(nodeOptions), ...argv];
+  const every = [...widerFragments(nodeOptions), ...execArgv];
   if (every.some(opensDebugger)) return false;
   if (every.some((t) => /sigusr1/i.test(t) && t !== SIGNAL_DEBUGGER_OFF)) return false;
   if (execArgv.includes(SIGNAL_DEBUGGER_OFF)) return true;

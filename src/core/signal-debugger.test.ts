@@ -48,6 +48,12 @@ describe('signalDebuggerOff', () => {
     expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF, '--inspect-port=0'], '--inspect-publish-uid=http')).toBe(true);
   });
 
+  it('takes the flag only as written: an underscore spelling node would read the same way is refused too', () => {
+    expect(signalDebuggerOff(['--disable_sigusr1'], SIGNAL_DEBUGGER_OFF)).toBe(false);
+    expect(signalDebuggerOff([], '--disable_sigusr1')).toBe(false);
+    expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF], '--DISABLE-SIGUSR1')).toBe(false);
+  });
+
   it('takes the flag from NODE_OPTIONS only when it holds nothing to unquote or split otherwise', () => {
     expect(signalDebuggerOff([], `--title "a ${SIGNAL_DEBUGGER_OFF} b"`)).toBe(false);
     expect(signalDebuggerOff([], `"${SIGNAL_DEBUGGER_OFF}"`)).toBe(false);
