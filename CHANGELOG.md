@@ -17,11 +17,12 @@ AI budget the customer has left.
 - While the cap is in force, single model calls (a chat title, memory and
   knowledge extraction, inbox classification, voice, the bulk-run judge) start
   only when a fixed per-call allowance is free; for text-to-speech it is the
-  cost of the text. While a run holds the budget they are refused. A chat title
+  cost of the text, and for a bulk-run judge call it is that call's own worst
+  case. While a run holds the budget they are refused. A chat title
   and a memory extraction are tried once more when that run ends. A
   knowledge-graph extraction is skipped and the memory is stored without its
   entities. An inbox mail is left for manual review, a voice request gets a
-  402, and a bulk run halts. (#2699)
+  402, and a bulk run halts. (#2699, #2842)
 - While the cap is in force, in-conversation workflows and batch runs are
   refused. A saved workflow, started by hand or on a schedule, starts only when
   the free budget covers the session cost ceiling (`max_session_cost_usd`, $50
