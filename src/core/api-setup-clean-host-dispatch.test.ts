@@ -67,7 +67,7 @@ function ownersChat(store: ApiStore): Agent {
     name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', noticeLanguage: 'en',
     principal: OWNER_PRINCIPAL,
     tools: [apiSetupTool as unknown as ToolEntry, foreignRead()],
-    promptUser: async () => 'Allow',
+    promptUser: async () => 'allow',
     conversationLatch: ConversationLatch.detached(),
     toolContext: { ...createToolContext({}), auditLog: testAuditLog().log, apiStore: store, vaultNameBindings: bindingsAsMigrated(store) },
   } as ConstructorParameters<typeof Agent>[0]);

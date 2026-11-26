@@ -29,6 +29,7 @@ import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { containedPrefill } from './contained-way-out.js';
 import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, isConsentCard, type ClosedCode } from './closed-question.js';
+import { CONSENT_UNRECOGNISED, isConsentKind, type ConsentKind } from '../contract/prompt.js';
 import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
@@ -228,6 +229,9 @@ export interface PermissionPrompt {
 	multiSelect?: boolean;
 	/** The workflow step that raised this prompt, when one did. */
 	origin?: PromptOrigin;
+	/** One of the engine's own confirmations, by its marker: the card is drawn from this alone,
+	 *  its options are that kind's keys, and its answer is one of them. */
+	consent?: ConsentKind;
 }
 
 /** Question descriptor inside a multi-question tabs prompt. Mirrors the
@@ -2601,6 +2605,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				promptId: data['promptId'] as string | undefined,
 				multiSelect: data['multi_select'] === true,
 				origin: originFromEvent(data),
+				...(isConsentKind(data['consent']) ? { consent: data['consent'] } : {}),
 			};
 			break;
 		case 'prompt_tabs': {
@@ -3015,7 +3020,7 @@ export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
 	// A consent card's answer is a click; as text in the message field it would approve nothing.
-	const draftable = isConsentCard(pendingPermission?.options) ? null : answer;
+	const draftable = isConsentCard(pendingPermission?.consent) ? null : answer;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
@@ -3059,6 +3064,12 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		await checkPendingPrompt();
 		const returned = answer !== null && composerDraft !== null && composerDraft(answer);
 		chatError = t(returned ? 'chat.mandate_key_input_returned' : 'chat.mandate_key_input');
+		chatErrorDetail = null;
+		return;
+	}
+	if (outcome === 'consent_unrecognised') {
+		if (sessionId !== sid) return;
+		chatError = t('chat.consent_unrecognised');
 		chatErrorDetail = null;
 		return;
 	}
@@ -3126,8 +3137,9 @@ export async function postTabProgress(promptId: string, partial: (string | null)
  *  it answered 410 (a closed question, with the reason the server gave, or null), `key_refused`
  *  when it refused the answer as carrying a key (422 `mandate_key_input`), and `settled` for
  *  every other final word except `id_required`: the answer went without the question's id
- *  (409 `prompt_id_required`), so nothing was answered. */
-type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | 'id_required' | { readonly closed: ClosedCode | null };
+ *  (409 `prompt_id_required`), so nothing was answered; `consent_unrecognised` when the answer
+ *  resolved an engine confirmation but was none of its keys, so the gate refused. */
+type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | 'id_required' | 'consent_unrecognised' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -3163,6 +3175,13 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 					continue;
 				}
 				return 'lost';
+			}
+			// An answer to one of the engine's confirmations that is none of its keys: recorded as a
+			// refusal, and said to the person, never a silent "no".
+			if (res.ok) {
+				let refused: unknown;
+				try { refused = ((await res.json()) as { refused?: unknown } | null)?.refused; } catch { /* no body */ }
+				if (refused === CONSENT_UNRECOGNISED) return 'consent_unrecognised';
 			}
 			// 2xx and the other final answers (404 stale, 409 refused, 400) are all "done".
 			return 'settled';
@@ -3441,8 +3460,9 @@ export async function checkPendingPrompt(onAnswered?: (nothingOpen: boolean) => 
 				// prompt degraded to single-select after a reload mid-prompt.
 				multiSelect: data['multiSelect'] === true,
 				origin,
+				...(isConsentKind(data['consent']) ? { consent: data['consent'] } : {}),
 			};
-			card = isConsentCard(pendingPermission.options) ? 'decision' : 'question';
+			card = isConsentCard(pendingPermission.consent) ? 'decision' : 'question';
 		} else if (promptType === 'ask_secret') {
 			// The card already open for this prompt stays, with what the user has typed into it: a
 			// reconnect asks again, and setting it anew would clear the field.

@@ -905,7 +905,7 @@ describe('spawnInline + parentPrompt propagation', () => {
     await spawnViaAgent({ id: 'a', agent: 'a', runtime: 'agent' }, named, {}, mockConfig, undefined, 'run-1', 'autonomous', { approvalFiling });
     expect(last()['approvalFiling']).toBe(approvalFiling);
 
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     await spawnInline({ id: 's', agent: 's', runtime: 'inline', task: 't' }, {}, mockConfig, mockParentTools, undefined, undefined, { parentPromptUser: promptUser });
     expect(last()['approvalFiling']).toBeUndefined();
     await spawnViaAgent({ id: 'a', agent: 'a', runtime: 'agent' }, named, {}, mockConfig, undefined, 'run-1', undefined, { parentPromptUser: promptUser });

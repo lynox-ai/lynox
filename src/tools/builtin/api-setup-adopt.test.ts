@@ -84,7 +84,7 @@ function agentWith(store: ApiStore, opts: AgentOpts = {}): never {
   return {
     principal: opts.principal ?? OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
-    promptUser: opts.promptUser === null ? undefined : (opts.promptUser ?? (async () => 'Allow')),
+    promptUser: opts.promptUser === null ? undefined : (opts.promptUser ?? (async () => 'allow')),
     runSignal: opts.runSignal,
     ...(opts.autonomy ? { autonomy: opts.autonomy } : {}),
     toolContext: {
@@ -172,7 +172,7 @@ describe('api_setup adopt_connection', () => {
   it('asks, then makes the profile and its connection the owner\'s', async () => {
     const store = storeWith();
     const questions: string[] = [];
-    const reply = await adopt(agentWith(store, { promptUser: async (q) => { questions.push(flattenPrompt(q as never)); return 'Allow'; } }));
+    const reply = await adopt(agentWith(store, { promptUser: async (q) => { questions.push(flattenPrompt(q as never)); return 'allow'; } }));
 
     // The adoption, then where the profile's client secret may go: until now only the owner's
     // release covered it, and an owner's profile sends a secret only where it is bound to go.
@@ -197,7 +197,7 @@ describe('api_setup adopt_connection', () => {
 
   const asked = async (profile: ApiProfile): Promise<string> => {
     const questions: string[] = [];
-    await adopt(agentWith(storeWith(profile), { promptUser: async (q) => { questions.push(flattenPrompt(q as never)); return 'Deny'; } }));
+    await adopt(agentWith(storeWith(profile), { promptUser: async (q) => { questions.push(flattenPrompt(q as never)); return 'deny'; } }));
     expect(questions).toHaveLength(1);
     return questions[0]!;
   };
@@ -247,7 +247,7 @@ describe('api_setup adopt_connection', () => {
     ['the grant names no mandate id', [] as string[], { ...MANDATE_GRANT, connected_mandate_id: undefined }],
   ])('does not claim the mandate ended when %s', async (_label, live, grant) => {
     const questions: string[] = [];
-    await adopt(agentWith(storeWith(crmProfile({ oauth_grant: grant as OAuthGrantRecord })), { live, promptUser: async (q) => { questions.push(flattenPrompt(q as never)); return 'Deny'; } }));
+    await adopt(agentWith(storeWith(crmProfile({ oauth_grant: grant as OAuthGrantRecord })), { live, promptUser: async (q) => { questions.push(flattenPrompt(q as never)); return 'deny'; } }));
     expect(questions[0]).toContain('this engine cannot tell whether that mandate is still active');
     expect(questions[0]).not.toContain('which is not active');
   });
@@ -255,7 +255,7 @@ describe('api_setup adopt_connection', () => {
   it('adopts nothing when the mandate became active again while the question was open', async () => {
     const store = storeWith();
     const live: string[] = [];
-    const reply = await adopt(agentWith(store, { live, promptUser: async () => { live.push('M-1'); return 'Allow'; } }));
+    const reply = await adopt(agentWith(store, { live, promptUser: async () => { live.push('M-1'); return 'allow'; } }));
     expect(reply).toContain('became active again while the question was open');
     expect(store.get('crm-api')?.oauth_grant?.connected_by).toBe(TAG);
   });
@@ -263,7 +263,7 @@ describe('api_setup adopt_connection', () => {
   it('adopts nothing, and asks nothing, while the mandate is still active', async () => {
     const store = storeWith();
     const before = JSON.stringify(store.get('crm-api'));
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     const reply = await adopt(agentWith(store, { live: ['M-1'], promptUser }));
     expect(reply).toContain('still active, so its connection is in use and cannot be adopted now');
     expect(promptUser).not.toHaveBeenCalled();
@@ -284,7 +284,7 @@ describe('api_setup adopt_connection', () => {
   });
 
   it.each([
-    ['the user declines', { promptUser: async () => 'Deny' }, 'user declined'],
+    ['the user declines', { promptUser: async () => 'deny' }, 'user declined'],
     ['nobody can be asked', { promptUser: null }, 'needs the user\'s own answer in an interactive session'],
     // An autonomous run can hold a prompt channel (a schedule the owner stamped): still no question.
     ['the run is autonomous, with a prompt channel', { autonomy: 'autonomous' }, 'needs the user\'s own answer in an interactive session'],
@@ -298,7 +298,7 @@ describe('api_setup adopt_connection', () => {
   });
 
   it('asks nothing in an autonomous run that could still prompt', async () => {
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     await adopt(agentWith(storeWith(), { promptUser, autonomy: 'autonomous' }));
     expect(promptUser).not.toHaveBeenCalled();
     // Control: the same agent in an interactive run is asked.
@@ -307,7 +307,7 @@ describe('api_setup adopt_connection', () => {
   });
 
   it('asks nothing of a mandate', async () => {
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     await adopt(agentWith(storeWith(), { principal: MANDATE, promptUser }));
     expect(promptUser).not.toHaveBeenCalled();
   });
@@ -316,7 +316,7 @@ describe('api_setup adopt_connection', () => {
     const store = storeWith();
     const ac = new AbortController();
     ac.abort();
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     const slot: CallSlot = {};
     const reply = await runInCallSlot(slot, () => adopt(agentWith(store, { promptUser, runSignal: ac.signal })));
     expect(reply).toContain('the run was stopped');
@@ -327,7 +327,7 @@ describe('api_setup adopt_connection', () => {
   });
 
   it('asks nothing about a connection no mandate made', async () => {
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     const reply = await adopt(agentWith(storeWith(crmProfile({ created_by: undefined, oauth_grant: undefined })), { promptUser }));
     expect(reply).toContain('there is nothing to adopt');
     expect(promptUser).not.toHaveBeenCalled();
@@ -345,14 +345,14 @@ describe('api_setup adopt_connection', () => {
   ])('asks again when %s changed while the question was open', async (_label, change) => {
     const store = storeWith();
     const changed = change(store.get('crm-api')!);
-    const reply = await adopt(agentWith(store, { promptUser: async () => { store.unregister('crm-api'); store.register(changed); return 'Allow'; } }));
+    const reply = await adopt(agentWith(store, { promptUser: async () => { store.unregister('crm-api'); store.register(changed); return 'allow'; } }));
     expect(reply).toContain('changed while the question was open');
     expect(store.get('crm-api')?.oauth_grant?.connected_by).not.toBe('owner');
   });
 
   it('adopts nothing when the profile was deleted while the question was open', async () => {
     const store = storeWith();
-    const reply = await adopt(agentWith(store, { promptUser: async () => { store.remove('crm-api'); return 'Allow'; } }));
+    const reply = await adopt(agentWith(store, { promptUser: async () => { store.remove('crm-api'); return 'allow'; } }));
     expect(reply).toContain('was deleted while the question was open');
     expect(store.get('crm-api')).toBeUndefined();
   });
@@ -368,7 +368,7 @@ describe('api_setup adopt_connection', () => {
 describe('adopt_connection compares against the profile as it was asked about', () => {
   it('asks again when the stored object itself was changed in place while the question was open', async () => {
     const store = storeWith();
-    const reply = await adopt(agentWith(store, { promptUser: async () => { store.get('crm-api')!.base_url = 'https://api.crm.example/elsewhere'; return 'Allow'; } }));
+    const reply = await adopt(agentWith(store, { promptUser: async () => { store.get('crm-api')!.base_url = 'https://api.crm.example/elsewhere'; return 'allow'; } }));
     expect(reply).toContain('changed while the question was open');
     expect(store.get('crm-api')?.oauth_grant?.connected_by).toBe(TAG);
   });

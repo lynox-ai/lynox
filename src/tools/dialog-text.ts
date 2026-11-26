@@ -12,6 +12,7 @@
  * the person wrote.
  */
 
+import type { ConsentKey } from '../contract/prompt.js';
 import type { NoticeLanguage } from '../core/notice-language.js';
 import type { SendRoleKind, SendSlot } from '../core/profile-secret-view.js';
 import { pv } from '../core/prompt-value.js';
@@ -680,4 +681,14 @@ export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChan
       : pv`Scopes entfernt: ${scopes}`,
     providerParameter: (key, was, now) => pv`Anbieter-Parameter ${key}: ${was} → ${now}`,
   },
+};
+
+/**
+ * How a consent key reads where the engine itself names it (a notification that lists a
+ * question's options). The web UI shows the same words from its own table; a test holds the two
+ * equal. The keys themselves are the wire (`src/contract/prompt.ts`).
+ */
+export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentKey, string>>>> = {
+  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow deep', balanced: 'Run on balanced', cancel: 'Cancel' },
+  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Stufe Tief erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen' },
 };

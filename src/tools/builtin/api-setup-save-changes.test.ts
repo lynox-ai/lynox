@@ -93,8 +93,8 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('names an added scope in the question, and a denied save keeps the stored scope', async () => {
     const store = new ApiStore();
-    expect((await save(store, 'create', shop(), 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
-    const { result, asked } = await save(store, 'update', shop({ scope: 'read_products write_products' }), 'Deny');
+    expect((await save(store, 'create', shop(), 'allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
+    const { result, asked } = await save(store, 'update', shop({ scope: 'read_products write_products' }), 'deny');
     expect(asked).toHaveLength(1);
     expect(asked[0]).toContain('This save changes:\n- scopes added: write_products');
     expect(result).toMatch(/^Blocked: .*declined/);
@@ -103,8 +103,8 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('names a removed scope and the store a provider parameter moves to', async () => {
     const store = new ApiStore();
-    await save(store, 'create', shop({ scope: 'read_products write_products' }), 'Allow');
-    const { asked } = await save(store, 'update', shop({ scope: 'read_products', shopName: 'other' }), 'Deny');
+    await save(store, 'create', shop({ scope: 'read_products write_products' }), 'allow');
+    const { asked } = await save(store, 'update', shop({ scope: 'read_products', shopName: 'other' }), 'deny');
     expect(asked[0]).toContain('- scopes removed: write_products');
     expect(asked[0]).toContain('- provider parameter shop: acme → other');
     expect(stored(store, 'shop')?.auth?.oauth?.preset_params).toEqual({ shop: 'acme' });
@@ -112,17 +112,17 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('control: a save that changes none of these fields lists no changes, and an allowed one is stored', async () => {
     const store = new ApiStore();
-    await save(store, 'create', shop(), 'Allow');
-    const same = await save(store, 'update', { ...shop(), description: 'Another text' }, 'Allow');
+    await save(store, 'create', shop(), 'allow');
+    const same = await save(store, 'update', { ...shop(), description: 'Another text' }, 'allow');
     expect(same.asked[0]).not.toContain('This save changes:');
-    const more = await save(store, 'update', shop({ scope: 'read_products write_products' }), 'Allow');
+    const more = await save(store, 'update', shop({ scope: 'read_products write_products' }), 'allow');
     expect(more.asked[0]).toContain('- scopes added: write_products');
     expect(stored(store, 'shop')?.auth?.oauth?.scope).toBe('read_products write_products');
   });
 
   it('an own sign-in fetched by the agent: a scope change with nobody to ask is refused and not stored', async () => {
     const store = new ApiStore();
-    expect((await save(store, 'create', ownGrant(), 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect((await save(store, 'create', ownGrant(), 'allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
     const { result } = await save(store, 'update', ownGrant({ scope: 'read write' }), undefined);
     expect(result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
@@ -134,9 +134,9 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     ['grant type', { grant_type: 'refresh_token' as const }, '- grant type: client_credentials → refresh_token'],
   ])('an own sign-in fetched by the agent: its %s change is asked about, named, and kept out when denied', async (_n, over, line) => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant(), 'Allow');
+    await save(store, 'create', ownGrant(), 'allow');
     const before = structuredClone(stored(store, 'svc'));
-    const { result, asked } = await save(store, 'update', ownGrant(over), 'Deny');
+    const { result, asked } = await save(store, 'update', ownGrant(over), 'deny');
     expect(asked).toHaveLength(1);
     expect(asked[0]).toContain(line);
     expect(result).toMatch(/^Blocked: .*declined/);
@@ -150,18 +150,18 @@ describe('api_setup: a save names what it changes, and a refused change is not s
       delete p.auth!.oauth!.grant_type;
       return p;
     };
-    await save(store, 'create', noGrant('read'), 'Allow');
+    await save(store, 'create', noGrant('read'), 'allow');
     expect(stored(store, 'svc')?.auth?.oauth?.grant_type).toBeUndefined();
     const nobody = await save(store, 'update', noGrant('read write'), undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
-    const denied = await save(store, 'update', noGrant('read write'), 'Deny');
+    const denied = await save(store, 'update', noGrant('read write'), 'deny');
     expect(denied.asked[0]).toContain('- scopes added: write');
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
   });
 
   it('a refresh_token sign-in whose grant type is dropped becomes client_credentials, and that is asked about', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant({ grant_type: 'refresh_token' }), 'Allow');
+    await save(store, 'create', ownGrant({ grant_type: 'refresh_token' }), 'allow');
     const dropped = ownGrant({ scope: 'read write' });
     delete dropped.auth!.oauth!.grant_type;
     const { result } = await save(store, 'update', dropped, undefined);
@@ -171,20 +171,20 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a value that carries a line break is shown on one line, and one shaped like a credential is not shown', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant(), 'Allow');
-    const forged = await save(store, 'update', ownGrant({ audience: 'x\n- scopes removed: read' }), 'Deny');
+    await save(store, 'create', ownGrant(), 'allow');
+    const forged = await save(store, 'update', ownGrant({ audience: 'x\n- scopes removed: read' }), 'deny');
     expect(forged.asked[0]).toContain('- audience: (none) → x - scopes removed: read');
     expect(forged.asked[0].split('\n').filter((l) => l.startsWith('- scopes removed'))).toEqual([]);
     const key = ['sk', 'ant', 'api03', 'Q'.repeat(40)].join('-');
-    const masked = await save(store, 'update', ownGrant({ audience: key }), 'Deny');
+    const masked = await save(store, 'update', ownGrant({ audience: key }), 'deny');
     expect(masked.asked[0]).toContain('- audience: (none) → (a value shaped like a credential, not shown)');
     expect(masked.asked[0]).not.toContain(key);
   });
 
   it('a refresh_token sign-in: a scope or audience change, which the next refresh sends, is asked about, named, and refused with nobody to ask', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant({ grant_type: 'refresh_token' }), 'Allow');
-    const denied = await save(store, 'update', ownGrant({ grant_type: 'refresh_token', scope: 'read write', audience: 'https://other.example' }), 'Deny');
+    await save(store, 'create', ownGrant({ grant_type: 'refresh_token' }), 'allow');
+    const denied = await save(store, 'update', ownGrant({ grant_type: 'refresh_token', scope: 'read write', audience: 'https://other.example' }), 'deny');
     expect(denied.asked[0]).toContain('- scopes added: write');
     expect(denied.asked[0]).toContain('- audience: (none) → https://other.example');
     expect(denied.result).toMatch(/^Blocked: .*declined/);
@@ -196,8 +196,8 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a key profile: a swap of the secret it reads is asked about first, before any binding question, and refused with nobody to ask', async () => {
     const store = new ApiStore();
-    expect((await save(store, 'create', keyProfile(), 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
-    const denied = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), 'Deny');
+    expect((await save(store, 'create', keyProfile(), 'allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
+    const denied = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), 'deny');
     expect(denied.asked).toHaveLength(1);
     expect(denied.asked[0]).toContain('This save changes:\n- secret read: KP_KEY_A → KP_KEY_B');
     const nobody = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), undefined);
@@ -207,8 +207,8 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a key profile: a move to another listed host is asked about and named, and kept out when denied', async () => {
     const store = new ApiStore();
-    await save(store, 'create', keyProfile(), 'Allow');
-    const { result, asked } = await save(store, 'update', keyProfile({ base_url: 'https://api.mistral.ai/v1' }), 'Deny');
+    await save(store, 'create', keyProfile(), 'allow');
+    const { result, asked } = await save(store, 'update', keyProfile({ base_url: 'https://api.mistral.ai/v1' }), 'deny');
     expect(asked[0]).toContain('- address (base_url): https://api.openai.com/v1 → https://api.mistral.ai/v1');
     expect(result).toMatch(/^Blocked: .*declined/);
     expect(stored(store, 'kp')?.base_url).toBe('https://api.openai.com/v1');
@@ -216,10 +216,10 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('refine ignores any field outside its patch, so it cannot change where a credential goes', async () => {
     const store = new ApiStore();
-    await save(store, 'create', keyProfile(), 'Allow');
+    await save(store, 'create', keyProfile(), 'allow');
     const asked: string[] = [];
     const patch = { addNotes: ['x'], base_url: 'https://evil.example', auth: { type: 'bearer', vault_keys: ['KP_KEY_B'] } };
-    const result = await apiSetupTool.handler({ action: 'refine', id: 'kp', refine: patch }, agentFor(store, asked, 'Allow')) as string;
+    const result = await apiSetupTool.handler({ action: 'refine', id: 'kp', refine: patch }, agentFor(store, asked, 'allow')) as string;
     expect(result).not.toMatch(/^(Error|Blocked|Validation)/);
     expect(stored(store, 'kp')?.notes).toEqual(['x']);
     expect(stored(store, 'kp')?.base_url).toBe('https://api.openai.com/v1');
@@ -228,13 +228,13 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a store profile whose sign-in address cannot be derived: a scope widened while the store is dropped is refused with nobody to ask, and named when asked', async () => {
     const store = new ApiStore();
-    await save(store, 'create', shop(), 'Allow');
+    await save(store, 'create', shop(), 'allow');
     const noStore = shop({ scope: 'read_products write_products' });
     delete noStore.auth!.oauth!.preset_params;
     const nobody = await save(store, 'update', noStore, undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "shop" /);
     expect(stored(store, 'shop')?.auth?.oauth?.scope).toBe('read_products');
-    const denied = await save(store, 'update', noStore, 'Deny');
+    const denied = await save(store, 'update', noStore, 'deny');
     expect(denied.asked[0]).toContain('- scopes added: write_products');
     expect(denied.asked[0]).toContain('- provider parameter shop: acme → (none)');
     expect(stored(store, 'shop')?.auth?.oauth).toMatchObject({ scope: 'read_products', preset_params: { shop: 'acme' } });
@@ -242,12 +242,12 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a store profile cannot be saved to read its app from other secret names', async () => {
     const store = new ApiStore();
-    await save(store, 'create', shop(), 'Allow');
+    await save(store, 'create', shop(), 'allow');
     const before = stored(store, 'shop')?.auth?.oauth?.client_secret_key;
     expect(before).toBeDefined();
     const other = shop();
     other.auth!.oauth!.client_secret_key = 'MY_OWN_SECRET';
-    const { result, asked } = await save(store, 'update', other, 'Allow');
+    const { result, asked } = await save(store, 'update', other, 'allow');
     expect(result).toContain('Invalid auth.oauth.client_secret_key: a profile on the built-in "shopify" provider reads its app from');
     expect(asked).toEqual([]);
     expect(stored(store, 'shop')?.auth?.oauth?.client_secret_key).toBe(before);
@@ -259,10 +259,10 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     ['the key put in the query string', { auth: { type: 'query', query_param: 'key', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] } }, '- how the secret is attached (auth.type): bearer → query'],
   ] as const)('a key profile: %s sends a credential differently with the same names, and is asked about and refused with nobody to ask', async (_n, over, line) => {
     const store = new ApiStore();
-    await save(store, 'create', { ...keyProfile(), auth: { type: 'bearer', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] } }, 'Allow');
+    await save(store, 'create', { ...keyProfile(), auth: { type: 'bearer', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] } }, 'allow');
     const before = structuredClone(stored(store, 'kp')?.auth);
     const next = { ...keyProfile(), ...over } as ApiProfile;
-    const denied = await save(store, 'update', next, 'Deny');
+    const denied = await save(store, 'update', next, 'deny');
     expect(denied.asked[0]).toContain(line);
     const nobody = await save(store, 'update', next, undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
@@ -274,8 +274,8 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     const basic = (username?: string): ApiProfile => ({ ...keyProfile(), auth: {
       type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], ...(username === undefined ? {} : { username_key: username }),
     } });
-    await save(store, 'create', basic('KP_USER'), 'Allow');
-    const denied = await save(store, 'update', basic(), 'Deny');
+    await save(store, 'create', basic('KP_USER'), 'allow');
+    const denied = await save(store, 'update', basic(), 'deny');
     expect(denied.asked[0]).toContain('- secret read for the user name sent (basic auth): KP_USER → KP_KEY_A');
     const nobody = await save(store, 'update', basic(), undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
@@ -284,43 +284,43 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a save that takes the last scope away leaves the choice to the provider: that is asked about', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant({ scope: 'read' }), 'Allow');
+    await save(store, 'create', ownGrant({ scope: 'read' }), 'allow');
     const none = ownGrant();
     delete none.auth!.oauth!.scope;
     const nobody = await save(store, 'update', none, undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
-    const denied = await save(store, 'update', none, 'Deny');
+    const denied = await save(store, 'update', none, 'deny');
     expect(denied.asked[0]).toContain('- scopes removed: read (none left: the provider decides which it grants)');
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
   });
 
   it('an address whose path is shaped like a credential still shows its host', async () => {
     const store = new ApiStore();
-    await save(store, 'create', keyProfile(), 'Allow');
+    await save(store, 'create', keyProfile(), 'allow');
     const key = ['sk', 'ant', 'api03', 'Q'.repeat(40)].join('-');
-    const { asked } = await save(store, 'update', keyProfile({ base_url: `https://api.mistral.ai/${key}` }), 'Deny');
+    const { asked } = await save(store, 'update', keyProfile({ base_url: `https://api.mistral.ai/${key}` }), 'deny');
     expect(asked[0]).toContain('- address (base_url): https://api.openai.com/v1 → https://api.mistral.ai (the rest is shaped like a credential, not shown)');
     expect(asked[0]).not.toContain(key);
   });
 
   it('a scope list written with commas is one scope as sent: rewriting it with spaces adds scopes, and is asked about', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant({ scope: 'read,write' }), 'Allow');
+    await save(store, 'create', ownGrant({ scope: 'read,write' }), 'allow');
     const nobody = await save(store, 'update', ownGrant({ scope: 'read write' }), undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
-    const denied = await save(store, 'update', ownGrant({ scope: 'read write' }), 'Deny');
+    const denied = await save(store, 'update', ownGrant({ scope: 'read write' }), 'deny');
     expect(denied.asked[0]).toContain('- scopes added: read write');
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read,write');
   });
 
   it('the question lists where the secret goes and which one is read before what it may do', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant(), 'Allow');
+    await save(store, 'create', ownGrant(), 'allow');
     const next = ownGrant({ scope: 'read write', audience: 'https://other.example' });
     next.base_url = 'https://api.mistral.ai/v1';
     next.auth!.oauth!.client_secret_key = 'SVC_OTHER';
     next.auth!.vault_keys = ['SVC_CID', 'SVC_OTHER'];
-    const { asked } = await save(store, 'update', next, 'Deny');
+    const { asked } = await save(store, 'update', next, 'deny');
     const lines = asked[0]!.split('\n').filter((l) => l.startsWith('- ')).map((l) => l.split(':')[0]);
     expect(lines).toEqual([
       '- address (base_url)',
@@ -337,7 +337,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a save that only takes a scope away narrows the profile: it saves with nobody to ask', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant({ scope: 'read write' }), 'Allow');
+    await save(store, 'create', ownGrant({ scope: 'read write' }), 'allow');
     const { result } = await save(store, 'update', ownGrant({ scope: 'read' }), undefined);
     expect(result).not.toMatch(/^(Error|Blocked|Validation)/);
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
@@ -345,7 +345,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('control: the same sign-in with nothing of its grant changed saves without a question', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant(), 'Allow');
+    await save(store, 'create', ownGrant(), 'allow');
     const { result } = await save(store, 'update', { ...ownGrant(), description: 'Another text' }, undefined);
     expect(result).not.toMatch(/^(Error|Blocked|Validation)/);
     expect(stored(store, 'svc')?.description).toBe('Another text');
@@ -378,9 +378,9 @@ describe('api_setup: a save names what it changes, and a refused change is not s
       '- secret read for the password sent (basic auth): KP_PASS → KP_KEY_B'],
   ] as const)('%s: the change is named, a no keeps the stored profile, and nobody to ask refuses it', async (_n, first, next, id, line) => {
     const store = new ApiStore();
-    expect((await save(store, 'create', first, 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect((await save(store, 'create', first, 'allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
     const before = structuredClone(stored(store, id));
-    const denied = await save(store, 'update', next, 'Deny');
+    const denied = await save(store, 'update', next, 'deny');
     expect(denied.asked.join('\n')).toContain(line);
     expect(denied.result).toMatch(/^Blocked: .*declined/);
     const nobody = await save(store, 'update', next, undefined);
@@ -431,9 +431,9 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a save made while its question was open is not overwritten: the answer no longer covers it', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant(), 'Allow');
+    await save(store, 'create', ownGrant(), 'allow');
     const asked: string[] = [];
-    const agent = agentFor(store, asked, 'Allow') as unknown as { promptUser: (q: unknown) => Promise<string> };
+    const agent = agentFor(store, asked, 'allow') as unknown as { promptUser: (q: unknown) => Promise<string> };
     const answer = agent.promptUser;
     agent.promptUser = async (q: unknown): Promise<string> => {
       // Another chat narrows the scope while this question is open.
@@ -451,7 +451,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
   // to it while they are open makes the save another act, so it is refused and asked again.
   const whileOpen = (store: ApiStore, at: number, write: () => void): { agent: never; asked: string[] } => {
     const asked: string[] = [];
-    const agent = agentFor(store, asked, 'Allow') as unknown as { promptUser: (q: unknown) => Promise<string> };
+    const agent = agentFor(store, asked, 'allow') as unknown as { promptUser: (q: unknown) => Promise<string> };
     const answer = agent.promptUser;
     let n = 0;
     agent.promptUser = async (q: unknown): Promise<string> => { n += 1; if (n === at) write(); return answer(q); };
@@ -460,7 +460,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a token renewal while the question is open refuses the save and keeps the renewal', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant(), 'Allow');
+    await save(store, 'create', ownGrant(), 'allow');
     const due = Date.now() + 3_600_000;
     const { agent, asked } = whileOpen(store, 1, () => {
       const renewed = structuredClone(stored(store, 'svc')!);
@@ -476,7 +476,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a mandate connection made while the question is open refuses the owner\'s save', async () => {
     const store = new ApiStore();
-    await save(store, 'create', ownGrant(), 'Allow');
+    await save(store, 'create', ownGrant(), 'allow');
     const { agent } = whileOpen(store, 1, () => {
       const cur = stored(store, 'svc')!;
       expect(store.save({ ...cur, oauth_grant: { ...cur.oauth_grant, connected_by: 'mandate:m@example.org', connected_mandate_id: 'M-1' } } as ApiProfile, join(lynoxDir, 'apis')).ok).toBe(true);
@@ -490,7 +490,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it('a grant record written during the binding question is not rolled back: the save is refused', async () => {
     const store = new ApiStore();
-    await save(store, 'create', keyProfile(), 'Allow');
+    await save(store, 'create', keyProfile(), 'allow');
     const { agent, asked } = whileOpen(store, 2, () => {
       const cur = stored(store, 'kp')!;
       expect(store.save({ ...cur, oauth_grant: { ...cur.oauth_grant, connected_by: 'owner', state: 'revoked', revoked_at: '2026-11-23T00:00:00.000Z', written: [{ name: 'KP_TOKEN', fp: 'abc' }] } } as ApiProfile, join(lynoxDir, 'apis')).ok).toBe(true);

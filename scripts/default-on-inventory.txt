@@ -9,3 +9,4 @@ feature:flat-file-memory
 feature:inbox-user-rules
 feature:plugins
 http_html_extract
+knowledge_graph_enabled

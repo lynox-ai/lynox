@@ -396,7 +396,7 @@ describe('a new question that arrives while an answer is being saved', () => {
 describe('why a question was closed, and the lost answer as a draft (UX-064, UX-068)', () => {
 	const say = async (key: string): Promise<string> => (await import('../i18n.svelte.js')).t(key);
 	/** Answers 'my answer' (or `answer`) to a question the server reports closed with `code`, as `viewer`. */
-	async function closedWith(code: string, opts: { viewer?: 'owner' | 'mandate'; field?: string; answer?: string; tabs?: boolean; options?: string[] } = {}): Promise<{ field: string; asked: number }> {
+	async function closedWith(code: string, opts: { viewer?: 'owner' | 'mandate'; field?: string; answer?: string; tabs?: boolean; options?: string[]; consent?: 'guard' | 'deep' } = {}): Promise<{ field: string; asked: number }> {
 		let field = opts.field ?? '';
 		let asked = 0;
 		store.registerComposerDraft((text) => { asked++; if (field.trim() !== '') return false; field = text; return true; });
@@ -412,7 +412,7 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 			await settle();
 			await store.replyPermissionTabs(['my answer']);
 		} else {
-			run.send('prompt', { promptId: 'p1', question: 'Which?', ...(opts.options !== undefined ? { options: opts.options } : {}) });
+			run.send('prompt', { promptId: 'p1', question: 'Which?', ...(opts.options !== undefined ? { options: opts.options } : {}), ...(opts.consent !== undefined ? { consent: opts.consent } : {}) });
 			await settle();
 			await store.replyPermission(opts.answer ?? 'my answer');
 		}
@@ -462,10 +462,10 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 	});
 
 	it('a consent card\'s answer is no draft: typed into the chat it would approve nothing', async () => {
-		for (const options of [['Allow', 'Deny'], ['Run on balanced', 'Cancel']]) {
+		for (const [options, consent] of [[['allow', 'deny'], 'guard'], [['deep', 'balanced', 'cancel'], 'deep']] as const) {
 			vi.resetModules();
 			store = await import('./chat.svelte.js');
-			const { field, asked } = await closedWith('timed_out', { answer: 'y', options });
+			const { field, asked } = await closedWith('timed_out', { answer: 'allow', options: [...options], consent });
 			expect(asked, options.join('/')).toBe(0);
 			expect(field).toBe('');
 			expect(store.getChatError()).toBe(await say('chat.prompt_closed.timed_out'));

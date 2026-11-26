@@ -38,7 +38,7 @@ function agentWith(tainted: boolean, ownerText: string): Agent {
   const agent = new Agent({
     name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', noticeLanguage: 'en',
     tools: [createWebSearchTool({} as SearchProvider) as ToolEntry],
-    promptUser: async () => 'Allow',
+    promptUser: async () => 'allow',
     ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => [ownerText] }),
     conversationLatch: ConversationLatch.detached(),
   } as ConstructorParameters<typeof Agent>[0]);

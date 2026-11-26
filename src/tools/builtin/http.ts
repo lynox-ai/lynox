@@ -1,4 +1,5 @@
 import type { ToolEntry } from '../../types/index.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent, type ConsentOutcome } from '../../core/consent-ask.js';
 import { HTTP_DIALOG, exfilWarning as exfilWarningText } from '../dialog-text.js';
 import { DEFAULT_MAX_TOOL_RESULT_CHARS } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
@@ -438,7 +439,7 @@ function onlyProfileQueryCredential(url: string, toolContext: ToolContext | unde
 const deniedInBatch = new WeakMap<object, Set<string>>();
 /** In-flight consent questions of a tool batch, keyed like `deniedInBatch`, by the question:
  *  parallel calls with the same question share one answer instead of asking twice. */
-const pendingInBatch = new WeakMap<object, Map<string, Promise<boolean>>>();
+const pendingInBatch = new WeakMap<object, Map<string, Promise<ConsentOutcome>>>();
 /** Write approvals given in a tool batch, keyed like `deniedInBatch`: per question, how many sends
  *  are left. An Allow adds as many as its question named and each send takes one, so an Allow
  *  never covers a call of another batch or a send more than it named. */
@@ -3675,10 +3676,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const language = agent.dialogLanguage ?? 'en';
         const answer = await agent.promptUser(
           HTTP_DIALOG[language].exfil(toolWordFrame('http_request', language), exfilWarningText(exfilWarning, language)),
-          ['Allow', 'Deny', '\x00'],
+          consentOptions('guard'),
+          consentMeta('guard'),
         );
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          blockedVerbatim(`Blocked: ${exfilWarning} — denied by user.`);
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          blockedVerbatim(consentRefusal(outcome, `Blocked: ${exfilWarning} — denied by user.`));
         }
       }
     }
@@ -4089,9 +4092,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               : said.sentNote(sentMethod, alsoNamed.join(', '));
             const answer = await promptUser(
               HTTP_DIALOG[agent.dialogLanguage ?? 'en'].outbound(toolWordFrame('http_request', agent.dialogLanguage ?? 'en'), gatedMethod, hostname, path, fields, pv`${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`),
-              ['Allow', 'Deny', '\x00'],
+              consentOptions('guard'),
+              consentMeta('guard'),
             );
-            const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
+            const outcome = decideConsent('guard', answer);
+            const allowed = outcome === 'allow';
             if (remembers && allowed && batch !== undefined) {
               let tickets = approvedInBatch.get(batch);
               if (!tickets) { tickets = new Map(); approvedInBatch.set(batch, tickets); }
@@ -4106,13 +4111,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               // Each write the request named, so a later request naming any of them is not asked.
               for (const m of named) denied.add(approvalKey(approvalMethod(m), hostname));
             }
-            return allowed;
+            // The outcome, not a yes/no: a twin awaiting this same question is told why, too.
+            return outcome;
           }).finally(() => { if (shareKey !== undefined) pendingMap?.delete(shareKey); });
           if (shareKey !== undefined) pendingMap?.set(shareKey, pending);
         }
-        const allowed = await pending;
-        if (!allowed) {
-          blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} denied by user.`);
+        const outcome = await pending;
+        if (outcome !== 'allow') {
+          blockedVerbatim(consentRefusal(outcome, `Blocked: outbound ${refusedAs} to ${service()} denied by user.`));
         }
         // Outside a batch, and for a write asked every time, the answer covers this call alone.
         if (!remembers || batch === undefined) break;

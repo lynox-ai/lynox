@@ -85,6 +85,25 @@ describe('the role lines (T-1, Fassung 4)', () => {
 	});
 });
 
+describe('a workflow role without a workflow to name', () => {
+	// The engine sends no workflow role without a workflow in the preview; should one come, its line is not said.
+	// U-290: a workflow plan without its workflow says so, and what follows, in place of the workflow roles.
+	it('a missing workflow is said once, after the plan roles, in DE and EN', () => {
+		const p = preview({ members: [wfMember(['created', 'workflow-created'])], workflow: null, workflowGone: true });
+		expect(texts(p).slice(0, 2)).toEqual(['Angelegt von ida@x.ch', 'Der Workflow dieses Plans fehlt. So führt der Plan nichts aus.']);
+		expect(kinds(p).filter((k) => k === 'workflow_gone')).toHaveLength(1);
+		setLocale('en');
+		expect(texts(p).slice(0, 2)).toEqual(['Created by ida@x.ch', 'This plan\'s workflow is missing. As it is, the plan does nothing.']);
+	});
+	it('without a workflow in the preview, says the plan roles and no line that quotes nothing', () => {
+		const p = preview({ members: [wfMember(['created', 'workflow-created', 'workflow-edited'])], workflow: null });
+		expect(texts(p).filter((t) => t.includes('Workflow'))).toEqual([]);
+		expect(texts(p)).toContain('Angelegt von ida@x.ch');
+		expect(texts(p).join('\n')).not.toContain('„“');
+		expect(kinds(p)).not.toContain('workflow_gone');
+	});
+});
+
 describe('F2: the workflow is taken over with the plan', () => {
 	const wf = { id: 'w', name: 'Rechnungen', takenOver: true };
 	it('names the change before the creation, and the plans released', () => {
