@@ -122,7 +122,7 @@ function agentFor(store: ApiStore, vault: Vault, opts: { principal?: RequestPrin
 }
 const del = (store: ApiStore, vault: Vault, id: string, opts: Parameters<typeof agentFor>[2] = {}): Promise<string> =>
   apiSetupTool.handler({ action: 'delete', id } as never, agentFor(store, vault, opts)) as Promise<string>;
-const allow = (): Promise<string> => Promise.resolve('Allow');
+const allow = (): Promise<string> => Promise.resolve('allow');
 
 // ── A: a profile the boot held back is deleted like a registered one ──
 
@@ -282,7 +282,7 @@ describe('deleting a profile whose written token an unreadable entry names', () 
     const late = tmp('lynox-delete-late-');
     writeFileSync(join(late, 'owner.json'), placeholder('owner.json').raw);
     // The question is asked after the check; the entry is read while it is open.
-    const result = await del(store, vault, 'shop', { promptUser: async () => { store.loadFromDirectory(late); return 'Allow'; } });
+    const result = await del(store, vault, 'shop', { promptUser: async () => { store.loadFromDirectory(late); return 'allow'; } });
     expect(result).toBe('Deleted API profile "shop". Left in the vault although this profile\'s sign-in wrote it: SHOP_ACCESS_TOKEN. A stored API profile that could not be read names it too, so whose it is cannot be told, so it was not removed. This profile is gone, so no later delete takes it away: remove it from the vault by hand once it is clear it is not that profile\'s.');
     expect(vault.snapshot()).toEqual({ SHOP_ACCESS_TOKEN: TOKEN });
   });
@@ -306,7 +306,7 @@ describe('deleting an entry the boot could not read', () => {
 
   it.each([
     ['nobody to ask', undefined, 'Blocked: deleting the unreadable API profile entry "owner" needs the user\'s confirmation, and no interactive prompt is available here. Nothing was deleted.'],
-    ['the owner declines', async () => 'Deny', 'Blocked: API profile entry "owner" not deleted — user declined.'],
+    ['the owner declines', async () => 'deny', 'Blocked: API profile entry "owner" not deleted — user declined.'],
   ] as const)('%s: nothing is deleted', async (_case, promptUser, reply) => {
     const { store, dir } = boot([placeholder('owner.json')]);
     expect(await del(store, vaultOf({}), 'owner', promptUser ? { promptUser } : {})).toBe(reply);

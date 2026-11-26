@@ -2,6 +2,7 @@
 	import { untrack } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
+	import { erasureDoneText } from '../utils/erasure-done.js';
 	import {
 		previewPersonErasure,
 		erasePerson,
@@ -91,7 +92,7 @@
 	</div>
 
 	{#if notice === 'erased' && result}
-		<p class="mt-2" role="status">{tf('erasure.done', { entries: String(result.counts.entries), memories: String(result.counts.memories) })}</p>
+		<p class="mt-2" role="status">{erasureDoneText(result.counts.entries, result.counts.memories)}</p>
 		{#if result.left.entries + result.left.memories + result.left.legacyEntities > 0}
 			<p class="mt-1 text-text-muted">{tf('erasure.left', { n: String(result.left.entries + result.left.memories + result.left.legacyEntities) })}</p>
 		{/if}

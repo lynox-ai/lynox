@@ -355,7 +355,7 @@ describe('bash after a search the provider ran in the same answer', () => {
     const agent = new Agent({
       name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', noticeLanguage: 'en',
       tools: [bashTool as unknown as ToolEntry],
-      promptUser: async () => 'Allow',
+      promptUser: async () => 'allow',
       ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => ['bitte lies docs.example'] }),
       conversationLatch: ConversationLatch.detached(),
       toolContext: {

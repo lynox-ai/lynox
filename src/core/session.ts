@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
@@ -17,7 +18,6 @@ import type {
   EffortLevel,
   ThinkingMode,
   TabQuestion,
-  IAgent,
   PromptUserFn,
   PromptTabsFn,
   PromptSecretFn,
@@ -98,6 +98,7 @@ import type { RequestPrincipal } from './request-principal.js';
 import { turnIsLocked } from './mandate-tool-lock.js';
 import { ConversationGrants } from './conversation-grants.js';
 import { SearchResultAddresses } from './search-result-addresses.js';
+import { wrapHandler } from '../tools/wrap-handler.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -387,15 +388,12 @@ export interface RunUsageSummary {
  * plugin-enabled instance. The spread keeps those, and any field added to ToolEntry later.
  */
 export function applyPluginToolGate(entries: ToolEntry[], pluginManager: PluginManager): ToolEntry[] {
-  return entries.map(entry => ({
-    ...entry,
-    handler: async (input: unknown, agent: IAgent): Promise<string> => {
-      const gate = await pluginManager.fireToolGate(entry.definition.name, input);
-      if (gate === false) {
-        throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
-      }
-      return entry.handler(input, agent);
-    },
+  return entries.map(entry => wrapHandler(entry, async (input, _agent, run): Promise<string> => {
+    const gate = await pluginManager.fireToolGate(entry.definition.name, input);
+    if (gate === false) {
+      throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
+    }
+    return run();
   }));
 }
 
@@ -1084,7 +1082,8 @@ export class Session {
         try {
           answer = await this.agent.promptUser(
             pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
-            ['Allow', 'Deny', '\x00'],
+            consentOptions('guard'),
+            consentMeta('guard'),
           );
         } catch (err: unknown) {
           // A prompt path that cannot reach anyone (an HTTP engine without its prompt store)
@@ -1096,7 +1095,10 @@ export class Session {
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          // The run's result, read by the person, not by the model: no sentence for the model here
+          // (the reply route already tells the person an unrecognised answer allowed nothing).
           const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;

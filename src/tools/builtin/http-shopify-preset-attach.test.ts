@@ -51,7 +51,7 @@ async function chatRequest(url: string, profile: ApiProfile | null, method = 'GE
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
     secretStore: { resolve: (n: string) => vault[n] ?? null, resolveSecretRefs: (x: unknown) => x, listNames: () => Object.keys(vault) },
-    promptUser: async () => 'Allow',
+    promptUser: async () => 'allow',
     getAvailableTools: () => [{ definition: { name: 'http_request' } }],
     toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   };

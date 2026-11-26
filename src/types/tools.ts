@@ -12,7 +12,19 @@ import type { SendTarget } from '../core/send-target.js';
 import type { HostPolicyContext } from '../core/network-guard.js';
 
 export type ToolHandler<TInput = unknown> =
-  (input: TInput, agent: IAgent) => Promise<string>;
+  (input: TInput, agent: IAgent, call?: ToolCallContext) => Promise<string>;
+
+/**
+ * What the engine settled about one call before its handler runs. `writeTarget` is the file a
+ * tool with `ToolEntry.writeTarget` writes, resolved ONCE for the call: the Permission Guard
+ * judged this file, so the handler writes exactly it and does not resolve the path again (a link
+ * set between the two would otherwise redirect the write to a file nobody judged). `null`: the
+ * path resolved to nothing writable, and the handler refuses. Absent: nothing was resolved for
+ * this call (a direct call), and the handler resolves the path itself.
+ */
+export interface ToolCallContext {
+  readonly writeTarget?: string | null | undefined;
+}
 
 /**
  * Structured payload a tool's `destructive.check` may return INSTEAD of a plain
@@ -108,7 +120,8 @@ export interface ToolEntry<TInput = unknown> {
    * directory), or `null` when the handler would refuse the path. The Permission Guard reads its
    * sensitive-path rules against this as well as against the path as written, so a link or a
    * confinement cannot put the file written out of the rules' sight. Declared here, next to the
-   * handler that resolves the same way, so the guard needs no import of the tool.
+   * handler that resolves the same way, so the guard needs no import of the tool. The engine calls
+   * it once per call and hands the result to the guard and to the handler (`ToolCallContext`).
    */
   writeTarget?: ((path: string) => string | null) | undefined;
   /**

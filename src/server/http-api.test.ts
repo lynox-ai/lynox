@@ -106,6 +106,21 @@ const mockSetApiKey = vi.fn();
 const mockGetApiStore = vi.fn().mockReturnValue(null);
 const mockSecretIsEnvironment = vi.fn().mockReturnValue(false);
 
+// Document extraction, held on demand: a test pushes a promise and the next upload's extraction
+// waits on it.
+const { extractHolds } = vi.hoisted(() => ({ extractHolds: [] as Array<Promise<void>> }));
+vi.mock('../core/document-extract.js', async (importActual) => {
+  const actual = await importActual<typeof import('../core/document-extract.js')>();
+  return {
+    ...actual,
+    extractDocumentText: async (...args: Parameters<typeof actual.extractDocumentText>) => {
+      const hold = extractHolds.shift();
+      if (hold) await hold;
+      return actual.extractDocumentText(...args);
+    },
+  };
+});
+
 // Capture-telemetry recorder — the funnel/proposal emit sites are fire-and-forget; this
 // records every call so a test can assert an event actually fired (the RF-GAP1/GAP2
 // regression guard: the events existed as types but no site emitted them).
@@ -3803,6 +3818,59 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('an answer to one of the engine\'s confirmations that is none of its keys is recorded and said back; an ordinary question\'s is not', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-consent-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const store = new PromptStore(history.getDb());
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const original = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => store;
+      const guard = (sid: string): string => store.insertAskUser(sid, '⚠ Command: x', ['allow', 'deny'], false, undefined, undefined, undefined, undefined, 'guard');
+      try {
+        for (const [answer, refused] of [['allow', false], ['deny', false], ['__dismissed__', false], ['y', true], ['yes', true], ['Erlauben', true], ['Allow', true], ['allow deep', true]] as const) {
+          const sid = `s-consent-${answer.replace(/\W/g, '_')}`;
+          const id = guard(sid);
+          const res = await jsonFetch(`/api/sessions/${sid}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer }) });
+          expect(res.status, answer).toBe(200);
+          const body = await res.json() as { ok: boolean; refused?: string };
+          expect(body.refused, answer).toBe(refused ? 'unrecognised_answer' : undefined);
+          // Recorded either way: the gate reads it, and refuses what is no key.
+          expect(store.getById(id)?.answer, answer).toBe(answer);
+          // A retry whose first response was lost learns the same.
+          const retry = await jsonFetch(`/api/sessions/${sid}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer }) });
+          const again = await retry.json() as { idempotent?: boolean; refused?: string };
+          expect(again.idempotent, answer).toBe(true);
+          expect(again.refused, answer).toBe(refused ? 'unrecognised_answer' : undefined);
+        }
+        // An older client answers without a promptId: nothing is answered, and the gate stays open.
+        const legacyId = guard('s-consent-legacy');
+        const legacy = await jsonFetch('/api/sessions/s-consent-legacy/reply', { method: 'POST', body: JSON.stringify({ answer: 'y' }) });
+        expect(legacy.status).toBe(409);
+        expect((await legacy.json() as { code?: string }).code).toBe('prompt_id_required');
+        expect(store.getById(legacyId)?.status).toBe('pending');
+        expect(store.getById(legacyId)?.answer ?? null).toBeNull();
+        // A question the model wrote, with the same words: an ordinary answer.
+        const plain = store.insertAskUser('s-plain', 'Allow?', ['Allow', 'Deny', '\x00']);
+        const ordinary = await jsonFetch('/api/sessions/s-plain/reply', { method: 'POST', body: JSON.stringify({ promptId: plain, answer: 'y' }) });
+        expect(await ordinary.json()).toEqual({ ok: true });
+        // A reconnect restores the marker from the store; a question stored without it has none.
+        guard('s-open');
+        const open = await jsonFetch('/api/sessions/s-open/pending-prompt');
+        const openBody = await open.json() as { consent?: string; options?: string[]; mailConnect?: unknown };
+        expect(openBody.consent).toBe('guard');
+        expect(openBody.options).toEqual(['allow', 'deny']);
+        expect(openBody.mailConnect).toBeUndefined();
+        store.insertAskUser('s-before', '⚠ Command: x', ['Allow', 'Deny', '\x00']);
+        const before = await jsonFetch('/api/sessions/s-before/pending-prompt');
+        expect((await before.json() as { consent?: string }).consent).toBeUndefined();
+      } finally {
+        engineRef.getPromptStore = original;
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('reply returns 404 for no pending prompt', async () => {
       const res = await jsonFetch('/api/sessions/test/reply', {
         method: 'POST',
@@ -4712,6 +4780,185 @@ describe('LynoxHTTPApi', () => {
       } finally {
         if (prev === undefined) delete process.env['LYNOX_RUN_WALL_CLOCK_MS'];
         else process.env['LYNOX_RUN_WALL_CLOCK_MS'] = prev;
+      }
+    });
+
+    // A run waiting on its own question counts against the run cap until it is answered,
+    // stopped or expires.
+    it('counts runs waiting on their own questions against the run cap', async () => {
+      const { db, store } = await promptDb();
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown; getRunExecutor: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      const originalGetRunExecutor = engineRef.getRunExecutor;
+      const { RunExecutor } = await import('../core/run-executor.js');
+      const ex = new RunExecutor(5);
+      engineRef.getPromptStore = (): unknown => store;
+      engineRef.getRunExecutor = (): unknown => ex;
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      const sids = ['waiting-cap-1', 'waiting-cap-2', 'waiting-cap-3', 'waiting-cap-4', 'waiting-cap-5'];
+      const open: Response[] = [];
+      try {
+        for (const sid of sids) {
+          repayRateWindow();
+          mockSessionRun.mockImplementationOnce(async () => {
+            const promptUser = mockSessionInstance.promptUser as (q: string, o?: string[]) => Promise<string>;
+            return `settled:${await promptUser('Which repo did you mean?', ['lynox', 'other'])}`;
+          });
+          const res = await jsonFetch(`/api/sessions/${sid}/run`, {
+            method: 'POST',
+            body: JSON.stringify({ task: 'sort the invoices', protocol: 1 }),
+          });
+          expect(res.status).toBe(200);
+          open.push(res);
+          for (let i = 0; i < 400 && !store.getPending(sid); i++) await new Promise<void>((r) => setTimeout(r, 5));
+          expect(store.getPending(sid), 'positive control: the run waits on its question').toBeDefined();
+        }
+        expect(ex.activeCount, 'positive control: five runs are held').toBe(5);
+        repayRateWindow();
+        const sixth = await jsonFetch('/api/sessions/waiting-cap-6/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'something else', protocol: 1 }),
+        });
+        expect(sixth.status).toBe(429);
+        expect(await sixth.json()).toEqual({ error: 'run_queue_full', capacity: 5 });
+        // A stopped run gives its place back.
+        const stop = await jsonFetch('/api/sessions/waiting-cap-1/abort', { method: 'POST' });
+        expect(stop.status, await stop.text()).toBe(200);
+        await expectSlotReclaimed(slots, 'waiting-cap-1');
+        for (let i = 0; i < 400 && ex.activeCount === 5; i++) await new Promise<void>((r) => setTimeout(r, 5));
+        expect(ex.activeCount).toBe(4);
+        expect(ex.atCapacity()).toBe(false);
+      } finally {
+        for (const sid of sids) {
+          await jsonFetch(`/api/sessions/${sid}/abort`, { method: 'POST' }).then((r) => r.text()).catch(() => undefined);
+        }
+        for (const sid of sids) await expectSlotReclaimed(slots, sid);
+        for (const res of open) await res.body?.cancel().catch(() => undefined);
+        engineRef.getPromptStore = originalGetPromptStore;
+        engineRef.getRunExecutor = originalGetRunExecutor;
+        db.close();
+      }
+    });
+
+    // A run that ends only releases the slot it owns.
+    it('does not release a slot a finishing run no longer owns', async () => {
+      const slots = (api as unknown as { runningSessions: Map<string, { takeover: unknown }> }).runningSessions;
+      const sid = 'own-slot-1';
+      let openA!: () => void;
+      let openB!: () => void;
+      extractHolds.push(new Promise<void>((r) => { openA = r; }), new Promise<void>((r) => { openB = r; }));
+      let finishA: ((v: string) => void) | undefined;
+      let finishB: ((v: string) => void) | undefined;
+      mockSessionRun
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishA = r; }))
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishB = r; }));
+      const files = [{ name: 'notes.txt', type: 'text/plain', data: Buffer.from('hello').toString('base64') }];
+      const send = (task: string): Promise<Response> => {
+        repayRateWindow();
+        return jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task, files, protocol: 1 }) });
+      };
+      const wait = async (done: () => boolean): Promise<void> => {
+        for (let i = 0; i < 400 && !done(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+      };
+      let a: Promise<Response> | undefined;
+      let b: Promise<Response> | undefined;
+      try {
+        a = send('first');
+        await wait(() => extractHolds.length === 1);
+        b = send('second');
+        await wait(() => extractHolds.length === 0);
+        expect(extractHolds.length, 'positive control: setup reached').toBe(0);
+        expect(slots.has(sid), 'positive control: no slot set').toBe(false);
+        openA();
+        await wait(() => finishA !== undefined);
+        const slotA = slots.get(sid);
+        expect(slotA, 'positive control: first slot set').toBeDefined();
+        openB();
+        await wait(() => finishB !== undefined);
+        const slotB = slots.get(sid);
+        expect(slotB, 'positive control: slot replaced').not.toBe(slotA);
+        finishA!('first done');
+        await (await a).text();
+        expect(slots.get(sid), 'the current slot stays').toBe(slotB);
+        repayRateWindow();
+        const third = await jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task: 'third', protocol: 1 }) });
+        expect(third.status).toBe(409);
+        await third.text();
+      } finally {
+        openA?.();
+        openB?.();
+        extractHolds.length = 0;
+        finishA?.('first done');
+        finishB?.('second done');
+        await a?.then((r) => r.text()).catch(() => undefined);
+        await b?.then((r) => r.text()).catch(() => undefined);
+        await expectSlotReclaimed(slots, sid);
+      }
+    });
+
+    // A run's heartbeat refreshes only the slot it owns.
+    it('refreshes only its own slot on a heartbeat', async () => {
+      const slots = (api as unknown as { runningSessions: Map<string, { lastEventAt: number }> }).runningSessions;
+      const sid = 'own-beat-1';
+      let openA!: () => void;
+      let openB!: () => void;
+      extractHolds.push(new Promise<void>((r) => { openA = r; }), new Promise<void>((r) => { openB = r; }));
+      let finishA: ((v: string) => void) | undefined;
+      let finishB: ((v: string) => void) | undefined;
+      mockSessionRun
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishA = r; }))
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishB = r; }));
+      const files = [{ name: 'notes.txt', type: 'text/plain', data: Buffer.from('hello').toString('base64') }];
+      const send = (task: string): Promise<Response> => {
+        repayRateWindow();
+        return jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task, files, protocol: 1 }) });
+      };
+      const wait = async (done: () => boolean): Promise<void> => {
+        for (let i = 0; i < 400 && !done(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+      };
+      // Only the heartbeat's interval is faked: sockets and the waits above keep real time, and
+      // the slot's clock is read against a marker rather than a faked Date.
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      let a: Promise<Response> | undefined;
+      let b: Promise<Response> | undefined;
+      try {
+        a = send('first');
+        await wait(() => extractHolds.length === 1);
+        b = send('second');
+        await wait(() => extractHolds.length === 0);
+        expect(extractHolds.length, 'positive control: setup reached').toBe(0);
+        openA();
+        await wait(() => finishA !== undefined);
+        const slotA = slots.get(sid);
+        expect(slotA, 'positive control: first slot set').toBeDefined();
+        // The first run's heartbeats fall on 10 s, 20 s, ...
+        slotA!.lastEventAt = 1;
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(slotA!.lastEventAt, 'a heartbeat refreshes the run\'s own slot').toBeGreaterThan(1);
+        await vi.advanceTimersByTimeAsync(5_000);
+        // The second run starts at 15 s, so its own heartbeats fall on 25 s, 35 s, ...
+        openB();
+        await wait(() => finishB !== undefined);
+        const slotB = slots.get(sid);
+        expect(slotB, 'positive control: slot replaced').not.toBe(slotA);
+        slotB!.lastEventAt = 1;
+        // 20 s: only the first run's heartbeat is due.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(slotB!.lastEventAt, 'another run\'s heartbeat leaves the slot as it was').toBe(1);
+        // 25 s: the second run's own heartbeat refreshes it.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(slotB!.lastEventAt, 'positive control: the slot\'s own heartbeat refreshes it').toBeGreaterThan(1);
+      } finally {
+        // Real timers first, so a failure above cannot leave the file on faked intervals.
+        vi.useRealTimers();
+        openA?.();
+        openB?.();
+        extractHolds.length = 0;
+        finishA?.('first done');
+        finishB?.('second done');
+        await a?.then((r) => r.text()).catch(() => undefined);
+        await b?.then((r) => r.text()).catch(() => undefined);
+        await expectSlotReclaimed(slots, sid);
       }
     });
 
@@ -10345,6 +10592,28 @@ describe('LynoxHTTPApi', () => {
         if (pending) ps.expirePrompt(pending.id, 'run_stopped');
         await parked;
       });
+    });
+
+    it('the live prompt frame carries the engine\'s consent marker, and a question without it carries none', async () => {
+      for (const [meta, expected] of [[{ consent: 'guard' }, 'guard'], [{ consent: 'deep' }, 'deep'], [undefined, undefined]] as const) {
+        await withStores(async (ps) => {
+          mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+          let parked: Promise<unknown> | undefined;
+          mockSessionRun.mockImplementationOnce(async () => {
+            parked = (mockSessionInstance.promptUser as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>))(
+              '⚠ Command: x', meta ? ['allow', 'deny'] : ['Allow', 'Deny', '\x00'], meta);
+            await new Promise((r) => setImmediate(r));
+            return 'done';
+          });
+          const text = await (await jsonFetch('/api/sessions/sse-consent/run', { method: 'POST', body: JSON.stringify({ task: 'go', protocol: 2 }) })).text();
+          const frame = text.split('\n').find((l) => l.startsWith('data:') && l.includes('"promptId"'));
+          expect(frame, 'no prompt frame on the stream').toBeDefined();
+          expect((JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>)['consent'], String(expected)).toBe(expected);
+          const pending = ps.getPending('sse-consent');
+          if (pending) ps.expirePrompt(pending.id, 'run_stopped');
+          await parked;
+        });
+      }
     });
 
     // With no prompt store there is no way to ask — and nothing is made up. `promptUser` used to
@@ -25856,6 +26125,9 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
   let windowBefore = new Map<string, number>();
   beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+  // Each case starts with an empty window: the requests of the tests before it in this file are no
+  // part of what is checked here, and on a fast run they can fill the minute's window on their own.
+  beforeEach(() => { for (const e of rateCounts().values()) e.count = 0; });
   afterEach(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
 
   async function withEnv(env: Record<string, string | undefined>, fn: () => Promise<void>): Promise<void> {

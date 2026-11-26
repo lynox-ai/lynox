@@ -21,6 +21,7 @@
 		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkShowsFailure,
 	} from './bulk-runs.js';
+	import { BulkLoadFailed, bulkLoadErrorKey } from './bulk-runs.js';
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
 
@@ -83,10 +84,12 @@
 	}
 
 	/** A page of the run's targets. A failed fetch throws: an empty page would read as a run
-	 *  with fewer targets than the approval covers. */
+	 *  with fewer targets than the approval covers. A refused answer throws with its status, so
+	 *  the page can say why ({@link bulkLoadErrorKey}). */
 	async function loadTargets(id: string, offset: number, limit: number, changed = false): Promise<BulkTarget[]> {
 		const r = await json<{ targets?: BulkTarget[] }>(`/bulk/runs/${encodeURIComponent(id)}/targets?offset=${offset}&limit=${limit}${changed ? '&changed=1' : ''}`);
-		if (!r.ok || !Array.isArray(r.body.targets)) throw new Error('targets');
+		if (!r.ok) throw new BulkLoadFailed(r.status);
+		if (!Array.isArray(r.body.targets)) throw new Error('targets');
 		return r.body.targets;
 	}
 
@@ -197,7 +200,7 @@
 		try {
 			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
 			if (left()) return false;
-			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
+			if (!r.ok) { if (!quiet) error = t(bulkLoadErrorKey([r.status])); loading = false; return false; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
@@ -244,9 +247,9 @@
 			unmeasuredOk = false;
 			probeOk = false;
 			supersedable = null;
-		} catch {
+		} catch (e) {
 			if (left()) return false;
-			if (!quiet) error = t('common.load_failed');
+			if (!quiet) error = t(bulkLoadErrorKey([e instanceof BulkLoadFailed ? e.status : null]));
 			loading = false;
 			return false;
 		}
@@ -272,9 +275,9 @@
 			targets = whole ? more : [...targets, ...more];
 			changedOnly = false;
 			return true;
-		} catch {
+		} catch (e) {
 			if (left()) return false;
-			actionError = t('common.load_failed');
+			actionError = t(bulkLoadErrorKey([e instanceof BulkLoadFailed ? e.status : null]));
 			return false;
 		}
 	}
@@ -767,10 +770,15 @@
 <!-- The markup a target's new value adds and removes in an HTML field (1010), as code text with
      every attribute whole (sec-core M3): set as text, never rendered, and wrapped so a long value
      stays in view. On an undo it says what the undo writes back and takes out. -->
-{#snippet targetName(target: { key: string })}
+<!-- A product target by its title where the store's read answered one (as text, never markup),
+     with its admin link below; without a title, the link alone as before. -->
+{#snippet targetName(target: { key: string; title?: string | undefined })}
 	{@const name = bulkTargetName(run?.targetSystem ?? '', target)}
 	{#if name.adminUrl === null}
 		<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+	{:else if target.title}
+		<span class="block text-sm break-words" data-testid="bulk-target-title">{bulkVisibleText(target.title)}</span>
+		<a class="text-xs text-text-muted underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{t('bulk.target.open_in_shop')}<span aria-hidden="true"> ↗</span></a>
 	{:else}
 		<a class="text-sm underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{tf('bulk.target.product', { n: name.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
 	{/if}

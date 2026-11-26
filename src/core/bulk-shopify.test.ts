@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, BULK_HALT_REASONS, type BulkRunForPreview } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_TARGET_TITLE_MAX, bulkTargetTitleCell, type BulkRunForPreview } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { BulkHostBudget, externalClient, externalWriter, graphqlWriteAnswer, parseBulkContract, type ExternalClient, type ExternalRead } from './bulk-external.js';
 import {
@@ -2070,6 +2070,10 @@ describe('applying a Shopify run', () => {
         const next = await previewedWith({ descriptionHtml: '<p>Neuer</p>' });
         expect(ledger.getRunForApply(next)).toMatchObject({ kind: 'apply' });
         expect(row(next)).toEqual({ change: 'invalid', error: 'before_has_shop_markup' });
+        // Left out by its name: the title this read answered is kept, encrypted like the rest.
+        expect(ledger.getPreview(next)[0]!.title).toBe('T1');
+        const cell = (engineDb.getDb().prepare('SELECT target_title FROM bulk_targets WHERE run_id = ? AND seq = 0').get(next) as { target_title: string | null }).target_title;
+        expect(cell !== null && cell !== 'T1').toBe(true);
         expect(stored(next, 'before')).toEqual({ absent: false, value: expect.objectContaining({ descriptionHtml: kept }) });
         expect(ledger.shopifyApplyOf(next)!.writes).toEqual([]);
       }
@@ -2994,3 +2998,99 @@ describe('a Shopify preview naming SEO text a theme may show as an entity', () =
     expect(t).not.toHaveProperty('seoEntityFields');
   });
 });
+
+// People know a product by its title. The preview keeps the title the store answered its read
+// with, encrypted like the before-image, and the targets route shows it; nothing else writes it.
+describe('a product target\'s title', () => {
+  async function previewed(src: BulkListSource = source()): Promise<string> {
+    const id = startedList(src);
+    await runBulkPreview(id, deps());
+    vi.stubEnv(FLAG, '1');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    return id;
+  }
+  const raw = (id: string): (string | null)[] => (engineDb.getDb()
+    .prepare('SELECT target_title FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(id) as { target_title: string | null }[]).map((r) => r.target_title);
+
+  it('is kept from the store\'s answer to the read, encrypted, and shown on the targets', async () => {
+    fill(3);
+    const id = await previewed();
+    expect(ledger.getPreview(id).map((t) => t.title)).toEqual(['T1', 'T2', 'T3']);
+    // Stored encrypted with the store's key: the row holds no title in clear.
+    const cells = raw(id);
+    expect(cells.every((c) => c !== null && !['T1', 'T2', 'T3'].includes(c))).toBe(true);
+    expect(cells.map((c) => engineDb.dec(c!))).toEqual(['T1', 'T2', 'T3']);
+  });
+
+  it('is the title the store answered, not the one a run that writes the title plans', async () => {
+    fill(2);
+    const id = await previewed(source({ title: 'Neuer Name' }));
+    expect(ledger.getPreview(id).map((t) => t.title)).toEqual(['T1', 'T2']);
+    expect(ledger.getPreview(id).map((t) => (t.after as Record<string, unknown>)['title'])).toEqual(['Neuer Name', 'Neuer Name']);
+  });
+
+  it('stays NULL where the store answered none, and an empty title is not stored either', async () => {
+    fill(2);
+    delete (s.products.get(10) as Record<string, unknown>)['title'];
+    (s.products.get(20) as Record<string, unknown>)['title'] = '';
+    const id = await previewed();
+    expect(raw(id)).toEqual([null, null]);
+    expect(ledger.getPreview(id).map((t) => 'title' in t)).toEqual([false, false]);
+  });
+
+  it('keeps at most 255 code points and never cuts inside a character', () => {
+    expect(BULK_TARGET_TITLE_MAX).toBe(255);
+    const emojiLast = `${'a'.repeat(254)}😀`;
+    expect(bulkTargetTitleCell(emojiLast)).toBe(emojiLast);
+    expect(bulkTargetTitleCell(`${emojiLast}b`)).toBe(emojiLast);
+    expect(bulkTargetTitleCell(`${'a'.repeat(255)}😀`)).toBe('a'.repeat(255));
+    expect(bulkTargetTitleCell(null)).toBeNull();
+    expect(bulkTargetTitleCell(undefined)).toBeNull();
+    expect(bulkTargetTitleCell('')).toBeNull();
+  });
+
+  const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
+    ledger, trailFor: () => null,
+    writerFor: (run) => bulkWriterFor(run, null, (r) => {
+      const granted = ledger.shopifyApplyOf(r.id);
+      const stored = r.contractJson === null ? null : parseBulkContract(r.contractJson);
+      if (granted === null || stored === null) return null;
+      const c = client(withShopifyApply(stored, HOST, granted));
+      return externalWriter(c, { sleep: async () => {}, io: shopifyTargetIo(c, ENDPOINT) });
+    }),
+  });
+  async function undoneOnce(withoutTitle: boolean): Promise<string> {
+    fill(1);
+    const id = await previewed(source({ seo_title: 'Neu' }));
+    const approved = ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    if (!approved.ok) throw new Error(JSON.stringify(approved));
+    await apply(id);
+    if (withoutTitle) engineDb.getDb().prepare('UPDATE bulk_targets SET target_title = NULL WHERE run_id = ?').run(id);
+    const undo = ledger.planUndo(id);
+    if (!undo.ok) throw new Error(undo.reason);
+    return undo.status.id;
+  }
+
+  it('goes with an undo, from the target it takes back, still encrypted', async () => {
+    const undoId = await undoneOnce(false);
+    expect(ledger.getPreview(undoId).map((t) => t.title)).toEqual(['T1']);
+    const [cell] = raw(undoId);
+    expect(cell).not.toBe('T1');
+    expect(engineDb.dec(cell!)).toBe('T1');
+  });
+
+  it('stays NULL on an undo whose source target had none', async () => {
+    const undoId = await undoneOnce(true);
+    expect(raw(undoId)).toEqual([null]);
+    expect(ledger.getPreview(undoId).map((t) => 'title' in t)).toEqual([false]);
+  });
+
+  it('is not part of what the judge reads', () => {
+    const src = readFileSync(join(__dirname, 'bulk-ledger.ts'), 'utf8');
+    const judge = src.slice(src.indexOf('  loadJudgeTarget('), src.indexOf('  loadJudgeTarget(') + 800);
+    expect(judge).toContain('SELECT target_key, before, context FROM bulk_targets');
+    expect(judge).not.toContain('target_title');
+  });
+});
+

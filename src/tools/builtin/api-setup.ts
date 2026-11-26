@@ -14,6 +14,7 @@
  * Profiles are written to ~/.lynox/apis/<id>.json and hot-reloaded into ApiStore.
  */
 
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
 import { API_SETUP_DIALOG, PRESET_NOTE, presetParamDescribe, SECURITY_CHANGE_WORDS, type DialogLanguage, type SecurityChangeWords } from '../dialog-text.js';
 import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
@@ -55,6 +56,7 @@ import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder }
 import { isPrivateIP } from '../../core/network-guard.js';
 import { effectiveWriteMethod, graphqlUrlWrites, isGraphqlEndpoint, isReadMethod, isRequestShapingHeaderName } from '../../core/outbound-write.js';
 import { ifEmptiedAny, ifOk, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { wrapHandler } from '../wrap-handler.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -1839,9 +1841,10 @@ async function askBindingGrowth(agent: IAgent, profile: ApiProfile, act: 'saved'
   const grow: Array<{ name: string; endpoints: string[] }> = [];
   for (const { name, bound } of needs) {
     if (agent.runSignal?.aborted) { noteOwnStopSentence(); return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` }; }
-    const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)), agent.dialogLanguage ?? 'en')}`, ['Allow', 'Deny', '\x00']);
-    if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-      return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.` };
+    const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)), agent.dialogLanguage ?? 'en')}`, consentOptions('guard'), consentMeta('guard'));
+    const outcome = decideConsent('guard', answer);
+    if (outcome !== 'allow') {
+      return { refusal: consentRefusal(outcome, `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.`) };
     }
     grow.push({ name, endpoints: dest });
   }
@@ -2748,10 +2751,12 @@ ${draftJson}
         } else {
           const answer = await agent.promptUser(
             API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].save(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), profile.name, changes.map((c) => c.text), disclosureIn(agent.dialogLanguage ?? 'en')),
-            ['Allow', 'Deny', '\x00'],
+            consentOptions('guard'),
+            consentMeta('guard'),
           );
-          if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-            return `Blocked: profile "${profile.id}" not saved — user declined.`;
+          const outcome = decideConsent('guard', answer);
+          if (outcome !== 'allow') {
+            return consentRefusal(outcome, `Blocked: profile "${profile.id}" not saved — user declined.`);
           }
           // `true`, not `redirectUrls.length > 0`: the guarded value below is
           // `hostsOf(redirectUrls)`, which is empty when the list is, so the
@@ -3209,11 +3214,13 @@ ${draftJson}
           ? Promise.resolve(null)
           : promptUser(
             API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].deleteUnreadable(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), id, singleLine(unreadableSource)),
-            ['Allow', 'Deny', '\x00'],
+            consentOptions('guard'),
+            consentMeta('guard'),
           ));
         if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`; }
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: API profile entry "${id}" not deleted — user declined.`;
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          return consentRefusal(outcome, `Blocked: API profile entry "${id}" not deleted — user declined.`);
         }
       }
       if (existing) {
@@ -3235,11 +3242,13 @@ ${draftJson}
           ? Promise.resolve(null)
           : promptUser(
             API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].deleteProfile(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), singleLine(String(existing.name)), id, host, loses),
-            ['Allow', 'Deny', '\x00'],
+            consentOptions('guard'),
+            consentMeta('guard'),
           ));
         if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile "${id}" not deleted — the run was stopped before the question was asked.`; }
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: API profile "${id}" not deleted — user declined.`;
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          return consentRefusal(outcome, `Blocked: API profile "${id}" not deleted — user declined.`);
         }
       }
       // Delete from the backing store + memory (S4b: engine.db `connections` when
@@ -4028,10 +4037,12 @@ ${draftJson}
             viewed: viewed === undefined ? undefined : { clock: releaseClock(viewed.at, agent.userTimezone), unchanged: viewed.binding === bindingOf(profile) },
             clientId: role === 'oauth.client_id_key', held,
           }),
-          ['Allow', 'Deny', '\x00'],
+          consentOptions('guard'),
+          consentMeta('guard'),
         ));
       if (answer === null) { noteOwnStopSentence(); return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`; }
-      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) return `Blocked: ${shownName} was not released to API profile "${id}" — user declined.`;
+      const outcome = decideConsent('guard', answer);
+      if (outcome !== 'allow') return consentRefusal(outcome, `Blocked: ${shownName} was not released to API profile "${id}" — user declined.`);
       // Only what the answer covered: the author and where the value goes. A renewal while the
       // question was open changes neither, and does not void the answer.
       const current = apiStore.get(id);
@@ -4101,11 +4112,13 @@ ${draftJson}
         ? Promise.resolve(null)
         : promptUser(
           API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].adopt(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), { name: singleLine(String(asked.name)), id, by, known, hosts, names }),
-          ['Allow', 'Deny', '\x00'],
+          consentOptions('guard'),
+          consentMeta('guard'),
         ));
       if (answer === null) { noteOwnStopSentence(); return `Blocked: the connection of API profile "${id}" was not adopted — the run was stopped before the question was asked.`; }
-      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-        return `Blocked: the connection of API profile "${id}" was not adopted — user declined.`;
+      const outcome = decideConsent('guard', answer);
+      if (outcome !== 'allow') {
+        return consentRefusal(outcome, `Blocked: the connection of API profile "${id}" was not adopted — user declined.`);
       }
       // Then where each of the profile's secrets may go: once the profile is the owner's, its sends
       // are checked against the owner's bindings, not against a release. Asked before the state
@@ -4154,9 +4167,8 @@ ${draftJson}
  * person's decision, not a failure of the call, and stay plain answers.
  */
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
-  ...apiSetupEntry,
-  handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> =>
-    `${await apiSetupEntry.handler(input, agent)}${waitingConnectionsNote(agent)}${releaseRequestsNote(agent)}`,
+  ...wrapHandler(apiSetupEntry, async (_input, agent, run): Promise<string> =>
+    `${await run()}${waitingConnectionsNote(agent)}${releaseRequestsNote(agent)}`),
   failureOf: apiSetupFailure,
 };
 

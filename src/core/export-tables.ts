@@ -91,7 +91,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       pending_prompts: { about: 'questions the assistant asked you and is waiting on' },
       approval_entries: { about: 'actions that waited for your approval, and your answers', strip: ['checksum', 'dedup_key', 'family_key'], encrypted: ['payload_json', 'result_json'] },
       bulk_runs: { about: 'list jobs the assistant ran over many items', strip: ['rule_hash', 'judge_rule_hash', 'approval_checksum'], encrypted: ['list_source', 'judge_rule', 'start_domains'] },
-      bulk_targets: { about: 'each item of a list job and what was changed', encrypted: ['target_key', 'before', 'after_planned', 'after_actual', 'result', 'context', 'link_domain'] },
+      bulk_targets: { about: 'each item of a list job and what was changed', encrypted: ['target_key', 'before', 'after_planned', 'after_actual', 'result', 'context', 'link_domain', 'target_title'] },
       inbound_events: { about: 'events other services sent to this installation', encrypted: ['values_json'] },
       audit_log: { about: 'a log of what the assistant changed, and when' },
       connections: { about: 'the services you connected (without their passwords or keys)', stripJson: { config_json: GRANT_RECORD_PATHS } },

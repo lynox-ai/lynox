@@ -347,6 +347,13 @@
 		return trigger.paused === true && trigger.status === 'completed';
 	}
 
+	// At a paused plan, open or completed, Delete and the switch are the owner's: the route refuses
+	// both to a helper (`paused`), so a helper is not offered them there. It waits for a known owner,
+	// as the confirm does.
+	function ownerOnlyHere(trigger: Trigger): boolean {
+		return trigger.paused === true && !ownerActs;
+	}
+
 	let takeoverFor = $state<Trigger | null>(null);
 	let takeoverPreview = $state<TakeoverPreview | null>(null);
 	// The lists of plans the open preview has unfolded: a new preview starts folded.
@@ -792,11 +799,13 @@
 							<!-- Not at a plan that waits for its takeover: next to its badge the switch
 							     read as a second pause, and a helper's is refused. After the takeover it
 							     comes back, and an own pause set before stays. -->
-							{#if !pausedOpen(trigger)}
+							{#if !pausedOpen(trigger) && !ownerOnlyHere(trigger)}
 								<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} data-trigger-toggle class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
 							{/if}
 							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
-							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
+							{#if !ownerOnlyHere(trigger)}
+								<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} data-trigger-delete class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
+							{/if}
 							{#if offersCheck(trigger)}
 								<button onclick={() => (checking[trigger.id] = !checking[trigger.id])} aria-expanded={checking[trigger.id] === true} class="{checkAsked(trigger) ? '' : '[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100'} rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity" data-trigger-check>{t('stamp.check')}</button>
 							{/if}

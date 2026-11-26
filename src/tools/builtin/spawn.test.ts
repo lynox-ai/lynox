@@ -6254,7 +6254,9 @@ describe('spawn_agent tool', () => {
       expect(typeof payload).toBe('object');
       const p = payload as WarningPayload;
       expect(p.message).toContain('DEEP');
-      expect(p.message).toMatch(/Estimated cost/i);
+      // The amount is the model's list-price cost in the budget's own unit ($), named as model cost,
+      // at the end of its sentence.
+      expect(p.message).toMatch(/Estimated model cost for this session: about \$\d+\.\d{2}\./);
       expect(p.tier).toBe('deep');
       expect(p.costUsd).toBeGreaterThan(0);
     });
