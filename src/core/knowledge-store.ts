@@ -999,6 +999,18 @@ export class KnowledgeStore {
     return this.listPendingForThread(threadId, limit).map(e => ({ ...e, text: this._maskText(e.text) }));
   }
 
+  /**
+   * How many entries are still stored though no list here returns them: rejected by the owner,
+   * or superseded by a newer one. A reader that has to carry everything held (the data export)
+   * uses it to say its copy is not complete.
+   */
+  countRejectedOrSuperseded(): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM knowledge_entries WHERE status IN ('rejected', 'superseded')",
+    ).get() as { n: number };
+    return row.n;
+  }
+
   listActive(limit = 200): Array<KnowledgeEntry & { subjectName: string | null }> {
     const capped = Math.max(1, Math.min(limit, 500));
     const rows = this.db.prepare(

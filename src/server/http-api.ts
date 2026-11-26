@@ -14810,7 +14810,10 @@ export class LynoxHTTPApi {
           // than `truncated` because that is the honest strength of the claim — the store
           // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
           // exactly 500, and over-reporting is the right way to be wrong here.
-          may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP,
+          // Rejected and superseded entries are still stored but not in these lists, so a copy
+          // that leaves them out is not complete.
+          may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP
+            || store.countRejectedOrSuperseded() > 0,
         };
       };
       const knowledgeStore = engine.getKnowledgeStore();
@@ -14820,16 +14823,12 @@ export class LynoxHTTPApi {
         } catch {
           exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
         }
-      } else if (engine.getUserConfig().durable_memory_enabled === true) {
-        // Switched on, yet no store: the engine opens it at boot when the setting is on, so
-        // that open failed (or its database did). Not read, so not known to be empty.
-        exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
-        process.stderr.write('⚠ /api/export: durable knowledge store unavailable — exported empty and marked incomplete\n');
       } else {
-        // Switched off: no store was opened. Switching it off deletes nothing, and the tables are
-        // in engine.db whatever the setting, so entries written while it was on are still held;
-        // the export is the answer to an access request and carries them. Read through a store
-        // built only to read, so the export writes nothing.
+        // No store. With the setting off none is opened; with it on, the open at boot failed,
+        // or the setting was switched on after boot. Either way nothing is deleted, and the
+        // tables are in engine.db whatever the setting, so entries written while a store was
+        // open are still held; the export is the answer to an access request and carries them.
+        // Read through a store built only to read, so the export writes nothing.
         const engineDb = engine.getEngineDb();
         if (engineDb) {
           try {
@@ -14847,8 +14846,10 @@ export class LynoxHTTPApi {
           process.stderr.write('⚠ /api/export: engine database unavailable — durable knowledge exported empty and marked incomplete\n');
         }
       }
-      // Whether durable memory is switched on. With it off, the block still carries what is
-      // held, and `enabled: false` says the entries are stored but not in use.
+      // `enabled` is the setting: whether durable memory is switched on in the config. With it
+      // off, the block still carries what is held, and `enabled: false` says the entries are
+      // stored but not in use. It can differ from the store the engine built at boot after the
+      // config is reloaded; the block's content does not depend on it.
       exportData['durable_knowledge'] = {
         ...(exportData['durable_knowledge'] as Record<string, unknown>),
         enabled: engine.getUserConfig().durable_memory_enabled === true,

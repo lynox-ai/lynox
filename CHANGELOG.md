@@ -56,7 +56,10 @@
   knowledge entries and memory blocks still held from when it was on, read
   without changing anything. Switching it off never deleted them, and until now
   the block came out empty and marked complete. The block's new `enabled` field
-  says whether durable memory is switched on.
+  says whether durable memory is switched on. The same read runs when durable
+  memory is on but its store did not open, and the block is marked incomplete
+  while entries the owner rejected or that were superseded are stored, since
+  the export does not carry those yet.
 
 ## 2.18.0 — 2026-11-17
 

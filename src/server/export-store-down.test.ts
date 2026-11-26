@@ -36,6 +36,7 @@ type EngineView = {
   getUserConfig: () => { durable_memory_enabled?: boolean | undefined };
   getEngineDb: () => unknown;
   _crm: unknown;
+  _knowledgeStore: unknown;
 };
 
 const ENV = [
@@ -200,6 +201,61 @@ describe('export with durable memory switched off after it held entries (real en
     } finally {
       view.getEngineDb = real;
     }
+  }, 60_000);
+
+  it('carries what it holds when durable memory is switched on after boot, with no store built', async () => {
+    const view = h.engine();
+    const real = view.getUserConfig;
+    view.getUserConfig = () => ({ ...real.call(view), durable_memory_enabled: true });
+    try {
+      expect(view.getKnowledgeStore(), 'fixture: the store is built only at boot').toBeNull();
+      const body = await h.exportBody();
+      expect(body.durable_knowledge.enabled, 'the setting now reads on').toBe(true);
+      expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['ACME renews in March']);
+      expect(body.durable_knowledge.may_be_incomplete, 'read in full').toBe(false);
+    } finally {
+      view.getUserConfig = real;
+    }
+  }, 60_000);
+});
+
+describe('export with durable memory on and its store gone, engine.db open (real engine)', () => {
+  const h = harness((dir) => {
+    const db = new EngineDb(join(dir, 'engine.db'));
+    new KnowledgeStore(db, new SubjectStore(db), null).write({ text: 'Delivery on Fridays', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    db.close();
+  }, true);
+
+  it('reads the entries through a store built only to read, unmarked', async () => {
+    expect(h.engine().getEngineDb(), 'fixture: engine.db opened').not.toBeNull();
+    // What the engine leaves behind when building the store at boot throws.
+    h.engine()._knowledgeStore = null;
+    expect(h.engine().getKnowledgeStore()).toBeNull();
+
+    const body = await h.exportBody();
+    expect(body.durable_knowledge.enabled).toBe(true);
+    expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['Delivery on Fridays']);
+    expect(body.durable_knowledge.may_be_incomplete, 'read in full').toBe(false);
+  }, 60_000);
+});
+
+describe('export with durable memory on and a rejected or superseded entry stored (real engine)', () => {
+  const h = harness((dir) => {
+    const db = new EngineDb(join(dir, 'engine.db'));
+    const store = new KnowledgeStore(db, new SubjectStore(db), null);
+    store.write({ text: 'Invoices go out monthly', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    const held = store.write({ text: 'The warehouse closes at noon on Saturdays', subjectName: 'Lager', sourceChannel: 'agent', sourceUntrusted: false });
+    if (held.deduped === true) throw new Error('fixture: the second entry was merged into the first');
+    const changed = db.getDb().prepare("UPDATE knowledge_entries SET status = 'rejected' WHERE id = ?").run(held.id).changes;
+    if (changed !== 1) throw new Error(`fixture: expected one entry to reject, got ${String(changed)}`);
+    db.close();
+  }, true);
+
+  it('marks the block incomplete: the rejected entry is held but not in the copy', async () => {
+    expect(h.engine().getKnowledgeStore(), 'fixture: the store opened').not.toBeNull();
+    const body = await h.exportBody();
+    expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['Invoices go out monthly']);
+    expect(body.durable_knowledge.may_be_incomplete, 'a stored entry is left out').toBe(true);
   }, 60_000);
 });
 
