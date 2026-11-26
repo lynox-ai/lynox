@@ -752,12 +752,17 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       } else {
         try {
           // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
-          // O_NOFOLLOW: the path is resolved, so a link at the file was set after that; it is
-          // refused here as the write refuses it, before anything is compared with it.
+          // O_NOFOLLOW: the path is resolved, so a link AT the file was set after that; it is
+          // refused here as the write refuses it, before anything is compared with it. The
+          // folders on the way are opened by name here (the write walks them without links).
           fd = openSync(realPath, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
         } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'ENOENT') {
             throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+          }
+          if (code === 'ELOOP') {
+            throw new Error(isInArtifactsRoot(realPath) ? linkRefusal(realPath, relative(artifactsRoot(), realPath)) : resolvedLinkRefusal(realPath), { cause: err });
           }
           throw err;
         }

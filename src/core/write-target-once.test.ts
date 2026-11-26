@@ -23,6 +23,10 @@ import { _resetCache as resetWorkspaceCache, clearTenantWorkspace, setTenantWork
 import { closeWorkspaceBase } from './workspace-rel.js';
 import { editFileTool, writeFileTool } from '../tools/builtin/fs.js';
 import { isDangerousDetailed } from '../tools/permission-guard.js';
+import { applyPluginToolGate } from './session.js';
+import { wrapWithGate } from '../orchestrator/runtime-adapter.js';
+import { ChangesetManager } from './changeset.js';
+import type { PluginManager } from './plugins.js';
 
 type Exec = { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> };
 
@@ -32,7 +36,8 @@ let away: string;
 
 function setup(isolated: boolean): void {
   data = realpathSync(mkdtempSync(join(tmpdir(), 'write-once-')));
-  away = realpathSync(mkdtempSync(join(tmpdir(), 'write-once-away-')));
+  // In /tmp itself, not TMPDIR: /tmp is a root the write tools allow with isolation on.
+  away = realpathSync(mkdtempSync('/tmp/write-once-away-'));
   vi.stubEnv('LYNOX_DATA_DIR', data);
   vi.stubEnv('LYNOX_WORKSPACE', '');
   ws = join(data, 'workspace');
@@ -67,6 +72,9 @@ function agentWith(tools: ToolEntry[]): Agent {
 const call = (agent: Agent, name: string, input: Record<string, unknown>) =>
   (agent as unknown as Exec)._executeOneInner({ type: 'tool_use', id: `t-${name}`, name, input });
 
+/** Said when the write meets a link on the way to the file it was handed. */
+const LINK_REFUSED = 'a link on the way to the file is not followed here; nothing was written.';
+
 /** `at` becomes a link to `to`. */
 const relink = (at: string, to: string): void => { unlinkSync(at); symlinkSync(to, at); };
 
@@ -82,6 +90,7 @@ describe.each([['write_file', writeFileTool], ['edit_file', editFileTool]] as co
     agent.promptUser = asked;
     const result = await call(agent, name, { path: 'notes.txt', ...INPUT[name] });
     expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain(LINK_REFUSED);
     expect(readFileSync(join(ws, '.env'), 'utf-8')).toBe('KEY=old\n');
     expect(lstatSync(join(ws, 'notes.txt')).isSymbolicLink()).toBe(true);
     // The guard judged the file resolved before the link (a plain one), not a second resolution.
@@ -95,7 +104,28 @@ describe.each([['write_file', writeFileTool], ['edit_file', editFileTool]] as co
     const agent = agentWith([resolvingThen(tool, () => relink(join(away, 'notes.txt'), join(away, 'other.txt')))]);
     const result = await call(agent, name, { path: join(away, 'notes.txt'), ...INPUT[name] });
     expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain(LINK_REFUSED);
     expect(readFileSync(join(away, 'other.txt'), 'utf-8')).toBe('old\n');
+  });
+
+  it(`${name}, control, isolation, a file in /tmp: without a link the judged file is written`, async () => {
+    setup(true);
+    writeFileSync(join(away, 'notes.txt'), 'old\n');
+    const result = await call(agentWith([resolvingThen(tool, () => undefined)]), name, { path: join(away, 'notes.txt'), ...INPUT[name] });
+    expect(result.is_error).not.toBe(true);
+    expect(readFileSync(join(away, 'notes.txt'), 'utf-8')).toMatch(/^new text/);
+  });
+
+  it(`${name}, behind the plugin gate: a link set after the judgement is refused, and the file it points to stays as it was`, async () => {
+    setup(false);
+    writeFileSync(join(ws, '.env'), 'KEY=old\n');
+    writeFileSync(join(ws, 'notes.txt'), 'old\n');
+    const plugins = { fireToolGate: async () => true } as unknown as PluginManager;
+    const [gated] = applyPluginToolGate([resolvingThen(tool, () => relink(join(ws, 'notes.txt'), '.env'))], plugins);
+    const result = await call(agentWith([gated!]), name, { path: 'notes.txt', ...INPUT[name] });
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain(LINK_REFUSED);
+    expect(readFileSync(join(ws, '.env'), 'utf-8')).toBe('KEY=old\n');
   });
 
   it(`${name}, control: without a link the judged file is written`, async () => {
@@ -156,15 +186,92 @@ describe('what the handler holds to', () => {
     expect(readFileSync(join(ws, 'other.txt'), 'utf-8')).toBe('old\n');
   });
 
-  it('edit_file, no workspace: a link set after the judgement is refused before the file it points to is read, so the answer says nothing of its text', async () => {
+  it('edit_file, no workspace: a link set at the file after the judgement is refused before the file it points to is read, so the answer says nothing of its text', async () => {
     setup(false);
     writeFileSync(join(ws, '.env'), 'KEY=1\n');
     writeFileSync(join(ws, 'notes.txt'), 'old\n');
     const agent = agentWith([resolvingThen(editFileTool, () => relink(join(ws, 'notes.txt'), '.env'))]);
     const result = await call(agent, 'edit_file', { path: 'notes.txt', old_string: 'old', new_string: 'new' });
     expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain(LINK_REFUSED);
     expect(String(result.content)).not.toContain('old_string');
     expect(readFileSync(join(ws, '.env'), 'utf-8')).toBe('KEY=1\n');
+  });
+});
+
+describe('every wrapper hands the call on', () => {
+  const CALL = { writeTarget: '/judged/file' } as const;
+  const inner = (): { entry: ToolEntry; seen: unknown[][] } => {
+    const seen: unknown[][] = [];
+    const entry = { ...writeFileTool, handler: async (...args: unknown[]) => { seen.push(args); return 'done'; } } as unknown as ToolEntry;
+    return { entry, seen };
+  };
+  const agent = { sessionCounters: { writeBytes: 0 } } as unknown as IAgent;
+
+  it('the plugin gate passes the call context to the tool, and leaves a call without one as it was', async () => {
+    const { entry, seen } = inner();
+    const [gated] = applyPluginToolGate([entry], { fireToolGate: async () => true } as unknown as PluginManager);
+    await gated!.handler({ path: 'x' }, agent, CALL);
+    await gated!.handler({ path: 'x' }, agent);
+    expect(seen).toEqual([[{ path: 'x' }, agent, CALL], [{ path: 'x' }, agent]]);
+  });
+
+  it('a workflow step gate passes the call context to the tool after its approval', async () => {
+    const { entry, seen } = inner();
+    const adapter = { submit: async () => 'id', waitForDecision: async () => ({ status: 'approved' }) };
+    const gated = wrapWithGate(entry, adapter as never, {} as never);
+    await gated.handler({ path: 'x' }, agent, CALL);
+    expect(seen).toEqual([[{ path: 'x' }, agent, CALL]]);
+  });
+});
+
+describe('the diff preview reads the file that is written', () => {
+  it('write_file, no workspace, an artifact path: the preview before the question shows the workspace file it writes, not the artifact', async () => {
+    setup(false);
+    mkdirSync(join(data, 'artifacts'));
+    writeFileSync(join(data, 'artifacts', 'report.html'), 'ARTIFACT TEXT\n');
+    writeFileSync(join(ws, 'report.html'), 'WORKSPACE TEXT\n');
+    const agent = agentWith([writeFileTool]);
+    // Emptying a file is asked about, so the preview is shown first.
+    agent.promptUser = vi.fn().mockResolvedValue('Allow');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let shown: string;
+    try {
+      await call(agent, 'write_file', { path: join(data, 'artifacts', 'report.html'), content: '' });
+      shown = stderr.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(shown).toContain('WORKSPACE TEXT');
+    expect(shown).not.toContain('ARTIFACT TEXT');
+    expect(readFileSync(join(ws, 'report.html'), 'utf-8')).toBe('');
+    expect(readFileSync(join(data, 'artifacts', 'report.html'), 'utf-8')).toBe('ARTIFACT TEXT\n');
+  });
+});
+
+describe('the review saves the file that is written', () => {
+  it('isolation, a file in /tmp: a link retargeted after the judgement leaves the backup and the write on the same file', async () => {
+    setup(true);
+    writeFileSync(join(away, 'b.txt'), 'b old\n');
+    writeFileSync(join(away, 'c.txt'), 'c old\n');
+    symlinkSync(join(away, 'b.txt'), join(away, 'a.txt'));
+    const manager = new ChangesetManager(ws, 'run', [realpathSync('/tmp')]);
+    try {
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', changesetManager: manager,
+        tools: [resolvingThen(writeFileTool, () => relink(join(away, 'a.txt'), join(away, 'c.txt')))],
+      });
+      const result = await call(agent, 'write_file', { path: join(away, 'a.txt'), content: 'new text' });
+      expect(result.is_error).not.toBe(true);
+      expect(readFileSync(join(away, 'b.txt'), 'utf-8')).toBe('new text');
+      expect(readFileSync(join(away, 'c.txt'), 'utf-8')).toBe('c old\n');
+      // Saved for the review: the file written, not the one the link points to now.
+      expect(manager.getChanges().map((c) => join(ws, c.file))).toEqual([join(away, 'b.txt')]);
+      manager.rollbackAll();
+      expect(readFileSync(join(away, 'b.txt'), 'utf-8')).toBe('b old\n');
+    } finally {
+      manager.cleanup();
+    }
   });
 });
 

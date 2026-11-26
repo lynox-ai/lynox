@@ -17,7 +17,6 @@ import type {
   EffortLevel,
   ThinkingMode,
   TabQuestion,
-  IAgent,
   PromptUserFn,
   PromptTabsFn,
   PromptSecretFn,
@@ -98,6 +97,7 @@ import type { RequestPrincipal } from './request-principal.js';
 import { turnIsLocked } from './mandate-tool-lock.js';
 import { ConversationGrants } from './conversation-grants.js';
 import { SearchResultAddresses } from './search-result-addresses.js';
+import { wrapHandler } from '../tools/wrap-handler.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -387,15 +387,12 @@ export interface RunUsageSummary {
  * plugin-enabled instance. The spread keeps those, and any field added to ToolEntry later.
  */
 export function applyPluginToolGate(entries: ToolEntry[], pluginManager: PluginManager): ToolEntry[] {
-  return entries.map(entry => ({
-    ...entry,
-    handler: async (input: unknown, agent: IAgent): Promise<string> => {
-      const gate = await pluginManager.fireToolGate(entry.definition.name, input);
-      if (gate === false) {
-        throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
-      }
-      return entry.handler(input, agent);
-    },
+  return entries.map(entry => wrapHandler(entry, async (input, _agent, run): Promise<string> => {
+    const gate = await pluginManager.fireToolGate(entry.definition.name, input);
+    if (gate === false) {
+      throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
+    }
+    return run();
   }));
 }
 

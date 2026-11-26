@@ -331,8 +331,8 @@ export function readForDiffPreview(path: string): string {
  * The text a write to `rawPath` would change, for the diff preview: the file the write would
  * change, resolved as write_file and edit_file resolve it. A path they refuse throws.
  */
-export function diffPreviewText(rawPath: string): string {
-  return readForDiffPreview(resolveWritablePath(rawPath));
+export function diffPreviewText(rawPath: string, writeTarget?: string | null): string {
+  return readForDiffPreview(typeof writeTarget === 'string' ? writeTarget : resolveWritablePath(rawPath));
 }
 
 /**
@@ -345,7 +345,12 @@ export function writeTargetFor(tool: ToolEntry, input: unknown): string | null |
   if (input === null || typeof input !== 'object' || !('path' in input)) return undefined;
   const path = (input as { path: unknown }).path;
   if (typeof path !== 'string') return undefined;
-  return tool.writeTarget(path);
+  // A resolution that throws resolves to nothing writable: the handler refuses the call.
+  try {
+    return tool.writeTarget(path);
+  } catch {
+    return null;
+  }
 }
 
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
@@ -5527,7 +5532,8 @@ export class Agent implements IAgent {
     // (`changesetReviewedAfterRun`). A child under its parent's review is asked as without one.
     const reviewedLater = mutatesFile && this._reviewedAfterRun && this.changesetManager?.active === true;
     // The file a write tool writes, resolved ONCE for this call: the guard below judges this file
-    // and the handler writes exactly it (`ToolCallContext`). Resolved again in the handler, a link
+    // (where it runs: not under a review after the run), the diff preview and the review's backup
+    // read it, and the handler writes exactly it (`ToolCallContext`). Resolved again later, a link
     // set while the call waits for its answer would send the write to a file nobody judged.
     const writeTarget = writeTargetFor(tool, tc.input);
     if (mutatesFile && !reviewedLater && this.promptUser) {
@@ -5536,7 +5542,7 @@ export class Agent implements IAgent {
         const input = tc.input as { path?: string; content?: string; old_string?: string; new_string?: string };
         if (input.path) {
           // A path the write tools refuse throws here and skips the preview; the tool reports it.
-          const existing = diffPreviewText(input.path);
+          const existing = diffPreviewText(input.path, writeTarget);
           let updated: string | undefined;
           if (tc.name === 'write_file' && typeof input.content === 'string') {
             updated = input.content;
@@ -5838,7 +5844,9 @@ export class Agent implements IAgent {
     // a prompt the user may take a while to answer.
     if (mutatesFile && this.changesetManager?.active) {
       const reviewed = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolveToolPath(reviewed)) === false) {
+      // The file the handler writes, as resolved once for this call: the backup saves that file,
+      // not one a second resolution would find.
+      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(typeof writeTarget === 'string' ? writeTarget : resolveToolPath(reviewed)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
         const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
@@ -5963,7 +5971,7 @@ export class Agent implements IAgent {
       // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
       if (mutatesFile && this.changesetManager?.active) {
         const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolveToolPath(written));
+        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(typeof writeTarget === 'string' ? writeTarget : resolveToolPath(written));
       }
 
       // Without a store (a headless workflow step) the engine's own env secrets are still
