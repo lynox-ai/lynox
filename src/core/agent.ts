@@ -329,10 +329,30 @@ export function readForDiffPreview(path: string): string {
 
 /**
  * The text a write to `rawPath` would change, for the diff preview: the file the write would
- * change, resolved as write_file and edit_file resolve it. A path they refuse throws.
+ * change. That is `writeTarget` when the call's file was resolved already (`writeTargetFor`);
+ * otherwise the path is resolved as write_file and edit_file resolve it, and a path they refuse
+ * throws.
  */
-export function diffPreviewText(rawPath: string): string {
-  return readForDiffPreview(resolveWritablePath(rawPath));
+export function diffPreviewText(rawPath: string, writeTarget?: string | null): string {
+  return readForDiffPreview(typeof writeTarget === 'string' ? writeTarget : resolveWritablePath(rawPath));
+}
+
+/**
+ * The file a tool with `ToolEntry.writeTarget` writes for this call's `path`, or null when it
+ * writes none; undefined for any other tool, and for a call without a path (the handler's own
+ * check refuses that one). Resolved once per call, for the guard and the handler alike.
+ */
+export function writeTargetFor(tool: ToolEntry, input: unknown): string | null | undefined {
+  if (tool.writeTarget === undefined) return undefined;
+  if (input === null || typeof input !== 'object' || !('path' in input)) return undefined;
+  const path = (input as { path: unknown }).path;
+  if (typeof path !== 'string') return undefined;
+  // A resolution that throws resolves to nothing writable: the handler refuses the call.
+  try {
+    return tool.writeTarget(path);
+  } catch {
+    return null;
+  }
 }
 
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
@@ -5508,13 +5528,18 @@ export class Agent implements IAgent {
     // Skip diff preview and permission prompt only where the user reviews the run afterwards
     // (`changesetReviewedAfterRun`). A child under its parent's review is asked as without one.
     const reviewedLater = mutatesFile && this._reviewedAfterRun && this.changesetManager?.active === true;
+    // The file a write tool writes, resolved ONCE for this call: the guard below judges this file
+    // (where it runs: not under a review after the run), the diff preview and the review's backup
+    // read it, and the handler writes exactly it (`ToolCallContext`). Resolved again later, a link
+    // set while the call waits for its answer would send the write to a file nobody judged.
+    const writeTarget = writeTargetFor(tool, tc.input);
     if (mutatesFile && !reviewedLater && this.promptUser) {
       // Show diff preview before permission prompt (non-changeset mode)
       try {
         const input = tc.input as { path?: string; content?: string; old_string?: string; new_string?: string };
         if (input.path) {
           // A path the write tools refuse throws here and skips the preview; the tool reports it.
-          const existing = diffPreviewText(input.path);
+          const existing = diffPreviewText(input.path, writeTarget);
           let updated: string | undefined;
           if (tc.name === 'write_file' && typeof input.content === 'string') {
             updated = input.content;
@@ -5555,7 +5580,7 @@ export class Agent implements IAgent {
       : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract, {
         provider: inherits.provider, apiKey: undefined, apiBaseURL: undefined,
         openaiModelId: inherits.openaiModelId, openaiAuth: undefined, modelPinnedByProfile: inherits.modelPinnedByProfile,
-      }, this.dialogLanguage);
+      }, this.dialogLanguage, writeTarget);
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
     // A run nobody watches may hand a queueable call to its owner instead of asking or being
@@ -5816,9 +5841,13 @@ export class Agent implements IAgent {
     // Saved for the review after every gate above, so a write that is refused or denied leaves
     // nothing in it, and what is saved is the file as it was just before this write, not before
     // a prompt the user may take a while to answer.
-    if (mutatesFile && this.changesetManager?.active) {
+    // Resolved to nothing writable (`writeTarget === null`), the handler refuses the call: nothing
+    // is saved for it either.
+    if (mutatesFile && this.changesetManager?.active && writeTarget !== null) {
       const reviewed = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolveToolPath(reviewed)) === false) {
+      // The file the handler writes, as resolved once for this call: the backup saves that file,
+      // not one a second resolution would find.
+      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(typeof writeTarget === 'string' ? writeTarget : resolveToolPath(reviewed)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
         const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
@@ -5883,7 +5912,7 @@ export class Agent implements IAgent {
       // thenable's `then` runs once, not once per reader.
       const rawResult = Promise.resolve(runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
-        : tool.handler(processedInput, this)));
+        : writeTarget === undefined ? tool.handler(processedInput, this) : tool.handler(processedInput, this, { writeTarget })));
       if (trail !== null) { Agent._trailOnSettle(rawResult, trail, callSlot); trailWatched = true; }
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is
@@ -5943,7 +5972,7 @@ export class Agent implements IAgent {
       // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
       if (mutatesFile && this.changesetManager?.active) {
         const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolveToolPath(written));
+        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(typeof writeTarget === 'string' ? writeTarget : resolveToolPath(written));
       }
 
       // Without a store (a headless workflow step) the engine's own env secrets are still

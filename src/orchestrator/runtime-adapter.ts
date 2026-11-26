@@ -24,6 +24,7 @@ import { describeTurnUntrusted } from '../core/untrusted-signals.js';
 import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
 import { ConversationGrants } from '../core/conversation-grants.js';
 import { escapeHiddenInJson, stripHidden } from '../core/hidden-text.js';
+import { wrapHandler } from '../tools/wrap-handler.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -694,9 +695,7 @@ interface GateMeta {
  * fields that exist today, and no test can cover a wrapper nobody has written yet.
  */
 export function wrapWithGate(tool: ToolEntry, gateAdapter: GateAdapter, meta: GateMeta): ToolEntry {
-  return {
-    ...tool,
-    handler: async (input: unknown, agent: IAgent): Promise<string> => {
+  return wrapHandler(tool, async (input, _agent, run): Promise<string> => {
       const approvalId = await gateAdapter.submit({
         ...meta,
         context: { tool: tool.definition.name, input },
@@ -709,9 +708,8 @@ export function wrapWithGate(tool: ToolEntry, gateAdapter: GateAdapter, meta: Ga
       if (decision.status === 'timeout') {
         throw new Error(`Tool "${tool.definition.name}" gate timed out`);
       }
-      return tool.handler(input, agent);
-    },
-  };
+      return run();
+  });
 }
 
 /**
