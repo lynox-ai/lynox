@@ -18,15 +18,17 @@ instance.
 ### Upgrade notes
 
 - The image's own entrypoint passes the new start check, unless your
-  `NODE_OPTIONS` holds an `--inspect` option (other than `--inspect-port`) or
+  `NODE_OPTIONS` holds an `--inspect` option (other than the port settings) or
   another spelling of `--disable-sigusr1`; then the engine refuses to start.
   Remove it from `NODE_OPTIONS`.
 - A setup that starts the engine with its own command, bypassing the
   entrypoint, needs `--disable-sigusr1` in that command, or a plain
-  `NODE_OPTIONS` that contains it; otherwise the engine does not start and
-  says why. `npx` and a source checkout are not checked.
+  `NODE_OPTIONS` that contains it, and no `--inspect` option; otherwise the
+  engine does not start and says why. `npx` and a source checkout are not
+  checked.
 - The egress proxy and the shell sidecar refuse to start if a `NODE_OPTIONS`
-  you set for them replaces the image's and lacks `--disable-sigusr1`.
+  you set for them replaces the image's and is not a plain one with
+  `--disable-sigusr1`, or holds an `--inspect` option.
 - Apart from this fix, the code is the same as 2.19.0. There are no database
   migrations.
 
