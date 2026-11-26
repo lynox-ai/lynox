@@ -51,6 +51,17 @@ export function linesBelow(lineBoxes: readonly { top: number; bottom: number }[]
 }
 
 /**
+ * How many lines of a scrolled box lie below its visible part, for a box whose lines are not
+ * elements of their own (rendered markup): what is left to scroll, in lines of `lineHeight`,
+ * rounded up so a cut line counts. 0 once the end is in view.
+ */
+export function linesLeftBelow(box: { scrollHeight: number; clientHeight: number; scrollTop: number }, lineHeight: number): number {
+	const left = box.scrollHeight - box.clientHeight - box.scrollTop;
+	if (left <= 0.5) return 0;
+	return Math.max(1, Math.ceil((left - 0.5) / Math.max(1, lineHeight)));
+}
+
+/**
  * Whether the field has too little room to show about four lines once it shrinks with the window.
  * Then the card keeps its own height and the stack scrolls instead, buttons included: the question
  * wins over the buttons. `over` is how far the stack's content runs past its visible part.

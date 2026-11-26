@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { linesBelow, promptFieldTooLow, splitPromptHead } from './prompt-head.js';
+import { linesBelow, linesLeftBelow, promptFieldTooLow, splitPromptHead } from './prompt-head.js';
 
 const many = Array.from({ length: 3 }, (_, i) => `rm -rf ./release/build-${i + 1}/artifacts`).join('\n');
 
@@ -63,6 +63,24 @@ describe('linesBelow', () => {
 	});
 	it('adds up a long cut line and the short lines below it', () => {
 		expect(linesBelow([box(0, 138), box(138, 161), box(161, 184), box(184, 207)], 92, 23)).toBe(2 + 3);
+	});
+});
+
+describe('linesLeftBelow', () => {
+	it('counts what is left to scroll in lines, a cut line as a whole one', () => {
+		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 0 }, 22)).toBe(14);
+		expect(linesLeftBelow({ scrollHeight: 300, clientHeight: 256, scrollTop: 0 }, 22)).toBe(2);
+		expect(linesLeftBelow({ scrollHeight: 260, clientHeight: 256, scrollTop: 0 }, 22)).toBe(1);
+	});
+
+	it('is 0 once the end is in view, a rounded pixel included', () => {
+		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 302 }, 22)).toBe(0);
+		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 301.6 }, 22)).toBe(0);
+		expect(linesLeftBelow({ scrollHeight: 200, clientHeight: 256, scrollTop: 0 }, 22)).toBe(0);
+	});
+
+	it('counts down as the box is scrolled', () => {
+		expect(linesLeftBelow({ scrollHeight: 558, clientHeight: 256, scrollTop: 200 }, 22)).toBe(5);
 	});
 });
 

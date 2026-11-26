@@ -78,3 +78,27 @@ describe('a long permission question at little height', () => {
 		expect(cls).toContain('flex-1');
 	});
 });
+
+describe('a question without a consent kind that runs past its box', () => {
+	// The model's own question and a tool's confirmation (a sheet's formulas, a mail) are rendered
+	// markup in a box of fixed height. Its end may be what the yes is for, so a count and a fade say
+	// that more follows, as the engine's own confirmation does. The measurement is in the shots.
+	it('its box is the one the count is measured on, and is measured again when it scrolls', () => {
+		const tags = [...CHATVIEW.matchAll(/<div\b[^>]*>/g)].map((m) => m[0]).filter((t) => t.includes('data-prompt-markdown'));
+		expect(tags).toHaveLength(1);
+		expect(tags[0]).toContain('onscroll={measureQuestion}');
+		expect(tags[0]).toContain('max-h-64');
+		expect(CHATVIEW).toContain("document.querySelector<HTMLElement>('[data-pending-prompt] [data-prompt-markdown]')");
+	});
+
+	it('shows a fade and a button with the count, in the card, only while lines lie below', () => {
+		const card = permissionCard();
+		const block = card.slice(card.indexOf('{#if questionBelow > 0}'));
+		expect(card.indexOf('{#if questionBelow > 0}')).toBeGreaterThan(card.indexOf('data-prompt-markdown'));
+		expect(block).toMatch(/^\{#if questionBelow > 0\}\s*<div data-prompt-fade [^>]*class="[^"]*\bpointer-events-none\b[^"]*\babsolute\b/);
+		expect(block).toContain('<button data-prompt-read-more type="button" onclick={readOnQuestion}');
+		expect(block).toContain('{questionBelowLabel} <span aria-hidden="true">↓</span>');
+		expect(CHATVIEW).toContain("questionBelow === 1 ? t('chat.prompt_read_more_one') : tf('chat.prompt_read_more', { n: String(questionBelow) })");
+	});
+});
+
