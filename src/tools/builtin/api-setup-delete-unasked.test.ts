@@ -57,7 +57,7 @@ describe('api_setup delete in an autonomous run', () => {
     expect(t.reached).toEqual([]);
   });
 
-  it('control: a supervised delete reaches the handler, which asks its own question', async () => {
+  it('control: a supervised delete reaches the handler, and the guard asks nothing', async () => {
     const t = tool();
     const asked: string[] = [];
     const result = await call(agentOf(t, asked, 'supervised'), { action: 'delete', id: 'svc' });

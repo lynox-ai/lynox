@@ -2174,22 +2174,19 @@ export function grantListed(next: ApiProfile, language: DialogLanguage = 'en'): 
 }
 
 /**
- * A create whose secrets may already go to all of its addresses: the binding question does not ask
- * for such a name, and the save question has nothing stored to compare with, so nothing names the
- * grant. It happens when a profile is deleted and saved again (the record of where a name may go
- * outlives the profile) or when a second profile reads a name the first one bound. Only the owner's
- * save, as with the binding question: a mandate's sends wait for the owner's release.
+ * A create that reads a secret already bound to some address: the save question has nothing stored
+ * to compare with, and the binding question names only addresses a name does not have yet, never
+ * the grant. It happens when a profile is deleted and saved again (the record of where a name may
+ * go outlives the profile) or when a second profile reads a name the first one bound. Any binding
+ * counts, not only one that covers this profile's addresses: an address spelled a little
+ * differently (a trailing `#` or `?`) would otherwise read as new and keep the list away. Only the
+ * owner's save, as with the binding question: a mandate's sends wait for the owner's release.
  */
 function createsOnBoundSecrets(agent: IAgent, prior: ApiProfile | undefined, profile: ApiProfile): boolean {
   if (prior !== undefined || !isOwnerPrincipal(agent.principal)) return false;
   const bindings = agent.toolContext?.vaultNameBindings ?? null;
   if (bindings === null) return false;
-  const dest = credentialEndpoints(profile);
-  if (dest.length === 0) return false;
-  return secretBearingNames(profile).some((name) => {
-    const bound = bindings.boundOf(name);
-    return dest.every((e) => bound.includes(e));
-  });
+  return secretBearingNames(profile).some((name) => bindings.boundOf(name).length > 0);
 }
 
 /**
@@ -2819,9 +2816,11 @@ ${draftJson}
           // secret may go grows only when the owner answers a question naming it
           // and its new destinations at an interactive save (`askBindingGrowth`
           // below); with nobody to answer, such a save is refused there. What
-          // still saves without anyone is a profile that names no secret, one
-          // whose secrets are already bound to its destinations, or one a
-          // mandate's session saves (its sends wait for the owner's release).
+          // still saves without anyone is a profile that names no secret, an
+          // update whose secrets are already bound to its destinations and that
+          // widens nothing, or one a mandate's session saves (its sends wait for
+          // the owner's release). A create on a secret bound anywhere is refused
+          // below (`listsAll`).
           if (nonVetted.length > 0) {
             return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
           }
@@ -2969,6 +2968,11 @@ ${draftJson}
         // No await from here to the save.
         if (JSON.stringify(apiStore.storedProfile(savedId) ?? null) !== priorState) {
           return `Error: API profile "${savedId}" changed while the question was open (for example, another chat saved it or its token was renewed), so the answer no longer covers this save. Nothing was saved and no stored token was removed. Read the profile again; if the change is still wanted, save it again; if it still needs their acceptance, the user is asked again.`;
+        }
+        // A secret of this new profile was bound while its questions were open (another save's
+        // answer): none of them listed what this profile may do with it.
+        if (!listsAll && createsOnBoundSecrets(agent, prior, profile)) {
+          return `Error: API profile "${savedId}" was not saved: a secret it reads was allowed for another address while the question was open, so the answer did not cover everything this new profile may do with it. Nothing was saved. Save it again; the user is asked with the whole list.`;
         }
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);
