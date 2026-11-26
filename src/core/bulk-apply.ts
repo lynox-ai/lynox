@@ -29,7 +29,7 @@ import { processUmask } from './workspace-rel.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
-import { shopifyConsentBlock } from './bulk-shopify.js';
+import { shopifyConsentBlock, shopifyProductWriteAccess } from './bulk-shopify.js';
 import { isShopifyStoreHostName } from './shopify-graphql.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
@@ -124,6 +124,9 @@ export interface BulkEffectOutcome {
   planned?: true;
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
+  /** Set where the push says the same shorter than `summary`, so that it fits the web-push cut;
+   *  the run result keeps `summary`, the way included. */
+  pushSummary?: string;
 }
 
 /** A run left `pending` is tried again after this. */
@@ -295,7 +298,22 @@ async function applyRunEffect(
   const source = run.kind === 'undo' && run.sourceRunId !== null ? ledger.getRunForApply(run.sourceRunId) : null;
   const restoresOnly = source !== null && source.kind !== 'undo';
   if (!restoresOnly) {
-    const blocked = apply === null ? [] : shopifyConsentBlock(apply, host === null ? undefined : deps.shopifyGrantOf?.(host));
+    const grant = host === null ? undefined : deps.shopifyGrantOf?.(host);
+    // The product form writes only through a connection that asked for `write_products` and was
+    // granted it (`shopifyProductWriteAccess`), read on every call like the grant below.
+    if (apply !== null && apply.form === 'shopify_product') {
+      const access = shopifyProductWriteAccess(grant);
+      if (access !== 'writable') {
+        ledger.halt(runId, BULK_HALT_REASONS.productWriteNotAsked);
+        const nothingYet = run.applied === 0 && ledger.sentCount(runId) === 0;
+        return {
+          status: 'refused',
+          summary: summarize(ledger, runId, say.productWriteNotAsked(access, nothingYet), say),
+          pushSummary: summarize(ledger, runId, say.productWriteNotAskedPush(access, nothingYet), say),
+        };
+      }
+    }
+    const blocked = apply === null ? [] : shopifyConsentBlock(apply, grant);
     if (blocked.length > 0) {
       ledger.halt(runId, BULK_HALT_REASONS.consentOutdated);
       const nothingYet = run.applied === 0 && ledger.sentCount(runId) === 0;

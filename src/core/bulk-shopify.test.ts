@@ -33,7 +33,7 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
-import { shopifyConnectedBy, shopifyMediaAccess, shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyPairedAfter, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyConnectedBy, shopifyMediaAccess, shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyPairedAfter, shopifyProductWriteAccess, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
 import { SHOPIFY_READ_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { MARKUP_MAX_TAGS, canonicalHtml, htmlEqual, normalizeHtml } from './html-tree.js';
@@ -52,8 +52,10 @@ import { BULK_MAX_TARGETS } from './bulk-plan.js';
 import { BULK_NOTICES } from './bulk-notices.js';
 import { SHOPIFY_CONSENT_VERSION } from './oauth-presets.js';
 
-/** A connection confirmed under the current customer text: every field of a Shopify run is covered. */
-const confirmedGrant = (): unknown => ({ consent_version: SHOPIFY_CONSENT_VERSION });
+/** A connection that asked for and was granted `write_products`, confirmed under the current
+ *  customer text: every field of a Shopify run is covered. */
+const WRITES_PRODUCTS = { asked_scope: ['read_products', 'write_products'], granted_scope: ['read_products', 'write_products'] };
+const confirmedGrant = (): unknown => ({ ...WRITES_PRODUCTS, consent_version: SHOPIFY_CONSENT_VERSION });
 import type { IAgent } from '../types/index.js';
 
 const HOST = 'acme.myshopify.com';
@@ -1522,7 +1524,8 @@ describe('applying a Shopify run', () => {
   // texts and nothing else: a run that writes a description halts before its first write.
   describe('a connection not confirmed under the current text', () => {
     const CURRENT = { consent_version: SHOPIFY_CONSENT_VERSION, consented_at: '2026-11-27T10:00:00.000Z' };
-    const applyUnder = (id: string, grant: unknown, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string; summary: string }> => runBulkEffect(id, effect, {
+    /** The run applied under exactly `grant`. */
+    const applyRaw = (id: string, grant: unknown, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string; summary: string; pushSummary?: string }> => runBulkEffect(id, effect, {
       ledger, trailFor: () => null, shopifyGrantOf: (host) => (host === HOST ? grant : undefined),
       writerFor: (run) => bulkWriterFor(run, null, (r) => externalRunWriter(r, ledger, (rr, _q, _r, shopifyApply) => {
         const stored = rr.contractJson === null ? null : parseBulkContract(rr.contractJson);
@@ -1530,6 +1533,9 @@ describe('applying a Shopify run', () => {
         return granted === null ? null : client(granted);
       })),
     });
+    /** The run applied under `grant` with `write_products` asked for and granted: what is tested is the text. */
+    const applyUnder = (id: string, grant: unknown, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string; summary: string }> =>
+      applyRaw(id, { ...WRITES_PRODUCTS, ...(grant as object | undefined) }, effect);
     const productWrites = (): unknown[] => s.requests.filter((r) => 'seoTitle' in r.variables || 'descriptionHtml' in r.variables);
     /** A previewed one-product run whose after-state also writes the description, approved. */
     const describing = async (): Promise<string> => {
@@ -1545,7 +1551,7 @@ describe('applying a Shopify run', () => {
     };
 
     it.each([
-      ['no grant', undefined],
+      ['a grant with no version', undefined],
       ['a grant from before the version was recorded', { origin: 'callback', asked_scope: ['write_products'] }],
       ['a grant with a time but no version', { consented_at: '2026-11-19T10:00:00.000Z' }],
       ['an earlier text', { consent_version: '0123456789abcdef', consented_at: '2026-11-19T10:00:00.000Z' }],
@@ -1663,6 +1669,114 @@ describe('applying a Shopify run', () => {
       expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.contract);
       expect(s.requests).toEqual([]);
       expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
+    });
+
+    // The product form writes only through a connection that asked for `write_products` and was
+    // granted it: an app may grant it unasked, and then nobody saw the consent page.
+    describe('a connection that did not ask for write_products', () => {
+      const GRANTED_ONLY = { granted_scope: ['read_products', 'write_products'], consent_version: SHOPIFY_CONSENT_VERSION };
+      /** A previewed one-product run of a title and SEO texts alone, which any text covers, approved. */
+      const titling = async (): Promise<string> => {
+        fill(1);
+        const id = await previewed();
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+        s.requests.length = 0;
+        return id;
+      };
+
+      it.each([
+        ['no grant', undefined],
+        ['a grant that recorded no ask, though the app granted write_products', GRANTED_ONLY],
+        ['a grant whose ask is no list', { ...GRANTED_ONLY, asked_scope: 'write_products' }],
+        ['a grant that asked to read only', { ...GRANTED_ONLY, asked_scope: ['read_products'] }],
+      ])('writes nothing under %s, not even a title, and says how to ask', async (_what, grant) => {
+        const id = await titling();
+        const product = JSON.stringify(s.products.get(10));
+        const out = await applyRaw(id, grant);
+        expect(out.status).toBe('refused');
+        expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(s.requests).toEqual([]);
+        expect(JSON.stringify(s.products.get(10))).toBe(product);
+        expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 0, sentUnknown: 0 });
+        expect(out.summary).toContain('lynox wrote nothing. When this Shopify connection was set up, lynox did not ask for permission to change products.');
+        // The push says it shorter and points to the run page; the run result keeps the way.
+        expect(out.pushSummary).toContain('lynox wrote nothing. When connecting, lynox did not ask Shopify for permission to change products. What to do is under Bulk runs.');
+        // The short reason the run page and a push show, in both languages.
+        expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS.productWriteNotAsked)).toContain('This Shopify connection may not change products. Ask lynox in the chat how to get that permission, then have the run planned again.');
+        expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.productWriteNotAsked)).toContain('Diese Shopify-Verbindung darf keine Produkte ändern. Frag lynox im Chat, wie du die Erlaubnis bekommst, und plane den Lauf dann neu.');
+      });
+
+      it('writes nothing under a grant that asked for write_products but was not granted it, and says where to allow it', async () => {
+        const id = await titling();
+        const out = await applyRaw(id, { ...WRITES_PRODUCTS, granted_scope: ['read_products'], consent_version: SHOPIFY_CONSENT_VERSION });
+        expect(out.status).toBe('refused');
+        expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(s.requests).toEqual([]);
+        expect(out.summary).toContain('lynox wrote nothing. Shopify did not give this connection permission to change products. Allow it in the app settings in Shopify, then ask lynox in the chat to connect Shopify again and plan the run again.');
+        expect(out.pushSummary).toContain('lynox wrote nothing. Shopify does not let this connection change products. What to do is under Bulk runs.');
+      });
+
+      it('writes once the connection asked for write_products and was granted it', async () => {
+        const id = await titling();
+        await applyRaw(id, GRANTED_ONLY);
+        expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 1 })).toMatchObject({ ok: true });
+        await applyRaw(id, { ...GRANTED_ONLY, asked_scope: ['read_products', 'write_products'] });
+        expect(ledger.getStatus(id)!.haltReason).toBeNull();
+        expect(productWrites()).toHaveLength(1);
+        expect(s.products.get(10)!['seo']).toEqual({ title: 'New title', description: 'D1' });
+      });
+
+      it('says after a first write that what was written stays, and pushes that short with the counts', async () => {
+        fill(2);
+        const id = await previewed();
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+        s.requests.length = 0;
+        await applyRaw(id, { ...GRANTED_ONLY, asked_scope: ['read_products', 'write_products'] });
+        expect(productWrites()).toHaveLength(1);
+        expect(ledger.confirmProbe(id)).toEqual({ ok: true });
+        expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 2 })).toMatchObject({ ok: true });
+        const out = await applyRaw(id, GRANTED_ONLY);
+        expect(out.status).toBe('refused');
+        expect(productWrites()).toHaveLength(1);
+        expect(out.summary).toMatch(/^lynox writes nothing more in this run; what it already wrote stays\. When this Shopify connection was set up/);
+        expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\. When connecting, lynox did not ask Shopify for permission to change products\. What to do is under Bulk runs\. (?:.* )?1 applied, of 2 targets\.$/);
+      });
+
+      it('does not say it wrote nothing when a send of the run has an unclear end', async () => {
+        const id = await titling();
+        // A loop marked the target sent and died before recording what came of it.
+        ledger.markSent(id, ledger.getPreview(id)[0]!.seq, null);
+        const out = await applyRaw(id, GRANTED_ONLY);
+        expect(out.status).toBe('refused');
+        expect(out.summary).toMatch(/^lynox writes nothing more in this run; what it already wrote stays\./);
+        expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\./);
+        // The push names the unclear send first, then the counts.
+        expect(out.pushSummary).toMatch(/What to do is under Bulk runs\. 1 unclear: sent without a clear answer, not sent again\. 0 applied, of 1 targets\.$/);
+      });
+
+      it('lets an undo restore what a run wrote, under a connection that no longer asks', async () => {
+        const id = await titling();
+        const seoBefore = JSON.stringify(s.products.get(10)!['seo']);
+        await applyRaw(id, confirmedGrant());
+        expect(s.products.get(10)!['seo']).toEqual({ title: 'New title', description: 'D1' });
+        const undo = ledger.planUndo(id);
+        if (!undo.ok) throw new Error(undo.reason);
+        await runBulkPreview(undo.status.id, deps());
+        expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+        await applyRaw(undo.status.id, GRANTED_ONLY, 'bulk_undo');
+        expect(ledger.getStatus(undo.status.id)!.haltReason).toBeNull();
+        expect(JSON.stringify(s.products.get(10)!['seo'])).toBe(seoBefore);
+      });
+
+      it('holds an undo of an undo under a connection that did not ask: it writes the new values again', async () => {
+        const redo = await redoOf();
+        const out = await applyRaw(redo, GRANTED_ONLY, 'bulk_undo');
+        expect(out.status).toBe('refused');
+        expect(ledger.getStatus(redo)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(s.requests).toEqual([]);
+        expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
+      });
     });
   });
 
@@ -3004,6 +3118,21 @@ describe('a Shopify preview naming SEO text a theme may show as an entity', () =
   });
 });
 
+describe('shopifyProductWriteAccess', () => {
+  it.each([
+    ['no grant', undefined, 'not_asked'],
+    ['a grant that is no object', 'write_products', 'not_asked'],
+    ['a grant with no ask', { granted_scope: ['write_products'] }, 'not_asked'],
+    ['an ask that is no list', { asked_scope: 'write_products', granted_scope: ['write_products'] }, 'not_asked'],
+    ['an ask to read only', { asked_scope: ['read_products'], granted_scope: ['write_products'] }, 'not_asked'],
+    ['an ask granted nothing', { asked_scope: ['write_products'] }, 'not_granted'],
+    ['an ask granted read only', { asked_scope: ['write_products'], granted_scope: ['read_products'] }, 'not_granted'],
+    ['an ask granted', { asked_scope: ['read_products', 'write_products'], granted_scope: ['write_products'] }, 'writable'],
+  ])('reads %s', (_what, grant, access) => {
+    expect(shopifyProductWriteAccess(grant)).toBe(access);
+  });
+});
+
 // People know a product by its title. The preview keeps the title the store answered its read
 // with, encrypted like the before-image, and the targets route shows it; nothing else writes it.
 describe('a product target\'s title', () => {
@@ -3056,7 +3185,7 @@ describe('a product target\'s title', () => {
   });
 
   const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
-    ledger, trailFor: () => null,
+    ledger, trailFor: () => null, shopifyGrantOf: confirmedGrant,
     writerFor: (run) => bulkWriterFor(run, null, (r) => {
       const granted = ledger.shopifyApplyOf(r.id);
       const stored = r.contractJson === null ? null : parseBulkContract(r.contractJson);

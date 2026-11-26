@@ -459,6 +459,8 @@ export const BULK_HALT_REASONS = {
   shopifyNoApiVersion: 'a setting for Shopify is missing in lynox; lynox has to fix this',
   // Fixed like every reason: the fields are named in the outcome's summary, not here.
   consentOutdated: 'the Shopify connection does not yet let lynox change a field this run writes; nothing was written in this call',
+  // Asked is what the person confirmed when connecting (`shopifyProductWriteAccess`).
+  productWriteNotAsked: 'the Shopify connection was not confirmed for changing products; nothing was written in this call',
   // Fixed like every reason: the target is named by its mark (`shop_added_markup`), not here.
   markupAddedByShop: 'the store kept a written description with markup the run did not send',
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
