@@ -566,8 +566,9 @@ describe('graphHoldsRowsNotExported', () => {
     const raw = new Database(file);
     try {
       raw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason, created_at) VALUES (?, ?, 'newer', '2026-01-01')").run(n, o);
-      expect(held(false), 'supersedes, subject graph off').toBe(true);
-      expect(held(true), 'supersedes, subject graph on').toBe(true);
+      // With the subject graph on the seeded entities count already; the table counts on either
+      // setting, so the setting where nothing else counts is the one that proves it.
+      expect(held(false), 'supersedes').toBe(true);
       raw.prepare('DELETE FROM supersedes').run();
 
       raw.prepare("INSERT INTO cooccurrences (entity_a_id, entity_b_id, last_seen_at) VALUES (?, ?, '2026-01-01')").run(alice, acme);
