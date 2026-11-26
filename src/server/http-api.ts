@@ -14721,6 +14721,9 @@ export class LynoxHTTPApi {
       // Knowledge graph (entities + relations). `knowledge_graph_may_be_incomplete` says the block
       // was not read in full: the layer threw, it is missing although it was not switched off (its
       // database or the embedding model failed to open at boot), or a read cap was reached.
+      // `enabled` is the setting, as on the durable knowledge block: whether the graph is
+      // switched on in the config.
+      const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
       const kg = engine.getKnowledgeLayer();
       if (kg) {
         const fallbacksBefore = kg.readFallbackCount;
@@ -14770,6 +14773,7 @@ export class LynoxHTTPApi {
               + 'or replaced by a newer memory that contradicts it. '
               + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
+            enabled: graphEnabled,
           };
           // A subject-graph read that fell back to the legacy store answered from another
           // store; what it returned may be partial.
@@ -14777,19 +14781,21 @@ export class LynoxHTTPApi {
           const fellBack = kg.readFallbackCount !== fallbacksBefore || kg.subjectGraphUnavailable;
           exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack;
         } catch {
-          exportData['knowledge_graph'] = { entities: [], relationships: [] };
+          exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
           exportData['knowledge_graph_may_be_incomplete'] = true;
           process.stderr.write('⚠ /api/export: knowledge graph read failed — exported empty and marked incomplete\n');
         }
-      } else if (engine.getUserConfig().knowledge_graph_enabled !== false) {
-        exportData['knowledge_graph'] = { entities: [], relationships: [] };
+      } else if (graphEnabled) {
+        exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: true };
         exportData['knowledge_graph_may_be_incomplete'] = true;
         process.stderr.write('⚠ /api/export: knowledge graph unavailable — exported empty and marked incomplete\n');
       } else {
-        // Switched off: no layer was opened, so nothing failed. What it held while it was on
-        // stays in its database and is not in this block.
-        exportData['knowledge_graph'] = { entities: [], relationships: [] };
-        exportData['knowledge_graph_may_be_incomplete'] = false;
+        // Switched off: no layer was opened. Switching it off deletes nothing, so what it held
+        // while it was on may still be stored, and the export is the answer to an access
+        // request. Without a layer it is not read here, so the block says the graph is off and
+        // marks itself incomplete rather than reading as empty.
+        exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: false };
+        exportData['knowledge_graph_may_be_incomplete'] = true;
       }
 
       // Durable knowledge store (entries + the always-loaded memory blocks).
