@@ -473,9 +473,11 @@ describe('where the stored Shopify list form is read', () => {
     'tools/builtin/bulk.ts | return form === SHOPIFY_LIST_FORM || form === SHOPIFY_MEDIA_',
     // A judge on the planner's form: only the product form takes one.
     'tools/builtin/bulk.ts | if (judgeInput !== undefined && form !== \'shopify\') throw ne',
-    // The image form on the planner's input: refused where the store connection may not write
-    // files, and named after a refused product plan only where it may.
-    'tools/builtin/bulk.ts | if (form === \'shopify_media\' && isShopifyStoreHostName(host)',
+    // The planner's form on a store whose connection may not run it: the image form where it may
+    // not write files, either form where the connection cannot write at all, and the refusal says
+    // which; the image form is named after a refused product plan only where it may run.
+    'tools/builtin/bulk.ts | if (access.kind !== \'writable\' && (form === \'shopify_media\' ',
+    'tools/builtin/bulk.ts | throw new ShopifyAccessRefusal(SHOPIFY_MEDIA_NO_SCOPE[access',
     'tools/builtin/bulk.ts | const images = form !== \'shopify\' ? \'\' : access.kind === \'wr',
     'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isEmpty',
     // The planner's own after-state names `shopify`, filtered or not: an empty description is refused.

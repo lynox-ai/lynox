@@ -14,7 +14,7 @@ import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 import { currentCallSignal } from '../../core/call-connection.js';
-import { STEP_ID_MAX } from '../../orchestrator/step-id.js';
+import { RESERVED_STEP_IDS, STEP_ID_MAX } from '../../orchestrator/step-id.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -69,7 +69,8 @@ function truncateSlug(slug: string, maxLen: number): string {
 /** Convert agent-assigned plan phases to pipeline steps with dependency graph */
 export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[] {
   // Build per-index ID mapping (supports duplicate phase names)
-  const usedIds = new Set<string>();
+  // A reserved id (`step-id.ts`) counts as taken: a phase named "Params" becomes `params-2`.
+  const usedIds = new Set<string>(RESERVED_STEP_IDS);
   const ids: string[] = [];
 
   for (const phase of phases) {
@@ -376,11 +377,15 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         // the tenant balance. No-op on self-host / BYOK. Booked from the reply,
         // not the plan: a reply that yields no plan was paid for too.
         onSpend: (costUsd) => {
+          // Charged to this run's cost ceiling too, like the agent's own helper calls.
+          agent.chargeExternalCost?.(costUsd);
           debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
         },
         // A planning call aborted at its timeout or by the stop returned no reply to book. Its upper bound
         // goes to the session cap only — never to the tenant balance (aborted-call.ts).
         onAbortedSpend: (cost) => {
+          // And to this run's ceiling, as a bound it counts but does not bill.
+          agent.chargeExternalCapOnlyCost?.(cost.upperBoundUsd);
           recordSessionCost(agent.sessionCounters, cost.upperBoundUsd);
         },
         // A stop of the run ends the planning call (plan_task has no tool time limit: it is

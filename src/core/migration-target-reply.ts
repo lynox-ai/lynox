@@ -7,6 +7,8 @@
  * or bidi characters, so it displays as what it says.
  */
 
+import { homedir } from 'node:os';
+
 /** Bytes the source reads at most, per kind of answer. A real one is far below each. */
 export const TARGET_BODY_CAPS = {
   /** The handshake's key material, or its refusal text. */
@@ -57,26 +59,64 @@ export function durationText(ms: number): string {
 }
 
 /**
+ * The whole transfer to the target ran past its deadline (`transferDeadlineMs`). `asked`: the
+ * request had gone out when it did (the target may have acted on it), or the deadline had passed
+ * before it, and it was not sent.
+ */
+export class TransferOutOfTime extends Error {
+  constructor(readonly asked: boolean) {
+    super('the migration ran past its deadline as a whole');
+    this.name = 'TransferOutOfTime';
+  }
+}
+
+/**
+ * How long the whole transfer (manifest, every part, the restore) may take, from the bundle's
+ * size: a fixed allowance for the target's own steps (the restore alone may take 15 minutes) and
+ * the time the bundle takes at 128 KiB/s (about 1 Mbit/s), rounded up to whole minutes. A
+ * migration over a link at least that fast is not cut; a slower one can be, although each part
+ * alone would pass its own deadline. A target that answers each step just inside its own deadline
+ * cannot hold the export, and the bundle in this instance's memory, for hours.
+ */
+export const TRANSFER_DEADLINE = { allowanceMs: 20 * 60_000, bytesPerSecond: 128 * 1024 } as const;
+export function transferDeadlineMs(bundleBytes: number): number {
+  const ms = TRANSFER_DEADLINE.allowanceMs + (Math.max(0, bundleBytes) / TRANSFER_DEADLINE.bytesPerSecond) * 1000;
+  return Math.ceil(ms / 60_000) * 60_000;
+}
+
+/**
  * `fetchFn` with a deadline for the answer to start: past it the request is aborted and
  * `TargetDidNotAnswer` thrown. The deadline ends once the headers are in, so it does not cut a
- * body that `readTargetBody` is still reading under its own.
+ * body that `readTargetBody` is still reading under its own. `overall`, when given, ends the
+ * request too, with `TransferOutOfTime`.
+ * The request is raced against both, so they hold also while the transport has not taken the
+ * signal yet, as during the network guard's name lookup (which the guard itself ends after 5 s),
+ * and for a `fetchFn` that ignores the signal.
  */
 export async function askTarget(
   fetchFn: (url: string, init: RequestInit) => Promise<Response>,
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  overall?: AbortSignal,
 ): Promise<Response> {
+  if (overall?.aborted === true) throw new TransferOutOfTime(false);
   const ctl = new AbortController();
+  let stop: (err: Error) => void = () => {};
+  const stopped = new Promise<never>((_, reject) => { stop = reject; });
+  const end = (err: Error): void => { ctl.abort(err); stop(err); };
   // run-group-starter: cleared in this call's `finally`, or fired once; it only aborts this request and reports no spend.
-  const timer = setTimeout(() => ctl.abort(new TargetDidNotAnswer(timeoutMs)), timeoutMs);
+  const timer = setTimeout(() => end(new TargetDidNotAnswer(timeoutMs)), timeoutMs);
+  const onOverall = (): void => end(new TransferOutOfTime(true));
+  overall?.addEventListener('abort', onOverall, { once: true });
   try {
-    return await fetchFn(url, { ...init, signal: ctl.signal });
+    return await Promise.race([fetchFn(url, { ...init, signal: ctl.signal }), stopped]);
   } catch (err: unknown) {
-    if (ctl.signal.aborted) throw new TargetDidNotAnswer(timeoutMs);
+    if (ctl.signal.aborted) throw ctl.signal.reason instanceof Error ? ctl.signal.reason : new TargetDidNotAnswer(timeoutMs);
     throw err;
   } finally {
     clearTimeout(timer);
+    overall?.removeEventListener('abort', onOverall);
   }
 }
 
@@ -97,19 +137,20 @@ export function capText(bytes: number): string {
 }
 
 /**
- * A target answer read as JSON, or a throw with `fail`'s text when it is over `cap`, does not
- * arrive in full in time, or is not JSON. The answer's own text is never quoted.
+ * A target answer read as JSON, or a throw with `fail`'s text (or the error `fail` gives) when it
+ * is over `cap`, does not arrive in full in time, or is not JSON. The answer's own text is never quoted.
  */
-export async function readTargetJson(r: Response, cap: number, fail: (why: UnreadAnswer) => string, timeoutMs: number = TARGET_BODY_TIMEOUT_MS): Promise<unknown> {
+export async function readTargetJson(r: Response, cap: number, fail: (why: UnreadAnswer) => string | Error, timeoutMs: number = TARGET_BODY_TIMEOUT_MS): Promise<unknown> {
+  const failure = (why: UnreadAnswer): Error => { const said = fail(why); return said instanceof Error ? said : new Error(said); };
   let text: string | null;
   try {
     text = await readTargetBody(r, cap, timeoutMs);
   } catch (err: unknown) {
     // Any other failure of the read (a reset, a closed connection) is the connection breaking.
-    throw new Error(fail(err instanceof TargetAnswerTooSlow ? 'slow' : 'broken'));
+    throw failure(err instanceof TargetAnswerTooSlow ? 'slow' : 'broken');
   }
-  if (text === null) throw new Error(fail('large'));
-  try { return JSON.parse(text) as unknown; } catch { throw new Error(fail('format')); }
+  if (text === null) throw failure('large');
+  try { return JSON.parse(text) as unknown; } catch { throw failure('format'); }
 }
 
 /**
@@ -168,9 +209,10 @@ export async function discardBody(r: Response, timeoutMs: number = TARGET_BODY_T
  * Every character that is not shown as itself: controls (Cc), format characters (Cf: the bidi
  * embeddings, overrides, isolates and marks, the zero-width characters, the invisible operators,
  * the soft hyphen, the interlinear annotation and tag characters), the variation selectors and the
- * fillers that render as nothing.
+ * fillers that render as nothing, and lone surrogates (Cs), which no font shows and which a quoted
+ * form would spell out six characters each.
  */
-const HIDDEN = /[\p{Cc}\p{Cf}\u034F\u115F\u1160\u180B-\u180F\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
+const HIDDEN = /[\p{Cc}\p{Cf}\p{Cs}\u034F\u115F\u1160\u180B-\u180F\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
 
 /**
  * A text from the target as it is shown to the user: line breaks, tabs and the line and paragraph
@@ -186,6 +228,31 @@ export function relayedText(text: string, max: number = 500): string {
     if (n === max) return `${out.slice(0, end)}…`;
     n++;
     end += ch.length;
+  }
+  return out;
+}
+
+/** The home directories of this instance: the system's, and `HOME` when it names another one. */
+function ownHomes(): string[] {
+  let system = '';
+  try { system = homedir(); } catch { /* no home known */ }
+  return [system, process.env['HOME'] ?? ''];
+}
+
+/**
+ * This instance's own error text with its home directory written as `~` wherever it starts a path
+ * (`/home/x/.lynox/a.db` becomes `~/.lynox/a.db`). A home counts only as a whole path segment:
+ * `/home/xy` stays as it is when the home is `/home/x`, and so does a home inside a longer path.
+ * A home that is empty, relative or the root is left out. Only for this instance's text, never
+ * for the target's words.
+ */
+export function homeAsTilde(text: string, homes: readonly string[] = ownHomes()): string {
+  const usable = [...new Set(homes.map((h) => h.replace(/\/+$/, '')).filter((h) => h.startsWith('/') && h.length > 1))]
+    .sort((a, b) => b.length - a.length);
+  let out = text;
+  for (const home of usable) {
+    const escaped = home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(?<![\\w.~/-])${escaped}(?=/|$|[^\\w.~-])`, 'g'), '~');
   }
   return out;
 }

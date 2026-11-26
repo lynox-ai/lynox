@@ -75,8 +75,8 @@ describe('the worker wires the judge to the engine\'s managed hook', () => {
   it('each report reaches the control plane under the run id and tier of its own gate', async () => {
     const { deps, hook } = await depsFromWorker();
     // Not 'fast', so a worker that labels every report 'fast' is caught.
-    const first = await deps.gate('deep');
-    const second = await deps.gate('balanced');
+    const first = await deps.gate('deep', undefined);
+    const second = await deps.gate('balanced', undefined);
     expect(first.blockedReason).toBeNull();
     expect(first.runId).not.toBe(second.runId);
     deps.report(first.runId, 0.02, 'deep');
@@ -92,8 +92,22 @@ describe('the worker wires the judge to the engine\'s managed hook', () => {
   it('a refused credit comes back from the worker\'s gate as blocked', async () => {
     allowed = false;
     const { deps, hook } = await depsFromWorker();
-    const gate = await deps.gate('fast');
+    const gate = await deps.gate('fast', undefined);
     await hook.onShutdown?.();
     expect(gate.blockedReason).not.toBeNull();
+  });
+
+  it('the worker\'s gate states the judge\'s worst case to the hooks', async () => {
+    // Kills: a worker that drops the amount (the hooks would hold the default single-call amount).
+    const { deps } = await depsFromWorker();
+    const real = hook;
+    const onBeforeRun = vi.fn();
+    hook = { onBeforeRun } as LynoxHooks;
+    try {
+      await deps.gate('fast', 7);
+    } finally {
+      hook = real;
+    }
+    expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(7);
   });
 });

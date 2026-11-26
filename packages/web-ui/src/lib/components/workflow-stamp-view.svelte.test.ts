@@ -373,14 +373,14 @@ describe('contract r3: what the view adds', () => {
 		await click(q('stamp-review'));
 		const step = q('stamp-step')?.textContent ?? '';
 		expect(q('stamp-role')?.textContent).toContain('Angaben der Rolle researcher');
-		expect(step).toContain('Aufwand: high');
-		expect(step).toContain('Nachdenken: adaptive');
+		expect(step).toContain('Gründlichkeit: Gründlich');
+		expect(step).toContain('Nachdenken: Automatisch');
 		expect(step).toContain('Zeitlimit: 2 min 30 s');
 		// What the role grants: the step's own tools are not all a run gets.
 		const grant = q('stamp-role-grant')?.textContent ?? '';
-		expect(grant).toContain('Modell: deep');
+		expect(grant).toContain('Modell: Tief');
 		// The step sets its own effort, which wins: the role's is not shown as if it applied.
-		expect(grant).not.toContain('Aufwand');
+		expect(grant).not.toContain('Gründlichkeit');
 		expect(grant).toContain('Erlaubt: web_search');
 		expect(grant).toContain('Sperrt: http_request');
 		expect(q('stamp-role')?.textContent).toContain('nur lesen');
@@ -489,7 +489,7 @@ describe('contract r3: what the view adds', () => {
 		await click(q('stamp-review'));
 		const grant = q('stamp-role-grant')?.textContent ?? '';
 		expect(grant).not.toContain('Modell');
-		expect(grant).toContain('Aufwand: max');
+		expect(grant).toContain('Gründlichkeit: Maximum');
 	});
 
 	it('a role the engine does not know says the step stops', async () => {
@@ -527,7 +527,7 @@ describe('contract r3: what the view adds', () => {
 		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { model: null, role: null, roleGrant: null });
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
-		expect(q('stamp-model-default')?.textContent).toContain('Modell: fast (Standard)');
+		expect(q('stamp-model-default')?.textContent).toContain('Modell: Schnell (Standard)');
 	});
 
 	it('no default model where the role names one', async () => {
@@ -536,7 +536,7 @@ describe('contract r3: what the view adds', () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
 		expect(q('stamp-model-default')).toBeNull();
-		expect(q('stamp-role-grant')?.textContent).toContain('Modell: deep');
+		expect(q('stamp-role-grant')?.textContent).toContain('Modell: Tief');
 	});
 
 	it('no default model where the role is unknown, since the step stops', async () => {
@@ -571,5 +571,296 @@ describe('renaming a workflow (ux U-077)', () => {
 		await renameWith({ status: 400, body: { error: 'name too long (max 200 characters)' } });
 		expect(target.textContent).toContain('Speichern fehlgeschlagen');
 		expect(target.textContent).not.toContain('nicht als Text erscheint');
+	});
+});
+
+describe('the stamp part names settings, and shows no stored value', () => {
+	const twoSteps = (expect: string, postUrl = 'https://other.example/upload', over: Record<string, unknown> = {}): Record<string, unknown> => ({
+		...preview(expect),
+		...over,
+		steps: [
+			{ id: 'fetch_orders', task: 'Read the open orders', tool: null, inputTemplate: null, tools: ['web_search', 'http_request', 'read_file'], model: null, inputFrom: [] },
+			{ id: 'post', task: 'Send the report', tool: 'http_request', inputTemplate: { url: postUrl }, tools: ['http_request'], model: null, inputFrom: ['fetch_orders'] },
+		],
+	});
+	const openStamp = async (body: Record<string, unknown>): Promise<void> => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body }] });
+		await click(q('stamp-review'));
+	};
+
+	it('names the mode and the failure strategy, and prints neither stored value', async () => {
+		await openStamp(twoSteps('d1', undefined, { mode: 'autonomous', onFailure: 'notify' }));
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Autonom');
+		// notify runs as continue does and reports to no one: it is not named as if it reported.
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
+		expect(q('stamp-mode')!.classList.contains('font-mono')).toBe(false);
+		const settings = q('stamp-settings')?.textContent ?? '';
+		expect(settings).not.toMatch(/\bautonomous\b|\bnotify\b/);
+	});
+
+	it('the interactive mode and the continue strategy are named too', async () => {
+		await openStamp(twoSteps('d1', undefined, { mode: 'interactive', onFailure: 'continue' }));
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Interaktiv');
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
+	});
+
+	it('a value the view does not know is printed as it came, hidden characters shown', async () => {
+		await openStamp(twoSteps('d1', undefined, { mode: 'turbo\u202E', onFailure: 'halt' }));
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('turbo<U+202E>');
+		expect(q('stamp-mode')!.classList.contains('font-mono')).toBe(true);
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('halt');
+	});
+
+	it('the stop strategy has its own name, and a line under it that the steps due along with the failed one still start', async () => {
+		await openStamp(twoSteps('d1', undefined, { onFailure: 'stop' }));
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Keine Folgeschritte starten');
+		expect(q('stamp-on-failure-note')?.textContent?.trim()).toBe('Schritte, die mit dem fehlgeschlagenen an der Reihe waren, starten noch und laufen zu Ende.');
+		// Under the name: the next element after the strategy's own value.
+		expect(q('stamp-on-failure')!.nextElementSibling).toBe(q('stamp-on-failure-note'));
+	});
+
+	it.each(['continue', 'notify', 'halt'])('the %s strategy carries no such line', async (onFailure) => {
+		await openStamp(twoSteps('d1', undefined, { onFailure }));
+		expect(q('stamp-on-failure')).not.toBeNull();
+		expect(q('stamp-on-failure-note')).toBeNull();
+	});
+
+	it('heads each step with its id and no number, and prints the task once', async () => {
+		await openStamp(twoSteps('d1'));
+		const stepEls = [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')];
+		expect(stepEls.map((s) => s.querySelector('[data-testid="stamp-step-head"]')?.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['Schritt fetch_orders', 'Schritt post']);
+		for (const [i, task] of ['Read the open orders', 'Send the report'].entries()) {
+			expect(stepEls[i]!.textContent!.split(task).length - 1, task).toBe(1);
+			expect(stepEls[i]!.querySelector('[data-testid="stamp-step-task"]')?.textContent).toBe(task);
+		}
+	});
+
+	it('a tool list wraps between names, not inside one', async () => {
+		await openStamp(twoSteps('d1'));
+		const list = target.querySelector<HTMLElement>('[data-testid="stamp-tool-list"]')!;
+		expect(list.textContent).toBe('web_search, http_request, read_file');
+		expect(list.classList.contains('break-all')).toBe(false);
+		expect(list.classList.contains('[overflow-wrap:anywhere]')).toBe(true);
+	});
+
+	it('after steps_changed, exactly the changed step is marked, focused and brought into sight', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: twoSteps('d1') }, { status: 200, body: twoSteps('d2', 'https://evil.example/upload') }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		expect(target.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
+		await click(q('stamp-confirm'));
+		const stepEls = [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')];
+		expect(stepEls.map((s) => s.hasAttribute('data-stamp-changed'))).toEqual([false, true]);
+		expect(stepEls.map((s) => s.querySelector('[data-testid="stamp-changed-mark"]')?.textContent?.trim() ?? null)).toEqual([null, 'Geändert']);
+		expect(target.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		expect(document.activeElement).toBe(stepEls[1]);
+		expect(scrolled).toContain(stepEls[1]);
+	});
+
+	it('a removed step is named, and a changed setting is marked where it stands', async () => {
+		const one = { ...twoSteps('d2', undefined, { onFailure: 'continue' }) };
+		one['steps'] = (one['steps'] as unknown[]).slice(1);
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: twoSteps('d1') }, { status: 200, body: one }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		expect(q('stamp-settings')?.hasAttribute('data-stamp-changed')).toBe(true);
+		expect(q('stamp-removed')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Geändert Nicht mehr dabei: fetch_orders');
+		expect(target.querySelector('[data-testid="stamp-step"][data-stamp-changed]')).toBeNull();
+		// The first changed part, in reading order, takes the focus.
+		expect(document.activeElement).toBe(q('stamp-settings'));
+	});
+
+	it('a new open of the view marks nothing from the last one', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: twoSteps('d1') }, { status: 200, body: twoSteps('d2', 'https://evil.example/upload') }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		expect(target.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		await click(byText('Abbrechen'));
+		await click(q('stamp-review'));
+		expect(target.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
+	});
+});
+
+describe('what the contract allows, and a contract that grants nothing (U-451)', () => {
+	const withParams = (expect: string, parameters: unknown[], contract: string[] | null = null): Record<string, unknown> => ({ ...preview(expect), parameters, contract });
+	const openStamp = async (body: Record<string, unknown>): Promise<void> => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body }] });
+		await click(q('stamp-review'));
+	};
+	const allowedOf = (): string[] => [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-param-allowed"]')].map((el) => el.textContent!.replace(/\s+/g, ' ').trim());
+	const boxesOf = (): string[] => [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-param-allowed"] [data-foreign-value]')].map((el) => el.textContent!);
+
+	it('prints under each parameter one line per rule, in words, each value in its own box', async () => {
+		await openStamp(withParams('d1', [
+			{ name: 'month', required: false, default: 'May', allowed: { enum: ['May', 'June'], regex: null, min: null, max: null } },
+			{ name: 'count', required: true, default: null, allowed: { enum: null, regex: null, min: 1, max: 5 } },
+			{ name: 'code', required: true, default: null, allowed: { enum: null, regex: '[a-z]+', min: 2, max: null } },
+			{ name: 'top', required: true, default: null, allowed: { enum: null, regex: null, min: null, max: 9 } },
+			{ name: 'none', required: true, default: null, allowed: { enum: [], regex: null, min: null, max: null } },
+			{ name: 'free', required: true, default: null, allowed: null },
+		]));
+		expect(allowedOf()).toEqual([
+			'erlaubt: May, June',
+			'erlaubt: 1 bis 5',
+			'erlaubt: was ganz zum Muster [a-z]+ passt',
+			'erlaubt: mindestens 2',
+			'erlaubt: höchstens 9',
+			'kein Wert erlaubt',
+		]);
+		expect(boxesOf()).toEqual(['May', 'June', '1', '5', '[a-z]+', '2', '9']);
+		// Under its own parameter: the lines sit in that parameter's row, and a parameter without rules has none.
+		const rows = [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-settings"] li')];
+		expect(rows.map((r) => r.querySelectorAll('[data-testid="stamp-param-allowed"]').length)).toEqual([1, 1, 2, 1, 1, 0]);
+	});
+
+	it('a value is shown as it is matched: spaces that would fold away, and hidden characters, are printed', async () => {
+		await openStamp(withParams('d1', [
+			{ name: 'shop', required: true, default: null, allowed: { enum: ['a  b', ' x', 'y\u202E', 'p\tq'], regex: null, min: null, max: null } },
+		]));
+		expect(boxesOf()).toEqual(['a<U+0020><U+0020>b', '<U+0020>x', 'y<U+202E>', 'p<U+0009>q']);
+	});
+
+	it('a contract that grants nothing says so in a sentence, in place of the list', async () => {
+		await openStamp(withParams('d1', [], []));
+		expect(q('stamp-contract-none')?.textContent?.trim()).toBe('Dieser Workflow hat keine Freigabe, ohne Rückfrage an andere Dienste zu schreiben. Lesen kann er weiterhin.');
+		expect(target.textContent).not.toContain('Ohne Rückfrage darf dieser Workflow');
+	});
+
+	it('a contract that grants writes lists them under a title that says they need no asking', async () => {
+		await openStamp(withParams('d1', [], ['POST https://api.example.com/upload']));
+		expect(target.textContent).toContain('Ohne Rückfrage darf dieser Workflow diese ausgehenden Aktionen durchführen:');
+		expect(target.textContent).toContain('POST https://api.example.com/upload');
+		expect(q('stamp-contract-none')).toBeNull();
+	});
+
+	it('CONTROL: without a contract there is no list and no sentence', async () => {
+		await openStamp(withParams('d1', [], null));
+		expect(q('stamp-contract-none')).toBeNull();
+		expect(target.textContent).not.toContain('Ohne Rückfrage darf dieser Workflow');
+	});
+
+	it('a rule that changed after the preview was shown marks the settings', async () => {
+		const at = (values: string[]): Record<string, unknown> => withParams('d', [{ name: 'month', required: true, default: null, allowed: { enum: values, regex: null, min: null, max: null } }]);
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: { ...at(['May']), expect: 'd1' } }, { status: 200, body: { ...at(['June']), expect: 'd2' } }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		expect(q('stamp-settings')?.hasAttribute('data-stamp-changed')).toBe(true);
+		expect(allowedOf()).toEqual(['erlaubt: June']);
+	});
+
+	describe('the plan dialog', () => {
+		const GRANT = { version: 1, grantedTools: ['http_request', 'bash'], httpMethods: ['POST'], hostPatterns: ['h.example'], pathPatterns: ['/p'], paramConstraints: {} };
+		const openPlan = async (capabilityContract?: unknown): Promise<void> => {
+			await open('owner', capabilityContract === undefined ? WF : { ...WF, capabilityContract });
+			await click(byText('Planen'));
+			expect(byText('Bestätigen & planen'), 'the plan dialog').not.toBeNull();
+		};
+
+		it('lists only the writes the engine grants, and no other tool', async () => {
+			await openPlan(GRANT);
+			expect(target.textContent).toContain('Ohne Rückfrage darf dieser Workflow diese ausgehenden Aktionen durchführen:');
+			expect(target.textContent).toContain('POST https://h.example/p');
+			expect(target.textContent).not.toMatch(/\bbash\b/);
+			expect(q('schedule-contract-none')).toBeNull();
+		});
+
+		it.each([
+			['without the request tool', { ...GRANT, grantedTools: ['bash'] }],
+			['without a path, which grants no path rather than the whole host', { ...GRANT, pathPatterns: [] }],
+			['without a host', { ...GRANT, hostPatterns: [] }],
+			['that is not an object', 'http_request'],
+		])('a contract %s says it grants nothing', async (_label, contract) => {
+			await openPlan(contract);
+			expect(q('schedule-contract-none')?.textContent?.trim()).toBe('Dieser Workflow hat keine Freigabe, ohne Rückfrage an andere Dienste zu schreiben. Lesen kann er weiterhin.');
+			expect(target.textContent).not.toContain('Ohne Rückfrage darf dieser Workflow');
+			expect(target.textContent).not.toContain('https://h.example');
+		});
+
+		it('CONTROL: without a contract there is no list and no sentence', async () => {
+			await openPlan();
+			expect(q('schedule-contract-none')).toBeNull();
+			expect(target.textContent).not.toContain('Ohne Rückfrage darf dieser Workflow');
+		});
+
+		it('prints a hidden character in a granted address instead of reading it', async () => {
+			await openPlan({ ...GRANT, hostPatterns: ['h\u202E.example'] });
+			expect(target.textContent).toContain('POST https://h<U+202E>.example/p');
+		});
+	});
+});
+
+describe('the stamp names a tier, a thoroughness and a thinking setting as the settings do', () => {
+	function stepWith(fields: Record<string, unknown>): Record<string, unknown> {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, fields);
+		return p;
+	}
+
+	it('a tier by its name, never the stored value; a model named by its id stays set apart as it is', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: stepWith({ model: 'balanced', effort: 'xhigh', thinking: 'enabled' }) }] });
+		await click(q('stamp-review'));
+		const step = q('stamp-step')!;
+		const text = step.textContent ?? '';
+		expect(text).toContain('Modell: Ausgewogen');
+		expect(text).toContain('Gründlichkeit: Sehr gründlich');
+		expect(text).toContain('Nachdenken: Immer');
+		for (const raw of ['balanced', 'xhigh', 'enabled']) expect(text).not.toContain(raw);
+		expect(step.querySelector('[data-model-tier="balanced"]')?.classList.contains('font-mono')).toBe(false);
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: stepWith({ model: 'claude-sonnet-4-5', effort: 'low', thinking: 'disabled' }) }] });
+		await click(q('stamp-review'));
+		const again = q('stamp-step')!;
+		expect(again.textContent).toContain('claude-sonnet-4-5');
+		expect(again.querySelector('[data-model-tier]')).toBeNull();
+		expect([...again.querySelectorAll('.font-mono')].some((el) => el.textContent === 'claude-sonnet-4-5')).toBe(true);
+		expect(again.textContent).toContain('Gründlichkeit: Schnell');
+		expect(again.textContent).toContain('Nachdenken: Deaktiviert');
+	});
+});
+
+describe('the stamp says where the workflow may run, from the rule a schedule asks', () => {
+	async function runsLine(runs: string | undefined): Promise<HTMLElement | null> {
+		const p = preview('d1');
+		if (runs !== undefined) p['runs'] = runs;
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		return q('stamp-runs');
+	}
+
+	it('an autonomous one: from a chat, on a schedule and by an agent in the background', async () => {
+		expect((await runsLine('anywhere'))?.textContent).toBe('aus dem Chat, geplant und von einem Agenten im Hintergrund');
+	});
+
+	it('an interactive one that asks only its owner: from a chat and on a schedule', async () => {
+		expect((await runsLine('chat_and_schedule'))?.textContent).toBe('aus dem Chat und geplant');
+	});
+
+	it('any other interactive one: from a chat and by an agent in the background, not on a schedule', async () => {
+		// A background agent's run_workflow starts it once the stamp holds, so the line says so.
+		expect((await runsLine('chat'))?.textContent).toBe('aus dem Chat und von einem Agenten im Hintergrund, nicht geplant');
+	});
+
+	it('an engine that sends no such field, or a value the view does not know, shows no line, and the preview stands', async () => {
+		expect(await runsLine(undefined)).toBeNull();
+		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		expect(await runsLine('everywhere')).toBeNull();
+		expect(q('stamp-step')).not.toBeNull();
+		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
 	});
 });
