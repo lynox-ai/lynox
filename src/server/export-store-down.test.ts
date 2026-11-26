@@ -312,6 +312,23 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     expect(after.knowledge_graph_may_be_incomplete, 'with it gone nothing is left out').toBe(false);
   }, 60_000);
 
+  it('counts with the subject-graph setting the layer started with, not one switched on in the config since', async () => {
+    const layer = h.engine().getKnowledgeLayer() as { readsSubjectGraph: boolean } | null;
+    expect(layer?.readsSubjectGraph, 'fixture: the layer started with the subject graph off').toBe(false);
+    const engineDb = h.engine().getEngineDb() as EngineDb;
+    // A person: listed if the layer read the subject graph, in no block since it does not.
+    const id = new SubjectStore(engineDb).createSubject({ kind: 'person', name: 'Bob' });
+    const getUserConfig = h.engine().getUserConfig;
+    h.engine().getUserConfig = () => ({ ...getUserConfig.call(h.engine()), subject_graph_enabled: true });
+    try {
+      const body = await h.exportBody();
+      expect(body.knowledge_graph_may_be_incomplete, 'the layer lists no subject, so Bob is left out').toBe(true);
+    } finally {
+      h.engine().getUserConfig = getUserConfig;
+      engineDb.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(id);
+    }
+  }, 60_000);
+
   it('lists a secret written to the vault after boot by name, not by value', async () => {
     const vault = h.engine().secretVault;
     expect(vault, 'fixture: the vault opened').not.toBeNull();
@@ -470,6 +487,8 @@ describe('export with the knowledge graph switched off after it held entities an
     } finally {
       engineDb.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(id);
     }
+    const after = await h.exportBody();
+    expect(after.knowledge_graph_may_be_incomplete, 'with it gone nothing is left out').toBe(false);
   }, 60_000);
 });
 

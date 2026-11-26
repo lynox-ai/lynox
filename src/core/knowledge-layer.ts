@@ -1641,6 +1641,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Whether this layer reads the subject graph: the setting as it was when the layer started.
+   * A later config reload does not rebuild the layer, so a reader that must agree with what the
+   * layer returns takes the setting from here, not from the current config.
+   */
+  get readsSubjectGraph(): boolean {
+    return this.subjectGraphEnabled;
+  }
+
+  /**
    * The subject graph is switched on but its store is missing (engine.db did not open at boot).
    * Every read then answers from the legacy store alone, without a fallback being logged, and
    * what only engine.db holds is not in it.

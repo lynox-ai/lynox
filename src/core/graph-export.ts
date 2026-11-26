@@ -302,8 +302,11 @@ export function readMemoryTextsForExport(opts: {
  *  - engine.db subjects the graph block does not list: with the subject graph on, archived ones
  *    and those of a kind it maps to no entity; with it off, every subject, since the block is
  *    then read from agent-memory.db;
+ *  - engine.db `supersedes`, `subject_cooccurrences` and `subject_mints`, and agent-memory.db
+ *    `supersedes` and `cooccurrences`, which no block carries on either setting;
  *  - with the subject graph on, agent-memory.db entities and relations, since the block is then
- *    read from engine.db.
+ *    read from engine.db; with it off, relations neither of whose entities is stored, since the
+ *    block collects relations through their entities.
  * The export says "complete" only when nothing stored is left out, so any such row marks the
  * graph block. A count that cannot be taken (no engine.db, a newer or unreadable
  * agent-memory.db, a failed query) cannot show there are none, and answers `true` as well.
@@ -319,15 +322,24 @@ export function graphHoldsRowsNotExported(opts: {
     const all = subjects.count({ includeArchived: true });
     const listed = opts.subjectGraph ? subjects.count({ kinds: ENTITY_MAPPABLE_SUBJECT_KINDS }) : 0;
     if (all > listed) return true;
+    const engineRows = opts.engineDb.getDb().prepare(
+      'SELECT (SELECT COUNT(*) FROM supersedes) + (SELECT COUNT(*) FROM subject_cooccurrences) + (SELECT COUNT(*) FROM subject_mints) AS n',
+    ).get() as { n: number };
+    if (engineRows.n > 0) return true;
   } catch {
     return true;
   }
-  if (!opts.subjectGraph || !existsSync(opts.agentMemoryFile)) return false;
+  if (!existsSync(opts.agentMemoryFile)) return false;
   let legacy: Database.Database | null = null;
   try {
     legacy = new Database(opts.agentMemoryFile, { readonly: true, fileMustExist: true });
     if (agentMemoryVersionOn(legacy) > AGENT_MEMORY_SCHEMA_VERSION) return true;
-    const rows = legacy.prepare('SELECT (SELECT COUNT(*) FROM entities) + (SELECT COUNT(*) FROM relations) AS n').get() as { n: number };
+    const graphRows = opts.subjectGraph
+      ? '(SELECT COUNT(*) FROM entities) + (SELECT COUNT(*) FROM relations)'
+      : '(SELECT COUNT(*) FROM relations r WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE e.id IN (r.from_entity_id, r.to_entity_id)))';
+    const rows = legacy.prepare(
+      `SELECT (SELECT COUNT(*) FROM supersedes) + (SELECT COUNT(*) FROM cooccurrences) + ${graphRows} AS n`,
+    ).get() as { n: number };
     return rows.n > 0;
   } catch {
     return true;

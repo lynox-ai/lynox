@@ -15019,10 +15019,13 @@ export class LynoxHTTPApi {
           engineDb: engine.getEngineDb(),
           mask: (t: string) => maskSecretPatterns(exportSecrets ? exportSecrets.maskSecrets(t) : t),
         });
+        // With a layer, the setting it started with: a config reload does not rebuild it, and the
+        // count must agree with what the layer lists.
+        const layer = engine.getKnowledgeLayer();
         const notExported = graphHoldsRowsNotExported({
           agentMemoryFile,
           engineDb: engine.getEngineDb(),
-          subjectGraph: engine.getUserConfig().subject_graph_enabled === true,
+          subjectGraph: layer ? layer.readsSubjectGraph === true : engine.getUserConfig().subject_graph_enabled === true,
         });
         memoryTexts = { block: { 'agent-memory.db': read['agent-memory.db'], 'engine.db': read['engine.db'] }, mayBeIncomplete: read.mayBeIncomplete || notExported };
       } catch {

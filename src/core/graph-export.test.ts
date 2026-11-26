@@ -506,7 +506,9 @@ describe('graphHoldsRowsNotExported', () => {
     db.close();
     const raw = new Database(file);
     raw.exec('PRAGMA foreign_keys = OFF; DELETE FROM entities');
+    const left = raw.prepare('SELECT (SELECT COUNT(*) FROM entities) AS e, (SELECT COUNT(*) FROM relations) AS r').get();
     raw.close();
+    expect(left, 'fixture: no entity, one relation').toEqual({ e: 0, r: 1 });
     expect(held(true), 'a relation with no entity left').toBe(true);
   });
 
@@ -528,6 +530,70 @@ describe('graphHoldsRowsNotExported', () => {
   it('with the subject graph off, finds any subject, since the block then reads agent-memory.db', () => {
     new SubjectStore(engineDb).createSubject({ kind: 'person', name: 'Bob' });
     expect(held(false)).toBe(true);
+  });
+
+  it('finds the engine.db tables no block carries, one at a time: supersedes, subject co-occurrences, subject mints', () => {
+    const subjects = new SubjectStore(engineDb);
+    const a = subjects.createSubject({ kind: 'person', name: 'A' });
+    const b = subjects.createSubject({ kind: 'person', name: 'B' });
+    const raw = engineDb.getDb();
+    expect(held(true), 'fixture: listed subjects only').toBe(false);
+
+    raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('o', 't', 'knowledge', 'global', 'global'), ('n', 't', 'knowledge', 'global', 'global')").run();
+    expect(held(true), 'fixture: memories are carried').toBe(false);
+    raw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason) VALUES ('n', 'o', 'newer')").run();
+    expect(held(true), 'supersedes').toBe(true);
+    raw.prepare('DELETE FROM supersedes').run();
+
+    raw.prepare('INSERT INTO subject_cooccurrences (subject_a_id, subject_b_id) VALUES (?, ?)').run(a, b);
+    expect(held(true), 'subject_cooccurrences').toBe(true);
+    raw.prepare('DELETE FROM subject_cooccurrences').run();
+
+    raw.prepare("INSERT INTO subject_mints (subject_id, thread_id) VALUES (?, 't1')").run(a);
+    expect(held(true), 'subject_mints').toBe(true);
+    raw.prepare('DELETE FROM subject_mints').run();
+    expect(held(true), 'all removed again').toBe(false);
+  });
+
+  it('finds the agent-memory.db tables no block carries, on either setting: supersedes and co-occurrences', () => {
+    const db = new AgentMemoryDb(file);
+    db.setEmbeddingDimensions(3);
+    const { alice, acme } = seedGraph(db);
+    const o = db.createMemory({ text: 'old', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
+    const n = db.createMemory({ text: 'new', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [0, 1, 0] });
+    db.close();
+    expect(held(false), 'fixture: entities, relations and texts are carried with the subject graph off').toBe(false);
+    const raw = new Database(file);
+    try {
+      raw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason, created_at) VALUES (?, ?, 'newer', '2026-01-01')").run(n, o);
+      expect(held(false), 'supersedes, subject graph off').toBe(true);
+      expect(held(true), 'supersedes, subject graph on').toBe(true);
+      raw.prepare('DELETE FROM supersedes').run();
+
+      raw.prepare("INSERT INTO cooccurrences (entity_a_id, entity_b_id, last_seen_at) VALUES (?, ?, '2026-01-01')").run(alice, acme);
+      expect(held(false), 'cooccurrences').toBe(true);
+      raw.prepare('DELETE FROM cooccurrences').run();
+      expect(held(false), 'all removed again').toBe(false);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('with the subject graph off, finds a relation neither of whose entities is stored, and not one the block reaches', () => {
+    const db = new AgentMemoryDb(file);
+    const { alice } = seedGraph(db);
+    db.close();
+    const raw = new Database(file);
+    try {
+      raw.exec('PRAGMA foreign_keys = OFF');
+      raw.prepare('DELETE FROM entities WHERE id = ?').run(alice);
+      expect(held(false), 'one entity left: the block reaches the relation through it').toBe(false);
+      raw.exec('DELETE FROM entities');
+      expect(raw.prepare('SELECT COUNT(*) AS n FROM relations').get(), 'fixture: the relation is still stored').toEqual({ n: 1 });
+      expect(held(false), 'no entity left: the block cannot reach it').toBe(true);
+    } finally {
+      raw.close();
+    }
   });
 
   it('answers true when a count cannot be taken: no engine.db, a closed one, a missing table, a newer or broken file', () => {
