@@ -18,7 +18,7 @@ import type {
 } from '../types/index.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
 import { processErrorText } from './error-egress.js';
-import type { MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
+import type { MemoryRow, RelationRow, ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { embedToBlob } from './embedding.js';
 import { EntityResolver, toEntityRecord } from './entity-resolver.js';
@@ -1619,16 +1619,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           .map(r => ({ ...this._relRowToRelationRecord(r), sourceDeleted: r.source_deleted === 1 }));
       } catch (err: unknown) { this._logReadFallback('getEntityRelationsForExport', err); }
     }
-    return this.db.getEntityRelationsForExport(entityId, limit).map(r => ({
-      fromEntityId: r.from_entity_id,
-      toEntityId: r.to_entity_id,
-      relationType: r.relation_type,
-      description: r.description,
-      confidence: r.confidence,
-      sourceMemoryId: r.source_memory_id ?? '',
-      createdAt: r.created_at,
-      sourceDeleted: r.source_deleted === 1,
-    }));
+    return this.db.getEntityRelationsForExport(entityId, limit).map(legacyRelationForExport);
   }
 
   // === Subject-graph read mappers (S1d — flag-gated, additive) ===
@@ -1692,84 +1683,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     );
   }
 
-  /**
-   * The subject-graph read of the entity list: maps Subjects back to the stable
-   * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
-   * Filter order: kind (`type`) → name/alias substring (`q`) → mention-count
-   * backfill → offset/limit slice. Rows come `updated_at DESC` (via `listSubjects`);
-   * the legacy path orders by `mention_count DESC`, so browse ORDER still differs from
-   * legacy, but `mentionCount` is now the real memory_subjects link count (batched via
-   * {@link SubjectStore.getMentionCounts}), not a hardcoded 0.
-   */
+  /** The subject-graph read of the entity list ({@link listSubjectEntitiesOn}) on this layer's store. */
   private _listSubjectEntities(
     opts?: { type?: string | undefined; q?: string | undefined; limit?: number | undefined; offset?: number | undefined },
   ): EntityRecord[] {
-    const store = this.subjectStore;
-    if (!store) return [];
-    // A `type` from the legacy KG vocabulary maps to a subject kind; one that maps
-    // to nothing (concept/location/collection) yields no rows.
-    const kindFilter = opts?.type ? entityTypeToSubjectKind(opts.type) : null;
-    if (opts?.type && !kindFilter) return [];
-    const rows = store.listSubjects(kindFilter ? { kind: kindFilter } : undefined);
-    let mapped = rows
-      .map(r => this._subjectRowToEntityRecord(r))
-      .filter((e): e is EntityRecord => e !== null);
-    const q = opts?.q?.trim().toLowerCase();
-    if (q) {
-      mapped = mapped.filter(e =>
-        e.canonicalName.toLowerCase().includes(q) ||
-        e.aliases.some(a => a.toLowerCase().includes(q)),
-      );
-    }
-    const offset = Math.max(opts?.offset ?? 0, 0);
-    const limit = opts?.limit ?? mapped.length;
-    const page = mapped.slice(offset, offset + limit);
-    // Populate the real mention count (memory_subjects links) — the subject path
-    // otherwise reports 0 for every entity (the "0× Erwähnungen" bug). Counted for
-    // the returned page ONLY: bounded against the SQLite variable cap on a large
-    // graph, and no wasted counting of rows we slice away.
-    const counts = store.getMentionCounts(page.map(e => e.id));
-    for (const e of page) e.mentionCount = counts.get(e.id) ?? 0;
-    return page;
+    return this.subjectStore ? listSubjectEntitiesOn(this.subjectStore, opts) : [];
   }
 
-  /** Map a Subject row to the stable `EntityRecord` DTO, or null when the kind has no KG equivalent. */
   private _subjectRowToEntityRecord(row: SubjectRow, mentionCount = 0): EntityRecord | null {
-    const entityType = subjectKindToEntityType(row.kind);
-    if (!entityType) return null;
-    let aliases: string[];
-    try {
-      const parsed: unknown = JSON.parse(row.aliases || '[]');
-      aliases = Array.isArray(parsed) ? parsed.filter((a): a is string => typeof a === 'string') : [];
-    } catch {
-      aliases = [];
-    }
-    return {
-      id: row.id,
-      canonicalName: row.name,
-      entityType,
-      aliases,
-      description: '',
-      scopeType: 'global',
-      scopeId: 'global',
-      mentionCount,
-      firstSeenAt: row.created_at,
-      lastSeenAt: row.updated_at,
-    };
+    return subjectRowToEntityRecord(row, mentionCount);
   }
 
-  /** Map a relationship row to the stable `RelationRecord` DTO. */
   private _relRowToRelationRecord(r: RelationshipRow): RelationRecord {
-    return {
-      fromEntityId: r.from_subject_id,
-      toEntityId: r.to_subject_id,
-      relationType: r.kind,
-      description: r.description,
-      confidence: r.confidence,
-      sourceMemoryId: r.source_memory_id ?? '',
-      createdAt: r.created_at,
-    };
+    return relRowToRelationRecord(r);
   }
+
 
   async mergeEntities(sourceId: string, targetId: string): Promise<void> {
     return this.entityResolver.merge(sourceId, targetId);
@@ -2398,4 +2326,100 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
     return pairs.length;
   }
+}
+
+// ── Subject-graph read mappers, on any store ────────────────────
+// Module functions so a reader without a layer (the data export while the graph is switched
+// off) maps the subject graph exactly as the layer does.
+
+/**
+ * The subject-graph read of the entity list: maps Subjects back to the stable
+ * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
+ * Filter order: kind (`type`) → name/alias substring (`q`) → mention-count
+ * backfill → offset/limit slice. Rows come `updated_at DESC` (via `listSubjects`);
+ * the legacy path orders by `mention_count DESC`, so browse ORDER still differs from
+ * legacy, but `mentionCount` is now the real memory_subjects link count (batched via
+ * {@link SubjectStore.getMentionCounts}), not a hardcoded 0.
+ */
+export function listSubjectEntitiesOn(
+  store: SubjectStore,
+  opts?: { type?: string | undefined; q?: string | undefined; limit?: number | undefined; offset?: number | undefined },
+): EntityRecord[] {
+  // A `type` from the legacy KG vocabulary maps to a subject kind; one that maps
+  // to nothing (concept/location/collection) yields no rows.
+  const kindFilter = opts?.type ? entityTypeToSubjectKind(opts.type) : null;
+  if (opts?.type && !kindFilter) return [];
+  const rows = store.listSubjects(kindFilter ? { kind: kindFilter } : undefined);
+  let mapped = rows
+    .map(r => subjectRowToEntityRecord(r))
+    .filter((e): e is EntityRecord => e !== null);
+  const q = opts?.q?.trim().toLowerCase();
+  if (q) {
+    mapped = mapped.filter(e =>
+      e.canonicalName.toLowerCase().includes(q) ||
+      e.aliases.some(a => a.toLowerCase().includes(q)),
+    );
+  }
+  const offset = Math.max(opts?.offset ?? 0, 0);
+  const limit = opts?.limit ?? mapped.length;
+  const page = mapped.slice(offset, offset + limit);
+  // Populate the real mention count (memory_subjects links) — the subject path
+  // otherwise reports 0 for every entity (the "0× Erwähnungen" bug). Counted for
+  // the returned page ONLY: bounded against the SQLite variable cap on a large
+  // graph, and no wasted counting of rows we slice away.
+  const counts = store.getMentionCounts(page.map(e => e.id));
+  for (const e of page) e.mentionCount = counts.get(e.id) ?? 0;
+  return page;
+}
+
+/** Map a Subject row to the stable `EntityRecord` DTO, or null when the kind has no KG equivalent. */
+export function subjectRowToEntityRecord(row: SubjectRow, mentionCount = 0): EntityRecord | null {
+  const entityType = subjectKindToEntityType(row.kind);
+  if (!entityType) return null;
+  let aliases: string[];
+  try {
+    const parsed: unknown = JSON.parse(row.aliases || '[]');
+    aliases = Array.isArray(parsed) ? parsed.filter((a): a is string => typeof a === 'string') : [];
+  } catch {
+    aliases = [];
+  }
+  return {
+    id: row.id,
+    canonicalName: row.name,
+    entityType,
+    aliases,
+    description: '',
+    scopeType: 'global',
+    scopeId: 'global',
+    mentionCount,
+    firstSeenAt: row.created_at,
+    lastSeenAt: row.updated_at,
+  };
+}
+
+/** Map a relationship row to the stable `RelationRecord` DTO. */
+export function relRowToRelationRecord(r: RelationshipRow): RelationRecord {
+  return {
+    fromEntityId: r.from_subject_id,
+    toEntityId: r.to_subject_id,
+    relationType: r.kind,
+    description: r.description,
+    confidence: r.confidence,
+    sourceMemoryId: r.source_memory_id ?? '',
+    createdAt: r.created_at,
+  };
+}
+
+/** Map a legacy relation row read for the data export to the `RelationRecord` DTO, its retired-source mark kept. */
+export function legacyRelationForExport(r: RelationRow & { source_deleted: 0 | 1 }): RelationRecord & { sourceDeleted: boolean } {
+  return {
+    fromEntityId: r.from_entity_id,
+    toEntityId: r.to_entity_id,
+    relationType: r.relation_type,
+    description: r.description,
+    confidence: r.confidence,
+    sourceMemoryId: r.source_memory_id ?? '',
+    createdAt: r.created_at,
+    sourceDeleted: r.source_deleted === 1,
+  };
 }
