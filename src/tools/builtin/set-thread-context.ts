@@ -32,7 +32,7 @@ interface SetThreadContextInput {
 
 /**
  * The answer when the customer name matches more than one entry: the stored names of the matches
- * (which can be extracted text) in one marked block after the sentence, never inside it.
+ * (which can be extracted text), each in its own marked block after the sentence, never inside it.
  */
 function ambiguityText(store: SubjectStore, candidateIds: readonly string[]): string {
   const names = candidateIds
