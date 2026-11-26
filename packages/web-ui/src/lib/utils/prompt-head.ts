@@ -62,6 +62,25 @@ export function contentLeftBelow(box: { scrollHeight: number; clientHeight: numb
 	return contentBottom === null ? toScroll : Math.min(toScroll, contentBottom - box.bottom);
 }
 
+/** The nodes `contentBottomOf` reads: a box's last child and its siblings before it. */
+export interface TailNode {
+	nodeType: number;
+	textContent: string | null;
+	previousSibling: TailNode | null;
+	getBoundingClientRect?: () => { bottom: number };
+}
+
+/**
+ * Where a box's content ends, for `contentLeftBelow`: the bottom of its last element, passing over
+ * text that is only whitespace (rendered markup ends in a line break). Null when text follows the
+ * last element, or there is none: then what is left to scroll is taken.
+ */
+export function contentBottomOf(lastChild: TailNode | null): number | null {
+	let tail = lastChild;
+	while (tail && tail.nodeType === 3 && (tail.textContent ?? '').trim() === '') tail = tail.previousSibling;
+	return tail && tail.nodeType === 1 && tail.getBoundingClientRect ? tail.getBoundingClientRect().bottom : null;
+}
+
 /**
  * How many lines `left` pixels of content below a box's edge are, rounded up so a cut line counts.
  * 0 below one pixel: the sizes are rounded pixels and the scroll position is not, so fractional

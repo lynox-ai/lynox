@@ -108,7 +108,7 @@
 	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning, prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
 	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
-	import { contentLeftBelow, linesLeftBelow, readOnStep, splitPromptHead } from '../utils/prompt-head.js';
+	import { contentBottomOf, contentLeftBelow, linesLeftBelow, readOnStep, splitPromptHead, type TailNode } from '../utils/prompt-head.js';
 	import PromptQuestionField from './PromptQuestionField.svelte';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
@@ -713,10 +713,7 @@
 	function measureQuestion(): void {
 		const el = questionBox();
 		if (!el) { questionBelow = 0; return; }
-		// Where the content ends: the last element, unless text follows it.
-		let tail: ChildNode | null = el.lastChild;
-		while (tail && tail.nodeType === Node.TEXT_NODE && (tail.textContent ?? '').trim() === '') tail = tail.previousSibling;
-		const contentBottom = tail instanceof Element ? tail.getBoundingClientRect().bottom : null;
+		const contentBottom = contentBottomOf(el.lastChild as TailNode | null);
 		const left = contentLeftBelow({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, scrollTop: el.scrollTop, bottom: el.getBoundingClientRect().bottom }, contentBottom);
 		questionBelow = linesLeftBelow(left, parseFloat(getComputedStyle(el).lineHeight) || 22);
 	}

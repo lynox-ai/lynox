@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { contentLeftBelow, linesBelow, linesLeftBelow, promptFieldTooLow, readOnStep, splitPromptHead } from './prompt-head.js';
+import { contentBottomOf, contentLeftBelow, linesBelow, type TailNode, linesLeftBelow, promptFieldTooLow, readOnStep, splitPromptHead } from './prompt-head.js';
 
 const many = Array.from({ length: 3 }, (_, i) => `rm -rf ./release/build-${i + 1}/artifacts`).join('\n');
 
@@ -87,6 +87,27 @@ describe('contentLeftBelow', () => {
 	});
 });
 
+describe('contentBottomOf', () => {
+	const el = (bottom: number, previousSibling: TailNode | null = null): TailNode => ({ nodeType: 1, textContent: 'x', previousSibling, getBoundingClientRect: () => ({ bottom }) });
+	const text = (data: string, previousSibling: TailNode | null): TailNode => ({ nodeType: 3, textContent: data, previousSibling });
+
+	it('is the bottom of the last element, past the line breaks after it', () => {
+		const p = el(426, el(300));
+		expect(contentBottomOf(text('\n', text('  ', p)))).toBe(426);
+		expect(contentBottomOf(p)).toBe(426);
+	});
+
+	it('is null when text follows the last element, or there is no element', () => {
+		expect(contentBottomOf(text('the end of it\n', el(426)))).toBeNull();
+		expect(contentBottomOf(text('\n', null))).toBeNull();
+		expect(contentBottomOf(null)).toBeNull();
+	});
+
+	it('stops at any other node after the last element, a comment say: null, to scroll is taken', () => {
+		expect(contentBottomOf({ nodeType: 8, textContent: '', previousSibling: el(426) })).toBeNull();
+	});
+});
+
 describe('linesLeftBelow', () => {
 	it('counts what is left in lines, a cut line as a whole one', () => {
 		expect(linesLeftBelow(302, 22)).toBe(14);
@@ -99,8 +120,7 @@ describe('linesLeftBelow', () => {
 		expect(linesLeftBelow(23, 22)).toBe(2);
 		expect(linesLeftBelow(45, 22)).toBe(3);
 		expect(linesLeftBelow(68.25, 22.75)).toBe(3);
-		// A line height floats cannot hold exactly: two of them are two lines, not three.
-		expect(linesLeftBelow(2 * 22.4, 22.4)).toBe(2);
+		// Three line heights of 22.1 px divide to 3.0000000000000004: three lines, not four.
 		expect(linesLeftBelow(3 * 22.1, 22.1)).toBe(3);
 	});
 
