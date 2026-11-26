@@ -150,7 +150,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
     // The stored names can differ from the ones given (an alias resolves to its entry) and can be
     // text extracted from outside content: each is returned in its own marked block, after a label
     // in lynox's own words, never inside the sentence.
-    if (answer !== 'Merge') return `Cancelled — the two entries were left as separate entries. ${storedNames('Duplicate (not merged)', dup.name, 'Kept', canon.name)}`;
+    if (answer !== 'Merge') return `Cancelled — the two entries were left as separate entries. ${storedNames('Duplicate (not merged)', dup.name, 'Would have been kept', canon.name)}`;
 
     try {
       const dupId = dup.id, canonId = canon.id;

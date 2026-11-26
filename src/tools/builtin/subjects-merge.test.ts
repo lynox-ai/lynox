@@ -464,7 +464,7 @@ describe('subjects_merge tool (PR-C3)', () => {
   it('a cancelled merge returns the stored names the same way', async () => {
     const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, makeAgent('Cancel'));
     expect(blocks(res)).toEqual(['Ada', 'Dr. Ada Lovelace']);
-    expect(outsideBlocks(res)).toBe('Cancelled — the two entries were left as separate entries. Their stored names:\nDuplicate (not merged): [block]\nKept: [block]');
+    expect(outsideBlocks(res)).toBe('Cancelled — the two entries were left as separate entries. Their stored names:\nDuplicate (not merged): [block]\nWould have been kept: [block]');
   });
 
   it('declares requiresConfirmation (so the permission guard defers to its own prompt)', () => {
