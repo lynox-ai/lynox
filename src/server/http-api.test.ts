@@ -4896,6 +4896,8 @@ describe('LynoxHTTPApi', () => {
         await vi.advanceTimersByTimeAsync(5_000);
         expect(slotB!.lastEventAt, 'positive control: the slot\'s own heartbeat refreshes it').toBeGreaterThan(1);
       } finally {
+        // Real timers first, so a failure above cannot leave the file on faked intervals.
+        vi.useRealTimers();
         openA?.();
         openB?.();
         extractHolds.length = 0;
@@ -4903,7 +4905,6 @@ describe('LynoxHTTPApi', () => {
         finishB?.('second done');
         await a?.then((r) => r.text()).catch(() => undefined);
         await b?.then((r) => r.text()).catch(() => undefined);
-        vi.useRealTimers();
         await expectSlotReclaimed(slots, sid);
       }
     });
