@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { parseActiveRuns, countLiveRuns, selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream } from './active-runs.js';
+import { parseActiveRuns, countLiveRuns, selectReattachTarget, scheduledQuestionWaits, offlineTurnArrived, shouldRefireOfflineTurn, shouldProbeServerAfterStream } from './active-runs.js';
 
 /**
  * Locks the GET /api/runs/active wire contract shared by the thread-history nav
@@ -250,5 +250,33 @@ describe('shouldProbeServerAfterStream', () => {
 		expect(shouldProbeServerAfterStream({
 			sawDone: false, sawErrorEvent: false, isStreaming: false, userStopped: false,
 		})).toBe(false);
+	});
+});
+
+describe('offlineTurnArrived', () => {
+	const rows = (...m: Array<[string, string]>) => ({ messages: m.map(([role, content]) => ({ role, content })) });
+	it('one user row more, carrying the words (marker removed): arrived', () => {
+		expect(offlineTurnArrived(rows(['user', 'a'], ['assistant', 'x'], ['user', '[Now: 2026-11-05T15:00:00.000Z]\n\nja']), 1, 'ja')).toBe(true);
+	});
+	it('the same words on a row the client counts already: not arrived', () => {
+		expect(offlineTurnArrived(rows(['user', 'ja'], ['assistant', 'x']), 1, 'ja')).toBe(false);
+	});
+	it('one row more with other words (another tab): not arrived', () => {
+		expect(offlineTurnArrived(rows(['user', 'a'], ['user', 'b']), 1, 'ja')).toBe(false);
+	});
+	it('two rows more, the last with the words: not arrived, the count is off', () => {
+		expect(offlineTurnArrived(rows(['user', 'a'], ['user', 'b'], ['user', 'ja']), 1, 'ja')).toBe(false);
+	});
+	it('blank user rows (answers to a question) are not counted', () => {
+		expect(offlineTurnArrived(rows(['user', 'a'], ['user', ' '], ['user', 'ja']), 1, 'ja')).toBe(true);
+	});
+	it('a loaded-context preamble is removed before the words are compared', () => {
+		expect(offlineTurnArrived(rows(['user', '[Loaded workflow w1]\nctx\n[/loaded-context]\n\nja']), 0, 'ja')).toBe(true);
+	});
+	it('an unreadable body or empty words: not arrived, never throws', () => {
+		expect(offlineTurnArrived(null, 0, 'ja')).toBe(false);
+		expect(offlineTurnArrived('<html>', 0, 'ja')).toBe(false);
+		expect(offlineTurnArrived({ messages: 'x' }, 0, 'ja')).toBe(false);
+		expect(offlineTurnArrived(rows(['user', 'ja']), 0, '  ')).toBe(false);
 	});
 });

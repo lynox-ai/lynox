@@ -108,7 +108,7 @@ function confirm(name: string, endpoints: string[]): void {
 type Ask = (q: string | PromptText) => Promise<string>;
 
 /** Answers the acceptance of a host yes, and the question where a vault secret may go no. */
-const allowHostsDenySecrets: Ask = async (q) => (/to be sent there/.test(flattenPrompt(q)) ? 'Deny' : 'Allow');
+const allowHostsDenySecrets: Ask = async (q) => (/to be sent there/.test(flattenPrompt(q)) ? 'deny' : 'allow');
 
 function agentOf(store: ApiStore, opts: { promptUser?: Ask; principal?: unknown; releases?: SecretReleases | null; ends?: unknown; autonomy?: string } = {}): never {
   return {
