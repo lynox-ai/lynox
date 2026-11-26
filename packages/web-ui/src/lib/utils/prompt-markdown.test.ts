@@ -555,7 +555,7 @@ describe('ChatView wiring', () => {
 		expect(members.filter((n) => n['computed'])).toEqual([]);
 		const called = inField.filter((n) => n.type === 'CallExpression' && (n['callee'] as SvelteNode).type === 'MemberExpression')
 			.map((n) => ((n['callee'] as SvelteNode)['property'] as SvelteNode)['name']);
-		expect([...new Set(called)].sort()).toEqual(['addEventListener', 'closest', 'disconnect', 'getBoundingClientRect', 'map', 'max', 'observe', 'querySelectorAll', 'removeEventListener', 'scrollBy']);
+		expect([...new Set(called)].sort()).toEqual(['addEventListener', 'closest', 'disconnect', 'floor', 'getBoundingClientRect', 'map', 'max', 'observe', 'querySelectorAll', 'removeEventListener', 'scrollBy']);
 		expect(inField.filter((n) => n.type === 'AssignmentExpression' && (n['left'] as SvelteNode).type !== 'Identifier')).toEqual([]);
 	});
 });
