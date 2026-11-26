@@ -3417,8 +3417,8 @@ export class LynoxHTTPApi {
   /**
    * Refuses a change to a paused plan (`plan-pause.ts`), before anything marks it: a mandate
    * changes nothing on one, the owner may switch it, complete it or delete it but not edit or
-   * stamp it, since only the takeover lets it run again, and nothing at a completed one. True when
-   * it answered the request.
+   * stamp it, since only the takeover lets it run again; a completed one nothing lets run again.
+   * True when it answered the request.
    */
   private _refusePaused(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string, action: 'edit' | 'enable' | 'complete' | 'delete' | 'confirm'): boolean {
     // Off, nothing is read for it: the routes are main's.

@@ -699,7 +699,7 @@
 							<!-- A completed plan that keeps its pause has no way back at the plan: nothing takes it
 							     over or reopens it. The line names the way there is (U-275). -->
 							{#if pausedDone(trigger)}
-								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-done-hint>{tf('triggers.paused_done_hint', { tab: t('hub.automation.workflows'), button: t('workflow_library.takeover.button') })}</p>
+								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-done-hint>{ownerActs ? tf('triggers.paused_done_hint', { tab: t('hub.automation.workflows'), button: t('workflow_library.takeover.button') }) : t('triggers.paused_done_hint_helper')}</p>
 							{/if}
 							<!-- Why its run does not do its work, with the way out: a watch the policy keeps from its
 							     page, or the cause its last failed run stored. Only causes lynox itself knows, said in

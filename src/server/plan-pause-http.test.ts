@@ -205,7 +205,7 @@ describe('the pause is held to its takeover (real engine)', () => {
   });
 
   it('a completed plan that keeps its pause is refused with its own sentence, without the takeover; an open one keeps it (U-275)', async () => {
-    const DONE = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again. If it runs a workflow that the person with this access created or last changed, that workflow has to be taken over first, under "Workflows" with "Take over workflow".';
+    const DONE = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again. If it runs a workflow that the person whose access ended created or last changed, the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
     const OPEN = 'paused because an access ended; it needs to be taken over';
     const donePlan = (): string => {
       const id = pausedPlan();

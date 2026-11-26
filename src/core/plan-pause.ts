@@ -295,10 +295,12 @@ export const PAUSED_MODEL_TEXT = "paused until the owner takes it over (the help
 /**
  * What a completed plan that keeps its pause adds about its workflow. A new plan on the same
  * workflow pauses again while the ended mandate is that workflow's member (see `PAUSED_MODEL_TEXT`
- * above), so the way names the workflow's takeover first. One sentence for every plan: the
- * reader checks the condition at the workflow's card, which names the ended access (U-275).
+ * above), so the way names the workflow's takeover first. It is the owner's (an owner-only route,
+ * no tool reaches it), so the sentence says who does it, true for every reader. One sentence for
+ * every plan: the reader checks the condition at the workflow's card, which names the ended access
+ * (U-275).
  */
-export const PAUSED_DONE_WORKFLOW_FIRST = 'If it runs a workflow that the person with this access created or last changed, that workflow has to be taken over first, under "Workflows" with "Take over workflow".';
+export const PAUSED_DONE_WORKFLOW_FIRST = 'If it runs a workflow that the person whose access ended created or last changed, the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
 
 /**
  * The same for a completed plan that keeps its pause. Nothing takes it over (`planOf` answers
