@@ -255,8 +255,11 @@ describe('the language comes from the session', () => {
 
   it('is handed to the list of changes from the session, never from the profile or the model', () => {
     const src = readFileSync(join(process.cwd(), 'src/tools/builtin/api-setup.ts'), 'utf8');
-    expect(src.match(/securityChanges\(/g)?.length).toBe(2);
+    // The definition, the list the person is asked with, and the English list in the refusal the
+    // model reads when nobody can be asked.
+    expect(src.match(/securityChanges\(/g)?.length).toBe(3);
     expect(src).toContain("securityChanges(prior, profile, agent.dialogLanguage ?? 'en')");
+    expect(src).toContain("securityChanges(prior, profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`)");
     expect(src).toContain("API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].save(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), profile.name, changes.map((c) => c.text), disclosureIn(agent.dialogLanguage ?? 'en'))");
   });
 });

@@ -503,7 +503,9 @@ describe('W-Question: the owner is asked with what is stored, and only then does
     delete (p as Partial<ApiProfile>).custom_endpoint_ack;
     const ask: Ask = async (q) => { asked.push(flattenPrompt(q)); return 'allow'; };
     const out = String(await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store, { promptUser: ask, autonomy: 'autonomous' })));
-    expect(out).toContain('no one can be asked');
+    // The host is outside the vetted list and nobody can accept it, so the save stops there,
+    // before the binding question.
+    expect(out).toMatch(/^Blocked: profile "crm2" egresses to a non-vetted sub-processor/);
     expect(store.get('crm2')).toBeUndefined();
     expect(asked.some((q) => q.includes('REPORT_KEY'))).toBe(false);
     expect(bindings()?.boundOf('REPORT_KEY')).not.toContain('https://crm2.example');

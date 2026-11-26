@@ -2729,7 +2729,7 @@ ${draftJson}
         // credential goes while the run that asked for it waits. So it is treated like a run with
         // no prompt at all, the same as the binding question (`askBindingGrowth`), `release_secret`
         // and `adopt_connection`. The delete questions further down are not of this kind: they
-        // take something away, and the permission guard asks first (`destructive`).
+        // take something away, and under `autonomous` the permission guard acts first (`destructive`).
         if (agent.autonomy === 'autonomous' || !agent.promptUser) {
           // Two halves, two answers, because they fail in opposite directions.
           // The egress half has to refuse the SAVE: a stored profile with a

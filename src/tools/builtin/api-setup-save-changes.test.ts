@@ -13,6 +13,7 @@ vi.mock('../../core/config.js', () => ({ getLynoxDir: () => lynoxDir }));
 import { apiSetupTool, ordinal, securityChanges } from './api-setup.js';
 import { ApiStore, type ApiProfile } from '../../core/api-store.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
+import { isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
@@ -549,13 +550,25 @@ describe('api_setup: an autonomous run cannot widen a profile, even though it co
     // control: the same save in a supervised run asks, and is stored on a yes
     const asked = await save(store, 'create', keyProfile({ base_url: 'https://x.openai.azure.com/v1' }), 'allow', 'supervised');
     expect(asked.asked.length).toBeGreaterThan(0);
-    expect(asked.asked[0]).toContain('x.openai.azure.com');
+    expect(asked.asked[0]).toContain("Custom endpoint outside lynox's listed sub-processors: x.openai.azure.com");
     expect(stored(store, 'kp')?.base_url).toBe('https://x.openai.azure.com/v1');
   });
 
-  it('a store sign-in saved in an autonomous run is refused without asking, and keeps its accepted sign-in redirect', async () => {
-    // Every built-in store sign-in sends to a host outside the vetted list, so an autonomous save
-    // of one stops at that half: no run without a person can record an acceptance for it.
+  it('every built-in sign-in sends the person to a host outside the vetted list', () => {
+    // What the next test leans on: no preset's sign-in host is vetted, so an autonomous save of a
+    // preset profile always stops at the host half and never reaches the redirect half alone.
+    const ids = OAUTH_PRESETS.ids();
+    expect(ids.length).toBeGreaterThan(1);
+    for (const id of ids) {
+      const host = OAUTH_PRESETS.get(id)!.host;
+      const name = host.kind === 'constant' ? host.host : host.template.replace(`{${host.param}}`, 'acme');
+      expect(isVettedEgressHost(`https://${name}/`), id).toBe(false);
+    }
+  });
+
+  it('a sign-in through a built-in preset saved in an autonomous run is refused without asking, and keeps its accepted sign-in redirect', async () => {
+    // Every built-in sign-in sends to a host outside the vetted list (the test above), so an
+    // autonomous save of one stops at that half: no run without a person can record an acceptance for it.
     const store = new ApiStore();
     await save(store, 'create', shop(), 'allow');
     expect(stored(store, 'shop')?.custom_endpoint_ack?.redirect_hosts).toEqual(['acme.myshopify.com']);
