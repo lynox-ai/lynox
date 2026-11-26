@@ -252,7 +252,7 @@ describe('ConnectionStore (Foundation Rework v2 — S4b)', () => {
       conn.upsert(baseRow({ id: 'a2' }));
       conn.upsert(baseRow({ id: 'm1', kind: 'mail' }));
       // A database from before v63: the column, its index and its version taken back out.
-      before.getDb().exec('ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 63;');
+      before.getDb().exec('ALTER TABLE bulk_targets DROP COLUMN refusal_detail; ALTER TABLE bulk_targets DROP COLUMN target_title; DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause; ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 63; DROP INDEX IF EXISTS idx_audit_log_poll_fold; DROP INDEX IF EXISTS idx_audit_log_ts; ALTER TABLE audit_log DROP COLUMN poll_last; ALTER TABLE audit_log DROP COLUMN poll_count;');
       before.close();
       const after = new EngineDb(path, '');
       engines.push(after);

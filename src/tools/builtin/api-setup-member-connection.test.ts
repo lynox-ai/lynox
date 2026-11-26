@@ -95,7 +95,7 @@ function agentWith(store: ApiStore, principal: RequestPrincipal, live: readonly 
     principal,
     ...(secretStore !== undefined ? { secretStore } : {}),
     sessionCounters: { httpRequests: 0 },
-    promptUser: async () => 'Allow',
+    promptUser: async () => 'allow',
     toolContext: {
       // A mandate's writes leave rows in the actor trail and are refused without one.
       auditLog: testAuditLog().log,
@@ -123,7 +123,7 @@ describe('the owner saving over a member\'s connection (P3)', () => {
     const store = storeWith();
     const reply = await run(agentWith(store, OWNER_PRINCIPAL, ['M-1']), { action: 'update', profile: crmProfile({ description: 'edited', created_by: undefined }) });
 
-    expect(reply).toBe(`Error: API profile "crm-api" was not saved. ${LEAD}, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects setup@example.org).`);
+    expect(reply).toBe(`Error: API profile "crm-api" was not saved. ${LEAD}, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this connection under Settings → API connections and connect it yourself (that disconnects setup@example.org).`);
     expect(store.get('crm-api')?.created_by).toBe(TAG);
     expect(store.get('crm-api')?.description).toBe('CRM API');
     expect(store.get('crm-api')?.oauth_grant).toEqual(MANDATE_GRANT);
@@ -169,7 +169,7 @@ describe('fetch_token on a member\'s connection', () => {
   it('the owner is told who connected it while the access lasts, and nothing is sent', async () => {
     const reply = await run(agentWith(storeWith(), OWNER_PRINCIPAL, ['M-1']), { action: 'fetch_token', id: 'crm-api' });
 
-    expect(reply).toBe(`Connection not used: ${LEAD}, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects setup@example.org). Nothing was sent.`);
+    expect(reply).toBe(`Connection not used: ${LEAD}, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this connection under Settings → API connections and connect it yourself (that disconnects setup@example.org). Nothing was sent.`);
   });
 
   it('once the access has ended the owner is told how to take it over', async () => {

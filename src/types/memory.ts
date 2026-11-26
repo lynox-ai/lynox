@@ -53,7 +53,7 @@ export interface IMemory {
    * and the log each namespace's write is recorded in (`capture#extract`). Without an actor the
    * namespaces are written as before, unrecorded, with a line on stderr.
    */
-  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined, actor?: import('../core/instance-trail.js').InstanceActor | undefined, auditLog?: import('../core/audit-log.js').AuditLog | null | undefined): Promise<void>;
+  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined, actor?: import('../core/instance-trail.js').InstanceActor | undefined, auditLog?: import('../core/audit-log.js').AuditLog | null | undefined, heldRetry?: MemoryExtractionRetry | undefined): Promise<void>;
   // Scope-aware methods (Phase 1)
   appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<boolean | void>;
   loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef):                            Promise<string | null>;
@@ -61,6 +61,14 @@ export interface IMemory {
   updateScoped(ns: MemoryNamespace, oldText: string, newText: string, scope: MemoryScopeRef): Promise<boolean>;
   // Phase 3: auto-classification support
   setActiveScopes?(scopes: MemoryScopeRef[]): void;
+  /**
+   * The refusal a person's or the model's change to memory gets on an engine that started without
+   * engine.db (`Memory.refuseChangesWithoutStore`), or `null` when it may go ahead. Asked by the
+   * entrances (the memory tools, the memory routes) before anything is written, an erasure by
+   * pattern through them included. Deleting all of the instance's data and purging a thread do not
+   * ask, and neither does the engine's own upkeep (expiry, garbage collection).
+   */
+  engineLessRefusal?(reader: 'model' | 'client'): string | null;
 }
 
 // === Knowledge Graph ===
@@ -378,4 +386,14 @@ export interface IKnowledgeLayer {
   runIntelligence(): void;
   feedbackOnRetrieval(memoryIds: string[], signal: 'useful' | 'wrong'): void;
   consolidateMemories(namespace: MemoryNamespace, scopeType: string, scopeId: string): number;
+}
+
+/**
+ * An extraction refused only because a run held the balance (a refusal within the balance)
+ * can be tried once more. `onRefused` receives that one retry; `isRetry` marks the retry
+ * itself, which is never deferred again and skips the extraction throttle.
+ */
+export interface MemoryExtractionRetry {
+  onRefused?: ((retry: () => void) => void) | undefined;
+  isRetry?: boolean | undefined;
 }

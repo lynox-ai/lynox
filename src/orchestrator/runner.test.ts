@@ -24,7 +24,7 @@ vi.mock('./runtime-adapter.js', async (importOriginal) => {
 });
 
 import { runManifest, retryManifest, workflowBoundExceeded, buildRunCtx, validateManifest } from './runner.js';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_CALLER_ENDED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
 import { RunHistory } from '../core/run-history.js';
 import { currentRunGroup, openRunGroup } from '../core/run-group.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
@@ -2208,6 +2208,61 @@ describe('runManifest — DoS bound wiring', () => {
     expect(state.error).toContain('step limit');
     expect(state.outputs.has('p1')).toBe(true);
     expect(state.outputs.has('p2')).toBe(false);
+  });
+});
+
+describe('runManifest — the end of the run that started it', () => {
+  it('ends the run before step 2 when the caller ended after step 1, with the caller\'s cause', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const end = new AbortController();
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const },
+      mockResponses, endSignal: end.signal,
+      hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') end.abort(); } },
+    });
+    expect(state.status).toBe('failed');
+    expect(state.error).toBe(WORKFLOW_CALLER_ENDED_ERROR);
+    expect(state.outputs.has('step-1')).toBe(true);
+    expect(state.outputs.has('step-2')).toBe(false);
+  });
+
+  it('ends the run also under on_failure: continue', async () => {
+    const end = new AbortController();
+    const state = await runManifest({ ...MANIFEST, on_failure: 'continue' }, CONFIG, { source: { kind: 'adhoc' as const },
+      mockResponses: new Map([['agent-b', 'result-b']]), endSignal: end.signal,
+      hooks: { onStepStart: (id: string) => { if (id === 'step-1') end.abort(); } },
+    });
+    expect(state.error).toBe(WORKFLOW_CALLER_ENDED_ERROR);
+    expect(state.outputs.has('step-2')).toBe(false);
+  });
+
+  it('an owner\'s stop keeps its own cause when the caller ended as well', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const end = new AbortController();
+    const stop = new AbortController();
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const },
+      mockResponses, endSignal: end.signal, stopSignal: stop.signal,
+      hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') { stop.abort(); end.abort(); } } },
+    });
+    expect(state.error).toBe(WORKFLOW_STOPPED_ERROR);
+  });
+
+  it('a LAST step that fails while the caller has ended ends the run with that cause, not completed', async () => {
+    const manifest: Manifest = {
+      ...MANIFEST, on_failure: 'continue',
+      agents: [{ id: 'only', agent: 'only', runtime: 'inline', task: 't' }],
+    };
+    const end = new AbortController();
+    mockSpawnInline.mockImplementationOnce(async () => { end.abort(); throw new Error('aborted'); });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: [], endSignal: end.signal });
+    expect(state.status).toBe('failed');
+    expect(state.error).toBe(WORKFLOW_CALLER_ENDED_ERROR);
+  });
+
+  it('control: a caller that has not ended lets every step run', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, endSignal: new AbortController().signal });
+    expect(state.status).toBe('completed');
+    expect(state.outputs.has('step-2')).toBe(true);
   });
 });
 

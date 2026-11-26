@@ -60,6 +60,17 @@ export interface InboxItem {
 	matchedRuleId?: string | undefined;
 	/** The rule that named this item but was not applied, or null when none was withheld. */
 	ruleWithheld?: InboxRuleWithheld | null | undefined;
+	/** Mail that came into the thread after this item's own mail while it is open; absent when none. */
+	followUps?: InboxItemFollowUps | undefined;
+}
+
+/** How many mails came into an open item's thread after its own mail, and the newest one's
+ *  date, sender name (absent when that mail reads as sensitive) and thread-message row id. */
+export interface InboxItemFollowUps {
+	count: number;
+	latestAt?: string | undefined; // ISO
+	latestFromName?: string | undefined;
+	latestMessageId: string;
 }
 
 /** Why a rule that named a mail was not applied, so the mail is shown instead. */
@@ -266,6 +277,11 @@ export async function undoBulk(bulkId: string, currentZone: InboxBucket): Promis
 		addToast(t('inbox.error_bulk_undo'), 'error');
 		return false;
 	}
+	// Items that changed since the bulk action stay as they are; say so, with the real numbers.
+	const body = (await res.json().catch(() => ({}))) as { reverted?: unknown; skipped?: unknown };
+	if (typeof body.skipped === 'number' && body.skipped > 0 && typeof body.reverted === 'number') {
+		addToast(tf('inbox.bulk_undo_skipped', { restored: String(body.reverted), skipped: String(body.skipped) }), 'info');
+	}
 	void loadInboxCounts();
 	void loadInboxItems(currentZone);
 	return true;
@@ -308,6 +324,8 @@ export interface InboxThreadMessage {
 	direction: InboxMessageDirection;
 	fetchedAt: string; // ISO
 	inboxItemId?: string | undefined;
+	/** A received message the inbox kept without its text because it read as confidential. */
+	confidential?: boolean | undefined;
 }
 
 export interface InboxThreadResponse {

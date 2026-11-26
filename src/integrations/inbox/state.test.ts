@@ -1048,7 +1048,7 @@ describe('findItemByMessageId (outbound-reply reconcile lookup)', () => {
   });
 });
 
-describe('InboxStateDb — the rule withheld on an item (v22)', () => {
+describe('InboxStateDb — the rule withheld on an item (v24)', () => {
   const withheld = { id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' as const };
 
   it('stores the withheld rule with the item and reads it back; an item without one reads null', () => {

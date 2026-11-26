@@ -51,8 +51,9 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });

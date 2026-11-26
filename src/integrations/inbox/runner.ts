@@ -28,6 +28,7 @@ export { scrubErrorMessage } from './sensitive-content.js';
 import { scrubErrorMessage as _scrubErrorMessage } from './sensitive-content.js';
 import type { InboxCostBudget } from './cost-budget.js';
 import { fireBeforeRunGate, type HookHost } from '../../core/metered-request.js';
+import { SINGLE_CALL_WORST_CASE_CENTS } from '../../core/run-admission.js';
 import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
 import type { InboxRulesLoader } from './rules-loader.js';
@@ -74,8 +75,9 @@ export interface InboxQueuePayload {
     masked: boolean;
     redactionCount: number;
   } | undefined;
-  /** The envelope marks the mail as an automatic reply (`Auto-Submitted: auto-replied`, such as an
-   *  out-of-office note); no description rule is checked for it. Other machine-sent mail (a dunning
+  /** The envelope marks the mail as an automatic reply (`Auto-Submitted: auto-replied`, X-Autoreply,
+   *  X-Autorespond or `Precedence: auto_reply`, such as an out-of-office note); no description rule
+   *  is checked for it. Other machine-sent mail (a dunning
    *  letter from an ERP, `auto-generated`) is checked. */
   isAutoReplied?: boolean | undefined;
 }
@@ -94,6 +96,21 @@ export function sensitiveAudit(payload: Pick<InboxQueuePayload, 'sensitive'>): R
         sensitive_redactions: payload.sensitive.redactionCount,
       }
     : {};
+}
+
+/** Shown for a mail the classifier would have filed as handled although the sensitive check
+ *  flagged it. */
+export const SENSITIVE_WITHHELD_REASON_DE = 'Sensibler Inhalt — nicht als erledigt abgelegt, bitte ansehen.';
+
+/**
+ * A mail the sensitive check flagged is never filed as handled. In `skip` (the default) it does not
+ * reach the classifier; under `mask` or `allow` it does, and the mails the check flags are the ones
+ * a person most needs to see, while a mail's own text can steer a classifier. Such a mail is shown
+ * instead. Any other verdict is kept as it is, so a result already held back keeps its own reason.
+ */
+export function withheldSensitive(result: ClassifyResult, payload: Pick<InboxQueuePayload, 'sensitive'>): ClassifyResult {
+  if (payload.sensitive === undefined || result.bucket !== 'auto_handled') return result;
+  return { ...result, bucket: 'requires_user', reasonDe: SENSITIVE_WITHHELD_REASON_DE, failReason: 'sensitive_content' };
 }
 
 /** Subset of ClassifierQueueOptions the wiring exposes — callbacks are owned. */
@@ -211,7 +228,9 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       // The instance's daily and monthly spending caps, on every instance; then the
       // managed credit gate: a credit-exhausted (or control-plane-stale →
       // fail-closed) managed tenant must not drive the pool key per inbound mail.
-      const gate = await fireBeforeRunGate(meteredHost ?? null, 'fast');
+      // One admission covers up to two calls (the description-rule check and the classifier),
+      // so its worst case is two single calls.
+      const gate = await fireBeforeRunGate(meteredHost ?? null, 'fast', { maxCostCents: 2 * SINGLE_CALL_WORST_CASE_CENTS });
       if (gate.blockedReason !== null) {
         return budgetExceededVerdict(
           gate.capReached === 'daily' ? 'Tägliches KI-Budget erreicht — manuell prüfen.'
@@ -260,7 +279,8 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       }
       return classify();
     },
-    onSuccess: (payload, result) => {
+    onSuccess: (payload, classified) => {
+      const result = withheldSensitive(classified, payload);
       const envelopeFields = payload.envelope ?? {};
       const metadataWarning = _detectEmptyMetadata(payload.envelope);
       const rule = result.rule;
@@ -275,7 +295,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           reasonDe: result.reasonDe,
           classifiedAt: new Date(),
           classifierVersion: result.classifierVersion,
-          // A rule either filed the item or was withheld on it; the item says which (v21, v22).
+          // A rule either filed the item or was withheld on it; the item says which (v21, v24).
           ...(rule !== undefined && rule.withheld === false ? { matchedRuleId: rule.id } : {}),
           ...(rule !== undefined && rule.withheld !== false
             ? { ruleWithheld: { id: rule.id, name: rule.name, reason: rule.withheld } }
@@ -293,6 +313,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
                 fail_reason: result.failReason,
                 body_truncated: result.bodyTruncated,
                 ...sensitiveAudit(payload),
+                ...(result !== classified ? { classifier_bucket: classified.bucket } : {}),
                 ...(metadataWarning ? { warning: 'classified_with_empty_metadata', missing: metadataWarning } : {}),
               }),
             }
@@ -309,6 +330,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
                 bucket: result.bucket,
                 action: rule.action,
                 ...sensitiveAudit(payload),
+                ...(result !== classified ? { classifier_bucket: classified.bucket } : {}),
                 ...(metadataWarning ? { warning: 'classified_with_empty_metadata', missing: metadataWarning } : {}),
               }),
             },
@@ -326,7 +348,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       _writeThreadMessage(state, payload, itemId, body);
       if (opts.notifier && result.bucket === 'requires_user') {
         const item = state.getItem(itemId);
-        if (item) void opts.notifier.notifyNewItem(item);
+        if (item) void opts.notifier.notifyNewItem(item, { flagged: payload.sensitive !== undefined });
       }
     },
     onDeadLetter: (payload, error) => {
@@ -400,7 +422,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       _writeThreadMessage(state, payload, itemId, undefined);
       if (opts.notifier) {
         const item = state.getItem(itemId);
-        if (item) void opts.notifier.notifyNewItem(item);
+        if (item) void opts.notifier.notifyNewItem(item, { flagged: payload.sensitive !== undefined });
       }
     },
   };

@@ -102,6 +102,10 @@ export interface PipelineResult {
   /** Why the run ended before its next step, in lynox's own words, when it was not a step's
    *  failure: today only that an access the workflow depends on ended during the run (1100). */
   endedBecause?: string | undefined;
+  /** When a step's reported failure ended the run (`on_failure: stop`, where the step has no entry
+   *  in `steps`): lynox's fixed sentence naming that step and where its reason is shown. The reason
+   *  itself is the step agent's text and never goes here (U-192 1b). */
+  reportedFailure?: string | undefined;
 }
 
 /**
@@ -337,6 +341,8 @@ export interface TriggerRecord {
   last_run_at?: string | undefined;
   last_run_result?: string | undefined;
   last_run_status?: string | undefined;
+  /** Why the last run failed, as a stored cause (`RunCause` JSON); read only through `storedRunCause`. */
+  last_run_cause?: string | undefined;
   /** When a parked trigger stops waiting (ISO-8601). Set only while `status` is
    *  `waiting`; undefined otherwise. Written by the park, read by the expiry
    *  sweep — see {@link TriggerStatus}. */

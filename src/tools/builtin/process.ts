@@ -8,8 +8,10 @@ import { getErrorMessage, logErrorChain } from '../../core/utils.js';
 import { randomUUID } from 'node:crypto';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import { INLINE_NAMED_ONLY_TOOLS } from '../../orchestrator/runtime-adapter.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
+import { runStepIds } from '../../orchestrator/step-id.js';
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
@@ -189,10 +191,14 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
     // A plan_task pipeline carries no capture parameters; preserve any the
     // source already had (legacy rows backfill to []).
     parameters: existing.parameters ?? [],
+    // A step id stored before ids had a shape (an old plan_task cut a phase name only to 60
+    // characters) is saved as `step-<n>`, its references with it: the save takes no other id, and
+    // the model cannot choose ids here.
+    steps: runStepIds(existing.steps),
   };
 
   // Save-time gate — same as plan_task.
-  assertPlannedPipelineIsValid(reusable);
+  assertPlannedPipelineIsValid(reusable, turnIsLocked(agent.principal));
   // Commit the durable engine.db workflow definition FIRST — it runs the
   // fail-closed contract validator and throws on a bad contract, so the volatile
   // in-memory store is only populated once the durable write succeeded (no
@@ -284,6 +290,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       // Account the annotation's pool-key spend to the local session cap +
       // the tenant balance (no-op on self-host / BYOK).
       meteredHost: agent.toolContext.meteredHost,
+      chargeRun: (usd: number) => { agent.chargeExternalCost?.(usd); },
       sessionCounters: agent.sessionCounters,
       // A stop of the run, or the tool's time limit, ends the extraction call.
       signal: currentCallSignal(),
@@ -333,7 +340,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     };
 
     // Save-time gate — same as plan_task.
-    assertPlannedPipelineIsValid(planned);
+    assertPlannedPipelineIsValid(planned, turnIsLocked(agent.principal));
 
     // Commit the durable engine.db workflow definition FIRST — it runs
     // the fail-closed contract validator and throws on a bad contract, so the

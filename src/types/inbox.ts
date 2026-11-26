@@ -34,6 +34,9 @@ export type InboxAuditAction =
   | 'undo'
   | 'unsnoozed_on_reply'
   | 'reopened_on_reply'
+  | 'raised_on_sensitive_follow_up'
+  /** A flagged follow-up on an item already open in "requires you": nothing raised, the flag noted. */
+  | 'sensitive_follow_up_kept_open'
   | 'rule_applied'
   | 'generation_requested';
 
@@ -103,10 +106,26 @@ export interface InboxItem {
   /** The rule that filed this item (v20); cleared when the rule is deleted. */
   matchedRuleId?: string | undefined;
   /**
-   * The rule that named this item but was not applied (v21), or null when none was withheld.
+   * The rule that named this item but was not applied (v24), or null when none was withheld.
    * Always set on an item read from the store; optional so hand-built items compile.
    */
   ruleWithheld?: InboxRuleWithheld | null | undefined;
+  /**
+   * Mail that came into the thread after this item's own mail, while the item is open: how many,
+   * and the newest one's date, sender name (left out when that mail reads as sensitive) and
+   * thread-message row id. Set by the inbox API on the items it returns, absent when there is none;
+   * the item's reason and subject still describe its own mail.
+   */
+  followUps?: InboxItemFollowUps | undefined;
+}
+
+/** See {@link InboxItem.followUps}. */
+export interface InboxItemFollowUps {
+  count: number;
+  /** ISO date of the newest follow-up, absent when its date is not known. */
+  latestAt: string | undefined;
+  latestFromName: string | undefined;
+  latestMessageId: string;
 }
 
 /**

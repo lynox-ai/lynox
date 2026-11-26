@@ -9,6 +9,8 @@
  *   under CP outage); on a credit refuse (`allowed` false or the local mirror
  *   spent) it forces at most one flush→/status per 30 s and decides again on that
  *   fresh answer, so a credit pack bought since the last sync admits the run
+ *   While the control plane asks for runs only within the balance (`overrun_hold`),
+ *   an admitted run reserves what is free and is bounded to it (`admitWithinBalance`)
  * - onAfterRun: queues cost report and periodically flushes to control plane
  * - Periodic re-sync: refreshes `allowed` flag every 5 min when denied
  *
@@ -31,7 +33,8 @@ import type {
   ProviderIncidentRequest,
   EscalationNoticeRequest,
 } from '../contract/http.js';
-import { readExactHeld } from '../contract/http.js';
+import { readExactHeld, readOverrunHold } from '../contract/http.js';
+import { RunAdmissionRefusedError, type RunAdmission } from './run-admission.js';
 import { keyDeliveryHeaders } from './vault-key-source.js';
 import type { ProviderBillingFailure } from './provider-failure.js';
 import type { DeliverySummary } from './notification-router.js';
@@ -83,6 +86,9 @@ const DEFAULT_RESYNC_INTERVAL_MS = 5 * 60_000;
 // enough that the first message after a credit-pack purchase is decided on the CP's
 // current answer, long enough that a looping agent cannot storm the CP.
 const REFUSE_RESYNC_COALESCE_MS = 30_000;
+const CREDIT_REFUSAL =
+  'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
+  'Manage your account at https://lynox.ai/managed/account';
 
 /** Parse a positive integer env var with fallback; rejects 0/NaN/negative.
  *  Clamps to [min, max] so an out-of-range env value can't disable safety. */
@@ -154,6 +160,20 @@ export function createManagedHook(opts: {
   // Coalesce forced resyncs on the refuse path so a looping/injected agent cannot
   // turn refuses into a CP fetch-storm (S2).
   let lastForcedResyncAtMs = 0;
+  // Whether the control plane asks the engine to admit new runs only within the balance
+  // (`overrun_hold`). /status states it every time (absent = no); a flush answer that
+  // leaves it out keeps what the last statement said.
+  let overrunHold = false;
+  // Whether the last /status said the balance gates this instance (`spend_gate: 'balance'`).
+  // The hold applies only then: an unfunded (hosted/BYOK) or ungated instance has no balance
+  // to admit runs within, so a stray `overrun_hold` there holds nothing.
+  let balanceGated = false;
+  // What runs admitted while that holds have set aside, in cents, until they end. Held
+  // in this process only and given back by each caller's `finally`; there is no expiry, so
+  // a run that holds its reservation for hours (a question waiting for its owner) still
+  // keeps a second run out. A reservation never given back refuses until a restart.
+  const reservations = new Map<number, number>();
+  let nextReservationId = 0;
   // Sub-cent billing carry, in integer micro-cents (1 cent = 1000 micro-cents).
   // The CP debits whole cents, so each run's exact cost accumulates here and only
   // whole cents are reported — the sub-cent fraction carries to the next run.
@@ -242,9 +262,13 @@ export function createManagedHook(opts: {
       });
 
       if (res.ok) {
-        const data = (await res.json()) as UsageFlushResponse;
+        const raw: unknown = await res.json();
+        const data = raw as UsageFlushResponse;
         // Only the boolean `true` allows: a malformed truthy value must not open the gate.
         allowed = data.allowed === true;
+        // No statement (absent, not a boolean) keeps the last one.
+        const hold = readOverrunHold(raw);
+        if (hold !== null) overrunHold = hold;
         lastSyncedAtMs = Date.now();
       } else {
         requeueBatch(batch);
@@ -300,6 +324,9 @@ export function createManagedHook(opts: {
         // Read off the raw body, so only a boolean speaks; absent is no statement (F7).
         opts.onExactHeld?.(readExactHeld(raw));
         allowed = data.allowed === true; // as in flush(): only the boolean `true` allows
+        // /status states the hold on every answer: anything but `true` is no hold.
+        overrunHold = readOverrunHold(raw) === true;
+        balanceGated = data.spend_gate === 'balance';
         lastSyncedAtMs = Date.now();
         // Whether the control plane FUNDS this instance's LLM spend (a pooled
         // key). Only a CP-funded instance's provider failure is the CP's account
@@ -347,6 +374,36 @@ export function createManagedHook(opts: {
   /** The mirror term: the local balance is unknown or not spent. */
   function mirrorAdmits(): boolean {
     return mirror === undefined || mirror > 0;
+  }
+
+  /** Σ live reservations. */
+  function reservedCents(): number {
+    let sum = 0;
+    for (const cents of reservations.values()) sum += cents;
+    return sum;
+  }
+
+  /**
+   * Admission while the control plane asks for runs only within the balance. Free is the
+   * mirror minus what admitted runs have set aside. A run (no `maxCostCents` in its
+   * context) takes ALL of it and is bounded to it, so a second run is refused until the
+   * first gives it back. A call with a stated worst case takes that much, if it fits. An
+   * unknown mirror admits nothing.
+   */
+  function admitWithinBalance(context: RunContext): RunAdmission {
+    if (mirror === undefined) throw new RunAdmissionRefusedError(CREDIT_REFUSAL);
+    const available = mirror - reservedCents();
+    const requested = context.maxCostCents;
+    if (!(available > 0)) throw new RunAdmissionRefusedError(CREDIT_REFUSAL);
+    // A stated worst case that is negative, NaN or not a number cannot be held to: refused.
+    if (requested !== undefined && !(typeof requested === 'number' && requested >= 0)) {
+      throw new RunAdmissionRefusedError(CREDIT_REFUSAL);
+    }
+    const cents = requested === undefined ? available : requested;
+    if (!(cents <= available)) throw new RunAdmissionRefusedError(CREDIT_REFUSAL);
+    const id = nextReservationId++;
+    reservations.set(id, cents);
+    return { maxCostCents: cents, release: () => { reservations.delete(id); } };
   }
 
   /** Has the cached `allowed` state grown stale (CP unreachable too long)? */
@@ -459,7 +516,7 @@ export function createManagedHook(opts: {
       resyncTimer = setInterval(() => { void syncStatus(); }, resyncIntervalMs);
     },
 
-    async onBeforeRun(_runId: string, _context: RunContext) {
+    async onBeforeRun(_runId: string, context: RunContext): Promise<void | RunAdmission> {
       // Admit predicate: three terms CONJOINED over one snapshot, `isStale()` FIRST as
       // the fail-closed staleness backstop. The mirror is a THIRD condition
       // ANDed after the existing two — it can only REFUSE more, never admit what
@@ -470,7 +527,7 @@ export function createManagedHook(opts: {
           'This usually clears within a minute; runs resume automatically once the control plane responds again.',
         );
       }
-      if (allowed && mirrorAdmits()) return;
+      if (allowed && mirrorAdmits()) return overrunHold && balanceGated ? admitWithinBalance(context) : undefined;
       // Refused on the cached state, which can be minutes old: a credit pack bought since
       // then shows up only at the next heartbeat. Force ONE coalesced authoritative resync —
       // flush pending THEN /status, so `/status` is the LAST writer of `allowed` (a bare
@@ -485,12 +542,9 @@ export function createManagedHook(opts: {
       if (now - lastForcedResyncAtMs >= REFUSE_RESYNC_COALESCE_MS) {
         lastForcedResyncAtMs = now;
         await flush();
-        if ((await syncStatus()) && mirrorAdmits()) return;
+        if ((await syncStatus()) && mirrorAdmits()) return overrunHold && balanceGated ? admitWithinBalance(context) : undefined;
       }
-      throw new Error(
-        'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
-        'Manage your account at https://lynox.ai/managed/account',
-      );
+      throw new Error(CREDIT_REFUSAL);
     },
 
     onAfterRun(runId: string, costUsd: number, context: RunContext) {

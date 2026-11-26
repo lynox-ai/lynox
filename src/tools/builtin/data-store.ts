@@ -4,7 +4,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { channels } from '../../core/observability.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
-import { rowStampOf } from '../../core/data-store.js';
+import { newCollectionId, rowStampOf } from '../../core/data-store.js';
 import { ifCounts, ifRemovedIds, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 // DataStore accessed via agent.toolContext.dataStore
@@ -93,12 +93,18 @@ export const dataStoreCreateTool: ToolEntry<CreateInput> = {
         ...(c.role === 'occurred_at' ? { role: 'occurred_at' as const } : {}),
       }));
 
-      return withInstanceWrite(agent, { site: 'data_store_create#create', kind: 'create', store: 'data_store', main: ['create'] }, (w) => {
+      // Decided once, here: the row names this id and the store writes exactly it, or fails to
+      // create the table. Without the column (an older file before its boot migration), or when
+      // that cannot be told, the row names the kind only and the store decides on its own.
+      let collectionId: string | undefined;
+      try { if (storeRef.hasCollectionIdColumn()) collectionId = newCollectionId(); } catch { collectionId = undefined; }
+      return withInstanceWrite(agent, { site: 'data_store_create#create', kind: 'create', store: 'data_store', target: () => [['collection', collectionId]], main: ['create'] }, (w) => {
         const info = w.run('create', () => storeRef.createCollection({
           name: input.name,
           scope,
           columns,
           uniqueKey: input.unique_key,
+          collectionId,
         }), ifReturned);
 
         // Publish for Knowledge Graph bridge (collection registration)
@@ -151,7 +157,7 @@ export const dataStoreInsertTool: ToolEntry<InsertInput> = {
     if (!storeRef) return 'DataStore not available.';
 
     try {
-      return withInstanceWrite(agent, { site: 'data_store_insert#save', kind: 'save', store: 'data_store', main: ['insert'] }, (w) => {
+      return withInstanceWrite(agent, { site: 'data_store_insert#save', kind: 'save', store: 'data_store', target: () => [['collection', storeRef.collectionIdOf(input.collection)]], main: ['insert'] }, (w) => {
         const result = w.run('insert', () => storeRef.insertRecords({
           collection: input.collection,
           records: input.records,
@@ -408,7 +414,7 @@ export const dataStoreDeleteTool: ToolEntry<DeleteInput> = {
     if (!storeRef) return 'DataStore not available.';
 
     try {
-      return withInstanceWrite(agent, { site: 'data_store_delete#delete', kind: 'delete', store: 'data_store', main: ['delete'] }, (w) => {
+      return withInstanceWrite(agent, { site: 'data_store_delete#delete', kind: 'delete', store: 'data_store', target: () => [['collection', storeRef.collectionIdOf(input.collection)]], main: ['delete'] }, (w) => {
         const { deleted } = w.run('delete', () => storeRef.deleteRecordsReturningIds({
           collection: input.collection,
           filter: input.filter,
@@ -458,7 +464,7 @@ export const dataStoreDropTool: ToolEntry<DropInput> = {
     if (!storeRef) return 'DataStore not available.';
 
     try {
-      return withInstanceWrite(agent, { site: 'data_store_drop#delete', kind: 'delete', store: 'data_store', main: ['drop'] }, (w) => {
+      return withInstanceWrite(agent, { site: 'data_store_drop#delete', kind: 'delete', store: 'data_store', target: () => [['collection', storeRef.collectionIdOf(input.collection)]], main: ['drop'] }, (w) => {
         const dropped = w.run('drop', () => storeRef.dropCollection(input.collection), ifTrue);
         if (dropped) {
           channels.dataStoreInsert.publish({

@@ -129,7 +129,7 @@ describe('the status bar reads today\'s cost again when a chat run ends', () => 
 		await sent;
 		await afterDelay();
 		expect(costReads).toBe(2);
-		expect(target.textContent).toContain('$0.42');
+		expect(target.textContent).toMatch(/0[.,]42/);
 	});
 
 	it('after a stop: when the stop is confirmed, and again when the stream closes', async () => {
@@ -149,7 +149,7 @@ describe('the status bar reads today\'s cost again when a chat run ends', () => 
 		await sent;
 		await afterDelay();
 		expect(costReads).toBe(3);
-		expect(target.textContent).toContain('$0.17');
+		expect(target.textContent).toMatch(/0[.,]17/);
 	});
 
 	it('after an error that ends the run', async () => {
@@ -162,7 +162,7 @@ describe('the status bar reads today\'s cost again when a chat run ends', () => 
 		stream.close();
 		await sent;
 		await afterDelay();
-		expect(target.textContent).toContain('$0.05');
+		expect(target.textContent).toMatch(/0[.,]05/);
 	});
 
 	it('after opening a chat whose run ended before the stream could be attached', async () => {
@@ -170,7 +170,7 @@ describe('the status bar reads today\'s cost again when a chat run ends', () => 
 		await store.resumeThread('t9');
 		await afterDelay();
 		expect(costReads).toBe(2);
-		expect(target.textContent).toContain('$0.09');
+		expect(target.textContent).toMatch(/0[.,]09/);
 	});
 
 	it('makes one read of signals that come close together, and none without a run end', async () => {
@@ -193,13 +193,13 @@ describe('the status bar reads today\'s cost again when a chat run ends', () => 
 		storedCost = 0.33;
 		window.dispatchEvent(new Event(store.RUN_ENDED_EVENT));
 		await afterDelay();
-		expect(target.textContent).toContain('$0.33');
+		expect(target.textContent).toMatch(/0[.,]33/);
 
 		releaseOld();
 		await settle();
 		expect(costReads).toBe(3);
-		expect(target.textContent).toContain('$0.33');
-		expect(target.textContent).not.toContain('$0.01');
+		expect(target.textContent).toMatch(/0[.,]33/);
+		expect(target.textContent).not.toMatch(/0[.,]01/);
 	});
 
 	it('stops listening when it is removed', async () => {

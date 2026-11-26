@@ -282,6 +282,42 @@ describe('handleGetItemContext', () => {
 });
 
 describe('handleGetItemThread', () => {
+  it('marks a received message kept without its text because it read as confidential, and no other', () => {
+    const itemId = state.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: 'thr-conf', bucket: 'requires_user', confidence: 0.5,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-10T12:00:00Z'), classifierVersion: 'v',
+      fromAddress: 'sender@x', subject: 'hello', messageId: '<own@x>',
+    });
+    const add = (messageId: string, extra: Partial<Parameters<typeof state.insertThreadMessage>[0]> = {}): void => {
+      state.insertThreadMessage({
+        accountId: ACCOUNT.id, threadKey: 'thr-conf', messageId, fromAddress: 'sender@x', subject: 'Re: hello',
+        direction: 'inbound', mailDate: new Date('2026-05-11T10:00:00Z'), ...extra,
+      });
+    };
+    add('<flagged@x>');
+    add('<plain-empty@x>');
+    add('<flagged-masked@x>', { snippet: 'IBAN [redacted]' });
+    add('<sent@x>', { direction: 'outbound' });
+    add('<subject-reads@x>', { subject: 'Bitte überweisen auf CH9300762011623852957' });
+    add('<kept-open@x>');
+    add('<flagged-body@x>', { bodyMd: 'Text da' });
+    for (const id of ['<flagged@x>', '<flagged-masked@x>', '<sent@x>', '<flagged-body@x>']) {
+      state.appendAudit({ itemId, action: 'raised_on_sensitive_follow_up', actor: 'system', payloadJson: JSON.stringify({ message_id: id }) });
+    }
+    state.appendAudit({ itemId, action: 'sensitive_follow_up_kept_open', actor: 'system', payloadJson: JSON.stringify({ message_id: '<kept-open@x>' }) });
+    const body = handleGetItemThread(deps, itemId).body as { messages: ReadonlyArray<{ messageId: string; confidential?: boolean }> };
+    const marked = Object.fromEntries(body.messages.map((m) => [m.messageId, m.confidential === true]));
+    expect(marked).toEqual({
+      '<flagged@x>': true,
+      '<plain-empty@x>': false,
+      '<flagged-masked@x>': false,
+      '<sent@x>': false,
+      '<subject-reads@x>': true,
+      '<kept-open@x>': true,
+      '<flagged-body@x>': false,
+    });
+  });
+
   it('404s on missing item', () => {
     expect(handleGetItemThread(deps, 'missing').status).toBe(404);
   });
@@ -1182,6 +1218,18 @@ describe('handleUndoBulk', () => {
     expect(body.reverted).toBe(2);
     expect(state.getItem(a)?.userAction).toBeUndefined();
     expect(state.getItem(b)?.userAction).toBeUndefined();
+  });
+
+  it('counts as reverted only the items it put back, and names the ones that changed since', () => {
+    const a = insertItem('a');
+    const b = insertItem('b');
+    const bulkId = (handleBulkAction(deps, { ids: [a, b], action: 'archived' }).body as { bulkId: string }).bulkId;
+    state.updateUserAction(b, 'replied');
+    const r = handleUndoBulk(deps, bulkId);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ ok: true, reverted: 1, skipped: 1 });
+    expect(state.getItem(a)?.userAction).toBeUndefined();
+    expect(state.getItem(b)?.userAction).toBe('replied');
   });
 
   it('returns 410 for an unknown bulkId or one outside the window', () => {
