@@ -1461,8 +1461,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   for (const s of steps) s.task = stripHidden(s.task);
   // A step id stored before ids had a shape runs as `step-<n>`, after the modifications (which
   // address steps by their stored id), so nothing the run writes quotes it. The names come from the
-  // stored plan, so a removed step does not shift them.
-  const runSteps = runStepIds(steps, stepRunNames(planned.steps));
+  // stored plan, so a removed step does not shift them; the ids a stored id is read against come
+  // from the stored plan too.
+  const runSteps = runStepIds(steps, stepRunNames(planned.steps), planned.steps.map(s => s.id));
 
   if (runSteps.length === 0) {
     return 'Error: All steps were removed. Nothing to execute.';
