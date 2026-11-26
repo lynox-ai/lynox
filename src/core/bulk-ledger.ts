@@ -34,7 +34,7 @@ import { shopifyBulkReadEnabled, shopifyPairedAfter, shopifySeoEntityFields } fr
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
-import { contextFieldsOfListForm, judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
+import { contextFieldsOfListForm, judgeAfterBound, normalizeJudgeRule, type JudgeRule, type JudgeRuleSourceRefusal } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 import type { ContainmentMirror } from './history-markers.js';
@@ -3324,11 +3324,17 @@ export class BulkLedger {
      *  anywhere leaves none behind. Left out before the judge first started, the run has none;
      *  from then on the list is frozen: the same one, or none given, passes. */
     startDomains?: unknown;
+    /** Why the rule's saved source no longer holds the text it was planned with, or null
+     *  (`judgeRuleSourceChanged`). Asked only before the judge first starts: the start that
+     *  begins it is the one the owner approves the text with, and from then on the run judges by
+     *  the stored text alone, a resume after a halt included. */
+    ruleSourceChanged?: ((rule: JudgeRule) => JudgeRuleSourceRefusal | null) | undefined;
   } = {}):
     { ok: true; status: BulkRunStatus; triggerId: string }
     | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' | 'start_domains_not_here' | 'start_domains_invalid' | 'start_domains_frozen' }
     | { ok: false; reason: 'supersede_required'; supersedable: { id: string; costUsd: number } }
-    | { ok: false; reason: 'rule_refused'; message: string } {
+    | { ok: false; reason: 'rule_refused'; message: string }
+    | { ok: false; reason: 'rule_source'; refusal: JudgeRuleSourceRefusal } {
     // A run left reading with no trigger is halted first, so the owner can start it again.
     this.freeDeadReads(runId);
     const run = this.runRow(runId);
@@ -3361,6 +3367,10 @@ export class BulkLedger {
       const refused = this.judgeRuleRefusal(run);
       if (refused !== null) return { ok: false, reason: 'rule_refused', message: refused };
       if (opts.judgeRuleHash === undefined || opts.judgeRuleHash !== run.judge_rule_hash) return { ok: false, reason: 'checksum' };
+      if (run.judge_started_at === null && opts.ruleSourceChanged !== undefined) {
+        const changed = opts.ruleSourceChanged(this.judgeRuleOf(run));
+        if (changed !== null) return { ok: false, reason: 'rule_source', refusal: changed };
+      }
       if (opts.costCapUsd === undefined ? run.cost_cap_usd === null : !isWholeCents(opts.costCapUsd)) return { ok: false, reason: 'cost_cap' };
     }
     const db = this.engineDb.getDb();

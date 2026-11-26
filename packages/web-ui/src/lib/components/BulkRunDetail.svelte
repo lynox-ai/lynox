@@ -15,8 +15,10 @@
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import BulkHost from './BulkHost.svelte';
+	import MarkedLine from './MarkedLine.svelte';
+	import { shownValue, VALUE_OPEN } from '../utils/plan-takeover.js';
 	import {
-		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText,
+		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkShowsFailure,
 	} from './bulk-runs.js';
 
@@ -32,6 +34,8 @@
 	let creates = $state<BulkTarget[]>([]);
 	let loading = $state(true);
 	let error = $state('');
+	// A refusal may name a value someone else wrote (an artifact's title), between the marks
+	// `shownValue` sets: the line is then drawn by `MarkedLine`, which sets the value apart.
 	let actionError = $state('');
 	// A start check that can never pass refused approving or writing on this run (its id and the
 	// engine's code): both stay off for it, with the cause by the button, until the page shows
@@ -69,7 +73,7 @@
 		return { ok: res.ok, status: res.status, body };
 	}
 
-	type PostBody = { error?: string; id?: string; code?: string; checksum?: string; supersedable?: { id: string; costUsd: number } };
+	type PostBody = { error?: string; id?: string; code?: string; checksum?: string; title?: string; supersedable?: { id: string; costUsd: number } };
 	function post(path: string, body?: unknown): Promise<{ ok: boolean; status: number; body: PostBody }> {
 		return json(path, {
 			method: 'POST',
@@ -307,9 +311,12 @@
 		const key = bulkReachRefusalKey(hopeless.code);
 		return key !== null ? t(key) : null;
 	});
-	const refusalOf = (r: { ok: boolean; body: { error?: string; code?: string } }): string | null => {
+	const refusalOf = (r: { ok: boolean; body: { error?: string; code?: string; title?: string } }): string | null => {
 		if (r.ok) return null;
 		const code = r.body.code;
+		const title = code === 'rule_source_unreadable' ? null : bulkArtifactTitle(r.body.title);
+		const ruleSourceKey = bulkRuleSourceKey(code, title !== null);
+		if (ruleSourceKey !== null) return title !== null ? tf(ruleSourceKey, { title: shownValue(title) }) : t(ruleSourceKey);
 		const key = code !== undefined && Object.hasOwn(REFUSAL_KEYS, code) ? REFUSAL_KEYS[code] : code !== undefined ? bulkReachRefusalKey(code) ?? undefined : undefined;
 		return key !== undefined ? t(key) : (r.body.error ?? t('common.load_failed'));
 	};
@@ -470,7 +477,10 @@
 			if (refusal !== null) {
 				await load();
 				if (runId !== id) return null;
-				if (error) error = refusal;
+				// A refusal that names a value is not put in the run's place, where it would be drawn
+				// without its value set apart: the page says loading failed, and the refusal shows
+				// below the run once it loads.
+				if (error && !refusal.includes(VALUE_OPEN)) error = refusal;
 			} else {
 				// A started run that halts on its limit later offers an empty field, not this one.
 				capInput = '';
@@ -513,7 +523,10 @@
 			if (refusal !== null) {
 				await load();
 				if (runId !== id) return null;
-				if (error) error = refusal;
+				// A refusal that names a value is not put in the run's place, where it would be drawn
+				// without its value set apart: the page says loading failed, and the refusal shows
+				// below the run once it loads.
+				if (error && !refusal.includes(VALUE_OPEN)) error = refusal;
 			} else {
 				capInput = '';
 			}
@@ -738,6 +751,7 @@
 {#snippet hostBox()}<BulkHost value={host ?? ''} />{/snippet}
 <!-- A text of the page that names the host among its words: the host boxed wherever it stands. -->
 {#snippet hostText(text: string)}{#each bulkHostSplit(text, host) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}{/snippet}
+{#snippet ruleOrigin(step: 'start' | 'approve')}{#if run?.ruleFromArtifact}{@const title = bulkArtifactTitle(run.ruleFromArtifact.title)}<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-from-artifact"><MarkedLine text={title !== null ? tf(bulkRuleFromArtifactKey(step, true), { title: shownValue(title) }) : t(bulkRuleFromArtifactKey(step, false))} mono={false} /></p>{:else}<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t(`bulk.${step}.rule_drafted`)}</p>{/if}{/snippet}
 {#snippet sentence(parts: BulkSentencePart[], fields: readonly string[])}{#each parts as part, i (i)}{#if 'slot' in part}{@render fieldNames(fields)}{:else}{part.text}{/if}{/each}{/snippet}
 <!-- A sentence of the page split at its placeholders: the host boxed, the target's name and the field
      names as the page shows them. Text the page did not write (a target's key) is never searched for
@@ -854,7 +868,7 @@
 				<div data-testid="bulk-approve-rule">
 					<h2 class="text-sm font-medium mb-1">{t('bulk.start.rule')}</h2>
 					<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
-					<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.approve.rule_drafted')}</p>
+					{@render ruleOrigin('approve')}
 				</div>
 			{/if}
 			{#if run.kind === 'apply' && targets.length > 0}
@@ -1013,7 +1027,7 @@
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
 						<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
 						<!-- The agent wrote the rule, from the owner's words or from data it read: the owner checks it (U-335). -->
-						<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.start.rule_drafted')}</p>
+						{@render ruleOrigin('start')}
 					</div>
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.fields')}</h3>
@@ -1331,7 +1345,7 @@
 				</div>
 			{/if}
 			{#if actionError}
-				<p class="text-sm text-danger">{actionError}</p>
+				<p class="text-sm text-danger" data-testid="bulk-action-error">{#if actionError.includes(VALUE_OPEN)}<MarkedLine text={actionError} mono={false} />{:else}{actionError}{/if}</p>
 			{/if}
 		</section>
 	{/if}

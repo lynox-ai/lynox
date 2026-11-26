@@ -145,6 +145,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
+import { judgeRuleSourceChanged } from '../core/bulk-judge-rule.js';
 import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
@@ -10727,6 +10728,10 @@ export class LynoxHTTPApi {
         // the owner sees it before the start the hash binds, never only the fields it decides.
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier, ...(judgeRule.context !== undefined ? { context: judgeRule.context } : {}) } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
+        // A rule taken word for word from a saved artifact is not lynox's wording: the page says
+        // where it came from, by the title it had when the run was planned. Read from the stored
+        // rule, so the owner's only, as the rule is.
+        ruleFromArtifact: judgeRule?.source !== undefined ? (judgeRule.source.title !== undefined ? { title: judgeRule.source.title } : {}) : null,
         judgeModel,
         judgeServedBy,
         // The start route refuses every judged start on such an instance (judge_unavailable); the
@@ -11011,6 +11016,10 @@ export class LynoxHTTPApi {
           // The link domains the owner allows a judged run's verdicts to add (PRD shopify-preset
           // §20.2 item 5, S20-4): only here, on the owner's route, written with the start itself.
           startDomains: fields['startDomains'],
+          // A rule taken from an artifact begins judging only while the artifact still holds the text
+          // the run was planned with: the run judges by the planned text, never a newer one, and an
+          // owner who edited the rule since meant the edit.
+          ruleSourceChanged: (rule) => judgeRuleSourceChanged(rule, engine.getArtifactStore()),
         });
         // The texts are ux's.
         if (!read.ok && read.reason === 'start_domains_invalid') {
@@ -11030,6 +11039,11 @@ export class LynoxHTTPApi {
           errorResponse(res, 409, 'Another judged run is started and not yet approved. Starting this one ends it, keeping what it spent: start again with "supersedes" set to its id.', 'supersede_required', {
             supersedable: { id: read.supersedable.id, costUsd: read.supersedable.costUsd },
           });
+          return;
+        }
+        if (!read.ok && read.reason === 'rule_source') {
+          const { code, message, title } = read.refusal;
+          errorResponse(res, 409, message, code, title !== undefined ? { title } : undefined);
           return;
         }
         if (!read.ok && read.reason === 'rule_refused') {

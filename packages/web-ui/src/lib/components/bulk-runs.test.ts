@@ -7,7 +7,7 @@ import {
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey,
-	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless,
+	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -2076,5 +2076,49 @@ describe('bulkSecretInContextKey', () => {
 		expect(bulkSecretInContextKey(true, false)).toBe('bulk.invalid.secret_in_context');
 		expect(bulkSecretInContextKey(false, true)).toBe('bulk.invalid.secret_in_context_column');
 		expect(bulkSecretInContextKey(false, false)).toBe('bulk.invalid.secret_in_context_field');
+	});
+});
+
+// A start refused because the run's rule came from a saved artifact that changed, is gone or
+// cannot be read now, and the sentence under such a rule: the page words each itself, and names
+// the artifact by the title it had at planning, a value an access can write.
+describe('the sentences about a rule taken from a saved artifact', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const Q = String.raw`'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"`;
+	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.(?:rule_source\.[a-z_]+|(?:start|approve)\.rule_from_artifact[a-z_]*))': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = (m[2] ?? m[3])!; en[m[1]!] = (m[4] ?? m[5])!; }
+	}
+
+	it('picks a sentence for every code, named only where a title is there and the artifact can be read', () => {
+		expect(BULK_RULE_SOURCE_CODES.map((c) => [bulkRuleSourceKey(c, true), bulkRuleSourceKey(c, false)])).toEqual([
+			['bulk.rule_source.changed_titled', 'bulk.rule_source.changed'],
+			['bulk.rule_source.gone_titled', 'bulk.rule_source.gone'],
+			['bulk.rule_source.unreadable', 'bulk.rule_source.unreadable'],
+		]);
+		expect(bulkRuleSourceKey('checksum', true)).toBeNull();
+		expect(bulkRuleSourceKey(undefined, false)).toBeNull();
+		expect([bulkRuleFromArtifactKey('start', true), bulkRuleFromArtifactKey('approve', false)])
+			.toEqual(['bulk.start.rule_from_artifact', 'bulk.approve.rule_from_artifact_untitled']);
+	});
+
+	it('takes a title only when it is text with more than spaces', () => {
+		expect([bulkArtifactTitle('Regeln'), bulkArtifactTitle(''), bulkArtifactTitle('  \n'), bulkArtifactTitle(undefined), bulkArtifactTitle(null), bulkArtifactTitle(7)])
+			.toEqual(['Regeln', null, null, null, null, null]);
+	});
+
+	it('has each sentence in both languages; a named one has its title slot and no quote marks of its own around it', () => {
+		const keys = [...BULK_RULE_SOURCE_CODES.flatMap((c) => [bulkRuleSourceKey(c, true)!, bulkRuleSourceKey(c, false)!]),
+			...(['start', 'approve'] as const).flatMap((s) => [bulkRuleFromArtifactKey(s, true), bulkRuleFromArtifactKey(s, false)])];
+		for (const key of new Set(keys)) {
+			for (const table of [de, en]) {
+				expect(table[key], key).toBeDefined();
+				expect(table[key]!.includes('{title}'), key).toBe(key.endsWith('_titled') || key.endsWith('.rule_from_artifact'));
+				expect(table[key], key).not.toMatch(/[„“”"»«]\{title\}|\{title\}[„“”"»«]/);
+			}
+		}
 	});
 });
