@@ -2377,7 +2377,7 @@ describe('approving an undo, per target (U-466)', () => {
 		expect(approveButton()?.disabled).toBe(false);
 		takeOut()[0]!.click();
 		await settle();
-		expect(explain()).toBe('Du hast alle Ziele herausgenommen, darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(explain()).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
 		expect(approveButton()?.disabled).toBe(true);
 		expect(approveButton()?.getAttribute('aria-describedby')).toBe('bulk-undo-approve-explain');
 	});
@@ -2387,13 +2387,13 @@ describe('approving an undo, per target (U-466)', () => {
 		run = undoRun({ total: 2, deselected: 2, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		targets = undoTargets().filter((x) => x.change !== 'delete').map((x) => ({ ...x, deselected: true }));
 		await render();
-		expect(explain()).toBe('You took out every target, so this undo writes nothing. Put one back, or leave it with “Not now”.');
+		expect(explain()).toBe('You took out every target that would get a value back, so this undo writes nothing. Put one back, or leave it with “Not now”.');
 		expect(approveButton()?.disabled).toBe(true);
 	});
 
 	for (const [lang, sentence] of [
-		['de', 'Du hast alle Ziele herausgenommen; die Rücknahme löscht nur noch den Eintrag unten.'],
-		['en', 'You took out every target; the undo now only deletes the entry below.'],
+		['de', 'Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; die Rücknahme löscht nur noch den Eintrag unten.'],
+		['en', 'You took out every target that would get a value back; the undo now only deletes the entry below.'],
 	] as const) {
 		it(`says the undo only deletes the entry left once the owner took out every target that gets a value back, and keeps the approval (${lang})`, async () => {
 			if (lang === 'de') german(); else english();

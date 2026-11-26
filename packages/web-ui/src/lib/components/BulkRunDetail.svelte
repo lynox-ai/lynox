@@ -1349,7 +1349,7 @@
 						</div>
 					{/if}
 					<div class="flex flex-wrap gap-2">
-						<!-- The ledger refuses an approval with nothing to write (`nothing_to_apply`): every target taken out. -->
+						<!-- The ledger refuses an approval with nothing to write (`nothing_to_apply`): every target that would get a value back taken out, or every target refused. -->
 						<button type="button" class={btnPrimary} disabled={busy || hopelessReason !== null || creates.length !== run.changes.delete || bulkWriting(run) === 0}
 							aria-describedby={hopelessReason !== null ? 'bulk-approve-hopeless' : bulkWriting(run) === 0 ? 'bulk-undo-approve-explain' : undefined} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>

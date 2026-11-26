@@ -1130,12 +1130,12 @@ describe('going on from a run that halted', () => {
 	it('says in the undo approval, where no target gets a value back, that the owner took every target out, that only the deletes are left after a take-out, or that the source only created entries', () => {
 		const ap = (update: number, deletes: number, tookOut: boolean, i: BulkI18n, listed = tookOut) =>
 			bulkUndoApproveText({ changes: { update, create: 0, delete: deletes, unchanged: 0, invalid: 0 }, undoOpen: 0 }, i, { tookOut, listed });
-		expect(ap(0, 0, true, DE)).toBe('Du hast alle Ziele herausgenommen, darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
-		expect(ap(0, 0, true, EN)).toBe('You took out every target, so this undo writes nothing. Put one back, or leave it with “Not now”.');
-		expect(ap(0, 1, true, DE)).toBe('Du hast alle Ziele herausgenommen; die Rücknahme löscht nur noch den Eintrag unten.');
-		expect(ap(0, 1, true, EN)).toBe('You took out every target; the undo now only deletes the entry below.');
-		expect(ap(0, 3, true, DE)).toBe('Du hast alle Ziele herausgenommen; die Rücknahme löscht nur noch die 3\u00a0Einträge unten.');
-		expect(ap(0, 3, true, EN)).toBe('You took out every target; the undo now only deletes the 3\u00a0entries below.');
+		expect(ap(0, 0, true, DE)).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(ap(0, 0, true, EN)).toBe('You took out every target that would get a value back, so this undo writes nothing. Put one back, or leave it with “Not now”.');
+		expect(ap(0, 1, true, DE)).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(ap(0, 1, true, EN)).toBe('You took out every target that would get a value back; the undo now only deletes the entry below.');
+		expect(ap(0, 3, true, DE)).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; die Rücknahme löscht nur noch die 3\u00a0Einträge unten.');
+		expect(ap(0, 3, true, EN)).toBe('You took out every target that would get a value back; the undo now only deletes the 3\u00a0entries below.');
 		// Nothing taken out and no target listed: the source only created entries, and the sentence does not say the owner took any out.
 		expect(ap(0, 1, false, DE)).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur den Eintrag unten.');
 		expect(ap(0, 1, false, EN)).toBe('This undo writes no value back; it only deletes the entry below.');
