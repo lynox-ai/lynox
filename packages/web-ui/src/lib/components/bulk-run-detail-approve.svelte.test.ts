@@ -2182,6 +2182,23 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(document.activeElement).toBe(approveButton);
 	});
 
+	it('keeps the line on whose connection the run writes directly above the button while the table is filtered, below the note', async () => {
+		run = makeRun({ total: 25, changes: changes(25), connectedBy: { provider: 'Shopify', by: 'Eva Muster' }, judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25);
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		const note = target.querySelector('[data-testid="bulk-approve-filtered"]');
+		const line = target.querySelector('[data-bulk-connected-by]');
+		expect(note).not.toBeNull();
+		expect(line).not.toBeNull();
+		// The note first, then the line, then the row that holds the approve button.
+		expect(note!.nextElementSibling).toBe(line);
+		const row = line!.nextElementSibling;
+		expect([t('bulk.approve.write_one'), t('bulk.approve.approve')]).toContain(row?.querySelector('button')?.textContent?.trim());
+	});
+
 	it('counts the rows the filtered table shows, leaves out the unchanged rows and their button, and offers that button again after', async () => {
 		const unchangedButton = (): HTMLButtonElement | undefined => [...target.querySelectorAll('button')]
 			.find((b) => [tf('bulk.preview.show_unchanged_one', { n: '1' }), tf('bulk.preview.show_unchanged_targets_one', { n: '1' })].includes(b.textContent?.trim() ?? ''));
