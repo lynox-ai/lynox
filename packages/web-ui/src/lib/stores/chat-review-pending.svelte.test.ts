@@ -289,7 +289,7 @@ describe('a rollback the server could not do', () => {
 	it.each([
 		['no review open any more', (): void => { card = []; }],
 		['no session any more', (): void => { changesetGone = true; }],
-	] as const)('the card shown for the meantime goes when the server answers with %s, and the held message is sent', async (_case, serverState) => {
+	] as const)('the card shown for the meantime goes when the server answers with %s, names the files left, and the held message is sent', async (_case, serverState) => {
 		await openReview();
 		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
 		serverState();
@@ -298,6 +298,9 @@ describe('a rollback the server could not do', () => {
 		await settle();
 		expect(store.getPendingChangeset(), 'no card the server denied').toBeNull();
 		expect(store.getRollbackStopped()).toBeNull();
+		const { t, tf } = await import('../i18n.svelte.js');
+		expect(t('changeset.not_restored_unknown'), 'positive control: the key has a text').not.toBe('changeset.not_restored_unknown');
+		expect(toasts, 'the files that may still carry the change are named, until closed').toEqual([[tf('changeset.not_restored_unknown', { files: 'notes.md' }), 'error', null]]);
 		expect(runTasks, 'the held message goes').toEqual(['next step', 'next step']);
 	});
 

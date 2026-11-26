@@ -3744,10 +3744,13 @@ export async function submitChangesetReview(
 		if (!answered || stale()) return;
 		// The server answered without a card (none open any more, or no session): the card shown
 		// for the meantime claims a review it just denied, so it goes, and so does the sentence.
+		// The files it named may still carry the change, and their backups may be gone: the person
+		// is told which, as when a rollback leaves files without knowing why, before the message goes.
 		if (provisional !== null && pendingChangeset === provisional) {
 			pendingChangeset = null;
 			pendingChangesetRunId = null;
 			rollbackStopped = null;
+			addToast(tf('changeset.not_restored_unknown', { files: namedFiles(left) }), 'error', null);
 		}
 		// Nothing left: the review is over.
 		if (pendingChangeset === null) drainQueueSoon(100);
