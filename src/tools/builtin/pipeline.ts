@@ -25,7 +25,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
-import { templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
+import { stepIdCollision, templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
 import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepRunNames } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
@@ -477,6 +477,12 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   const shapeIssue = stepIdIssue(steps);
   if (shapeIssue) return `Error: ${shapeIssue}`;
 
+  // A step id the run's context already uses (`template-refs.ts`): an inline context key, or `params`
+  // beside it. Refused here, by the place in the list the model wrote, before anything is estimated.
+  const inlineContext = input.context ?? {};
+  const collision = stepIdCollision(steps, { ...inlineContext, params: inlineContext }, 'steps', { saved: false });
+  if (collision) return `Error: ${collision}`;
+
   // Validate unique IDs
   const ids = new Set<string>();
   for (const step of steps) {
@@ -666,6 +672,9 @@ export interface RunSavedWorkflowResult {
   /** For a refusal because a step refers to the output of a step its run cannot read
    *  (`templateRefIssue`): that step's position, 1-based, which the owner is told in fixed words. */
   unresolvedRefStep?: number | undefined;
+  /** For a refusal because a step's id is one a run already uses (`stepIdCollision`): that step's
+   *  position, 1-based, which the owner is told in fixed words. */
+  reservedIdStep?: number | undefined;
 }
 
 /**
@@ -903,6 +912,7 @@ export async function runSavedWorkflow(
 
   // Asked of the workflow as read here, so no edit can fall between the check and the run. As stored:
   // the owner's stamp binds the stored definition, so the check must see that, not a renamed copy.
+  // A check that needs the steps as the run executes them builds that copy itself (`runStepIds`).
   const refused = runtime?.checkWorkflow?.(planned) ?? null;
   if (refused !== null) return { ok: false, error: refused };
 
@@ -971,9 +981,15 @@ export async function runSavedWorkflow(
   // also when the run then throws.
   const originRefusals: import('../../core/origin-notices.js').OriginRefusal[] = [];
 
-  // A reference no run resolves (`template-refs.ts`), here before `validateManifest` refuses it, so
-  // the caller can tell the owner which step in fixed words (`unresolvedRefStep`).
-  const refIssue = templateRefIssue(steps, { params: bound.params });
+  // A step id the run's context already uses, or a reference no run resolves (`template-refs.ts`),
+  // here before the runner refuses it, so the caller can tell the owner which step and why in fixed
+  // words (`reservedIdStep`, `unresolvedRefStep`) and does not retry a run that cannot start.
+  const runContext = { params: bound.params };
+  const collision = stepIdCollision(steps, runContext, 'steps');
+  if (collision !== null) {
+    return { ok: false, error: `Workflow execution failed: Invalid manifest: ${collision}`, reservedIdStep: templateRefStep(collision) };
+  }
+  const refIssue = templateRefIssue(steps, runContext);
   if (refIssue !== null) {
     return { ok: false, error: `Workflow execution failed: Invalid manifest: ${refIssue}`, unresolvedRefStep: templateRefStep(refIssue) };
   }

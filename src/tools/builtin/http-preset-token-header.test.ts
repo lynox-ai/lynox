@@ -32,7 +32,7 @@ async function headersFor(presetId: string): Promise<Record<string, string>> {
   };
   expect(store.register(profile)).toBe(true);
   const headers: Record<string, string> = {};
-  await attachStoredCredential(`https://${host}/x`, headers, false, {
+  await attachStoredCredential(`https://${host}/x`, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
     apiStore: store,
     secretStore: { resolve: (n: string) => (n === accessTokenKey(profile.id) ? 'tok-value' : null) } as never,
     principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),

@@ -474,6 +474,7 @@ async function applyRunEffect(
   /** One claimed target: what to record for it. */
   async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
     Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
+    let localSent = false;
     try {
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
@@ -502,7 +503,7 @@ async function applyRunEffect(
       // target is recorded still left a row saying whose credential reached the host.
       const sent = (): void => { ledger.markSent(runId, t.seq, carried?.() ?? null); };
       const refused = (): void => { ledger.markRefused(runId, t.seq); };
-      if (w.reportsSend !== true) sent();
+      if (w.reportsSend !== true) { sent(); localSent = true; }
       const out = await w.write(t.key, t.after, sent, refused);
       if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
       return {
@@ -511,6 +512,11 @@ async function applyRunEffect(
         ...(out.hostRewrote === true ? { hostRewrote: true as const } : {}),
       };
     } catch (err: unknown) {
+      // A local writer that throws has answered: its outcome is known, so its send is booked as
+      // answered, as an external writer's refusal is (`onRefused`). Only the send of this pass,
+      // never one a loop that died left before it. No count reads a local run's open sends today;
+      // this keeps the column true for whatever reads it next.
+      if (localSent) ledger.markRefused(runId, t.seq);
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
       if (err instanceof BulkSecretError) return { kind: 'secret' };

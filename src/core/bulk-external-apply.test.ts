@@ -27,15 +27,16 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, resourceKindOf, type BulkRunForApply } from './bulk-ledger.js';
+import type { StoreAttachRefusal } from './shopify-host.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import {
-  BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, writeMethodOf,
+  BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, refusedAnswer, writeMethodOf,
   type BulkWriteMethod, type ExternalClient,
 } from './bulk-external.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { runBulkPreview } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
-import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
+import { setPinnedTransportForTests, StoreRequestRefusedError, type PinnedTransportInput } from './network-guard.js';
 import { createToolContext } from './tool-context.js';
 import { TriggerStore } from './trigger-store.js';
 import { WorkerLoop } from './worker-loop.js';
@@ -72,6 +73,8 @@ interface Shop {
   landThenFail?: Set<string>;
   /** `METHOD path` whose request reaches the shop and whose connection then breaks. */
   dropAfter?: Set<string>;
+  /** Per `METHOD path`, the store's pass refuses the request at the send (`StoreRequestRefusedError`). */
+  passRefuses?: Set<string>;
   /** Per `METHOD path`, the answers of the next requests in order (0: the connection breaks);
    *  once used up, the shop answers as usual. */
   sequence?: Map<string, number[]>;
@@ -96,6 +99,7 @@ function serve(s: Shop): () => void {
     const body = input.body === undefined ? undefined : JSON.parse(input.body.toString('utf8')) as unknown;
     const auth = Object.entries(input.headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
     s.requests.push({ method: input.method, path, body, auth });
+    if (s.passRefuses?.has(`${input.method} ${path}`)) throw new StoreRequestRefusedError('Blocked: request to a Shopify store refused: the body names an access token. Do not retry it with a changed body.');
     if (s.dropAfter?.has(`${input.method} ${path}`)) throw new Error('connection reset');
     const next = s.sequence?.get(`${input.method} ${path}`)?.shift();
     if (next === 0) throw new Error('connection reset');
@@ -120,15 +124,26 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null } = {}): ExternalClient {
+function client(opts: { attach?: boolean; refuse?: StoreAttachRefusal; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<'renewed' | 'not-run' | 'ineligible' | 'dead' | 'client-misnamed'>; reconnect?: 'ended' | 'client-misnamed' } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
-    attach: async (u, headers, method) => {
+    attach: async (u, headers, method, out) => {
       opts.methods?.push(method);
-      if (opts.attach === false) return null;
+      if (opts.refuse !== undefined) {
+        if (out) {
+          out.refusal = opts.refuse;
+          if (opts.reconnect !== undefined) out.reconnect = opts.reconnect;
+        }
+        return null;
+      }
+      if (opts.attach === false) {
+        if (opts.reconnect !== undefined && out !== undefined) out.reconnect = opts.reconnect;
+        return null;
+      }
       headers['authorization'] = `Bearer ${TOKEN}`;
+      if (opts.renew !== undefined && out !== undefined) out.renew = () => opts.renew!(u);
       return opts.connection ? opts.connection(u, method) : { id: 'fixture', grantId: 'grant-1' };
     },
     rateLimit: opts.rateLimit ?? (() => null),
@@ -294,6 +309,114 @@ describe('applying an external run', () => {
     } finally {
       restore();
     }
+  });
+
+  it('names a send without a confirmed write apart from the written targets, and its undo finds it unchanged where it never arrived', async () => {
+    const s = shop();
+    // The second send leaves and the connection drops before the host applies it: lynox sent to
+    // the target, has no answer, and the target still holds its value from before.
+    s.dropAfter = new Set(['PATCH /products/1']);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      expect(s.items.get('/products/1')!['price']).toBe('12.00');
+      // The undo still takes back both, but the page names them apart: one written, one open.
+      expect(ledger.countUndoable(runId)).toBe(2);
+      expect(ledger.countUndoableParts(runId)).toEqual({ written: 1, open: 1 });
+      // Where the head counts written targets, it counts the same one.
+      expect(ledger.getStatus(runId)!.heads?.written).toBe(1);
+
+      s.dropAfter.clear();
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ? AND phase = 'writing'`).run(runId);
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(undo.status.total).toBe(2);
+      // Of the two targets it gives a value back, one takes back a write never confirmed.
+      expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(1);
+      expect(ledger.countUndoOpenTargets(runId)).toBe(0);
+      // Only targets that get a value back count: one the undo removes is listed apart.
+      const openSeq = (engineDb.getDb().prepare('SELECT seq FROM bulk_targets WHERE run_id = ? AND source_seq = 1').get(undo.status.id) as { seq: number }).seq;
+      engineDb.getDb().prepare(`UPDATE bulk_targets SET change = 'delete' WHERE run_id = ? AND seq = ?`).run(undo.status.id, openSeq);
+      expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(0);
+      engineDb.getDb().prepare(`UPDATE bulk_targets SET change = 'update' WHERE run_id = ? AND seq = ?`).run(undo.status.id, openSeq);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter })).status).toBe('done');
+      expect([s.items.get('/products/0')!['price'], s.items.get('/products/1')!['price']]).toEqual(['12.00', '12.00']);
+      // The open target never held the run's value: the undo finds it as it should be, unchanged,
+      // and does not show it as a target someone changed in between.
+      expect(ledger.getStatus(undo.status.id)).toMatchObject({ conflicts: 0 });
+      expect(ledger.getStatus(undo.status.id)!.heads).toMatchObject({ unchanged: 1, written: 1, conflict: 0 });
+      // Only the undo sent a PATCH to the first target; the open one got no second write.
+      expect(s.requests.filter((r) => r.method === 'PATCH' && r.path === '/products/1')).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not name a send the host refused as open, though its undo still reads it', async () => {
+    const s = shop();
+    // The host refuses the second write: it changed nothing there, and the head counts it failed.
+    s.sequence = new Map([['PATCH /products/1', [422]]]);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      expect(s.items.get('/products/1')!['price']).toBe('12.00');
+      expect(ledger.getStatus(runId)!.heads).toMatchObject({ written: 1, failed: 1, unclear: 0 });
+      // The undo takes back both, as before; the page names only the written one.
+      expect(ledger.countUndoable(runId)).toBe(2);
+      expect(ledger.countUndoableParts(runId)).toEqual({ written: 1, open: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('counts an applied target a stale loop sent to after another found it as written, as the head does', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      // A loop found the first target as planned, and a loop that had lost its claim sent to it after.
+      engineDb.getDb().prepare('UPDATE bulk_targets SET found_unsent = 1, write_sent = 1 WHERE run_id = ? AND seq = 0').run(runId);
+      expect(ledger.getStatus(runId)!.heads?.written).toBe(2);
+      expect(ledger.countUndoable(runId)).toBe(2);
+      expect(ledger.countUndoableParts(runId)).toEqual({ written: 2, open: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not count an undo target the owner took out as one that is checked first', async () => {
+    const s = shop();
+    s.dropAfter = new Set(['PATCH /products/1']);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ? AND phase = 'writing'`).run(runId);
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(1);
+      const openSeq = (engineDb.getDb().prepare('SELECT seq FROM bulk_targets WHERE run_id = ? AND source_seq = 1').get(undo.status.id) as { seq: number }).seq;
+      expect(ledger.deselectTarget(undo.status.id, openSeq, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('counts no open target on a local run, where a write has a known outcome', () => {
+    const run = ledger.recordDryRun({
+      createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w',
+      targets: [{ key: '/a', before: { absent: false, value: 'old' }, after: 'new' }, { key: '/b', before: { absent: false, value: 'old' }, after: 'new' }],
+    });
+    // One written, one marked sent without a recorded write: locally that send is not open.
+    engineDb.getDb().prepare('UPDATE bulk_targets SET applied_at = 1 WHERE run_id = ? AND seq = 0').run(run.id);
+    engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = 1').run(run.id);
+    expect(ledger.countUndoableParts(run.id)).toEqual({ written: 1, open: 0 });
+    expect(ledger.countUndoable(run.id)).toBe(1);
   });
 
   it('a failed write that landed stays in the undo after a resume turned its retry into a conflict', async () => {
@@ -617,6 +740,152 @@ describe('applying an external run', () => {
     }
   });
 
+  describe('a 401 to a token the engine can renew (a store connection whose token expires)', () => {
+    it('renews once and sends the same write once more, which lands', async () => {
+      const s = shop();
+      s.sequence = new Map([['PATCH /products/0', [401]]]);
+      const restore = serve(s);
+      try {
+        const renewed: string[] = [];
+        const refused: number[] = [];
+        const c = client({ renew: async (u) => { renewed.push(u); return 'renewed' as const; } });
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).kind).toBe('ok');
+        expect(renewed).toEqual([url(0)]);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(2);
+        expect(s.items.get('/products/0')?.['price']).toBe('13.00');
+        // The first send was refused and is reported so, once; the second landed.
+        expect(refused).toEqual([1]);
+      } finally {
+        restore();
+      }
+    });
+
+    it('a token that runs out in the middle of a run is renewed there, and the run writes every target', async () => {
+      const s = shop();
+      // Targets 0 is written on the old token; at target 1 the hour is up.
+      s.sequence = new Map([['PATCH /products/1', [401]]]);
+      const restore = serve(s);
+      try {
+        let renewals = 0;
+        const c = client({ renew: async () => { renewals++; return 'renewed' as const; } });
+        const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(out.status).not.toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ applied: 3, failed: 0 });
+        expect(renewals).toBe(1);
+        expect([0, 1, 2].map((i) => s.items.get(`/products/${String(i)}`)?.['price'])).toEqual(['15.00', '15.00', '15.00']);
+      } finally {
+        restore();
+      }
+    });
+
+    for (const [renewal, reason] of [['ineligible', 'storeAccessEnded'], ['not-run', 'unauthorized']] as const) {
+      it(`a 401 whose renewal says ${renewal} halts the run with ${reason}, sent once, resumable`, async () => {
+        const s = shop();
+        s.special.set('PATCH /products/0', { status: 401 });
+        const restore = serve(s);
+        try {
+          const c = client({ renew: async () => renewal });
+          const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+          const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+          expect(out.status).toBe('halted');
+          expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS[reason], applied: 0 });
+          expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+          expect(ledger.listPending(runId)).toEqual([0, 1]);
+        } finally {
+          restore();
+        }
+      });
+    }
+
+    it('a second 401 after the renewal halts the run as before, and nothing is renewed twice', async () => {
+      const s = shop();
+      s.special.set('PATCH /products/0', { status: 401 });
+      const restore = serve(s);
+      try {
+        let renewals = 0;
+        const c = client({ renew: async () => { renewals++; return 'renewed' as const; } });
+        const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(out.status).toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.unauthorized, applied: 0 });
+        expect(renewals).toBe(1);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(2);
+        // Both sends were refused and reported so: the target is unwritten and resumable, not unclear.
+        expect(ledger.listPending(runId)).toEqual([0, 1]);
+      } finally {
+        restore();
+      }
+    });
+
+    it('when nothing was renewed, the request is not sent again', async () => {
+      const s = shop();
+      s.special.set('PATCH /products/0', { status: 401 });
+      const restore = serve(s);
+      try {
+        const c = client({ renew: async () => 'not-run' as const });
+        const refused: number[] = [];
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).kind).toBe('unauthorized');
+        // A refusal that stands is reported, once.
+        expect(refused).toEqual([1]);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+      } finally {
+        restore();
+      }
+    });
+
+    for (const [renewal, why] of [['dead', 'ended'], ['ineligible', 'ended'], ['client-misnamed', 'client-misnamed']] as const) {
+      it(`a 401 whose renewal says ${renewal} answers reconnect (${why}), sent once and reported refused once`, async () => {
+        const s = shop();
+        s.special.set('PATCH /products/0', { status: 401 });
+        const restore = serve(s);
+        try {
+          const c = client({ renew: async () => renewal });
+          const refused: number[] = [];
+          expect(await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).toEqual({ kind: 'reconnect', why });
+          expect(refused).toEqual([1]);
+          expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+        } finally {
+          restore();
+        }
+      });
+    }
+
+    for (const [why, reason] of [['ended', 'storeAccessEnded'], ['client-misnamed', 'storeClientMisnamed']] as const) {
+      it(`a store connection that has to be connected again (${why}) halts the run with its own reason, nothing sent, resumable`, async () => {
+        const s = shop();
+        const restore = serve(s);
+        try {
+          const ok = client();
+          const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), ok);
+          const c = client({ attach: false, reconnect: why });
+          const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+          expect(out.status).toBe('halted');
+          expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS[reason], applied: 0 });
+          expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(0);
+          expect(ledger.listPending(runId)).toEqual([0, 1]);
+        } finally {
+          restore();
+        }
+      });
+    }
+
+    it('a 403 is not a token that ran out: no renewal, no second send', async () => {
+      const s = shop();
+      s.special.set('PATCH /products/0', { status: 403 });
+      const restore = serve(s);
+      try {
+        let renewals = 0;
+        const c = client({ renew: async () => { renewals++; return 'renewed' as const; } });
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' })).kind).toBe('unauthorized');
+        expect(renewals).toBe(0);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+      } finally {
+        restore();
+      }
+    });
+  });
+
   it('halts at the first target on a refused or missing credential, leaving it unwritten and resumable', async () => {
     const s = shop();
     s.special.set('PATCH /products/0', { status: 401 });
@@ -641,6 +910,65 @@ describe('applying an external run', () => {
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(noCred) })).status).toBe('halted');
       expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.credential);
       expect(s.requests.length).toBe(before);
+    } finally {
+      restore();
+    }
+  });
+
+  it('halts the write on a pass\'s refusal at the send with its own reason, keeps what was written before, and counts the refusal as no write', async () => {
+    const s = shop();
+    s.passRefuses = new Set(['PATCH /products/1']);
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(out.status).toBe('halted');
+      expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.storeRequestRefused, applied: 1, failed: 0, sentUnknown: 0 });
+      // Target 0 stays written; the refused PATCH reached the stub only as the refusal, and target 2 after it was not sent.
+      expect(s.items.get('/products/0')!['price']).toBe('15.00');
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0', '/products/1']);
+      expect(refusedAnswer({ kind: 'store_request_refused' })).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('answers no send for a refusal at the attach, which sent nothing', () => {
+    for (const unsent of [{ kind: 'store_refused', reason: 'shopifyNotCleared' }, { kind: 'reconnect', why: 'ended' }, { kind: 'no_credential' }] as const) {
+      expect([unsent.kind, refusedAnswer(unsent)]).toEqual([unsent.kind, false]);
+    }
+  });
+
+  it('a reconnect goes before a store\'s own cause, and either before a missing credential', async () => {
+    // The attach gives at most one of the two; were it ever to give both, connecting again is
+    // what the run asks for. Nothing is sent either way.
+    const s = shop();
+    const restore = serve(s);
+    try {
+      expect(await client({ refuse: 'shopifyNotCleared', reconnect: 'ended' }).write(url(0), 'PATCH', { price: '13.00' })).toEqual({ kind: 'reconnect', why: 'ended' });
+      expect(await client({ refuse: 'shopifyNotCleared' }).write(url(0), 'PATCH', { price: '13.00' })).toEqual({ kind: 'store_refused', reason: 'shopifyNotCleared' });
+      expect(await client({ attach: false }).write(url(0), 'PATCH', { price: '13.00' })).toEqual({ kind: 'no_credential' });
+      expect(s.requests).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('halts on the store\'s own cause, not on a missing credential, leaving the targets unwritten and pending', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      for (const cause of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable'] as const) {
+        engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+        const c = client({ refuse: cause });
+        const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), client());
+        const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(out.status, cause).toBe('halted');
+        expect(ledger.getStatus(runId), cause).toMatchObject({ haltReason: BULK_HALT_REASONS[cause], applied: 0, failed: 0 });
+        expect(ledger.listPending(runId), cause).toEqual([0, 1]);
+      }
+      expect(s.requests.filter((r) => r.method === 'PATCH')).toEqual([]);
     } finally {
       restore();
     }
@@ -2707,6 +3035,8 @@ describe('a send without a clear answer is not sent again', () => {
     // Unclear from the halt on, when the owner decides whether to resume: failed, and not
     // among the targets the resume sends to.
     expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 1, sentUnknown: 1 });
+    // The halt names it as this pass's unclear send, and none as a target that failed.
+    expect(ledger.getStatus(runId)).toMatchObject({ passUnclear: 1, heads: { failed: 0, unclear: 1 } });
     s.special.delete('PATCH /products/0');
     resume(runId);
     return runId;
@@ -2723,7 +3053,7 @@ describe('a send without a clear answer is not sent again', () => {
       expect(second.summary).toContain('1 unclear: sent without a clear answer, not sent again.');
       expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
       expect(s.items.get('/products/0')!['price']).toBe('12.00');
-      expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, failed: 0, failedOnce: 1, sentUnknown: 1 });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, failed: 0, failedOnce: 1, sentUnknown: 1, passUnclear: 0 });
       expect(targetErrors(runId)).toEqual(['sent_unknown']);
       // The model reads it too, so it does not plan the run as if that target were open.
       const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
@@ -3048,6 +3378,34 @@ describe('a send without a clear answer is not sent again', () => {
       } finally {
         restore();
       }
+    }
+  });
+});
+
+describe('the head counts of an external run', () => {
+  const none = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 };
+
+  it('a send without an answer is counted once, as unclear, before and after a resume', async () => {
+    const s = shop();
+    s.dropAfter = new Set(['PATCH /products/0']);
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
+      const halted = ledger.getStatus(runId)!;
+      // Before the resume the target is both failed and unclear in the counts beside the heads.
+      expect([halted.failed, halted.sentUnknown]).toEqual([1, 1]);
+      expect(halted.heads).toEqual({ ...none, unclear: 1, open: 2 });
+
+      s.dropAfter = new Set();
+      expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      const resumed = ledger.getStatus(runId)!;
+      expect(resumed.heads).toEqual({ ...none, unclear: 1, written: 2 });
+      expect(Object.values(resumed.heads).reduce((a, b) => a + b, 0)).toBe(resumed.total);
+    } finally {
+      restore();
     }
   });
 });

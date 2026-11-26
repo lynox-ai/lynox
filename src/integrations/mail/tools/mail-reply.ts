@@ -16,7 +16,7 @@ import {
   type MailSendResult,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, recipientFieldTargets, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, parseAddressList, previewAddressList, recipientFieldTargets, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
@@ -58,8 +58,8 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
     outwardWrite: () => 'reply',
     // A reply reads the mail it answers before it writes: that read is a row of its own.
     outwardRead: (input) => namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)], ['uid', input.uid]]),
-    // Only the recipients the call names: the `to` and `cc` overrides, parsed with this tool's
-    // own parser. The default recipients (the original sender, and everyone on reply_all) come
+    // Only the recipients the call names: the `to` and `cc` overrides, parsed with the same
+    // parser the send uses. The default recipients (the original sender, and everyone on reply_all) come
     // from the mail being answered, which the input does not hold.
     sendTargets: (input) => recipientFieldTargets([input.to, input.cc], parseAddressList),
     definition: {
@@ -250,9 +250,11 @@ export async function prepareReply(
   // RFC 3834 says: "Automatic responses SHOULD NOT be issued in response
   // to any message which contains an Auto-Submitted header field, where
   // that field has any value other than 'no'." We enforce this as a
-  // hard block — no confirmation can override it. Prevents mail loops.
+  // hard block — no confirmation can override it. Prevents mail loops. The same holds for the
+  // autoresponder headers and delivery reports `automaticMail` reads (automatic-mail.ts).
   if (original.envelope.isAutoReply) {
-    return { ok: false, message: `mail_reply blocked: original message has Auto-Submitted header (auto-generated/auto-replied). ` +
+    return { ok: false, message: `mail_reply blocked: original message was sent automatically ` +
+      `(an Auto-Submitted, autoresponder or Precedence header, or a delivery report). ` +
       `RFC 3834 forbids automatic replies to automated messages to prevent mail loops. ` +
       `If this is a real message that needs a response, use mail_send instead.` };
   }
@@ -305,7 +307,14 @@ export async function prepareReply(
     const sender = original.envelope.replyTo[0] ?? original.envelope.from[0];
     toAddrs = sender ? [sender] : [];
   }
-  if (toAddrs.length === 0) return { ok: false, message: 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.' };
+  if (toAddrs.length === 0) {
+    return {
+      ok: false,
+      message: input.to
+        ? 'mail_reply error: the "to" override holds no valid address (each needs an @; a value with a line break or control character is dropped). Nothing was sent.'
+        : 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.',
+    };
+  }
 
   // The address the reply goes out from, read from the same source the
   // provider sends from — not from the stored account row, which can lag
@@ -484,28 +493,6 @@ export async function commitReply(
     });
   } catch { /* reconcile is best-effort — never fail an already-sent reply */ }
   return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;
-}
-
-function parseAddressList(input: string | undefined): MailAddress[] {
-  if (!input) return [];
-  return input
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0)
-    .map(parseAddress)
-    .filter((a): a is MailAddress => a !== null);
-}
-
-function parseAddress(raw: string): MailAddress | null {
-  const angle = raw.match(/^\s*(?:"?([^"<]*?)"?\s*)?<([^>]+)>\s*$/);
-  if (angle) {
-    const name = angle[1]?.trim();
-    const address = angle[2]?.trim();
-    if (!address || !address.includes('@')) return null;
-    return name ? { name, address } : { address };
-  }
-  if (raw.includes('@')) return { address: raw };
-  return null;
 }
 
 /** Accept yes/ja/ok/1/y as approval — anything else is denial. */
