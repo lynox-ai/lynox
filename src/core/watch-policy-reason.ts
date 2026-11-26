@@ -14,14 +14,14 @@ export type WatchPolicyReason =
   | { kind: 'other'; detail: string };
 
 export interface WatchPolicyWords {
-  /** Why, after "The watched page was not read:" / "not watched:", lower case, ending in a period. */
+  /** Why, after the lead ("The watched page was not read:"), ending in a period: lower case in English, a sentence of its own in German. */
   why: string;
   /** What can be done, or '' when nothing the owner or the operator sets would help. */
   wayOut: string;
 }
 
 const ALSO_HTTPS_EN = 'The address must also be https://, since this instance only reads HTTPS pages (enforce_https).';
-const ALSO_HTTPS_DE = 'Die Adresse muss ausserdem mit https:// beginnen, weil diese Instanz nur HTTPS-Seiten liest (enforce_https).';
+const ALSO_HTTPS_DE = 'Ausserdem muss die Adresse mit https:// beginnen, weil diese Instanz nur https-Seiten liest (enforce_https).';
 
 /** `alsoHttps`: the address is http:// under enforce_https and its https:// form is refused too, for `reason`. */
 export function watchPolicyWordsEn(reason: WatchPolicyReason, alsoHttps = false): WatchPolicyWords {
@@ -44,11 +44,11 @@ export function watchPolicyWordsEn(reason: WatchPolicyReason, alsoHttps = false)
 export function watchPolicyWordsDe(reason: WatchPolicyReason, alsoHttps = false): WatchPolicyWords {
   const words = ((): WatchPolicyWords => {
     switch (reason.kind) {
-      case 'protocol': return { why: 'sie ist keine http- oder https-Adresse.', wayOut: '' };
-      case 'deny_all': return { why: 'die network_policy dieser Instanz ist deny-all, darum liest lynox keine Webseite.', wayOut: 'Nur der Betreiber kann network_policy ändern.' };
-      case 'allow_list': return { why: `ihr Host ${reason.host} steht nicht in der Netzwerk-Allow-List dieser Instanz.`, wayOut: 'Der Betreiber kann den Host in die Allow-List aufnehmen (network_policy).' };
-      case 'https': return { why: 'diese Instanz liest nur HTTPS-Seiten (enforce_https).', wayOut: 'Beobachte stattdessen die https://-Adresse.' };
-      case 'other': return { why: 'die Netzwerkeinstellungen dieser Instanz lassen die Seite nicht zu.', wayOut: '' };
+      case 'protocol': return { why: 'Die Adresse ist keine http- oder https-Adresse.', wayOut: '' };
+      case 'deny_all': return { why: 'Diese Instanz liest keine Webseiten (network_policy: deny-all).', wayOut: 'Ändern kann das nur der Betreiber der Instanz.' };
+      case 'allow_list': return { why: `Der Host ${reason.host} steht nicht in der Netzwerk-Liste dieser Instanz (network_policy).`, wayOut: 'Aufnehmen kann ihn der Betreiber der Instanz.' };
+      case 'https': return { why: 'Diese Instanz liest nur https-Seiten (enforce_https).', wayOut: 'Bitte lynox im Chat, die Beobachtung auf die https-Adresse umzustellen.' };
+      case 'other': return { why: 'Die Netzwerkeinstellungen dieser Instanz lassen diese Seite nicht zu.', wayOut: 'Ändern kann das der Betreiber der Instanz.' };
     }
   })();
   return alsoHttps ? { why: words.why, wayOut: `${words.wayOut} ${ALSO_HTTPS_DE}` } : words;

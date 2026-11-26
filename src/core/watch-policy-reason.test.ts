@@ -24,17 +24,17 @@ describe('watch policy refusal words', () => {
       "The watched page was not read: this instance's network settings refuse it: network access denied (unrecognised egress policy).",
     ]);
     expect(REASONS.map((r) => WORKER_NOTICES.de.watchPolicyRefused(r, false))).toEqual([
-      'Die beobachtete Seite wurde nicht gelesen: sie ist keine http- oder https-Adresse.',
-      'Die beobachtete Seite wurde nicht gelesen: die network_policy dieser Instanz ist deny-all, darum liest lynox keine Webseite. Nur der Betreiber kann network_policy ändern.',
-      'Die beobachtete Seite wurde nicht gelesen: ihr Host other.example steht nicht in der Netzwerk-Allow-List dieser Instanz. Der Betreiber kann den Host in die Allow-List aufnehmen (network_policy).',
-      'Die beobachtete Seite wurde nicht gelesen: diese Instanz liest nur HTTPS-Seiten (enforce_https). Beobachte stattdessen die https://-Adresse.',
-      'Die beobachtete Seite wurde nicht gelesen: die Netzwerkeinstellungen dieser Instanz lassen die Seite nicht zu.',
+      'Die beobachtete Seite wurde nicht gelesen: Die Adresse ist keine http- oder https-Adresse.',
+      'Die beobachtete Seite wurde nicht gelesen: Diese Instanz liest keine Webseiten (network_policy: deny-all). Ändern kann das nur der Betreiber der Instanz.',
+      'Die beobachtete Seite wurde nicht gelesen: Der Host other.example steht nicht in der Netzwerk-Liste dieser Instanz (network_policy). Aufnehmen kann ihn der Betreiber der Instanz.',
+      'Die beobachtete Seite wurde nicht gelesen: Diese Instanz liest nur https-Seiten (enforce_https). Bitte lynox im Chat, die Beobachtung auf die https-Adresse umzustellen.',
+      'Die beobachtete Seite wurde nicht gelesen: Die Netzwerkeinstellungen dieser Instanz lassen diese Seite nicht zu. Ändern kann das der Betreiber der Instanz.',
     ]);
   });
 
   it('adds the https step after the way out, in each language', () => {
     expect(watchPolicyWordsEn({ kind: 'deny_all' }, true).wayOut).toBe('Only the operator can change network_policy. The address must also be https://, since this instance only reads HTTPS pages (enforce_https).');
-    expect(watchPolicyWordsDe({ kind: 'deny_all' }, true).wayOut).toBe('Nur der Betreiber kann network_policy ändern. Die Adresse muss ausserdem mit https:// beginnen, weil diese Instanz nur HTTPS-Seiten liest (enforce_https).');
+    expect(watchPolicyWordsDe({ kind: 'deny_all' }, true).wayOut).toBe('Ändern kann das nur der Betreiber der Instanz. Ausserdem muss die Adresse mit https:// beginnen, weil diese Instanz nur https-Seiten liest (enforce_https).');
     expect(watchPolicyWordsDe({ kind: 'allow_list', host: 'h.example' }, false).wayOut).not.toContain('https://');
   });
 
