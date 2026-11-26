@@ -14980,7 +14980,8 @@ export class LynoxHTTPApi {
 
       // Knowledge graph (entities + relations). `knowledge_graph_may_be_incomplete` says the block
       // was not read in full: the layer threw, it is missing although it was not switched off (its
-      // database or the embedding model failed to open at boot), or a read cap was reached.
+      // database or the embedding model failed to open at boot), or a read cap was reached. It is
+      // also set while remembered texts or mentions are stored: the block does not carry them yet.
       // `enabled` is the setting, as on the durable knowledge block: whether the graph is
       // switched on in the config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
@@ -15039,7 +15040,20 @@ export class LynoxHTTPApi {
           // store; what it returned may be partial.
           // The same holds when the subject graph is on but its store never opened.
           const fellBack = kg.readFallbackCount !== fallbacksBefore || kg.subjectGraphUnavailable;
-          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack;
+          // Remembered texts and their mentions (both stores) are held but not in this block, so
+          // while any is stored the block is not the whole of the graph. A count that cannot be
+          // taken, or a missing engine.db, cannot show there are none.
+          let textsHeld = true;
+          try {
+            const engineDb = engine.getEngineDb();
+            if (engineDb) {
+              const { countEngineMemoryRows } = await import('../core/memory-graph-store.js');
+              textsHeld = kg.countHeldMemoryTexts() > 0 || countEngineMemoryRows(engineDb) > 0;
+            }
+          } catch {
+            process.stderr.write('⚠ /api/export: remembered texts could not be counted — knowledge graph marked incomplete\n');
+          }
+          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack || textsHeld;
         } catch {
           exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
           exportData['knowledge_graph_may_be_incomplete'] = true;
@@ -15300,11 +15314,10 @@ export class LynoxHTTPApi {
           exportData['set_aside_databases_unknown'] = err instanceof Error ? err.name : 'error';
           setAside = new Set(['history.db', 'engine.db', 'datastore.db', 'agent-memory.db']);
         }
-        // The layer fixes the switch at boot; the config can say otherwise after a reload.
-        const subjectGraphOn = engine.getKnowledgeLayer()?.readsSubjectGraph === true
-          || engine.getUserConfig().subject_graph_enabled === true;
         if (setAside.has('history.db')) exportData['threads_may_be_incomplete'] = true;
-        if (setAside.has('agent-memory.db') || (subjectGraphOn && setAside.has('engine.db'))) {
+        // A set-aside engine.db is marked whatever the subject graph: it still holds remembered
+        // texts, and while those are stored the block is not the whole of the graph.
+        if (setAside.has('agent-memory.db') || setAside.has('engine.db')) {
           exportData['knowledge_graph_may_be_incomplete'] = true;
         }
         if (setAside.has('engine.db')) {

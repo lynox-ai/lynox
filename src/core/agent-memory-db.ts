@@ -1170,6 +1170,16 @@ export class AgentMemoryDb {
     return row.cnt;
   }
 
+  /**
+   * Every stored remembered text and every mention of an entity in one, active or not: the rows
+   * of `memories` plus the rows of `mentions`. The data export does not carry these texts yet, so
+   * it reads a count above zero as "the graph block is not the whole of what is held".
+   */
+  countMemoryTextRows(): number {
+    const row = this.db.prepare('SELECT (SELECT COUNT(*) FROM memories) + (SELECT COUNT(*) FROM mentions) AS n').get() as { n: number };
+    return row.n;
+  }
+
   /** Cosine similarity search over memory embeddings with in-place scoring. */
   findSimilarMemories(
     embedding: number[],

@@ -1650,21 +1650,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * How many remembered texts and mentions the legacy store holds ({@link AgentMemoryDb.countMemoryTextRows}).
+   * The data export does not carry them, so it marks its graph block incomplete while this is above zero.
+   */
+  countHeldMemoryTexts(): number {
+    return this.db.countMemoryTextRows();
+  }
+
+  /**
    * The subject graph is switched on but its store is missing (engine.db did not open at boot).
    * Every read then answers from the legacy store alone, without a fallback being logged, and
    * what only engine.db holds is not in it.
    */
   get subjectGraphUnavailable(): boolean {
     return this.subjectGraphEnabled && this.subjectStore === null;
-  }
-
-  /**
-   * Whether this layer reads the subject graph (engine.db). Fixed at boot: a config reload that
-   * turns the switch later does not rebuild the layer, so a reader asking which database the
-   * graph came from asks here, not the current config.
-   */
-  get readsSubjectGraph(): boolean {
-    return this.subjectGraphEnabled;
   }
 
   private _readFallbacks = 0;
