@@ -751,7 +751,7 @@
 {#snippet hostBox()}<BulkHost value={host ?? ''} />{/snippet}
 <!-- A text of the page that names the host among its words: the host boxed wherever it stands. -->
 {#snippet hostText(text: string)}{#each bulkHostSplit(text, host) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}{/snippet}
-{#snippet ruleOrigin(step: 'start' | 'approve')}{#if run?.ruleFromArtifact}{@const title = bulkArtifactTitle(run.ruleFromArtifact.title)}<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-from-artifact"><MarkedLine text={title !== null ? tf(bulkRuleFromArtifactKey(step, true), { title: shownValue(title) }) : t(bulkRuleFromArtifactKey(step, false))} mono={false} /></p>{:else}<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t(`bulk.${step}.rule_drafted`)}</p>{/if}{/snippet}
+{#snippet ruleOrigin(step: 'start' | 'restart' | 'approve')}{#if run?.ruleFromArtifact}{@const title = bulkArtifactTitle(run.ruleFromArtifact.title)}<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-from-artifact"><MarkedLine text={title !== null ? tf(bulkRuleFromArtifactKey(step, true), { title: shownValue(title) }) : t(bulkRuleFromArtifactKey(step, false))} mono={false} /></p>{:else}<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t(`bulk.${step}.rule_drafted`)}</p>{/if}{/snippet}
 {#snippet sentence(parts: BulkSentencePart[], fields: readonly string[])}{#each parts as part, i (i)}{#if 'slot' in part}{@render fieldNames(fields)}{:else}{part.text}{/if}{/each}{/snippet}
 <!-- A sentence of the page split at its placeholders: the host boxed, the target's name and the field
      names as the page shows them. Text the page did not write (a target's key) is never searched for
@@ -1105,6 +1105,14 @@
 							<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.no_judge_model')}</p>
 						{/if}
 					{:else}
+						{#if (restartKind === 'judge' || restartKind === 'judge_cap') && run.judgeRule}
+							<!-- Judging again goes on with the same rule: the owner sees it as at the first start (U-340). -->
+							<div data-testid="bulk-restart-rule">
+								<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
+								<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+								{@render ruleOrigin('restart')}
+							</div>
+						{/if}
 						{#if restartKind === 'judge_cap'}
 							<div class="text-sm space-y-1">
 								<label class="flex flex-wrap items-center gap-2">
