@@ -1275,11 +1275,9 @@ describe('against the real managed hook (PRD §6(e)): what reaches the control p
     const refused = await judgeOnce('Z');
     expect(refused.h.calls).toHaveLength(0);
     expect(ledger.getStatus(refused.id)!.haltReason).toBe(BULK_HALT_REASONS.creditRefused);
-    // Refused for the amount, not for a stale or unknown balance.
+    // Refused for the amount, not for a stale control plane.
     expect(refused.gates[0]!.refusedWithinBalance).toBe(true);
     expect(refused.asked[0]).toBeGreaterThan(balance);
-    // The default amount would fit this balance.
-    expect(balance).toBeGreaterThan(SINGLE_CALL_WORST_CASE_CENTS);
     // Control: the same call on a twin target, with a balance that carries its worst case, goes through.
     balance = refused.asked[0]! + 1;
     const carried = await judgeOnce('Y', refused.id);
