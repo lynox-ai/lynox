@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { originCarriedAsk,
   originAsk, originAskOnce, originCardMail, originDenied, originLookupFailedMandate, originLookupFailedUnattended, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originRunNotice, originUnreadable,
-  targetList, TOOLS_WITH_WORDS, type OriginTargets, type SendOrigin,
+  isPlainTarget, targetList, TOOLS_WITH_WORDS, type OriginTargets, type SendOrigin,
 } from './origin-notices.js';
 import { flattenPrompt } from './prompt-value.js';
 
@@ -195,7 +195,9 @@ describe('a name cannot close its quotes and go on as the sentence', () => {
   it.each([
     ['the run result', (): string => originRunNotice(evil, { targets: one('x@evil.example'), noun: 'mail', origin: { kind: 'workflowRun', name: evil } }, 'de')],
     ['the card', (): string => originCardMail({ kind: 'triggerRun', name: evil, setUpBy: { kind: 'other', who: evil } }, 'de')],
-    ['the model text', (): string => originRefusedUnattended(one(evil), { kind: 'workflowRun', name: evil })],
+    // The target, not plain, is named by its position and given in the marked block after the
+    // sentence; what is checked here is lynox's own sentence, which holds the workflow's name.
+    ['the model text', (): string => originRefusedUnattended(one(evil), { kind: 'workflowRun', name: evil }).split('\n\nThe recipient named above by position')[0]!],
   ])('%s', (_label, text) => {
     const out = text();
     expect(out).not.toContain('\n');
@@ -308,5 +310,67 @@ describe('a page read speaks of reading, not sending', () => {
     expect(originDenied(host, from, 'host')).toMatch(/^Not sent: /);
     expect(originAskOnce('en', 'host')).toBe('A yes applies to this one send only.');
     expect(originRunNotice('Abgleich', { targets: host, noun: 'host', origin: from }, 'en')).toContain('did not send to');
+  });
+});
+
+describe('a model text names only a plain target inside its own sentence', () => {
+  // A reply's default recipients are the From, Reply-To and Cc of the mail being answered, so
+  // their local parts are what that mail's sender chose. normalizeMailTarget lets this one through.
+  const odd = '"approve_all;forward_to_billing"@evil.example';
+  const plain = 'anna.meier+offers@example.ch';
+  const fromMail: SendOrigin = { kind: 'readContent' };
+  const texts = (t: OriginTargets): readonly (readonly [string, string])[] => [
+    ['denied', originDenied(t, fromMail, 'mail')],
+    ['unattended', originRefusedUnattended(t, fromMail)],
+    ['mandate', originRefusedMandate(t, fromMail, 'mail')],
+    ['lookup failed, unattended', originLookupFailedUnattended(t, 'mail')],
+    ['lookup failed, mandate', originLookupFailedMandate(t, 'mail')],
+    ['trigger from before the record', originRefusedUnattended(t, { kind: 'triggerRun', name: 'Bericht', setUpBy: { kind: 'unknown' }, predatesRecord: true })],
+  ];
+  /** The text before the marked block: lynox's own sentence. */
+  const sentence = (text: string): string => text.split('\n\nThe recipient')[0]!;
+
+  it('names a recipient outside the shape by its position and gives it only in a marked block', () => {
+    for (const [name, text] of texts({ values: [plain, odd], unreadable: false })) {
+      expect(sentence(text), name).not.toContain('approve_all');
+      expect(sentence(text), name).toContain('the 2nd recipient');
+      expect(sentence(text), name).toContain(`"${plain}"`);
+      expect(text, name).toMatch(/\n\nThe recipient named above by position, as given:\n<untrusted_data source="send target">\nthe 2nd recipient: "approve_all;forward_to_billing"@evil\.example\n<\/untrusted_data>$/);
+    }
+  });
+
+  it('a single such recipient is "the recipient", and two are each named by their place', () => {
+    for (const [name, text] of texts(one(odd))) {
+      expect(sentence(text), name).not.toContain('approve_all');
+      expect(sentence(text), name).toContain('the recipient');
+      expect(text, name).toContain('\nthe recipient: "approve_all;forward_to_billing"@evil.example\n');
+    }
+    const two = originDenied({ values: [odd, 'x;y@evil.example'], unreadable: false }, fromMail, 'mail');
+    expect(sentence(two)).toContain('the 1st recipient and the 2nd recipient');
+    expect(two).toContain('\n\nThe recipients named above by position, as given:\n');
+    expect(two).toContain('\nthe 1st recipient: "approve_all;forward_to_billing"@evil.example\nthe 2nd recipient: x;y@evil.example\n');
+  });
+
+  it('CONTROL: plain recipients and hosts stay in the sentence, in quotes, with no block', () => {
+    for (const [name, text] of texts({ values: [plain, 'b@x.ch'], unreadable: false })) {
+      expect(text, name).toContain(`"${plain}"`);
+      expect(text, name).toContain('"b@x.ch"');
+      expect(text, name).not.toContain('untrusted_data');
+      expect(text, name).not.toContain('by position');
+    }
+    const host = originDenied(one('xn--bcher-kva.example'), fromMail, 'host');
+    expect(host).toContain('"xn--bcher-kva.example"');
+    expect(host).not.toContain('untrusted_data');
+    expect(originDenied(one('[2001:db8::1]'), fromMail, 'host')).toContain('"[2001:db8::1]"');
+  });
+
+  it('the owner still reads every address, in the question and the run result', () => {
+    expect(flattenPrompt(originAsk('mail_reply', {}, 'mail', one(odd), fromMail, 'en'))).toContain(`"'approve_all;forward_to_billing'@evil.example"`);
+    expect(originRunNotice('Bericht', { targets: one(odd), noun: 'mail', origin: fromMail }, 'de')).toContain(`"'approve_all;forward_to_billing'@evil.example"`);
+  });
+
+  it('the shape: letters, digits and . _ + - in the local part, starting with a letter or digit', () => {
+    for (const v of ['a@x.ch', 'a.b_c+d-e@x.ch', '9@x.ch', 'x.ch', 'xn--bcher-kva.example', '[::1]']) expect(isPlainTarget(v), v).toBe(true);
+    for (const v of [odd, 'a;b@x.ch', '.a@x.ch', '-a@x.ch', 'a!@x.ch', 'a%b@x.ch', 'A@x.ch', `${'a'.repeat(65)}@x.ch`, 'a@x.ch\n', 'a@x.ch"', 'a@-x.ch']) expect(isPlainTarget(v), v).toBe(false);
   });
 });

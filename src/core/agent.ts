@@ -5477,7 +5477,7 @@ export class Agent implements IAgent {
     const outcome = decideConsent('guard', answer);
     if (outcome !== 'allow') {
       const denied = saving ? originTokenUrlRefused('denied', shown, origin, carried, lookupFailed)
-        : carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
+        : carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown, noun)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(consentRefusal(outcome, denied)), is_error: true } };
     }
     return { origin: passed };
