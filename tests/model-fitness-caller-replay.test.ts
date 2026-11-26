@@ -13,8 +13,8 @@ import {
 } from '../scripts/model-fitness/caller-replay.js';
 import { withWireRules } from '../src/core/llm-wire-rules.js';
 import { wrapUntrustedData } from '../src/core/data-boundary.js';
-import { CAPTURE_FALLBACK_MAX_TOKENS, CAPTURE_TOOL_NAME } from '../src/core/capture-fallback.js';
-import { FOLLOW_UP_FALLBACK_MAX_TOKENS, FOLLOW_UP_TOOL_NAME } from '../src/core/follow-up-fallback.js';
+import { CAPTURE_FALLBACK_MAX_TOKENS, CAPTURE_SYSTEM, CAPTURE_TOOL, CAPTURE_TOOL_NAME } from '../src/core/capture-fallback.js';
+import { FOLLOW_UP_FALLBACK_MAX_TOKENS, FOLLOW_UP_FALLBACK_SYSTEM, FOLLOW_UP_TOOL_NAME } from '../src/core/follow-up-fallback.js';
 import { getBetasForProvider } from '../src/types/config.js';
 import type { RerankOutcome } from '../src/integrations/search/search-reranker.js';
 
@@ -194,21 +194,25 @@ describe('boundaryChecks', () => {
 describe('runCaller on the agent passes', () => {
   const turn = { turn: { question: 'q', answer: 'a' } };
 
-  it('sends the follow-up pass with its forced tool, its budget and the provider betas', async () => {
+  it('sends the follow-up pass with its system, its forced tool, its budget and the provider betas', async () => {
     const { client, sent } = stubClient(toolReply(FOLLOW_UP_TOOL_NAME, { suggestions: [] }));
     expect((await runCaller('agent.follow_up', turn, UNCHECKED_MODEL, 'stub', { client })).outcome).toBe('called');
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({
       model: UNCHECKED_MODEL,
+      system: FOLLOW_UP_FALLBACK_SYSTEM,
       max_tokens: FOLLOW_UP_FALLBACK_MAX_TOKENS,
       tool_choice: { type: 'tool', name: FOLLOW_UP_TOOL_NAME },
       betas: getBetasForProvider('anthropic'),
     });
+    expect((sent[0]!['tools'] as { name: string }[]).map(t => t.name)).toEqual([FOLLOW_UP_TOOL_NAME]);
   });
 
-  it('sends the capture pass with its own budget', async () => {
+  it('sends the capture pass with its system, its tool and its own budget', async () => {
     const { client, sent } = stubClient(toolReply(CAPTURE_TOOL_NAME, { facts: [] }));
     await runCaller('agent.capture', turn, UNCHECKED_MODEL, 'stub', { client });
+    expect(sent[0]!['system']).toBe(CAPTURE_SYSTEM);
+    expect(sent[0]!['tools']).toEqual([CAPTURE_TOOL]);
     expect(sent[0]!['max_tokens']).toBe(CAPTURE_FALLBACK_MAX_TOKENS);
   });
 
