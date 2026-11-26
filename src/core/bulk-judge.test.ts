@@ -569,6 +569,51 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.phase).toBe('previewed');
   });
 
+  it('an answer the rule refuses keeps the field, the rule and its bound, never the value, and the tracker reads the same once per refusal', async () => {
+    store.insertRecords({ collection: 'products', records: [{ sku: 'D', title: 'old d', note: `${MARK}-d` }], stamp: TEST_STAMP });
+    const id = await plan(['A', 'B', 'C', 'D']);
+    expect(start(id).ok).toBe(true);
+    // A credential-shaped value over the rule's bound: refused by the real validator, as the call would be.
+    const refusedValue = `sk-live-${'Q'.repeat(60)}`;
+    const schema = judgeCallSchema(ledger.getJudgeRun(id)!.rule);
+    const h = harness((_u, n) => {
+      let e: Error = new ExtractShapeError('no tool call');
+      if (n <= 2) {
+        try { validateAgainstSchema(change({ title: refusedValue }), schema); } catch (err: unknown) { e = err as Error; }
+      }
+      // The same class and field, another rule: its own event.
+      if (n === 4) e = new SchemaValueError('short', 'after.title', 'shorter than 2 characters', { kind: 'minLength', limit: 2 });
+      attachExtractionSpend(e, { costUsd: 0.01, tier: 'fast', inputTokens: 700, outputTokens: 30 });
+      throw e;
+    });
+    await runBulkJudge(id, h.deps);
+    const [a, b, c, d] = ledger.getPreview(id);
+    expect(d!.refusalDetail).toEqual({ field: 'title', kind: 'minLength', limit: 2 });
+    for (const refused of [a, b]) {
+      expect(refused!.error).toBe('verdict_invalid');
+      expect(refused!.refusalDetail).toEqual({ field: 'title', kind: 'maxLength', limit: 40 });
+    }
+    // An answer refused without a field of the rule keeps none.
+    expect(c!.error).toBe('verdict_invalid');
+    expect(c!.refusalDetail).toBeUndefined();
+    const cells = engineDb.getDb().prepare('SELECT refusal_detail FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(id) as { refusal_detail: string | null }[];
+    expect(cells[2]!.refusal_detail).toBeNull();
+    const kept = cells[0]!.refusal_detail!;
+    expect(JSON.parse(engineDb.dec(kept))).toEqual({ field: 'title', kind: 'maxLength', limit: 40 });
+    for (const text of [kept, engineDb.dec(kept)]) {
+      expect(text).not.toContain('sk-live');
+      expect(text).not.toContain('QQQQ');
+    }
+    // Two targets refused the same way are one event; another rule on the same field, or an
+    // answer refused without a field, is its own.
+    expect(h.captured.map((e) => e.message)).toEqual([
+      'bulk_judge verdict failed: SchemaValueError at after.title (maxLength 40)',
+      'bulk_judge verdict failed: ExtractShapeError',
+      'bulk_judge verdict failed: SchemaValueError at after.title (minLength 2)',
+    ]);
+    expect(h.captured.some((e) => e.message.includes('sk-live') || e.message.includes('QQQQ'))).toBe(false);
+  });
+
   it('bulk_status shows, while a judge is running, what is judged, what is invalid, the spend and the limit', async () => {
     // D is no row of the store, so it is invalid before the judge sees it.
     const id = await plan(['A', 'B', 'C', 'D']);

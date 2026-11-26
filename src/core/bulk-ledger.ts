@@ -39,6 +39,7 @@ import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 import type { ContainmentMirror } from './history-markers.js';
 import { isSharedSuffix } from './public-suffix.js';
+import { SCHEMA_REFUSAL_KINDS, type SchemaRefusalKind } from './llm-helper.js';
 
 /** A target's stored `read_*` or `write_*` pair (engine.db v43). */
 interface ConnectionColumns {
@@ -191,6 +192,30 @@ export type BulkInvalidReason =
   | 'markup_dropped_before'
   /** an HTML value holds a shortcode whose text the canonical form the run sends would change */
   | 'shortcode_changed';
+
+/** The rule kinds a schema refusal names. */
+const BULK_REFUSAL_KINDS: ReadonlySet<string> = new Set(SCHEMA_REFUSAL_KINDS);
+
+/**
+ * With `verdict_invalid`: the field of the run's rule the judge's answer broke, the rule's kind
+ * and its bound. Every part comes from the rule's schema, never from the value the model
+ * wrote; the target keeps it so the owner and support can tell a refusal from a provider fault.
+ */
+export interface BulkRefusalDetail {
+  field: string;
+  kind: SchemaRefusalKind;
+  limit?: number;
+}
+
+/** `value` as a {@link BulkRefusalDetail}, or null: a field name of at most 80 characters, a known kind, a finite bound. */
+function refusalDetailShape(value: unknown): BulkRefusalDetail | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const { field, kind, limit } = value as Record<string, unknown>;
+  if (typeof field !== 'string' || field === '' || field.length > 80) return null;
+  if (typeof kind !== 'string' || !BULK_REFUSAL_KINDS.has(kind)) return null;
+  if (limit !== undefined && (typeof limit !== 'number' || !Number.isFinite(limit))) return null;
+  return { field, kind: kind as BulkRefusalDetail['kind'], ...(typeof limit === 'number' ? { limit } : {}) };
+}
 
 /** Every markup refusal is a reason a target can record. */
 const _markupRefusalsAreReasons: MarkupRefusal extends BulkInvalidReason ? true : never = true;
@@ -727,6 +752,10 @@ export interface PreviewTarget {
   /** A target refused for `new_link_domain` (1010): the domain the refused link points to, as the
    *  check read it (ASCII, lower case, Punycode). Absent on a row recorded before it was kept. */
   linkDomain?: string | undefined;
+  /** A target refused for `verdict_invalid`: which field of the rule broke which rule, and
+   *  the rule's bound. Absent on a row recorded before it was kept, and where the refusal named no
+   *  field of the rule; the page then reads the sentence without one. */
+  refusalDetail?: BulkRefusalDetail | undefined;
   /** A target refused for `shortcode_changed` (1130): each HTML field the value changes and whose
    *  shortcode the check refuses (against its before-image where the row holds one; a planned
    *  target refused at its read holds none), with its whole value as the planner or the judge
@@ -1738,13 +1767,13 @@ export class BulkLedger {
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (((applied_at IS NOT NULL AND found_unsent = 0) OR (applied_at IS NULL AND write_sent = 1 AND undone_at IS NULL)) AND ${WRITING_SQL}) AS written,
          undone_at IS NOT NULL AS undone,
-         shop_added_markup, host_rewrote, context_secret_field, link_domain, target_title
+         shop_added_markup, host_rewrote, context_secret_field, link_domain, target_title, refusal_detail
        FROM bulk_targets WHERE run_id = ?${opts.changed === true ? " AND change != 'unchanged' ORDER BY written DESC, seq" : ' ORDER BY seq'} LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
       deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
-      context_secret_field: number | null; link_domain: string | null; target_title: string | null;
+      context_secret_field: number | null; link_domain: string | null; target_title: string | null; refusal_detail: string | null;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
@@ -1811,6 +1840,7 @@ export class BulkLedger {
           ? { contextField: contextNames[r.context_secret_field]! } : {}),
         ...(r.error === 'new_link_domain' && r.link_domain !== null ? { linkDomain: this.engineDb.dec(r.link_domain) } : {}),
         ...(r.target_title !== null ? { title: this.engineDb.dec(r.target_title) } : {}),
+        ...(r.error === 'verdict_invalid' && r.refusal_detail !== null ? this.refusalDetailOf(r.refusal_detail) : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
@@ -3337,6 +3367,24 @@ export class BulkLedger {
     return run ? this.startDomainsOfRow(run) ?? [] : [];
   }
 
+  /** The `refusal_detail` cell of a refused target: the field, rule and bound, encrypted, only with
+   *  `verdict_invalid` and only in the shape {@link BulkRefusalDetail} has. */
+  private refusalDetailCell(reason: BulkInvalidReason, refusal: BulkRefusalDetail | undefined): string | null {
+    if (reason !== 'verdict_invalid' || refusal === undefined) return null;
+    const detail = refusalDetailShape(refusal);
+    return detail === null ? null : this.engineDb.enc(JSON.stringify(detail));
+  }
+
+  /** A stored `refusal_detail` as the page reads it; a cell that does not decode to the shape reads as none. */
+  private refusalDetailOf(cell: string): { refusalDetail: BulkRefusalDetail } | Record<string, never> {
+    try {
+      const detail = refusalDetailShape(JSON.parse(this.engineDb.dec(cell)) as unknown);
+      return detail === null ? {} : { refusalDetail: detail };
+    } catch {
+      return {};
+    }
+  }
+
   /** The `link_domain` cell of a refused target: the domain, encrypted, only with `new_link_domain`
    *  (sec-core 1010: another reason's detail is the model's raw value and stays out). */
   private linkDomainCell(reason: BulkInvalidReason, domain: string | undefined): string | null {
@@ -3585,7 +3633,7 @@ export class BulkLedger {
     runId: string, seq: number, token: string,
     /** `contextField`: with `secret_in_context`, the index in the rule's `context` of the field that held it.
      *  `linkDomain`: with `new_link_domain`, the domain the refused link points to (1010). */
-    verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown> | undefined; contextField?: number | undefined; linkDomain?: string | undefined },
+    verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown> | undefined; contextField?: number | undefined; linkDomain?: string | undefined; refusal?: BulkRefusalDetail | undefined },
     now: number = Date.now(),
   ): boolean {
     const db = this.engineDb.getDb();
@@ -3597,8 +3645,8 @@ export class BulkLedger {
         const kept = verdict.invalid === 'shortcode_changed' && verdict.refused !== undefined
           ? this.engineDb.enc(JSON.stringify(verdict.refused)) : null;
         return db.prepare(
-          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, after_planned = COALESCE(?, after_planned), context_secret_field = ?, link_domain = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-        ).run(verdict.invalid, kept, verdict.contextField ?? null, this.linkDomainCell(verdict.invalid, verdict.linkDomain), at, runId, seq, token, runId).changes === 1;
+          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, after_planned = COALESCE(?, after_planned), context_secret_field = ?, link_domain = ?, refusal_detail = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+        ).run(verdict.invalid, kept, verdict.contextField ?? null, this.linkDomainCell(verdict.invalid, verdict.linkDomain), this.refusalDetailCell(verdict.invalid, verdict.refusal), at, runId, seq, token, runId).changes === 1;
       }
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;
