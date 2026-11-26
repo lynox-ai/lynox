@@ -12,6 +12,7 @@ import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-princ
 import type { IAgent, LynoxUserConfig, PlannedPipeline, InlinePipelineStep } from '../../types/index.js';
 import type { CapabilityContract } from '../../types/capability-contract.js';
 import { testAuditLog } from '../../../tests/helpers/audit-log.js';
+import { RESERVED_STEP_IDS } from '../../orchestrator/step-id.js';
 
 const mockConfig = { api_key: 'test-key' } as LynoxUserConfig;
 
@@ -220,8 +221,12 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     storePipeline('wf-1', makePlanned({ steps: [{ id: 'params', task: 'Fetch' }, { id: 'b', task: 'Use {{params.result}}', input_from: ['params'] }] }));
     const edit = (modifications: unknown[]): Promise<string> =>
       updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications } as never, makeAgent(history)) as Promise<string>;
-    expect(await edit([{ action: 'update_task', step_id: 'b', value: 'Use it' }])).toBe(
-      'Error: This workflow holds a step id a run already uses for something else ("params", "__proto__" or "constructor"), which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:\n- rename_step for step #1 (a reserved id): step_id "#1", value a new id in the allowed form, for example fetch_orders; the steps that read it follow');
+    const refusal = await edit([{ action: 'update_task', step_id: 'b', value: 'Use it' }]);
+    expect(refusal).toBe(
+      'Error: This workflow holds a step id a run already uses for something else ("params", "__proto__" or "constructor"), which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:\n- rename_step for step #1 (a reserved id): step_id "#1", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), other than params, __proto__ or constructor, for example fetch_orders; the steps that read it follow');
+    // The fix rules out every reserved id, read from the set itself, so the next id it asks for is not one either.
+    const fix = refusal.slice(refusal.indexOf('rename_step for step #1'));
+    for (const id of RESERVED_STEP_IDS) expect(fix).toMatch(new RegExp(`[ ,]${id.replace(/[^a-z]/g, '\\$&')}[ ,]`));
     expect(await edit([{ action: 'rename_step', step_id: '#1', value: 'fetch' }])).toContain('✓ Updated workflow');
     _resetPipelineStore();
     const saved = getPipeline('wf-1', history)!.steps;

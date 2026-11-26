@@ -48,6 +48,12 @@ export function isReservedStepId(id: unknown): boolean {
   return typeof id === 'string' && RESERVED_STEP_IDS.has(id);
 }
 
+/** {@link RESERVED_STEP_IDS} as a fix names them: `params, __proto__ or constructor`. */
+export function reservedStepIdsInWords(): string {
+  const ids = [...RESERVED_STEP_IDS];
+  return ids.length < 2 ? ids.join('') : `${ids.slice(0, -1).join(', ')} or ${ids[ids.length - 1]!}`;
+}
+
 /** Why a reserved id is refused as a step id, naming where it is; the reserved names are lynox's own words. */
 export function reservedStepIdRefusal(where: string, { refs = true }: { refs?: boolean } = {}): string {
   return `${where}: "params", "__proto__" and "constructor" cannot be step ids, because a run already uses these names ("params" holds the workflow's parameters). `
