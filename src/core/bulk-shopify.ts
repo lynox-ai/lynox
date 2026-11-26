@@ -46,7 +46,7 @@ import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
  *   connected again.
  * - `expired`: a refresh of the connection's token failed (`oauth_grant.state` `refresh-dead`,
  *   which the refresh writes and which also drops the binding). It is written for several causes
- *   (the store refused the token, its answer was not usable, the new token could not be stored)
+ *   (for example the store refused the token, its answer was not usable, the vault changed meanwhile)
  *   and the grant does not record which, so no cause is named; only a new connect helps, since
  *   no refresh runs without the binding. Checked before the binding, which that refresh took away.
  * The dead states come before the scope: on a connection that cannot write at all, adding a
