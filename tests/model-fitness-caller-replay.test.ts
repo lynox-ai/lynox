@@ -8,13 +8,14 @@ import { describe, it, expect } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import {
-  CALLER_SITES, CONTROL_MODEL, boundaryChecks, deriveCallerInputs, inputFor, noToolStubClient, outcomeOf,
-  parseSearchResults, plannedCalls, positiveControl, runCaller,
+  CALLER_SITES, CONTROL_MODEL, boundaryChecks, deriveCallerInputs, endsTurnToolNames, inputFor, noToolStubClient, outcomeOf,
+  parseSearchResults, plannedCalls, positiveControl, quotaOf, runCaller,
 } from '../scripts/model-fitness/caller-replay.js';
 import { withWireRules } from '../src/core/llm-wire-rules.js';
 import { wrapUntrustedData } from '../src/core/data-boundary.js';
-import { CAPTURE_TOOL_NAME } from '../src/core/capture-fallback.js';
-import { FOLLOW_UP_TOOL_NAME } from '../src/core/follow-up-fallback.js';
+import { CAPTURE_FALLBACK_MAX_TOKENS, CAPTURE_TOOL_NAME } from '../src/core/capture-fallback.js';
+import { FOLLOW_UP_FALLBACK_MAX_TOKENS, FOLLOW_UP_TOOL_NAME } from '../src/core/follow-up-fallback.js';
+import { getBetasForProvider } from '../src/types/config.js';
 import type { RerankOutcome } from '../src/integrations/search/search-reranker.js';
 
 /** A model whose forced choice the boundary leaves alone, so it does not check the reply. */
@@ -94,6 +95,31 @@ describe('deriveCallerInputs', () => {
     expect(deriveCallerInputs(midTurn).turn?.answer).toBe('Create a custom app, then connect it here.');
   });
 
+  it('takes a final answer that calls a turn-ending tool beside its text as the answer', () => {
+    const withChips: BetaMessageParam[] = [
+      { role: 'user', content: 'Q?' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Final answer.' }, { type: 'tool_use', id: 'f1', name: FOLLOW_UP_TOOL_NAME, input: { suggestions: [] } }] },
+    ];
+    expect(deriveCallerInputs(withChips).turn).toEqual({ question: 'Q?', answer: 'Final answer.' });
+  });
+
+  it('passes over text beside an ordinary tool call, and beside a turn-ending one mixed with it', () => {
+    const preamble = (calls: string[]): BetaMessageParam[] => [
+      { role: 'user', content: 'Earlier?' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Earlier answer.' }] },
+      { role: 'user', content: 'Q?' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Looking.' }, ...calls.map((name, i) => ({ type: 'tool_use' as const, id: `c${String(i)}`, name, input: {} }))] },
+    ];
+    expect(deriveCallerInputs(preamble(['web_research'])).turn?.answer).toBe('Earlier answer.');
+    expect(deriveCallerInputs(preamble([FOLLOW_UP_TOOL_NAME, 'web_research'])).turn?.answer).toBe('Earlier answer.');
+  });
+
+  it('finds the turn-ending tools on the tool entries, not by a fixed name', () => {
+    expect(endsTurnToolNames().has(FOLLOW_UP_TOOL_NAME)).toBe(true);
+    expect(endsTurnToolNames().has('web_research')).toBe(false);
+    expect([...endsTurnToolNames({ a: { endsTurn: true, definition: { name: 'x' } }, b: { endsTurn: false, definition: { name: 'y' } }, c: 5 })]).toEqual(['x']);
+  });
+
   it('reads only text blocks as the answer', () => {
     const withOther: BetaMessageParam[] = [
       { role: 'user', content: 'Q?' },
@@ -147,6 +173,12 @@ describe('outcomeOf', () => {
   });
 });
 
+describe('quotaOf', () => {
+  it('counts misses over the calls that answered, leaving no_result, errors and skips out', () => {
+    expect(quotaOf({ called: 5, missed: 2, cut_off: 1, no_result: 4, error: 3, skipped: 7 })).toEqual({ missed: 2, answered: 8 });
+  });
+});
+
 describe('boundaryChecks', () => {
   it('is true for a model that rejects a forced choice and false for one that takes it', () => {
     expect(boundaryChecks(CONTROL_MODEL)).toBe(true);
@@ -159,11 +191,20 @@ describe('runCaller on the agent passes', () => {
 
   it('sends the follow-up pass with its forced tool, its budget and the provider betas', async () => {
     const { client, sent } = stubClient(toolReply(FOLLOW_UP_TOOL_NAME, { suggestions: [] }));
-    expect((await runCaller('agent.follow_up', turn, CONTROL_MODEL, 'stub', { client })).outcome).toBe('called');
+    expect((await runCaller('agent.follow_up', turn, UNCHECKED_MODEL, 'stub', { client })).outcome).toBe('called');
     expect(sent).toHaveLength(1);
-    expect(sent[0]!['model']).toBe(CONTROL_MODEL);
-    expect(Array.isArray(sent[0]!['betas'])).toBe(true);
-    expect(typeof sent[0]!['max_tokens']).toBe('number');
+    expect(sent[0]).toMatchObject({
+      model: UNCHECKED_MODEL,
+      max_tokens: FOLLOW_UP_FALLBACK_MAX_TOKENS,
+      tool_choice: { type: 'tool', name: FOLLOW_UP_TOOL_NAME },
+      betas: getBetasForProvider('anthropic'),
+    });
+  });
+
+  it('sends the capture pass with its own budget', async () => {
+    const { client, sent } = stubClient(toolReply(CAPTURE_TOOL_NAME, { facts: [] }));
+    await runCaller('agent.capture', turn, UNCHECKED_MODEL, 'stub', { client });
+    expect(sent[0]!['max_tokens']).toBe(CAPTURE_FALLBACK_MAX_TOKENS);
   });
 
   it('counts a text-only capture reply as a miss through the boundary', async () => {

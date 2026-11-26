@@ -39,6 +39,7 @@ import {
 } from '../../src/core/follow-up-fallback.js';
 import { CAPTURE_FALLBACK_MAX_TOKENS, CAPTURE_TIMEOUT_MS, CAPTURE_TOOL_NAME, buildCaptureRequest } from '../../src/core/capture-fallback.js';
 import { suggestFollowUpsTool } from '../../src/tools/builtin/suggest-follow-ups.js';
+import * as builtinTools from '../../src/tools/builtin/index.js';
 import { planDAG } from '../../src/core/dag-planner.js';
 import { rerankSearchResults } from '../../src/integrations/search/search-reranker.js';
 import type { SearchResult } from '../../src/integrations/search/search-provider.js';
@@ -91,19 +92,36 @@ function resultText(content: unknown): string {
   return (content as Block[]).filter(b => b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('\n');
 }
 
+/**
+ * The tools whose call ends the turn (`endsTurn` on the tool entry): a final answer can carry
+ * one beside its text (`suggest_follow_ups` today). Read from the entries, not named here, so
+ * the next such tool is covered without an edit.
+ */
+export function endsTurnToolNames(entries: Record<string, unknown> = builtinTools): Set<string> {
+  const out = new Set<string>();
+  for (const v of Object.values(entries)) {
+    if (typeof v !== 'object' || v === null) continue;
+    const e = v as { endsTurn?: unknown; definition?: { name?: unknown } };
+    if (e.endsTurn === true && typeof e.definition?.name === 'string') out.add(e.definition.name);
+  }
+  return out;
+}
+
 /** Derive each caller's input from a captured main-agent body (see the file comment). */
-export function deriveCallerInputs(messages: readonly BetaMessageParam[]): CallerInputs {
+export function deriveCallerInputs(messages: readonly BetaMessageParam[], endsTurn: ReadonlySet<string> = endsTurnToolNames()): CallerInputs {
   const inputs: CallerInputs = {};
   const goal = lastUserText(messages);
   if (goal) inputs.goal = goal;
 
   // The answer the follow-up and capture passes read is the assistant's FINAL text of a turn,
   // and the question is the user text before it. An assistant message that also calls a tool
-  // is mid-turn — its text is the preamble to the call, not an answer — so it is passed over.
+  // is mid-turn — its text is the preamble to the call, not an answer — so it is passed over,
+  // unless every tool it calls ends the turn: then it IS the final answer (agent.ts reads the
+  // text of such a message as the turn's answer).
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]!;
     if (msg.role !== 'assistant') continue;
-    if (blocksOf(msg).some(b => b.type === 'tool_use')) continue;
+    if (blocksOf(msg).some(b => b.type === 'tool_use' && !endsTurn.has(b.name ?? ''))) continue;
     const answer = textOf(msg);
     if (!answer) continue;
     const question = lastUserText(messages.slice(0, i));
@@ -166,6 +184,15 @@ export function outcomeOf(site: string, before: Counters, after: Counters): 'cal
   if ((after.cut[site] ?? 0) > (before.cut[site] ?? 0)) return 'cut_off';
   if ((after.miss[site] ?? 0) > (before.miss[site] ?? 0)) return 'missed';
   return 'called';
+}
+
+/**
+ * The quota line of one site: misses over the calls that answered. `no_result` is left out of
+ * the denominator — the planner returns the same null for a caught timeout as for a reply
+ * without a plan, so counting it would dilute the quota with failures — and shown on its own.
+ */
+export function quotaOf(tally: Record<CallerOutcome, number>): { missed: number; answered: number } {
+  return { missed: tally.missed, answered: tally.called + tally.missed + tally.cut_off };
 }
 
 /** Whether the client boundary checks this model's reply for the forced call (the model rejects a forced choice). */
@@ -331,8 +358,8 @@ async function main(): Promise<void> {
         tally[r.outcome]++;
         if (r.reason && (r.outcome === 'error' || r.outcome === 'no_result')) reasons.add(r.reason);
       }
-      const ran = tally.called + tally.missed + tally.cut_off + tally.no_result;
-      console.log(`  ${site.padEnd(16)} no tool_use ${String(tally.missed)}/${String(ran)}  · no result ${String(tally.no_result)}  · cut off ${String(tally.cut_off)}  · error ${String(tally.error)}  · no input ${String(tally.skipped)}`);
+      const q = quotaOf(tally);
+      console.log(`  ${site.padEnd(16)} no tool_use ${String(q.missed)}/${String(q.answered)}  · no result ${String(tally.no_result)} (not in the quota)  · cut off ${String(tally.cut_off)}  · error ${String(tally.error)}  · no input ${String(tally.skipped)}`);
       if (reasons.size) console.log(`      reasons: ${[...reasons].join(' | ')}`);
     }
   }
