@@ -71,6 +71,35 @@ describe('estimateTokens', () => {
 });
 
 describe('validateAgainstSchema', () => {
+  it('names every refusal by the path, the rule and its bound from the schema, never the value', () => {
+    const schema: ExtractSchema = {
+      type: 'object',
+      properties: {
+        title: { type: 'string', maxLength: 5 },
+        code: { type: 'string', minLength: 3 },
+        qty: { type: 'integer', minimum: 1, maximum: 9 },
+        tags: { type: 'array', items: { type: 'string', enum: ['a'] }, maxItems: 1 },
+        ok: { type: 'boolean' },
+      },
+      required: ['title'],
+    };
+    const refusalOf = (data: unknown): unknown => {
+      try { validateAgainstSchema(data, schema); } catch (e: unknown) {
+        return e instanceof SchemaValueError || e instanceof ExtractShapeError ? e.refusal : 'other';
+      }
+      return 'none';
+    };
+    expect(refusalOf({ title: 'sk-live-secret' })).toEqual({ path: 'title', kind: 'maxLength', limit: 5 });
+    expect(refusalOf({ title: 'a', code: 'x' })).toEqual({ path: 'code', kind: 'minLength', limit: 3 });
+    expect(refusalOf({ title: 'a', qty: 0 })).toEqual({ path: 'qty', kind: 'minimum', limit: 1 });
+    expect(refusalOf({ title: 'a', qty: 10 })).toEqual({ path: 'qty', kind: 'maximum', limit: 9 });
+    expect(refusalOf({ title: 'a', qty: 1.5 })).toEqual({ path: 'qty', kind: 'type' });
+    expect(refusalOf({ title: 'a', tags: ['a', 'a'] })).toEqual({ path: 'tags', kind: 'maxItems', limit: 1 });
+    expect(refusalOf({ title: 'a', tags: ['b'] })).toEqual({ path: 'tags[0]', kind: 'enum' });
+    expect(refusalOf({ title: 'a', ok: 'yes' })).toEqual({ path: 'ok', kind: 'type' });
+    expect(refusalOf({})).toEqual({ path: 'title', kind: 'required' });
+  });
+
   it('accepts a fully-valid object', () => {
     expect(() => validateAgainstSchema(
       { name: 'foo', count: 3, level: 'medium', tags: ['a', 'b'] },

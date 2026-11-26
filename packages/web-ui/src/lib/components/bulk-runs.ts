@@ -870,6 +870,9 @@ export interface BulkTarget {
 	contextField?: string | undefined;
 	/** With `new_link_domain`: the domain the refused link points to, as the engine recorded it. */
 	linkDomain?: string | undefined;
+	/** With `verdict_invalid`: the field of the rule the model's answer broke, the rule's kind and
+	 *  its bound, all from the rule (never the answer). Absent on older rows. */
+	refusalDetail?: BulkRefusalDetail | undefined;
 	/** Per HTML field an `update` target changes: the elements and comments its new value adds and
 	 *  removes, each with its full value (PRD shopify-preset §20.2 item 5, sec-core M3). Computed by
 	 *  the engine from the parser's tree; the page only lists it, as text. */
@@ -1668,6 +1671,34 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	new_img: 'new_img', not_canonical: 'not_canonical',
 	comment_added: 'comment_added_shopify', html_too_long: 'html_too_long',
 };
+/** The rule a model's answer broke, as the engine keeps it with `verdict_invalid`. */
+export interface BulkRefusalDetail {
+	field: string;
+	kind: string;
+	limit?: number | undefined;
+}
+/** The rule kinds the page words; a kind it does not know reads as the sentence without a field. */
+export const BULK_REFUSAL_KINDS: readonly string[] = ['required', 'type', 'enum', 'pattern', 'maxLength', 'minLength', 'minimum', 'maximum', 'maxItems'];
+/** Kinds whose sentence names the rule's bound. */
+const BULK_REFUSAL_BOUNDED: ReadonlySet<string> = new Set(['maxLength', 'minLength', 'minimum', 'maximum', 'maxItems']);
+
+/**
+ * The sentence for an answer the rule refused, naming the field and the rule it broke (and the
+ * bound), or null where the engine kept no such detail or its kind is not one the page words:
+ * the caller then reads the sentence without a field. The field is named as the run names it
+ * elsewhere (Shopify's readable name; the rule's own name on any other list).
+ */
+export function bulkRefusalText(
+	detail: BulkRefusalDetail | undefined, shopify: boolean, host: string | null, i18n: BulkI18n,
+): string | null {
+	if (detail === undefined || !BULK_REFUSAL_KINDS.includes(detail.kind)) return null;
+	const bounded = BULK_REFUSAL_BOUNDED.has(detail.kind);
+	if (bounded && (detail.limit === undefined || !Number.isFinite(detail.limit))) return null;
+	const field = shopify ? bulkFieldNamesText(host, [detail.field], (k) => i18n.t(k)) : bulkVisibleText(detail.field);
+	const rule = bounded ? i18n.tf(`bulk.invalid.refusal.${detail.kind}`, { n: String(detail.limit) }) : i18n.t(`bulk.invalid.refusal.${detail.kind}`);
+	return i18n.tf(shopify ? 'bulk.invalid.verdict_refused' : 'bulk.invalid.verdict_refused_target', { field, rule });
+}
+
 /** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
  *  of tags the page reads, whose way out differs from planning again, and of links, in a
  *  shortcode as much as in HTML. */
@@ -1693,12 +1724,19 @@ export function bulkInvalidText(
 	 *  With `before_has_shop_markup`: the date of the earlier write, already formatted, or null.
 	 *  `listForm`: the stored list form; `judgesHtml`: the run's rule decides an HTML field;
 	 *  `startDomains`: the run takes allowed link domains at the start of judging ({@link bulkTakesStartDomains});
-	 *  `linkDomain`: with `new_link_domain`, the domain the refused link points to. */
+	 *  `linkDomain`: with `new_link_domain`, the domain the refused link points to;
+	 *  `refusal`: with `verdict_invalid`, the field and rule the answer broke ({@link bulkRefusalText}). */
 	context?: {
 		field: string | undefined; host: string | null; dataStore: boolean; markedDate?: string | null | undefined;
 		listForm?: string | null | undefined; judgesHtml?: boolean | undefined; startDomains?: boolean; linkDomain?: string | undefined;
+		refusal?: BulkRefusalDetail | undefined;
 	},
 ): string {
+	// An answer the rule refused names the field and the rule it broke, on every run.
+	if (reason === 'verdict_invalid') {
+		const refused = bulkRefusalText(context?.refusal, shopify, context?.host ?? null, i18n);
+		if (refused !== null) return refused;
+	}
 	// The description an earlier run wrote and the store added markup to: named
 	// by that run's date, so the owner can find it; without the date where the run is gone.
 	if (reason === 'before_has_shop_markup') {

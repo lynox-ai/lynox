@@ -8,6 +8,7 @@ import {
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey,
 	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
+	bulkRefusalText, BULK_REFUSAL_KINDS,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -2133,5 +2134,58 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 				expect(table[key], key).not.toMatch(/[„“”"»«]\{title\}|\{title\}[„“”"»«]/);
 			}
 		}
+	});
+});
+
+// An answer the rule refused names the field and the rule it broke: read from the i18n
+// source, both languages, word for word; never a value, which the engine does not keep.
+describe('the sentence for an answer the rule refused', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!.replace(/\\'/g, "'"); en[m[1]!] = m[3]!.replace(/\\'/g, "'"); }
+	}
+	const from = (table: Record<string, string>): BulkI18n => ({
+		t: (k) => table[k] ?? k,
+		tf: (k, vars) => Object.entries(vars).reduce((s, [name, v]) => s.split(`{${name}}`).join(v), table[k] ?? k),
+	});
+	const DE = from({ ...de, 'bulk.field.shopify.seo_title': 'SEO-Titel' });
+	const EN = from({ ...en, 'bulk.field.shopify.seo_title': 'SEO title' });
+	const host = 'acme.myshopify.com';
+	const seo = { field: 'seo_title', kind: 'maxLength', limit: 60 };
+	const ctx = (refusal: unknown, dataStore = false) => ({ field: undefined, host, dataStore, refusal: refusal as never });
+
+	it('names the field and the limit on a Shopify run, in German and English', () => {
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx(seo))).toBe(
+			'Das Modell hat für dieses Produkt keine verwertbare Antwort gegeben. Feld SEO-Titel: Der Text ist länger als 60 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.',
+		);
+		expect(bulkInvalidText('verdict_invalid', true, true, EN, ctx(seo))).toBe(
+			'The model gave no usable answer for this product. Field SEO title: the text is longer than 60 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.',
+		);
+	});
+
+	it('names the field by the rule on any other run', () => {
+		expect(bulkInvalidText('verdict_invalid', false, true, DE, { ...ctx({ field: 'summary', kind: 'minLength', limit: 3 }, true), host: null })).toBe(
+			'Das Modell hat für dieses Ziel keine verwertbare Antwort gegeben. Feld summary: Der Text ist kürzer als 3 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.',
+		);
+	});
+
+	it('has a sentence for every rule kind in both languages', () => {
+		for (const kind of BULK_REFUSAL_KINDS) {
+			expect(de[`bulk.invalid.refusal.${kind}`], kind).toBeDefined();
+			expect(en[`bulk.invalid.refusal.${kind}`], kind).toBeDefined();
+			expect(bulkRefusalText({ field: 'title', kind, limit: 2 }, false, null, EN), kind).not.toContain('bulk.invalid');
+		}
+	});
+
+	it('reads the sentence without a field where none was kept, the kind is unknown or a bound is missing', () => {
+		const plain = bulkInvalidText('verdict_invalid', true, true, DE);
+		expect(plain).toBe(de['bulk.invalid.verdict_invalid']);
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx(undefined))).toBe(plain);
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx({ field: 'seo_title', kind: 'shout' }))).toBe(plain);
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx({ field: 'seo_title', kind: 'maxLength' }))).toBe(plain);
 	});
 });

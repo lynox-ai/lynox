@@ -1673,6 +1673,11 @@ const MIGRATIONS: string[] = [
      generation INTEGER NOT NULL,
      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
    );`,
+  // v75: with `verdict_invalid`, which field of the run's rule the judge's answer broke and by
+  // which rule (`BulkRefusalDetail`, JSON, encrypted): field name, rule kind and bound, all from
+  // the rule's schema, never the refused value. Existing rows stay NULL and read as before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (75);
+   ALTER TABLE bulk_targets ADD COLUMN refusal_detail TEXT;`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */

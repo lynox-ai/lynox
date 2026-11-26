@@ -291,7 +291,8 @@ export function validateAgainstSchema(data: unknown, schema: ExtractSchema, path
   if (schema.required) {
     for (const key of schema.required) {
       if (!(key in obj)) {
-        throw new ExtractShapeError(`Missing required field "${path ? `${path}.${key}` : key}"`);
+        const at = path ? `${path}.${key}` : key;
+        throw new ExtractShapeError(`Missing required field "${at}"`, { path: at, kind: 'required' });
       }
     }
   }
@@ -317,10 +318,27 @@ export function validateAgainstSchema(data: unknown, schema: ExtractSchema, path
  * its message carries the refused string.
  */
 export class ExtractShapeError extends Error {
-  constructor(message: string) {
+  /** Where a field of the schema was refused and by which rule, where the refusal names one. */
+  readonly refusal: SchemaRefusal | undefined;
+  constructor(message: string, refusal?: SchemaRefusal) {
     super(message);
     this.name = 'ExtractShapeError';
+    this.refusal = refusal;
   }
+}
+
+/** The rule of the schema a value broke. */
+export type SchemaRefusalKind = 'required' | 'type' | 'enum' | 'pattern' | 'maxLength' | 'minLength' | 'minimum' | 'maximum' | 'maxItems';
+
+/**
+ * A refusal as a caller may keep or show it: the field's path, the rule and, for a bounded
+ * rule, its bound. Every part comes from the schema (its property names, the item index, its
+ * limits), never from the value the model wrote.
+ */
+export interface SchemaRefusal {
+  path: string;
+  kind: SchemaRefusalKind;
+  limit?: number;
 }
 
 /**
@@ -332,11 +350,14 @@ export class ExtractShapeError extends Error {
 export class SchemaValueError extends Error {
   readonly path: string;
   readonly rule: string;
-  constructor(message: string, path: string, rule: string) {
+  /** The same refusal as path, rule kind and bound, for a caller that words it itself. */
+  readonly refusal: SchemaRefusal | undefined;
+  constructor(message: string, path: string, rule: string, refusal?: Omit<SchemaRefusal, 'path'>) {
     super(message);
     this.name = 'SchemaValueError';
     this.path = path;
     this.rule = rule;
+    this.refusal = refusal === undefined ? undefined : { path, ...refusal };
   }
 }
 
@@ -346,50 +367,50 @@ const shownValue = (value: string): string => `${JSON.stringify(value.slice(0, 4
 function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: string, depth: number): void {
   switch (prop.type) {
     case 'string':
-      if (typeof value !== 'string') throw new ExtractShapeError(`Expected string at "${path}", got ${typeof value}`);
+      if (typeof value !== 'string') throw new ExtractShapeError(`Expected string at "${path}", got ${typeof value}`, { path, kind: 'type' });
       if (prop.enum && !prop.enum.includes(value)) {
         const rule = `not in enum [${prop.enum.join(', ')}]`;
-        throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
+        throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule, { kind: 'enum' });
       }
       if (prop.pattern && !new RegExp(prop.pattern).test(value)) {
         const rule = `does not match pattern /${prop.pattern}/`;
-        throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
+        throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule, { kind: 'pattern' });
       }
       if (prop.minLength !== undefined || prop.maxLength !== undefined) {
         // Characters as JSON Schema counts them: code points, not UTF-16 units (an emoji like 🙂 is one).
         const length = [...value].length;
         if (prop.maxLength !== undefined && length > prop.maxLength) {
           const rule = `longer than ${String(prop.maxLength)} characters`;
-          throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
+          throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule, { kind: 'maxLength', limit: prop.maxLength });
         }
         if (prop.minLength !== undefined && length < prop.minLength) {
           const rule = `shorter than ${String(prop.minLength)} characters`;
-          throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
+          throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule, { kind: 'minLength', limit: prop.minLength });
         }
       }
       break;
     case 'number':
     case 'integer':
       if (typeof value !== 'number' || !Number.isFinite(value)) {
-        throw new ExtractShapeError(`Expected ${prop.type} at "${path}", got ${typeof value}`);
+        throw new ExtractShapeError(`Expected ${prop.type} at "${path}", got ${typeof value}`, { path, kind: 'type' });
       }
       if (prop.type === 'integer' && !Number.isInteger(value)) {
-        throw new ExtractShapeError(`Expected integer at "${path}", got ${String(value)}`);
+        throw new ExtractShapeError(`Expected integer at "${path}", got ${String(value)}`, { path, kind: 'type' });
       }
       if (prop.minimum !== undefined && value < prop.minimum) {
-        throw new ExtractShapeError(`Value ${String(value)} at "${path}" below minimum ${String(prop.minimum)}`);
+        throw new ExtractShapeError(`Value ${String(value)} at "${path}" below minimum ${String(prop.minimum)}`, { path, kind: 'minimum', limit: prop.minimum });
       }
       if (prop.maximum !== undefined && value > prop.maximum) {
-        throw new ExtractShapeError(`Value ${String(value)} at "${path}" above maximum ${String(prop.maximum)}`);
+        throw new ExtractShapeError(`Value ${String(value)} at "${path}" above maximum ${String(prop.maximum)}`, { path, kind: 'maximum', limit: prop.maximum });
       }
       break;
     case 'boolean':
-      if (typeof value !== 'boolean') throw new ExtractShapeError(`Expected boolean at "${path}", got ${typeof value}`);
+      if (typeof value !== 'boolean') throw new ExtractShapeError(`Expected boolean at "${path}", got ${typeof value}`, { path, kind: 'type' });
       break;
     case 'array':
-      if (!Array.isArray(value)) throw new ExtractShapeError(`Expected array at "${path}", got ${typeof value}`);
+      if (!Array.isArray(value)) throw new ExtractShapeError(`Expected array at "${path}", got ${typeof value}`, { path, kind: 'type' });
       if (prop.maxItems !== undefined && value.length > prop.maxItems) {
-        throw new ExtractShapeError(`Array at "${path}" has ${String(value.length)} items, max ${String(prop.maxItems)}`);
+        throw new ExtractShapeError(`Array at "${path}" has ${String(value.length)} items, max ${String(prop.maxItems)}`, { path, kind: 'maxItems', limit: prop.maxItems });
       }
       value.forEach((item, i) => { validateProperty(item, prop.items, `${path}[${String(i)}]`, depth + 1); });
       break;
