@@ -25455,6 +25455,20 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(await none.text(), 'the refusal differs with the question').toBe(await open.text());
     });
 
+    it('naming a question of its own from another conversation, a mandate is refused alike whether one is open or not', async () => {
+      const mine = prompts.insertAskUser(OWN, 'Mandate asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag(M) });
+      asMandate();
+      const named = (): Promise<Response> =>
+        jsonFetch(`/api/sessions/${FOREIGN}${suffix}`, { method: 'POST', body: JSON.stringify({ ...body, promptId: mine }) });
+      const none = await named();
+      expect(none.status, 'without an open question').toBe(403);
+      prompts.insertAskUser(FOREIGN, 'Owner asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag('owner') });
+      const open = await named();
+      expect(open.status, 'with an open question').toBe(403);
+      expect(await none.text(), 'the refusal differs with the question').toBe(await open.text());
+      expect(prompts.getById(mine)!.status, 'its own question was answered from another conversation').toBe('pending');
+    });
+
     it('control: a mandate in its own conversation without a question still gets the 404', async () => {
       asMandate();
       expect((await call(OWN)).status).toBe(404);

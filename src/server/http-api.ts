@@ -3198,7 +3198,9 @@ export class LynoxHTTPApi {
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
    * answers its own 404, but only in the request's own conversation: in another person's it is
-   * refused as when a question is open, so the answer does not say whether one is.
+   * refused as when a question is open, so the answer does not say whether one is. A question
+   * named by id that belongs to another session is no candidate: the route answers it as one,
+   * and it says nothing about this conversation.
    */
   private _refuseUnlessOwnsPrompt(
     req: IncomingMessage,
@@ -3209,7 +3211,8 @@ export class LynoxHTTPApi {
   ): boolean {
     const principal = this._principalOf(req);
     if (isOwnerPrincipal(principal)) return false;
-    const candidates = [promptId ? ps.getById(promptId) : undefined, ps.getPending(sessionId)]
+    const named = promptId ? ps.getById(promptId) : undefined;
+    const candidates = [named?.session_id === sessionId ? named : undefined, ps.getPending(sessionId)]
       .filter((row): row is PendingPromptRow => row !== undefined);
     if (candidates.length === 0) return this._refuseUnlessOwns(req, res, 'answer this question', () => [this._threadRow(sessionId)]);
     // A question names the grant it was asked under (v60). A later grant for the same address is
