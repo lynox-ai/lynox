@@ -2461,7 +2461,7 @@ describe('approving an undo, per target (U-466)', () => {
 		german();
 		run = undoRun({ total: 4, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 2 } });
 		// A row of fields and a row of text lines both show values; the two refused rows only their reason.
-		targets = [...refused(), { ...undoTargets()[0]!, seq: 2 }, { ...undoTargets()[0]!, seq: 3, diff: { kind: 'text', removed: ['alt'], added: ['neu'] } }];
+		targets = [...refused(), { ...undoTargets()[0]!, seq: 2 }, { ...undoTargets()[0]!, seq: 3, diff: { kind: 'text', from: 0, removed: ['alt'], added: ['neu'] } }];
 		await render();
 		const labels = rows().map((r) => r.querySelector('[data-testid="bulk-values-label"]')?.textContent ?? null);
 		expect(labels).toEqual([null, null, 'Jetzt → zurück auf', 'Jetzt → zurück auf']);
