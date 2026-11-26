@@ -2105,6 +2105,19 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 			.toEqual(['bulk.start.rule_from_artifact', 'bulk.restart.rule_from_artifact_untitled', 'bulk.approve.rule_from_artifact_untitled']);
 	});
 
+	// After the start the artifact may have changed or gone: where judging goes on and at the approval
+	// the sentence says the rule was taken when the run was planned, with no pointer to Artifacts (U-461).
+	it('says at a restart and at the approval that the rule was taken when the run was planned, word for word', () => {
+		const fr = 'Prüf, ob sie sagt, was du willst, bevor du die Beurteilung fortsetzt.';
+		const fe = 'Check that it says what you want before you continue the judging.';
+		const ar = 'Prüf, ob sie sagt, was du willst, bevor du freigibst.';
+		const ae = 'Check that it says what you want before you approve.';
+		expect([de['bulk.restart.rule_from_artifact'], en['bulk.restart.rule_from_artifact']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus {title} übernommen. ${fr}`, `This rule was taken word for word from {title} when the run was planned. ${fe}`]);
+		expect([de['bulk.restart.rule_from_artifact_untitled'], en['bulk.restart.rule_from_artifact_untitled']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus einem gespeicherten Artefakt übernommen. ${fr}`, `This rule was taken word for word from a saved artifact when the run was planned. ${fe}`]);
+		expect([de['bulk.approve.rule_from_artifact'], en['bulk.approve.rule_from_artifact']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus {title} übernommen. ${ar}`, `This rule was taken word for word from {title} when the run was planned. ${ae}`]);
+		expect([de['bulk.approve.rule_from_artifact_untitled'], en['bulk.approve.rule_from_artifact_untitled']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus einem gespeicherten Artefakt übernommen. ${ar}`, `This rule was taken word for word from a saved artifact when the run was planned. ${ae}`]);
+	});
+
 	it('takes a title only when it is text with more than spaces', () => {
 		expect([bulkArtifactTitle('Regeln'), bulkArtifactTitle(''), bulkArtifactTitle('  \n'), bulkArtifactTitle(undefined), bulkArtifactTitle(null), bulkArtifactTitle(7)])
 			.toEqual(['Regeln', null, null, null, null, null]);
