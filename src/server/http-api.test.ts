@@ -4843,6 +4843,71 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // A run's heartbeat refreshes only the slot it owns.
+    it('refreshes only its own slot on a heartbeat', async () => {
+      const slots = (api as unknown as { runningSessions: Map<string, { lastEventAt: number }> }).runningSessions;
+      const sid = 'own-beat-1';
+      let openA!: () => void;
+      let openB!: () => void;
+      extractHolds.push(new Promise<void>((r) => { openA = r; }), new Promise<void>((r) => { openB = r; }));
+      let finishA: ((v: string) => void) | undefined;
+      let finishB: ((v: string) => void) | undefined;
+      mockSessionRun
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishA = r; }))
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishB = r; }));
+      const files = [{ name: 'notes.txt', type: 'text/plain', data: Buffer.from('hello').toString('base64') }];
+      const send = (task: string): Promise<Response> => {
+        repayRateWindow();
+        return jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task, files, protocol: 1 }) });
+      };
+      const wait = async (done: () => boolean): Promise<void> => {
+        for (let i = 0; i < 400 && !done(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+      };
+      // Only the heartbeat's interval is faked: sockets and the waits above keep real time, and
+      // the slot's clock is read against a marker rather than a faked Date.
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      let a: Promise<Response> | undefined;
+      let b: Promise<Response> | undefined;
+      try {
+        a = send('first');
+        await wait(() => extractHolds.length === 1);
+        b = send('second');
+        await wait(() => extractHolds.length === 0);
+        expect(extractHolds.length, 'positive control: setup reached').toBe(0);
+        openA();
+        await wait(() => finishA !== undefined);
+        const slotA = slots.get(sid);
+        expect(slotA, 'positive control: first slot set').toBeDefined();
+        // The first run's heartbeats fall on 10 s, 20 s, ...
+        slotA!.lastEventAt = 1;
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(slotA!.lastEventAt, 'a heartbeat refreshes the run\'s own slot').toBeGreaterThan(1);
+        await vi.advanceTimersByTimeAsync(5_000);
+        // The second run starts at 15 s, so its own heartbeats fall on 25 s, 35 s, ...
+        openB();
+        await wait(() => finishB !== undefined);
+        const slotB = slots.get(sid);
+        expect(slotB, 'positive control: slot replaced').not.toBe(slotA);
+        slotB!.lastEventAt = 1;
+        // 20 s: only the first run's heartbeat is due.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(slotB!.lastEventAt, 'another run\'s heartbeat leaves the slot as it was').toBe(1);
+        // 25 s: the second run's own heartbeat refreshes it.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(slotB!.lastEventAt, 'positive control: the slot\'s own heartbeat refreshes it').toBeGreaterThan(1);
+      } finally {
+        openA?.();
+        openB?.();
+        extractHolds.length = 0;
+        finishA?.('first done');
+        finishB?.('second done');
+        await a?.then((r) => r.text()).catch(() => undefined);
+        await b?.then((r) => r.text()).catch(() => undefined);
+        vi.useRealTimers();
+        await expectSlotReclaimed(slots, sid);
+      }
+    });
+
     it('takes over a silent engine even while a reader follows the run', async () => {
       repayRateWindow();
       await withRunBuffers(async (runIdOf) => {
