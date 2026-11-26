@@ -24471,6 +24471,26 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         } finally { restore(); }
       });
 
+      it('the preview says where the workflow may run, by the rule a schedule asks', async () => {
+        const restore = shaped();
+        const h = hist();
+        const runsOf = async (mode: string | undefined, steps: Array<Record<string, unknown>>): Promise<unknown> => {
+          h['getWorkflowExact']!.mockImplementation(() => ({ ...structuredClone(MANDATE_WF), mode, steps }));
+          return ((await (await jsonFetch('/api/workflows/wf-sched/stamp-preview')).json()) as { runs: unknown }).runs;
+        };
+        try {
+          // Autonomous: a chat, a schedule and a background agent's run_workflow.
+          expect(await runsOf('autonomous', [{ id: 's1', task: 'look up the report', tools: ['memory_recall'] }])).toBe('anywhere');
+          // Interactive, asking only its owner through ask_user: a schedule too, where the questions reach the owner.
+          expect(await runsOf('interactive', [{ id: 's1', task: 'ask', tools: ['ask_user'] }, { id: 's2', task: 'look', tools: ['memory_recall'] }])).toBe('chat_and_schedule');
+          // Interactive with a secret to ask for, or with no question tool at all: no schedule.
+          expect(await runsOf('interactive', [{ id: 's1', task: 'ask', tools: ['ask_user'] }, { id: 's2', task: 'key', tools: ['ask_secret'] }])).toBe('chat');
+          expect(await runsOf('interactive', [{ id: 's1', task: 'look', tools: ['memory_recall'] }])).toBe('chat');
+          // A definition without a mode reads as interactive, as the schedule check reads it.
+          expect(await runsOf(undefined, [{ id: 's1', task: 'ask', tools: ['ask_user'] }])).toBe('chat');
+        } finally { restore(); }
+      });
+
       it('the preview names a step\'s role, effort, thinking and time limit, and takes a definition without steps', async () => {
         const restore = shaped();
         const h = hist();

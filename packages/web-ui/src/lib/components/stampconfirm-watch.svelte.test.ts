@@ -24,16 +24,19 @@ let component: Record<string, unknown> | undefined;
 const before = getLocale();
 let watchUrl = '';
 
+let modelTier: string | null = null;
+
 const preview = () => ({
 	expect: 'digest-1', by: null, workflow: null, connections: [],
 	subject: {
 		id: 'w1', effect: 'run_agent', source: 'watch', title: 'Preisseite', description: null, schedule_cron: null,
-		watch: JSON.stringify({ url: watchUrl, interval_minutes: 60 }), pipeline_id: null, pipeline_params: null, model_tier: null, wf: null,
+		watch: JSON.stringify({ url: watchUrl, interval_minutes: 60 }), pipeline_id: null, pipeline_params: null, model_tier: modelTier, wf: null,
 	},
 });
 const json = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
 beforeEach(() => {
+	modelTier = null;
 	setLocale('de');
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => (String(url).endsWith('/tasks/w1/stamp-preview') ? json(200, preview()) : json(200, {}))));
 	target = document.createElement('div');
@@ -132,5 +135,24 @@ describe('the stamp of a watch whose stored address hides characters', () => {
 		watchUrl = 'https://preise.lieferant-beispiel.ch/x/../heizoel';
 		await open();
 		expect(pieces(target.querySelector('[data-stamp-watch-host]'))).toEqual(['https://', 'preise.', 'lieferant-beispiel.', 'ch']);
+	});
+});
+
+describe('the stamp of a plan names its model tier as the settings do', () => {
+	it('shows a tier by its name, never the stored value, in both languages', async () => {
+		watchUrl = 'https://shop.example/preise';
+		modelTier = 'balanced';
+		await open();
+		const line = target.querySelector('[data-stamp-model]')?.textContent ?? '';
+		expect(line).toContain('Ausgewogen');
+		expect(line).not.toContain('balanced');
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		setLocale('en');
+		modelTier = 'deep';
+		await open();
+		expect(target.querySelector('[data-stamp-model]')?.textContent).toContain('Deep');
+		expect(target.querySelector('[data-stamp-model]')?.textContent).not.toContain('deep');
 	});
 });

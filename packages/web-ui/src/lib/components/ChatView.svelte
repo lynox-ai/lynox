@@ -122,6 +122,7 @@
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { canChooseModel, isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { tierName } from '../utils/tier-words.js';
 	import { speakHttpFailureText, transcribeFailureText } from './voice-failure.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
@@ -2238,7 +2239,7 @@
 						{/if}
 						{#if child.tier}
 							<span class="text-text-subtle/50" aria-hidden="true">·</span>
-							<span class="uppercase tracking-wide text-[9px] {child.downgraded ? 'text-warning/80' : 'text-text-subtle/50'}">{child.tier}</span>
+							<span class="uppercase tracking-wide text-[9px] {child.downgraded ? 'text-warning/80' : 'text-text-subtle/50'}">{tierName(child.tier) ?? child.tier}</span>
 						{/if}
 						{#if child.downgraded}
 							<span class="text-warning/80">{t('spawn.downgraded_note')}</span>

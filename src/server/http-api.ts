@@ -344,6 +344,7 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
 function stampShown(planned: PlannedPipeline): {
   mode: PlannedPipeline['mode']; onFailure: NonNullable<PlannedPipeline['on_failure']>; limits: PlannedPipeline['limits'] | null;
   contract: string[] | null; parameters: Array<{ name: string; required: boolean; default: unknown; allowed: ShownAllowed | null }>;
+  runs: StampRuns;
 } {
   const contract: unknown = planned.capabilityContract ?? undefined;
   const constraints = typeof contract === 'object' && contract !== null ? (contract as { paramConstraints?: unknown }).paramConstraints : undefined;
@@ -361,7 +362,25 @@ function stampShown(planned: PlannedPipeline): {
       name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null,
       allowed: allowedShown(constraints, p.name),
     })),
+    runs: runsFrom(planned),
   };
+}
+
+/** Where a workflow may run, as the stamp says it: `anywhere` is a chat, a schedule and an agent in
+ *  the background; `chat_and_schedule` a chat and a schedule; `chat` a chat and an agent in the
+ *  background, and no schedule. */
+type StampRuns = 'anywhere' | 'chat_and_schedule' | 'chat';
+
+/**
+ * Read from the rule every planning surface asks (`isSchedulableWorkflow`): an autonomous workflow
+ * runs from a chat, on a schedule and from a background agent's `run_workflow`; an interactive one
+ * that asks only through `ask_user` on a schedule too, where its questions reach the owner, but a
+ * background agent's call refuses it (`run_workflow`); any other runs from a chat and no schedule,
+ * and a background agent's `run_workflow` starts it once its stamp holds, as it does today.
+ */
+function runsFrom(planned: PlannedPipeline): StampRuns {
+  if (planned.mode === 'autonomous') return 'anywhere';
+  return isSchedulableWorkflow(planned) ? 'chat_and_schedule' : 'chat';
 }
 
 /** What a contract allows for one parameter, as the stamp and the takeover previews show it. */

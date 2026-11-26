@@ -65,12 +65,17 @@ export interface StampParameter {
   allowed: StampAllowed | null;
 }
 
+export const STAMP_RUNS = ['anywhere', 'chat_and_schedule', 'chat'] as const;
+export type StampRuns = (typeof STAMP_RUNS)[number];
+
 export interface StampPreview {
   expect: string;
   stampedAt: string | null;
   changedBy: 'mandate' | 'owner' | null;
   awaitsStamp: boolean;
   mode: string | null;
+  /** Where it may run, by the engine's rule (`isSchedulableWorkflow`), or null when not sent. */
+  runs: StampRuns | null;
   parameters: StampParameter[];
   onFailure: string | null;
   limits: unknown;
@@ -177,6 +182,9 @@ export function parseStampPreview(body: unknown): StampPreview | null {
   const mode = optStr(body['mode']);
   const onFailure = optStr(body['onFailure']);
   const stampedAt = optStr(body['stampedAt']);
+  // Where it may run only informs: a value this view does not know shows no line, and the preview stands.
+  const runsRead = optOneOf(body['runs'], STAMP_RUNS);
+  const runs = runsRead === BAD ? null : runsRead;
   if (mode === BAD || onFailure === BAD || stampedAt === BAD) return null;
   const changedBy = body['changedBy'];
   return {
@@ -185,6 +193,7 @@ export function parseStampPreview(body: unknown): StampPreview | null {
     changedBy: changedBy === 'mandate' || changedBy === 'owner' ? changedBy : null,
     awaitsStamp: body['awaitsStamp'] === true,
     mode,
+    runs,
     parameters,
     onFailure,
     limits: body['limits'] ?? null,

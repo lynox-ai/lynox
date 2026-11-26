@@ -373,14 +373,14 @@ describe('contract r3: what the view adds', () => {
 		await click(q('stamp-review'));
 		const step = q('stamp-step')?.textContent ?? '';
 		expect(q('stamp-role')?.textContent).toContain('Angaben der Rolle researcher');
-		expect(step).toContain('Aufwand: high');
-		expect(step).toContain('Nachdenken: adaptive');
+		expect(step).toContain('Gründlichkeit: Gründlich');
+		expect(step).toContain('Nachdenken: Automatisch');
 		expect(step).toContain('Zeitlimit: 2 min 30 s');
 		// What the role grants: the step's own tools are not all a run gets.
 		const grant = q('stamp-role-grant')?.textContent ?? '';
-		expect(grant).toContain('Modell: deep');
+		expect(grant).toContain('Modell: Tief');
 		// The step sets its own effort, which wins: the role's is not shown as if it applied.
-		expect(grant).not.toContain('Aufwand');
+		expect(grant).not.toContain('Gründlichkeit');
 		expect(grant).toContain('Erlaubt: web_search');
 		expect(grant).toContain('Sperrt: http_request');
 		expect(q('stamp-role')?.textContent).toContain('nur lesen');
@@ -489,7 +489,7 @@ describe('contract r3: what the view adds', () => {
 		await click(q('stamp-review'));
 		const grant = q('stamp-role-grant')?.textContent ?? '';
 		expect(grant).not.toContain('Modell');
-		expect(grant).toContain('Aufwand: max');
+		expect(grant).toContain('Gründlichkeit: Maximum');
 	});
 
 	it('a role the engine does not know says the step stops', async () => {
@@ -527,7 +527,7 @@ describe('contract r3: what the view adds', () => {
 		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { model: null, role: null, roleGrant: null });
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
-		expect(q('stamp-model-default')?.textContent).toContain('Modell: fast (Standard)');
+		expect(q('stamp-model-default')?.textContent).toContain('Modell: Schnell (Standard)');
 	});
 
 	it('no default model where the role names one', async () => {
@@ -536,7 +536,7 @@ describe('contract r3: what the view adds', () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
 		expect(q('stamp-model-default')).toBeNull();
-		expect(q('stamp-role-grant')?.textContent).toContain('Modell: deep');
+		expect(q('stamp-role-grant')?.textContent).toContain('Modell: Tief');
 	});
 
 	it('no default model where the role is unknown, since the step stops', async () => {
@@ -797,5 +797,70 @@ describe('what the contract allows, and a contract that grants nothing (U-451)',
 			await openPlan({ ...GRANT, hostPatterns: ['h\u202E.example'] });
 			expect(target.textContent).toContain('POST https://h<U+202E>.example/p');
 		});
+	});
+});
+
+describe('the stamp names a tier, a thoroughness and a thinking setting as the settings do', () => {
+	function stepWith(fields: Record<string, unknown>): Record<string, unknown> {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, fields);
+		return p;
+	}
+
+	it('a tier by its name, never the stored value; a model named by its id stays set apart as it is', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: stepWith({ model: 'balanced', effort: 'xhigh', thinking: 'enabled' }) }] });
+		await click(q('stamp-review'));
+		const step = q('stamp-step')!;
+		const text = step.textContent ?? '';
+		expect(text).toContain('Modell: Ausgewogen');
+		expect(text).toContain('Gründlichkeit: Sehr gründlich');
+		expect(text).toContain('Nachdenken: Immer');
+		for (const raw of ['balanced', 'xhigh', 'enabled']) expect(text).not.toContain(raw);
+		expect(step.querySelector('[data-model-tier="balanced"]')?.classList.contains('font-mono')).toBe(false);
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: stepWith({ model: 'claude-sonnet-4-5', effort: 'low', thinking: 'disabled' }) }] });
+		await click(q('stamp-review'));
+		const again = q('stamp-step')!;
+		expect(again.textContent).toContain('claude-sonnet-4-5');
+		expect(again.querySelector('[data-model-tier]')).toBeNull();
+		expect([...again.querySelectorAll('.font-mono')].some((el) => el.textContent === 'claude-sonnet-4-5')).toBe(true);
+		expect(again.textContent).toContain('Gründlichkeit: Schnell');
+		expect(again.textContent).toContain('Nachdenken: Deaktiviert');
+	});
+});
+
+describe('the stamp says where the workflow may run, from the rule a schedule asks', () => {
+	async function runsLine(runs: string | undefined): Promise<HTMLElement | null> {
+		const p = preview('d1');
+		if (runs !== undefined) p['runs'] = runs;
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		return q('stamp-runs');
+	}
+
+	it('an autonomous one: from a chat, on a schedule and by an agent in the background', async () => {
+		expect((await runsLine('anywhere'))?.textContent).toBe('aus dem Chat, geplant und von einem Agenten im Hintergrund');
+	});
+
+	it('an interactive one that asks only its owner: from a chat and on a schedule', async () => {
+		expect((await runsLine('chat_and_schedule'))?.textContent).toBe('aus dem Chat und geplant');
+	});
+
+	it('any other interactive one: from a chat and by an agent in the background, not on a schedule', async () => {
+		// A background agent's run_workflow starts it once the stamp holds, so the line says so.
+		expect((await runsLine('chat'))?.textContent).toBe('aus dem Chat und von einem Agenten im Hintergrund, nicht geplant');
+	});
+
+	it('an engine that sends no such field, or a value the view does not know, shows no line, and the preview stands', async () => {
+		expect(await runsLine(undefined)).toBeNull();
+		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		expect(await runsLine('everywhere')).toBeNull();
+		expect(q('stamp-step')).not.toBeNull();
+		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
 	});
 });
