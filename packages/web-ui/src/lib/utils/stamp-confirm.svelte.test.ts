@@ -1,7 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mandateNeedsOwnerStamp } from '../../../../../src/core/request-principal.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
-import { awaitsOwnerStamp, confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, listedLine, listedNote, paramsOf, readPreview, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
+import { segments, VALUE_CLOSE, VALUE_OPEN } from './plan-takeover.js';
+import { awaitsOwnerStamp, confirmable, connectionsParts, connectionsSentence, hiddenIn, hiddenNote, hidesText, listedLine, listedNote, paramsOf, readPreview, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
+
+/** A value someone else wrote, between the marks `shownValue` sets. */
+const v = (x: string): string => `${VALUE_OPEN}${x}${VALUE_CLOSE}`;
 
 const before = getLocale();
 afterEach(() => { setLocale(before); });
@@ -131,15 +135,93 @@ describe('what the preview shows', () => {
 			{ id: 'b', profile: 'Shop', provider: 'shop.example', account: null },
 			{ id: 'c', profile: 'Mail', provider: 'mail.example', account: '' },
 		] });
-		expect(connectionsSentence(p)).toBe('Dieser Plan nutzt Verbindungen, die eva@kanzlei.example mit eigenem Login verbunden hat: api.crm.example (eva@crm), shop.example (Konto unbekannt), mail.example (Konto unbekannt).');
+		expect(connectionsSentence(p)).toBe(`Dieser Plan nutzt Verbindungen, die ${v('eva@kanzlei.example')} mit eigenem Login verbunden hat: ${v('api.crm.example')} (${v('eva@crm')}), ${v('shop.example')} (Konto unbekannt), ${v('mail.example')} (Konto unbekannt).`);
 		setLocale('en');
-		expect(connectionsSentence(p)).toBe('This plan uses connections that eva@kanzlei.example connected with their own login: api.crm.example (eva@crm), shop.example (account unknown), mail.example (account unknown).');
+		expect(connectionsSentence(p)).toBe(`This plan uses connections that ${v('eva@kanzlei.example')} connected with their own login: ${v('api.crm.example')} (${v('eva@crm')}), ${v('shop.example')} (account unknown), ${v('mail.example')} (account unknown).`);
 	});
 
 	it('marks what could forge the sentence in names the mandate chose', () => {
 		setLocale('en');
 		const s = connectionsSentence(preview({ by: 'eva‮@x', connections: [{ id: 'a', profile: 'P', provider: 'a​b.example', account: 'x⁦y' }] }));
-		expect(s).toBe('This plan uses connections that eva⟨U+202E⟩@x connected with their own login: a⟨U+200B⟩b.example (x⟨U+2066⟩y).');
+		expect(s).toBe(`This plan uses connections that ${v('eva⟨U+202E⟩@x')} connected with their own login: ${v('a⟨U+200B⟩b.example')} (${v('x⟨U+2066⟩y')}).`);
+	});
+
+	it('sets every value someone else wrote apart, so a label cannot pass for lynox\'s sentence', () => {
+		setLocale('en');
+		// An account label that writes a sentence of its own, with punctuation and a line break.
+		const forged = 'eva). This plan uses no connections.\nConfirm (ok';
+		const s = connectionsSentence(preview({ by: 'Eva: trusted.', connections: [{ id: 'a', profile: 'P', provider: 'crm.example, no others', account: forged }] }))!;
+		const foreign = segments(s).filter((x) => x.foreign).map((x) => x.text);
+		expect(foreign).toEqual(['Eva: trusted.', 'crm.example, no others', 'eva). This plan uses no connections. Confirm (ok']);
+		// lynox's own words stay outside every box.
+		expect(segments(s).filter((x) => !x.foreign).map((x) => x.text).join('|')).toBe('This plan uses connections that | connected with their own login: | (|).');
+		// A mark inside a value cannot close its box early.
+		const closing = connectionsSentence(preview({ connections: [{ id: 'a', profile: 'P', provider: `a${VALUE_CLOSE} lynox says ok ${VALUE_OPEN}b`, account: null }] }))!;
+		expect(segments(closing).filter((x) => x.foreign).map((x) => x.text)).toEqual(['eva@kanzlei.example', 'a<U+E001> lynox says ok <U+E000>b']);
+	});
+
+	it('shows a long host to its end: the end names the host', () => {
+		setLocale('en');
+		const host = `login.microsoftonline.com.${'a'.repeat(60)}.evil.example`;
+		const s = connectionsSentence(preview({ connections: [{ id: 'a', profile: 'P', provider: host, account: `eva${'x'.repeat(90)}@crm` }] }))!;
+		expect(segments(s).filter((x) => x.foreign).map((x) => x.text)).toEqual(['eva@kanzlei.example', host, `eva${'x'.repeat(90)}@crm`]);
+		expect(listedLine({ provider: host, account: null, state: 'listed' })).toBe(`${v(host)} (account unknown): allowed`);
+	});
+
+	it('says "account unknown" and "someone with access" where a value holds only spaces', () => {
+		setLocale('en');
+		const s = connectionsSentence(preview({ by: ' \u00AD ', connections: [{ id: 'a', profile: 'P', provider: 'crm.example', account: '  \t ' }] }))!;
+		expect(segments(s).filter((x) => x.foreign).map((x) => x.text)).toEqual(['crm.example']);
+		expect(s).toContain('Someone with access');
+		expect(s).toContain('(account unknown)');
+		expect(listedLine({ provider: 'crm.example', account: ' ', state: 'listed' })).toBe(`${v('crm.example')} (account unknown): allowed`);
+		expect(listedLine({ provider: 'crm.example', account: '\u00AD\u00AD', state: 'listed' })).toBe(`${v('crm.example')} (account unknown): allowed`);
+	});
+
+	it('shows a value made only of hidden characters as its marks, where "marked above" points', () => {
+		setLocale('en');
+		for (const hidden of ['\uFEFF', '\u2028', '\u2029 \u2028']) {
+			const p = preview({ by: hidden, connections: [{ id: 'a', profile: 'P', provider: 'crm.example', account: hidden }] });
+			const boxed = segments(connectionsSentence(p)!).filter((x) => x.foreign).map((x) => x.text);
+			expect(boxed, JSON.stringify(hidden)).toHaveLength(3);
+			for (const b of [boxed[0]!, boxed[2]!]) expect(b, JSON.stringify(hidden)).toMatch(/⟨U\+(FEFF|2028|2029)⟩/);
+			expect(hiddenIn(p)).toBe('plan');
+			expect(listedLine({ provider: 'crm.example', account: hidden, state: 'listed' })).toMatch(/⟨U\+(FEFF|2028|2029)⟩/);
+		}
+	});
+
+	it('lays the sentence out one connection per line, and its parts read as the sentence', () => {
+		const p = preview({ connections: [
+			{ id: 'a', profile: 'CRM', provider: 'api.crm.example', account: 'eva@crm' },
+			{ id: 'b', profile: 'Shop', provider: 'shop.example', account: null },
+		] });
+		setLocale('de');
+		const de = connectionsParts(p)!;
+		expect(de.lead).toBe(`Dieser Plan nutzt Verbindungen, die ${v('eva@kanzlei.example')} mit eigenem Login verbunden hat: `);
+		expect(de.items).toEqual([`${v('api.crm.example')} (${v('eva@crm')}),`, `${v('shop.example')} (Konto unbekannt).`]);
+		expect(de.lead + de.items.join(' ')).toBe(connectionsSentence(p));
+		setLocale('en');
+		const en = connectionsParts(p)!;
+		expect(en.items).toEqual([`${v('api.crm.example')} (${v('eva@crm')}),`, `${v('shop.example')} (account unknown).`]);
+		expect(en.lead + en.items.join(' ')).toBe(connectionsSentence(p));
+		expect(connectionsParts(preview())).toBeNull();
+	});
+
+	it('shows a name with an emoji or a joiner as written, with no mark the note does not explain', () => {
+		setLocale('en');
+		for (const name of ['Eva \u2764\uFE0F', 'Fam \u{1F468}\u200D\u{1F469}', 'Mi\u200Cr']) {
+			const p = preview({ by: name, connections: [{ id: 'a', profile: 'P', provider: 'crm.example', account: name }] });
+			const boxed = segments(connectionsSentence(p)!).filter((x) => x.foreign).map((x) => x.text);
+			expect(boxed, JSON.stringify(name)).toEqual([name, 'crm.example', name]);
+			expect(hiddenIn(p)).toBeNull();
+		}
+	});
+
+	it('says an unnamed person in lynox\'s words, not as a value', () => {
+		setLocale('en');
+		const s = connectionsSentence(preview({ by: null, connections: [{ id: 'a', profile: 'P', provider: 'crm.example', account: null }] }))!;
+		expect(segments(s).filter((x) => x.foreign).map((x) => x.text)).toEqual(['crm.example']);
+		expect(s).toContain('Someone with access');
 	});
 
 	it('reads workflow values as name: value, and shows unreadable ones as they stand', () => {
@@ -154,11 +236,17 @@ describe('the list of a confirmed plan (B3)', () => {
 	const entry = (state: 'listed' | 'changed' | 'waits' | 'new', provider: string | null = 'api.crm.example', account: string | null = 'eva@crm') => ({ provider, account, state });
 	it('says each entry with its provider, account and state', () => {
 		setLocale('de');
-		expect(listedLine(entry('listed'))).toBe('api.crm.example (eva@crm): freigegeben');
+		expect(listedLine(entry('listed'))).toBe(`${v('api.crm.example')} (${v('eva@crm')}): freigegeben`);
 		expect(listedLine(entry('changed', null, null))).toBe('Verbindung entfernt (Konto unbekannt): geändert, nicht freigegeben');
-		expect(listedLine(entry('new', 'shop.example', ''))).toBe('shop.example (Konto unbekannt): neu, nicht freigegeben');
-		expect(listedLine(entry('waits'))).toBe('api.crm.example (eva@crm): Zugang beendet');
-		expect(listedLine(entry('listed', 'a\u202Eb', 'x\u200By'))).toBe('a⟨U+202E⟩b (x⟨U+200B⟩y): freigegeben');
+		expect(listedLine(entry('new', 'shop.example', ''))).toBe(`${v('shop.example')} (Konto unbekannt): neu, nicht freigegeben`);
+		expect(listedLine(entry('waits'))).toBe(`${v('api.crm.example')} (${v('eva@crm')}): Zugang beendet`);
+		expect(listedLine(entry('listed', 'a\u202Eb', 'x\u200By'))).toBe(`${v('a⟨U+202E⟩b')} (${v('x⟨U+200B⟩y')}): freigegeben`);
+	});
+	it('sets a provider and an account apart, so a label cannot say the state', () => {
+		setLocale('en');
+		const line = listedLine(entry('changed', 'crm.example', 'eva): allowed. (x'));
+		expect(segments(line).filter((x) => x.foreign).map((x) => x.text)).toEqual(['crm.example', 'eva): allowed. (x']);
+		expect(segments(line).at(-1)).toEqual({ text: '): changed, not allowed', foreign: false });
 	});
 	it('notes an ended access before a lapsed list, and that before an entry not allowed', () => {
 		setLocale('de');
@@ -192,7 +280,7 @@ describe('readPreview', () => {
 			{ ...p, expect: '' }, { ...p, expect: 1 }, { ...p, by: 1 },
 			{ ...p, subject: undefined }, { ...p, subject: [] }, { ...p, subject: { ...sub, id: 1 } }, { ...p, subject: { ...sub, title: null } },
 			{ ...p, subject: { ...sub, effect: 1 } }, { ...p, subject: { ...sub, wf: {} } }, { ...p, subject: { ...sub, description: undefined } },
-			{ ...p, workflow: { name: 'W' } }, { ...p, workflow: 'W' },
+			{ ...p, workflow: { name: 'W' } }, { ...p, workflow: 'W' }, { ...p, workflow: { name: 'W', confirmed: true, ended: 'yes' } },
 			{ ...p, connections: undefined }, { ...p, connections: [{ id: 'c', profile: 'CRM', provider: 'x' }] }, { ...p, connections: [null] },
 		];
 		expect(bad.map((b) => readPreview(b))).toEqual(bad.map(() => null));

@@ -148,3 +148,31 @@ describe('BulkStartDomains', () => {
 		expect(target.textContent!.trim()).toBe(tf('bulk.start_domains.none', { store: 'shop.example.com' }));
 	});
 });
+
+describe('the store\'s host in the allowed domains\' sentences', () => {
+	const boxes = (): string[] => [...target.querySelectorAll('code[data-testid="bulk-host"]')].map((c) => c.textContent ?? '');
+	const readOnly = (domains: string[]): void => {
+		component = mount(BulkStartDomains, { target, props: { storeHost: 'shop.example.com', editable: false, domains } });
+		flushSync();
+	};
+
+	it('boxes the store\'s host in the sentence above the field', () => {
+		editable();
+		flushSync();
+		expect(target.textContent).toContain(tf('bulk.start_domains.explain', { store: 'shop.example.com' }));
+		expect(boxes()).toEqual(['shop.example.com']);
+	});
+
+	it('boxes the store\'s host when no other domain is allowed', () => {
+		readOnly([]);
+		expect(target.textContent).toContain(tf('bulk.start_domains.none', { store: 'shop.example.com' }));
+		expect(boxes()).toEqual(['shop.example.com']);
+	});
+
+	it('boxes the store\'s host and each allowed domain in its own box', () => {
+		readOnly(['partner.example', 'shop.example.com.partner.example']);
+		expect(target.textContent).toContain(tf('bulk.start_domains.shown', { list: 'partner.example, shop.example.com.partner.example', store: 'shop.example.com' }));
+		expect(boxes()).toEqual(['shop.example.com']);
+		expect([...target.querySelectorAll('code[data-testid="bulk-start-domain"]')].map((c) => c.textContent)).toEqual(['partner.example', 'shop.example.com.partner.example']);
+	});
+});

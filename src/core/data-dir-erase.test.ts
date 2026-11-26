@@ -22,6 +22,7 @@ const KEPT_BY_DECISION = new Set([
   '.volume-check',
   'export-slot.lock',
   'http-secret',
+  'owner-sessions-generation',
   'plugins',
   'pricing.json',
   'vapid-keys.json',

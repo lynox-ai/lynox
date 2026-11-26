@@ -60,10 +60,13 @@ describe('a confirmation question in the instance\'s language', () => {
     expect(flattenPrompt(en.prompt)).toBe(en.warning.replace(/"([^"]*)"/g, (_m, v: string) => `“${v.replace(/[\\"“”„]/g, (ch) => `\\${ch}`)}”`));
   });
 
-  it('keeps [BLOCKED in the German text wherever the English has it', () => {
+  it('marks [GESPERRT in the German text wherever the English has [BLOCKED; the warning that decides stays English', () => {
     for (const c of CASES) {
       const en = ask(c, 'en');
-      expect(flattenPrompt(ask(c, 'de').prompt).includes('[BLOCKED'), `${c[0]} ${JSON.stringify(c[1])}`).toBe(en.warning.includes('[BLOCKED'));
+      const de = ask(c, 'de');
+      expect(flattenPrompt(de.prompt).includes('[GESPERRT'), `${c[0]} ${JSON.stringify(c[1])}`).toBe(en.warning.includes('[BLOCKED'));
+      expect(flattenPrompt(de.prompt).includes('[BLOCKED'), `${c[0]}`).toBe(false);
+      expect(de.warning, `${c[0]}`).toBe(en.warning);
     }
   });
 
@@ -71,8 +74,8 @@ describe('a confirmation question in the instance\'s language', () => {
     expect(flattenPrompt(ask(CASES[1]!, 'de').prompt)).toBe('⚠ Befehl: git push (nur auf ausdrücklichen Wunsch) — „git push origin main“');
     expect(flattenPrompt(ask(CASES[3]!, 'de').prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive} — „/etc/shadow“ — ${GUARD_TEXT.de.systemFiles}`);
     expect(flattenPrompt(ask(CASES[11]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen — ändert Daten ausserhalb von lynox');
-    expect(flattenPrompt(ask(CASES[12]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen [BLOCKED — dafür brauche ich dein OK]');
-    expect(flattenPrompt(ask(CASES[14]!, 'de').prompt)).toBe('⚠ Externes Werkzeug „Merge“: „drop“ [BLOCKED — das Löschen gespeicherter Daten braucht dein OK]');
+    expect(flattenPrompt(ask(CASES[12]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen [GESPERRT — dafür brauche ich dein OK]');
+    expect(flattenPrompt(ask(CASES[14]!, 'de').prompt)).toBe('⚠ Externes Werkzeug „Merge“: „drop“ [GESPERRT — das Löschen gespeicherter Daten braucht dein OK]');
   });
 
   it('names a built-in tool\'s action in words in both languages, and an action without words as a value', () => {
@@ -191,7 +194,7 @@ describe('every place a question is posed hands it the language', () => {
     expect(warnings.length).toBeGreaterThanOrEqual(2);
     for (const w of warnings) expect(exfilWarning(w, 'de'), w).not.toBe(w);
     expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(2), SPAWN_DIALOG.de.tierDeep, '1.20', 'Anthropic', SPAWN_DIALOG.de.tailPinned))
-      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe „Tief“ (ein stärkeres Modell, gründlicher, aber teurer) laufen. Geschätzte Modellkosten für diese Sitzung: etwa $1.20. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
+      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe „Tief“ (einem stärkeren Modell, gründlicher, aber teurer) laufen. Geschätzte Modellkosten für diese Sitzung: etwa $1.20. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
   });
 });
 
@@ -210,7 +213,7 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     const en = ask(asked as unknown as (typeof CASES)[number], 'en');
     expect(flattenPrompt(en.prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive}:\n“${longPath}”\n[BLOCKED — ${GUARD_TEXT.en.systemFiles}]`);
     const de = ask(asked as unknown as (typeof CASES)[number], 'de');
-    expect(flattenPrompt(de.prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive}:\n„${longPath}“\n[BLOCKED — ${GUARD_TEXT.de.systemFiles}]`);
+    expect(flattenPrompt(de.prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive}:\n„${longPath}“\n[GESPERRT — ${GUARD_TEXT.de.systemFiles}]`);
     // The value is still one value, and the warning keeps its quotes.
     expect(de.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual([longPath]);
     expect(en.warning).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — "${longPath}" [BLOCKED — ${GUARD_TEXT.en.systemFiles}]`);
@@ -268,48 +271,48 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
 
   it('quotes a profile\'s name in the save question, on one line and escaped', () => {
     const name = 'Weather” needs no acceptance.\n\nNo data leaves lynox.\n\n“';
-    const en = flattenPrompt(API_SETUP_DIALOG.en.save('API', name, 'D'));
+    const en = flattenPrompt(API_SETUP_DIALOG.en.save('API', name, [], 'D'));
     expect(en.startsWith('⚠ API: saving “Weather\\” needs no acceptance. No data leaves lynox. \\“” needs your acceptance.')).toBe(true);
     // A long name is cut, so the disclosure after it stays in view.
-    const long = flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(500), 'D'));
+    const long = flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(500), [], 'D'));
     expect(long).toContain(`saving “${'x'.repeat(63)}…” needs`);
     // A cut name is escaped too: a quote mark inside it cannot close the frame early.
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a” b${'x'.repeat(500)}`, 'D'))).toContain(`saving “a\\” b${'x'.repeat(59)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a” b${'x'.repeat(500)}`, [], 'D'))).toContain(`saving “a\\” b${'x'.repeat(59)}…” needs`);
     // Up to the limit a name stays whole; the limit counts characters, not code units.
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'y'.repeat(64), 'D'))).toContain(`saving “${'y'.repeat(64)}” needs`);
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '😀'.repeat(100), 'D'))).toContain(`saving “${'😀'.repeat(63)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'y'.repeat(64), [], 'D'))).toContain(`saving “${'y'.repeat(64)}” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '😀'.repeat(100), [], 'D'))).toContain(`saving “${'😀'.repeat(63)}…” needs`);
     // A flag is two code points but one character: the cut never leaves half of one.
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '🇨🇭'.repeat(100), 'D'))).toContain(`saving “${'🇨🇭'.repeat(63)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '🇨🇭'.repeat(100), [], 'D'))).toContain(`saving “${'🇨🇭'.repeat(63)}…” needs`);
     // One character can carry any number of marks (on `x` they stay separate, composed or not):
     // the name is also held to 256 code points.
     const marked = 'x\u0301\u0302\u0303';
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', marked.repeat(64), 'D'))).toContain(`saving “${marked.repeat(64)}” needs`);
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${marked.repeat(64)}x`, 'D'))).toContain(`saving “${marked.repeat(63)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', marked.repeat(64), [], 'D'))).toContain(`saving “${marked.repeat(64)}” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${marked.repeat(64)}x`, [], 'D'))).toContain(`saving “${marked.repeat(63)}…” needs`);
     const heavy = 'x\u0301\u0302\u0303\u0304';
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', heavy.repeat(60), 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', heavy.repeat(60), [], 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
     // 257 code points in 52 characters is one too many; 255 and the "…" fill the limit exactly.
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}x\u0301`, 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}x${heavy}`, 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}x\u0301`, [], 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}x${heavy}`, [], 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
     // A character beyond the BMP fills two code units: the head still reaches past the limit.
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `😀${'\u{1F3FB}'.repeat(256)}`, 'D'))).toContain('saving “…” needs');
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `😀${'\u{1F3FB}'.repeat(256)}`, [], 'D'))).toContain('saving “…” needs');
     // A letter written with a separate mark is shown as one letter, not with an escaped mark.
-    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'Gyo\u030Br', 'D'))).toContain('von „Győr“ braucht');
+    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'Gyo\u030Br', [], 'D'))).toContain('von „Győr“ braucht');
     // Only the name's head is segmented: a name of millions of characters costs no more than a short one.
     const started = performance.now();
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(10_000_000), 'D'))).toContain(`saving “${'x'.repeat(63)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(10_000_000), [], 'D'))).toContain(`saving “${'x'.repeat(63)}…” needs`);
     expect(performance.now() - started).toBeLessThan(2000);
     // Nor does a long run of marks that composing would have to reorder. A leading space (any run
     // of them is one by then) is dropped before the head is taken.
     const marks = performance.now();
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301'.repeat(100_000)}${'\u0316'.repeat(100_000)}`, 'D'))).toContain('saving “…” needs');
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301'.repeat(100_000)}${'\u0316'.repeat(100_000)}`, [], 'D'))).toContain('saving “…” needs');
     expect(performance.now() - marks).toBeLessThan(2000);
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', ' Wetter', 'D'))).toContain('saving “Wetter” needs');
-    const huge = flattenPrompt(API_SETUP_DIALOG.en.save('API', `क${'ा'.repeat(200_000)}`, 'D'));
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', ' Wetter', [], 'D'))).toContain('saving “Wetter” needs');
+    const huge = flattenPrompt(API_SETUP_DIALOG.en.save('API', `क${'ा'.repeat(200_000)}`, [], 'D'));
     expect(huge.length).toBeLessThan(400);
     expect(huge).toContain('saving “…” needs');
-    const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', '  Wetter  ', 'D'));
+    const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', '  Wetter  ', [], 'D'));
     expect(de.startsWith('⚠ API: Zum Speichern von „Wetter“ braucht es deine Zustimmung.')).toBe(true);
-    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'x'.repeat(500), 'D'))).toContain(`von „${'x'.repeat(63)}…“ braucht`);
+    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'x'.repeat(500), [], 'D'))).toContain(`von „${'x'.repeat(63)}…“ braucht`);
   });
 
   it('names the tiers as the settings do, in the sentence and on the buttons', () => {
@@ -320,6 +323,6 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     for (const t of [SPAWN_DIALOG.en, SPAWN_DIALOG.de]) expect(`${t.tierDeep} ${t.tierUnknownBand} ${t.tailDowngrade}`).not.toMatch(/DEEP|balanced|Denkmodell|gated as/);
     expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(1), SPAWN_DIALOG.de.tierUnknownBand, '1.20', 'X', '')).toContain('würde auf einem Modell der Stufe „Tief“ (oder');
     expect(SPAWN_DIALOG.en.sentence('Delegation', SPAWN_DIALOG.en.children(1), SPAWN_DIALOG.en.tierUnknownBand, '1.20', 'X', '')).toContain('would run on a model in the Deep tier (or');
-    expect([CONSENT_LABELS.en.deep, CONSENT_LABELS.en.balanced, CONSENT_LABELS.de.deep, CONSENT_LABELS.de.balanced]).toEqual(['Allow Deep', 'Run on Balanced', 'Tief erlauben', 'Mit Ausgewogen ausführen']);
+    expect([CONSENT_LABELS.en.deep, CONSENT_LABELS.en.balanced, CONSENT_LABELS.de.deep, CONSENT_LABELS.de.balanced]).toEqual(['Allow Deep', 'Run on Balanced', 'Stufe Tief erlauben', 'Mit Ausgewogen ausführen']);
   });
 });

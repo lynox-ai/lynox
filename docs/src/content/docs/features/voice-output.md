@@ -25,7 +25,7 @@ Toggling the speaker off mid-stream stops current audio and clears the queue.
 
 | Property              | Mistral Voxtral TTS                     |
 |-----------------------|-----------------------------------------|
-| Hosting               | Mistral La Plateforme (hosted in the EU by default)       |
+| Hosting               | Mistral La Plateforme (EU endpoint)       |
 | Model                 | `voxtral-mini-tts-3-0` (Voxtral TTS 3, pinned; Mistral lists it as Public Preview) |
 | Default voice         | `en_paul_neutral` (English)             |
 | Languages             | 35+ per Mistral; the voice catalog has voices for many of them |
@@ -62,7 +62,7 @@ The same key powers voice input (transcription). One credential covers both dire
 
 ## Privacy
 
-- Audio is synthesized on Mistral's EU infrastructure and streamed straight back to your browser. No persistent storage by the provider.
+- Audio is synthesized by Mistral through its EU endpoint (`api.eu.mistral.ai`) and streamed straight back to your browser. Mistral keeps API inputs and outputs for 30 rolling days to monitor abuse.
 - lynox does not retain the audio — the speaker button always re-synthesizes on click.
 - The speaker button is hidden entirely when no TTS provider is available — so on self-hosted setups without a Mistral key, no dead control appears.
 

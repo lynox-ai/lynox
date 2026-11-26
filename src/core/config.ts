@@ -9,6 +9,7 @@ import { readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
+import { jsonFault } from './json-fault.js';
 import { pinnedVaultSlotForEndpoint } from './llm/catalog.js';
 import { TIER_PRESETS, expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from './tier-presets.js';
 import { providerListApplies, refusedProfileClass } from './contained-providers.js';
@@ -206,6 +207,12 @@ function getProjectConfigDir(): string {
   return join(process.cwd(), LYNOX_DIR);
 }
 
+/** The code of a failed read (`EACCES`, `ERR_FS_FILE_TOO_LARGE`), or a fixed text: never the message. */
+function errnoCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && /^(E[A-Z0-9]+|ERR_[A-Z_]+)$/.test(code) ? code : 'read failed';
+}
+
 function readConfigFile(filePath: string): LynoxUserConfig | null {
   if (!existsSync(filePath)) return null;
   try {
@@ -218,8 +225,9 @@ function readConfigFile(filePath: string): LynoxUserConfig | null {
     }
     return result.data as LynoxUserConfig;
   } catch (err: unknown) {
-    const msg = getErrorMessage(err);
-    process.stderr.write(`⚠ Failed to parse ${filePath}: ${msg}\n`);
+    // The file holds keys: a parse error names the position, never the text around it. A read
+    // error names its code; the path is already in the line.
+    process.stderr.write(`⚠ Failed to parse ${filePath}: ${err instanceof SyntaxError ? jsonFault(err) : errnoCode(err)}\n`);
     return null;
   }
 }

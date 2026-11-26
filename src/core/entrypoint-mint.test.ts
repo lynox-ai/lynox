@@ -28,7 +28,8 @@ function sandbox(): { home: string; lynox: string } {
   if (tools === 'busybox') for (const applet of APPLETS) symlinkSync(BUSYBOX!, join(bin, applet));
   writeFileSync(join(bin, 'node'), [
     '#!/bin/sh',
-    'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
+    '[ "$1" = "--disable-sigusr1" ] || { echo "node started without --disable-sigusr1: $*" >&2; exit 97; }',
+    'if [ "$2" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
     'echo "ENGINE_KEY=${LYNOX_VAULT_KEY:-}"',
     'echo "ENGINE_KEY_SOURCE=${LYNOX_VAULT_KEY_SOURCE-unset}"',
   ].join('\n') + '\n', { mode: 0o755 });

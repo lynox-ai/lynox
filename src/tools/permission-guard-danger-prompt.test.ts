@@ -144,10 +144,12 @@ describe('a plugin tool cannot word its dialog as a built-in tool\'s', () => {
   });
 
   it('a payload without a text message, or no answer at all, does not throw', () => {
-    const s = ask(plugin('Merge', () => ({ message: 42 as unknown as string })));
-    expect(values(s)).toEqual(['Merge', '42']);
-    const none = ask(plugin('Merge', () => undefined as unknown as null));
-    expect(flattenPrompt(none.prompt)).toBe('⚠ External tool “Merge” — destroys stored data');
+    let s: ReturnType<typeof ask> | undefined;
+    expect(() => { s = ask(plugin('Merge', () => ({ message: 42 as unknown as string }))); }).not.toThrow();
+    expect(values(s!)).toEqual(['Merge', '42']);
+    let none: ReturnType<typeof ask> | undefined;
+    expect(() => { none = ask(plugin('Merge', () => undefined as unknown as null)); }).not.toThrow();
+    expect(flattenPrompt(none!.prompt)).toBe('⚠ External tool “Merge” — destroys stored data');
   });
 
   it('a payload is blocked unattended just as a label is', () => {
