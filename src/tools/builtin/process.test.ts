@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { saveWorkflowTool, processToSteps, SESSION_PARAM_NAME_REFUSAL } from './process.js';
-import { _resetPipelineStore, getPipeline, storePipeline } from './pipeline.js';
+import { saveWorkflowTool, processToSteps, SESSION_ANALYSIS_FAILED, SESSION_PARAM_NAME_REFUSAL } from './process.js';
+import { _resetPipelineStore, getPipeline, getPipelineStore, storePipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
@@ -206,6 +206,8 @@ describe('save_workflow — session source', () => {
     expect(result).not.toContain(SENT);
     expect(mockHistory.insertPlannedPipeline).not.toHaveBeenCalled();
     expect(mockHistory.insertProcess).not.toHaveBeenCalled();
+    // Nor the in-memory store a run reads first.
+    expect(getPipelineStore().size).toBe(0);
   });
 
   it.each([
@@ -327,18 +329,23 @@ describe('save_workflow — retryable extraction failure', () => {
     captureProcessMock.mockReset();
   });
 
-  it('surfaces a clear retryable error and writes no partial state', async () => {
-    captureProcessMock.mockRejectedValue(new Error('network timeout'));
+  // An endpoint may echo what it was sent, the session's tool calls included: the provider's text
+  // stays in the log and the model gets a fixed answer that names the retry.
+  it('answers a fixed retryable error without the provider\'s text, and writes no partial state', async () => {
+    const MARK = 'echoed-session-text-7f3a';
+    captureProcessMock.mockRejectedValue(new Error(`API error 422: {"detail":[{"input":"${MARK}"}]}`));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
     const result = await saveWorkflowTool.handler({ name: 'Flaky Workflow' }, agent);
 
-    // Error message names the failure and tells the agent it can retry.
-    expect(result).toMatch(/extraction failed/i);
-    expect(result).toMatch(/network timeout/);
-    expect(result).toMatch(/retry/i);
+    expect(result).toBe('Error: The analysis of this session failed. No workflow was saved. Call save_workflow once more to retry; if it fails again, tell the user that lynox could not analyse the session, and offer to plan the steps with plan_task instead (a workflow saved that way takes no parameters).');
+    expect(result).toBe(SESSION_ANALYSIS_FAILED);
+    expect(result).not.toContain(MARK);
+    errors.mockRestore();
 
     // Atomicity: no ProcessRecord, no PlannedPipeline written.
     expect(mockHistory.insertProcess).not.toHaveBeenCalled();
+    expect(mockHistory.insertPlannedPipeline).not.toHaveBeenCalled();
   });
 });
 

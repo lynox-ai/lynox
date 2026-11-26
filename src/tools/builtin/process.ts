@@ -22,6 +22,12 @@ export const SESSION_PARAM_NAME_REFUSAL =
   'yourself with plan_task and save that plan with save_workflow and its workflow_id. ' +
   'A workflow saved that way takes no parameters; tell the user so.';
 
+/** save_workflow's answer when the session analysis fails; the cause is logged, never returned. */
+export const SESSION_ANALYSIS_FAILED =
+  'Error: The analysis of this session failed. No workflow was saved. Call save_workflow once more to retry; ' +
+  'if it fails again, tell the user that lynox could not analyse the session, and offer to plan the steps ' +
+  'with plan_task instead (a workflow saved that way takes no parameters).';
+
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
 // === save_workflow ===
@@ -309,8 +315,9 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // A stopped call is not a failure to retry: the engine reports the stop.
     if (currentCallSignal()?.aborted === true) throw processCaptureStopped();
     logErrorChain('save_workflow:extract', err);
-    // Nothing has been persisted yet — safe to retry.
-    return `Error: Workflow extraction failed (${getErrorMessage(err)}). No workflow was saved. This is a transient analysis failure — call save_workflow again to retry.`;
+    // Nothing has been persisted yet — safe to retry. The provider's error text stays in the log: an
+    // endpoint may echo what it was sent, which is the session's tool calls, outside content included.
+    return SESSION_ANALYSIS_FAILED;
   }
 
   // Stopped after the reply arrived: nothing is saved. Everything from here to the last write
@@ -320,7 +327,9 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
   // The parameter names come from the analysis, which read the session's tool calls, outside
   // content included, and the result below returns them. A name outside the form a refusal may
   // quote (`isShownParamName`) refuses the whole capture: dropping only that name would leave a
-  // step's `{{name}}` that resolves to nothing. Nothing is stored yet, and the name is not quoted.
+  // step's `{{name}}` in its task as raw text, the name included, since only listed names move
+  // under `params.` and an unknown one passes the save as a possible context key. Nothing is
+  // stored yet, and the name is not quoted.
   if (!record.parameters.every((p) => isShownParamName(p.name))) {
     return SESSION_PARAM_NAME_REFUSAL;
   }
