@@ -24,7 +24,7 @@ import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 export const TOOL_LINE_WORDS = {
   bash: 'Command',
   http_request: 'API request',
-  api_setup: 'API profiles',
+  api_setup: 'API connections',
   mail_send: 'New email',
   mail_reply: 'Reply to email',
   mail_connect: 'Mailbox connection',
@@ -59,7 +59,7 @@ export const DIALOG_ONLY_WORDS = {
 export const TOOL_LINE_WORDS_DE = {
   bash: 'Befehl',
   http_request: 'API-Anfrage',
-  api_setup: 'API-Profile',
+  api_setup: 'API-Verbindungen',
   mail_send: 'Neue Mail',
   mail_reply: 'Antwort auf Mail',
   mail_connect: 'Postfach-Verbindung',

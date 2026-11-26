@@ -59,10 +59,13 @@ describe('a confirmation question in the instance\'s language', () => {
     expect(flattenPrompt(en.prompt)).toBe(en.warning.replace(/"([^"]*)"/g, (_m, v: string) => `"${v.replace(/[\\"]/g, (ch) => `\\${ch}`)}"`));
   });
 
-  it('keeps [BLOCKED in the German text wherever the English has it', () => {
+  it('marks [GESPERRT in the German text wherever the English has [BLOCKED; the warning that decides stays English', () => {
     for (const c of CASES) {
       const en = ask(c, 'en');
-      expect(flattenPrompt(ask(c, 'de').prompt).includes('[BLOCKED'), `${c[0]} ${JSON.stringify(c[1])}`).toBe(en.warning.includes('[BLOCKED'));
+      const de = ask(c, 'de');
+      expect(flattenPrompt(de.prompt).includes('[GESPERRT'), `${c[0]} ${JSON.stringify(c[1])}`).toBe(en.warning.includes('[BLOCKED'));
+      expect(flattenPrompt(de.prompt).includes('[BLOCKED'), `${c[0]}`).toBe(false);
+      expect(de.warning, `${c[0]}`).toBe(en.warning);
     }
   });
 
@@ -70,8 +73,8 @@ describe('a confirmation question in the instance\'s language', () => {
     expect(flattenPrompt(ask(CASES[1]!, 'de').prompt)).toBe('⚠ Befehl: git push (nur auf ausdrücklichen Wunsch) — "git push origin main"');
     expect(flattenPrompt(ask(CASES[3]!, 'de').prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive} — "/etc/shadow" — ${GUARD_TEXT.de.systemFiles}`);
     expect(flattenPrompt(ask(CASES[11]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen — ändert Daten ausserhalb von lynox');
-    expect(flattenPrompt(ask(CASES[12]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen [BLOCKED — dafür brauche ich dein OK]');
-    expect(flattenPrompt(ask(CASES[14]!, 'de').prompt)).toBe('⚠ Externes Werkzeug "Merge": "drop" [BLOCKED — das Löschen gespeicherter Daten braucht dein OK]');
+    expect(flattenPrompt(ask(CASES[12]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen [GESPERRT — dafür brauche ich dein OK]');
+    expect(flattenPrompt(ask(CASES[14]!, 'de').prompt)).toBe('⚠ Externes Werkzeug "Merge": "drop" [GESPERRT — das Löschen gespeicherter Daten braucht dein OK]');
   });
 
   it('names a built-in tool\'s action in words in both languages, and an action without words as a value', () => {
@@ -190,6 +193,6 @@ describe('every place a question is posed hands it the language', () => {
     expect(warnings.length).toBeGreaterThanOrEqual(2);
     for (const w of warnings) expect(exfilWarning(w, 'de'), w).not.toBe(w);
     expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(2), SPAWN_DIALOG.de.tierDeep, '1.20', 'Anthropic', SPAWN_DIALOG.de.tailPinned))
-      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer) laufen. Geschätzte Modellkosten für diese Sitzung: etwa $1.20. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
+      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe Tief (ein stärkeres Denkmodell, leistungsfähiger, aber teurer) laufen. Geschätzte Modellkosten für diese Sitzung: etwa $1.20. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
   });
 });

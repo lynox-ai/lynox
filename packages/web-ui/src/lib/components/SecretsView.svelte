@@ -23,6 +23,7 @@
 
 	function refusalText(why: SecretWriteRefusal): string {
 		if (why === 'preset_client') return t('secrets.preset_client_use_form');
+		if (why === 'retired_preset_client') return t('secrets.retired_preset_client');
 		return why === 'managed' ? t('secrets.managed_blocked') : t('common.save_failed');
 	}
 

@@ -10,7 +10,15 @@ import { readEnvAlias } from './env.js';
 const PRIVACY_POLICY_URL = 'https://lynox.ai/privacy';
 const OUTSIDE = 'On this instance you manage the workspace files outside lynox.';
 
-const managed = (): boolean => !!readEnvAlias('LYNOX_BILLING_TIER');
+/**
+ * Whether the way out names lynox support: any tier value counts, canonical or not. An instance
+ * with a tier set is run as a provisioned one by the same raw check elsewhere (the lifecycle routes
+ * refused on it, the import's strip and regate, the managed hook), so support is its real way out.
+ * `GET /api/config` hands the same answer to the Web UI (`billing_tier_set`), so its notices name
+ * the same way out as these refusals.
+ */
+export const billingTierSet = (): boolean => !!readEnvAlias('LYNOX_BILLING_TIER');
+const managed = billingTierSet;
 
 /** The record a backup or a migration export carries when it left the workspace out (walkers 1, 2). */
 export const OMITTED_SIDECAR = 'omitted-sidecar';
