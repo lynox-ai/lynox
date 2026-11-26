@@ -145,8 +145,10 @@ import { resolveClientIp } from './client-ip.js';
 import { awaitsOwnQuestion } from './own-question.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
+import type { KnowledgeStore } from '../core/knowledge-store.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
+import { judgeRuleSourceChanged } from '../core/bulk-judge-rule.js';
 import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
@@ -169,6 +171,7 @@ import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.j
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
+import { EXPORT_RELATIONS_PER_ENTITY } from '../core/knowledge-layer.js';
 import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure, type WorkspaceWalk } from '../core/data-dir-erase.js';
 import type { WorkspaceAccess } from '../core/workspace-access.js';
 import type { StagedArchive, WorkspaceManifest } from '../core/workspace-export.js';
@@ -2667,7 +2670,15 @@ export class LynoxHTTPApi {
   private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
   private static readonly SESSION_COOKIE_NAME = 'lynox_session';
   /** The owner's principal part of a session cookie; the Web UI mints the same bytes (`ownerSession`). */
-  private static readonly OWNER_PRINCIPAL_PART = Buffer.from(JSON.stringify({ v: 1, kind: 'owner' }), 'utf8').toString('base64url');
+  /**
+   * The owner's principal part of a session cookie minted in `generation` (owner-sessions.ts): the
+   * bytes of today's `{v:1,kind:'owner'}` in generation 0, `{v:1,kind:'owner',gen:n}` after the
+   * first end. The web UI mints the same bytes (`ownerSessionPrincipal`).
+   */
+  private static _ownerPrincipalPart(generation: number): string {
+    const principal = generation === 0 ? { v: 1, kind: 'owner' } : { v: 1, kind: 'owner', gen: generation };
+    return Buffer.from(JSON.stringify(principal), 'utf8').toString('base64url');
+  }
   /** A principal cookie stamped further than this in the future is refused (D4). */
   private static readonly SESSION_FUTURE_SKEW_S = 60;
 
@@ -3242,7 +3253,10 @@ export class LynoxHTTPApi {
    * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
-   * answers its own 404.
+   * answers its own 404, but only in the request's own conversation: in another person's it is
+   * refused as when a question is open, so the answer does not say whether one is. A question
+   * named by id that belongs to another session is no candidate: the route answers it as one,
+   * and it says nothing about this conversation.
    */
   private _refuseUnlessOwnsPrompt(
     req: IncomingMessage,
@@ -3253,9 +3267,10 @@ export class LynoxHTTPApi {
   ): boolean {
     const principal = this._principalOf(req);
     if (isOwnerPrincipal(principal)) return false;
-    const candidates = [promptId ? ps.getById(promptId) : undefined, ps.getPending(sessionId)]
+    const named = promptId ? ps.getById(promptId) : undefined;
+    const candidates = [named?.session_id === sessionId ? named : undefined, ps.getPending(sessionId)]
       .filter((row): row is PendingPromptRow => row !== undefined);
-    if (candidates.length === 0) return false;
+    if (candidates.length === 0) return this._refuseUnlessOwns(req, res, 'answer this question', () => [this._threadRow(sessionId)]);
     // A question names the grant it was asked under (v60). A later grant for the same address is
     // another grant (§3.13 B4): it does not answer what the earlier one left open.
     if (principal.kind === 'mandate' && candidates.some((row) => row.mandate_id !== null && row.mandate_id !== principal.mandateId)) {
@@ -3474,11 +3489,12 @@ export class LynoxHTTPApi {
       return null;
     }
 
-    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() ? null : { iat: timestamp, principal: null };
+    // A cookie without a principal was minted before generations existed: generation 0.
+    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() || this._ownerSessionEnded(0) ? null : { iat: timestamp, principal: null };
     const session = LynoxHTTPApi._parseSessionPrincipal(parts[1]!);
     if (session === null) return null;
     if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
-    if (session.kind === 'owner') return { iat: timestamp, principal: null };
+    if (session.kind === 'owner') return this._ownerSessionEnded(session.gen) ? null : { iat: timestamp, principal: null };
     if (nowS >= session.exp) return null;
     return {
       iat: timestamp,
@@ -3487,6 +3503,21 @@ export class LynoxHTTPApi {
         ...(session.mandateExp !== undefined ? { mandateExp: session.mandateExp } : {}),
       },
     };
+  }
+
+  /**
+   * Whether an owner cookie of this generation is refused: any generation but the live one
+   * (owner-sessions.ts, `Engine.liveOwnerGeneration`, which has one of its own when engine.db did not
+   * open); a store that cannot be read refuses. A mandate's session is not touched: it ends with its
+   * mandate (`_mandateLive`).
+   */
+  private _ownerSessionEnded(generation: number): boolean {
+    if (!this.engine) return generation !== 0;
+    try {
+      return generation !== this.engine.liveOwnerGeneration();
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -3499,7 +3530,7 @@ export class LynoxHTTPApi {
   }
 
   /** The signed principal part of a session cookie; null for anything this engine does not know. */
-  private static _parseSessionPrincipal(part: string): { kind: 'owner' } | { kind: 'mandate'; email: string; display: string; mandateId: string; exp: number; mandateExp?: number } | null {
+  private static _parseSessionPrincipal(part: string): { kind: 'owner'; gen: number } | { kind: 'mandate'; email: string; display: string; mandateId: string; exp: number; mandateExp?: number } | null {
     let raw: unknown;
     try {
       raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
@@ -3509,8 +3540,14 @@ export class LynoxHTTPApi {
     if (raw === null || typeof raw !== 'object') return null;
     const p = raw as Record<string, unknown>;
     if (p['v'] !== 1) return null;
-    // Exactly `{v:1,kind:'owner'}`: any other field beside it is refused, never read as the owner.
-    if (p['kind'] === 'owner') return Object.keys(p).length === 2 ? { kind: 'owner' } : null;
+    // Exactly `{v:1,kind:'owner'}` (generation 0) or `{v:1,kind:'owner',gen:n}` with n a whole number
+    // from 1: any other field, or another `gen`, is refused, never read as the owner.
+    if (p['kind'] === 'owner') {
+      const keys = Object.keys(p).length;
+      if (keys === 2) return { kind: 'owner', gen: 0 };
+      const gen = p['gen'];
+      return keys === 3 && typeof gen === 'number' && Number.isSafeInteger(gen) && gen >= 1 ? { kind: 'owner', gen } : null;
+    }
     if (p['kind'] !== 'mandate') return null;
     const { email, display, mandate_id: mandateId, exp } = p;
     if (typeof email !== 'string' || email.length === 0) return null;
@@ -3564,11 +3601,23 @@ export class LynoxHTTPApi {
   ): void {
     const ageSec = Math.floor(Date.now() / 1000) - cookieIssuedAt;
     if (ageSec < LynoxHTTPApi.SESSION_REFRESH_AFTER_S) return;
+    // In the live generation: the cookie being refreshed was just let in, so it is of that one; a
+    // cookie of another was refused before this and is never refreshed into the live one.
+    LynoxHTTPApi._setOwnerSessionCookie(req, res, secret, this.engine ? this.engine.liveOwnerGeneration() : 0, trustProxy);
+  }
 
+  /** Mint the owner's session cookie in `generation`, signed now, and set it on the response. */
+  private static _setOwnerSessionCookie(
+    req: IncomingMessage,
+    res: ServerResponse,
+    secret: string,
+    generation: number,
+    trustProxy: boolean,
+  ): void {
     const key = createHmac('sha256', 'lynox-session').update(secret).digest();
     const nonce = randomBytes(8).toString('hex');
     const ts = Math.floor(Date.now() / 1000).toString();
-    const payload = `${nonce}.${LynoxHTTPApi.OWNER_PRINCIPAL_PART}.${ts}`;
+    const payload = `${nonce}.${LynoxHTTPApi._ownerPrincipalPart(generation)}.${ts}`;
     const hmac = createHmac('sha256', key).update(payload).digest('hex');
     const token = `${payload}.${hmac}`;
 
@@ -5020,6 +5069,10 @@ export class LynoxHTTPApi {
     }, OWN);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/sessions/:id', async (_req, res, params) => {
+      // The conversation first, before the lookup: the thread row is there with or without a live
+      // session, so someone else's conversation is refused alike in both states, and the 404 does
+      // not tell a mandate whether a session is live in it.
+      if (this._refuseUnlessOwns(_req, res, 'end this session', () => [this._threadRow(params['id']!)])) return;
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // Ending a session stops its run (§3.13 B6, E7): the conversation and the run must
@@ -5037,11 +5090,12 @@ export class LynoxHTTPApi {
     // ── Runs (SSE) ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/run', async (req, res, params, body) => {
       const sessionId = params['id']!;
+      // A mandate runs only in a conversation it started (§3.13 E1, N2). Read on the thread
+      // row, not on the session object: the session's principal is whoever ran last. Before the
+      // lookup, so the 404 does not tell a mandate whether a session is live in another's.
+      if (this._refuseUnlessOwns(req, res, 'run this conversation', () => [this._threadRow(sessionId)])) return;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
-      // A mandate runs only in a conversation it started (§3.13 E1, N2). Read on the thread
-      // row, not on the session object: the session's principal is whoever ran last.
-      if (this._refuseUnlessOwns(req, res, 'run this conversation', () => [this._threadRow(sessionId)])) return;
       // A mandate's helper takes no key in this chat: a message that reads as carrying one is
       // refused here, before the thread, the run history, the title, a log or the model see any of
       // it, and before a busy or full queue (409, 429) or a takeover could answer instead — those
@@ -6621,6 +6675,9 @@ export class LynoxHTTPApi {
     }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
+      // The conversation before the lookup, as on the other session routes: the 404 below then
+      // says nothing about another person's conversation.
+      if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => [this._threadRow(params['id']!)])) return;
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // The changeset is the last run's work and outlives it: only that run's principal (or
@@ -6741,6 +6798,9 @@ export class LynoxHTTPApi {
     // ── Compact (context management) ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/compact', async (_req, res, params, body) => {
       const sessionId = params['id']!;
+      // The conversation before the lookup, as on the other session routes: the 404 below then
+      // says nothing about another person's conversation.
+      if (this._refuseUnlessOwns(_req, res, 'compact this conversation', () => [this._threadRow(sessionId)])) return;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // Compacting rewrites the conversation the last run left: the conversation and that
@@ -6778,9 +6838,11 @@ export class LynoxHTTPApi {
     // renders as actionable copy (U1).
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/sessions/:id/model', async (_req, res, params, body) => {
       const sessionId = params['id']!;
+      // Before the lookup: the thread row is there with or without a live session, so another
+      // person's conversation is refused alike, and the 404 tells a mandate nothing about it.
+      if (this._refuseUnlessOwns(_req, res, 'change this conversation\'s model', () => [this._threadRow(sessionId)])) return;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
-      if (this._refuseUnlessOwns(_req, res, 'change this conversation\'s model', () => [this._threadRow(sessionId)])) return;
       if (this.runningSessions.has(sessionId)) {
         errorResponse(res, 409, 'Cannot change the model while a run is in progress');
         return;
@@ -9640,6 +9702,12 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what stamping a workflow would confirm')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/confirm', async (_req, res, params, body) => {
+      // Only in the owner's browser session, as a schedule is confirmed: a token, the owner's
+      // included, goes to scripts and integrations, which stamp nothing on the owner's behalf.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A workflow is stamped only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
@@ -9686,6 +9754,12 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what taking over a workflow would do')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/takeover', async (_req, res, params, body) => {
+      // Only in the owner's browser session, as the stamp: the takeover lets a workflow run as the
+      // owner, which a script or an integration holding a token does not decide.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A workflow is taken over only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       // The digest from the preview is required: the takeover is the owner's consent to what the
       // preview showed, and nothing else.
       const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
@@ -10348,6 +10422,12 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what taking over a plan would do')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/takeover', async (_req, res, params, body) => {
+      // Only in the owner's browser session: the takeover releases a plan that was paused for a
+      // reason, the same consent a schedule's confirmation is.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A plan is taken over only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       if (!planPauseOn()) { errorResponse(res, 409, TAKEOVER_REFUSALS.not_available.message, 'not_available'); return; }
       // The digest from the preview is required: the takeover is the owner's consent to what the
       // preview showed, and nothing else.
@@ -10708,6 +10788,10 @@ export class LynoxHTTPApi {
         // the owner sees it before the start the hash binds, never only the fields it decides.
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier, ...(judgeRule.context !== undefined ? { context: judgeRule.context } : {}) } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
+        // A rule taken word for word from a saved artifact is not lynox's wording: the page says
+        // where it came from, by the title it had when the run was planned. Read from the stored
+        // rule, so the owner's only, as the rule is.
+        ruleFromArtifact: judgeRule?.source !== undefined ? (judgeRule.source.title !== undefined ? { title: judgeRule.source.title } : {}) : null,
         judgeModel,
         judgeServedBy,
         // The start route refuses every judged start on such an instance (judge_unavailable); the
@@ -10992,6 +11076,10 @@ export class LynoxHTTPApi {
           // The link domains the owner allows a judged run's verdicts to add (PRD shopify-preset
           // §20.2 item 5, S20-4): only here, on the owner's route, written with the start itself.
           startDomains: fields['startDomains'],
+          // A rule taken from an artifact begins judging only while the artifact still holds the text
+          // the run was planned with: the run judges by the planned text, never a newer one, and an
+          // owner who edited the rule since meant the edit.
+          ruleSourceChanged: (rule) => judgeRuleSourceChanged(rule, engine.getArtifactStore()),
         });
         // The texts are ux's.
         if (!read.ok && read.reason === 'start_domains_invalid') {
@@ -11011,6 +11099,11 @@ export class LynoxHTTPApi {
           errorResponse(res, 409, 'Another judged run is started and not yet approved. Starting this one ends it, keeping what it spent: start again with "supersedes" set to its id.', 'supersede_required', {
             supersedable: { id: read.supersedable.id, costUsd: read.supersedable.costUsd },
           });
+          return;
+        }
+        if (!read.ok && read.reason === 'rule_source') {
+          const { code, message, title } = read.refusal;
+          errorResponse(res, 409, message, code, title !== undefined ? { title } : undefined);
           return;
         }
         if (!read.ok && read.reason === 'rule_refused') {
@@ -12548,6 +12641,64 @@ export class LynoxHTTPApi {
       const out: MandateRevocationResponse = { newly_revoked: newly };
       jsonResponse(res, 200, out);
     });
+
+    // End every owner session of this instance, from the control plane (owner-sessions.ts): the
+    // operator's way when the owner asks for it or a cookie left the owner's hands. Same auth as the
+    // mandate revocation above, and the same end as the owner's route. The instance secret stays, so
+    // usage reports and secret delivery go on. With `{ generation }` it ends nothing by itself and
+    // re-asserts the generation the control plane recorded, raised to, never lowered: an instance
+    // restored from an older backup is healed by that call.
+    this.addCpAdminRoute('POST /api/admin/owner-sessions/end', async (req, res, _params, body) => {
+      const sessions = engine.getOwnerSessions();
+      if (!sessions) {
+        errorResponse(res, 503, 'The store of owner sessions is not available, so no session was ended. Restart the instance and try again.', 'owner_sessions_unavailable');
+        return;
+      }
+      const asserted = body !== null && typeof body === 'object' ? (body as Record<string, unknown>)['generation'] : undefined;
+      if (asserted !== undefined) {
+        // The control plane's alone: on a self-hosted instance this route is the owner's admin
+        // scope, and a raise far ahead would leave every later session past what a cookie can carry.
+        if (!this._cpAdminRequests.has(req)) {
+          errorResponse(res, 403, 'Only the control plane re-asserts a generation. To end the owner sessions, send the call without generation.', 'owner_sessions_assert_cp_only');
+          return;
+        }
+        // Never past the clock in milliseconds, which is where a recreated engine.db starts: no
+        // generation an end reaches is higher, and the counter stays far inside a safe integer.
+        if (typeof asserted !== 'number' || !Number.isSafeInteger(asserted) || asserted < 0 || asserted > Date.now()) {
+          errorResponse(res, 400, 'Expected { generation?: a whole number of milliseconds from 0, not later than now }.', 'invalid_owner_sessions_end');
+          return;
+        }
+        jsonResponse(res, 200, { generation: sessions.raiseTo(asserted), ended: false });
+        return;
+      }
+      jsonResponse(res, 200, { generation: sessions.endAll(), ended: true });
+    });
+
+    // The owner ends every other session of theirs: each owner cookie minted until now is refused
+    // from here on, and a caller signed in by cookie gets one of the new generation, so this device
+    // stays signed in. A route of the owner's, never an agent tool: no model can be talked into
+    // signing the owner out. It ends sessions only: a passkey, a mandate or a bearer token stays.
+    this.addStatic('user', 'POST /api/auth/owner-sessions/end', async (req, res) => {
+      const sessions = engine.getOwnerSessions();
+      if (!sessions) {
+        errorResponse(res, 503, 'The store of owner sessions is not available, so no session was ended. Restart the instance and try again.', 'owner_sessions_unavailable');
+        return;
+      }
+      const secret = process.env['LYNOX_HTTP_SECRET'];
+      const byCookie = (this._authOrigin.get(req) ?? '').startsWith('cookie:');
+      // Checked again here, with nothing awaited before the end: the cookie was checked when the
+      // headers came, and a body held back past another end must not end that end's sessions and
+      // walk away with a cookie of the new generation.
+      if (byCookie && (!secret || this._verifySessionCookie(req, secret)?.principal !== null)) {
+        errorResponse(res, 401, 'Unauthorized');
+        return;
+      }
+      const generation = sessions.endAll();
+      if (secret && byCookie) {
+        LynoxHTTPApi._setOwnerSessionCookie(req, res, secret, generation, process.env['LYNOX_TRUST_PROXY'] === 'true');
+      }
+      jsonResponse(res, 200, { generation, ended: true });
+    }, ownerOnly('end the owner sessions'));
 
     // Drop the local grant WITHOUT revoking it at Google — the switch-back
     // path (D12). Separate from `/revoke` on purpose: the two differ only in
@@ -14784,16 +14935,22 @@ export class LynoxHTTPApi {
         exportData['memory_scopes_may_be_incomplete'] = all.mayBeIncomplete;
       }
 
-      // Knowledge graph (entities + relations)
+      // Knowledge graph (entities + relations). `knowledge_graph_may_be_incomplete` says the block
+      // was not read in full: the layer threw, it is missing although it was not switched off (its
+      // database or the embedding model failed to open at boot), or a read cap was reached.
+      // `enabled` is the setting, as on the durable knowledge block: whether the graph is
+      // switched on in the config.
+      const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
       const kg = engine.getKnowledgeLayer();
       if (kg) {
+        const fallbacksBefore = kg.readFallbackCount;
         try {
           // Page through ALL entities. A single { limit: 200 } call silently
           // dropped every entity past the first 200 from a user's GDPR export
           // (an Art. 15/20 completeness gap, on the legacy KG today and the
           // subject-graph once the flag flips). The page cap bounds a runaway
-          // loop. (The per-entity relation cap below stays at 200 newest — a
-          // documented bounded loss; the global relation scan is S2-main.)
+          // loop. The per-entity relation read is capped too (newest first); an entity
+          // that returns the cap may hold more, and the block is then marked.
           const PAGE = 200;
           const MAX_PAGES = 1000;
           const entities: EntityRecord[] = [];
@@ -14813,8 +14970,10 @@ export class LynoxHTTPApi {
           // source memory was deleted are still stored, so they are exported too,
           // marked `sourceDeleted` and explained in `relationships_note`.
           const relationSet = new Map<string, unknown>();
+          let relationCapHit = false;
           for (const entity of entities) {
             const relations = await kg.getEntityRelationsForExport(entity.id);
+            if (relations.length >= EXPORT_RELATIONS_PER_ENTITY) relationCapHit = true;
             for (const rel of relations) {
               // The source is part of the key: the legacy store keeps one row per
               // assertion, and a deleted one must not stand in for a live one.
@@ -14831,12 +14990,29 @@ export class LynoxHTTPApi {
               + 'or replaced by a newer memory that contradicts it. '
               + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
+            enabled: graphEnabled,
           };
+          // A subject-graph read that fell back to the legacy store answered from another
+          // store; what it returned may be partial.
+          // The same holds when the subject graph is on but its store never opened.
+          const fellBack = kg.readFallbackCount !== fallbacksBefore || kg.subjectGraphUnavailable;
+          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack;
         } catch {
-          exportData['knowledge_graph'] = { entities: [], relationships: [] };
+          exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
+          exportData['knowledge_graph_may_be_incomplete'] = true;
+          process.stderr.write('⚠ /api/export: knowledge graph read failed — exported empty and marked incomplete\n');
         }
+      } else if (graphEnabled) {
+        exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: true };
+        exportData['knowledge_graph_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: knowledge graph unavailable — exported empty and marked incomplete\n');
       } else {
-        exportData['knowledge_graph'] = { entities: [], relationships: [] };
+        // Switched off: no layer was opened. Switching it off deletes nothing, so what it held
+        // while it was on may still be stored, and the export is the answer to an access
+        // request. Without a layer it is not read here, so the block says the graph is off and
+        // marks itself incomplete rather than reading as empty.
+        exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: false };
+        exportData['knowledge_graph_may_be_incomplete'] = true;
       }
 
       // Durable knowledge store (entries + the always-loaded memory blocks).
@@ -14849,48 +15025,77 @@ export class LynoxHTTPApi {
       // Pending entries are included: a queued fact is stored personal data whether or not it
       // was ever approved, and Art. 15 asks what is held, not what is active.
       const EMPTY_KNOWLEDGE = { entries: [], pending_entries: [], sources: [], blocks: {}, may_be_incomplete: false };
+      // One store's block. It throws where a read does: `listActive` decrypts every row, so one
+      // unreadable row would otherwise throw out of a handler with no wrapper and take the ENTIRE
+      // export with it — threads, CRM, everything. Each caller catches, as its `knowledge_graph`
+      // neighbour does: a missing section is a gap; a 500 is no answer at all.
+      const durableBlock = (store: KnowledgeStore): Record<string, unknown> => {
+        const ENTRY_CAP = 500;
+        const active = store.listActive(ENTRY_CAP);
+        // Masked, matching the active half. The raw-text queue is for a human deciding about
+        // an entry; this is a file that gets stored and forwarded.
+        const pending = store.listPendingMasked(ENTRY_CAP);
+        // The wording each conversation used for an entry, masked like the rest: a source can
+        // hold words the entry itself does not carry.
+        const sources = store.listSourcesMasked(ENTRY_CAP);
+        // Masked as well: a block is edited without a write-side shape scan, so it can hold a
+        // pasted key the entries' own check would have refused.
+        const blocks: Record<string, string | null> = {};
+        for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = store.getBlockMasked(id);
+        return {
+          entries: active,
+          pending_entries: pending,
+          sources,
+          blocks,
+          // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
+          // a different thing from one that looks complete. Named `may_be_incomplete` rather
+          // than `truncated` because that is the honest strength of the claim — the store
+          // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
+          // exactly 500, and over-reporting is the right way to be wrong here.
+          // Rejected and superseded entries are still stored but not in these lists, so a copy
+          // that leaves them out is not complete.
+          may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP
+            || store.countRejectedOrSuperseded() > 0,
+        };
+      };
       const knowledgeStore = engine.getKnowledgeStore();
       if (knowledgeStore) {
-        // try/catch like its `knowledge_graph` neighbour, and for the same reason: `listActive`
-        // decrypts every row, so one unreadable row would throw out of a handler with no
-        // wrapper and take the ENTIRE export with it — threads, CRM, everything. A missing
-        // section is a gap; a 500 is no answer at all.
         try {
-          const ENTRY_CAP = 500;
-          const active = knowledgeStore.listActive(ENTRY_CAP);
-          // Masked, matching the active half. The raw-text queue is for a human deciding about
-          // an entry; this is a file that gets stored and forwarded.
-          const pending = knowledgeStore.listPendingMasked(ENTRY_CAP);
-          // The wording each conversation used for an entry, masked like the rest: a source can
-          // hold words the entry itself does not carry.
-          const sources = knowledgeStore.listSourcesMasked(ENTRY_CAP);
-          const blocks: Record<string, string | null> = {};
-          for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = knowledgeStore.getBlock(id)?.content ?? null;
-          exportData['durable_knowledge'] = {
-            entries: active,
-            pending_entries: pending,
-            sources,
-            blocks,
-            // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
-            // a different thing from one that looks complete. Named `may_be_incomplete` rather
-            // than `truncated` because that is the honest strength of the claim — the store
-            // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
-            // exactly 500, and over-reporting is the right way to be wrong here.
-            may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP,
-          };
+          exportData['durable_knowledge'] = durableBlock(knowledgeStore);
         } catch {
           exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
         }
-      } else if (engine.getUserConfig().durable_memory_enabled === true) {
-        // Switched on, yet no store: the engine opens it at boot when the setting is on, so
-        // that open failed (or its database did). Not read, so not known to be empty.
-        exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
-        process.stderr.write('⚠ /api/export: durable knowledge store unavailable — exported empty and marked incomplete\n');
       } else {
-        // Switched off: no store was opened, so nothing is read and nothing failed. Entries
-        // written while it was on stay in engine.db and are not in this block.
-        exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
+        // No store. With the setting off none is opened; with it on, the open at boot failed,
+        // or the setting was switched on after boot. Either way nothing is deleted, and the
+        // tables are in engine.db whatever the setting, so entries written while a store was
+        // open are still held; the export is the answer to an access request and carries them.
+        // Read through a store built only to read, so the export writes nothing.
+        const engineDb = engine.getEngineDb();
+        if (engineDb) {
+          try {
+            const { SubjectStore } = await import('../core/subject-store.js');
+            const { KnowledgeStore: ReadStore } = await import('../core/knowledge-store.js');
+            const subjects = engine.getSubjectStore() ?? new SubjectStore(engineDb);
+            exportData['durable_knowledge'] = durableBlock(new ReadStore(engineDb, subjects, engine.getSecretStore() ?? null, { readOnly: true }));
+          } catch {
+            exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+            process.stderr.write('⚠ /api/export: durable knowledge read failed — exported empty and marked incomplete\n');
+          }
+        } else {
+          // No engine.db: the tables that would hold entries were not read.
+          exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+          process.stderr.write('⚠ /api/export: engine database unavailable — durable knowledge exported empty and marked incomplete\n');
+        }
       }
+      // `enabled` is the setting: whether durable memory is switched on in the config. With it
+      // off, the block still carries what is held, and `enabled: false` says the entries are
+      // stored but not in use. It can differ from the store the engine built at boot after the
+      // config is reloaded; the block's content does not depend on it.
+      exportData['durable_knowledge'] = {
+        ...(exportData['durable_knowledge'] as Record<string, unknown>),
+        enabled: engine.getUserConfig().durable_memory_enabled === true,
+      };
 
       // CRM contacts + deals, and every DataStore collection: walked to the END by
       // `_id`, the way the threads are walked above.
@@ -14986,12 +15191,26 @@ export class LynoxHTTPApi {
         process.stderr.write('⚠ /api/export: DataStore unavailable — datastore exported empty and marked incomplete\n');
       }
 
-      // Secret names (never values — GDPR export must not leak secrets)
+      // Secret names, never values: a downloaded file holding credentials would be the leak
+      // itself. `secrets_note` says so to whoever reads the export. The names are the store's and
+      // the vault file's: code that holds the vault writes rows past the store's map after boot.
+      // There is no switch for the store or its vault, so either missing failed at boot (a vault
+      // key that does not open the file, for one), and the list is then marked.
       const secretStore = engine.getSecretStore();
+      exportData['secrets_note'] = 'Names of the stored secrets only. Their values are not exported.';
       if (secretStore) {
-        exportData['secrets'] = secretStore.listNames();
+        let vaultNames: string[] = [];
+        let vaultRead = secretStore.hasVault;
+        try { vaultNames = secretStore.listVaultNames(); } catch { vaultRead = false; }
+        exportData['secrets'] = [...new Set([...secretStore.listNames(), ...vaultNames])].sort();
+        exportData['secrets_may_be_incomplete'] = !vaultRead;
+        if (!vaultRead) {
+          process.stderr.write('⚠ /api/export: secret vault unavailable — secret names marked incomplete\n');
+        }
       } else {
         exportData['secrets'] = [];
+        exportData['secrets_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: secret store unavailable — secret names exported empty and marked incomplete\n');
       }
 
       // Config (redacted)

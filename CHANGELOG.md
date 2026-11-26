@@ -48,11 +48,36 @@
 - `GET /api/export` now sets `contacts_may_be_incomplete`,
   `deals_may_be_incomplete`, `datastore_may_be_incomplete`,
   `threads_may_be_incomplete` and `durable_knowledge.may_be_incomplete` to
-  `true` when the store behind the block could not be opened at boot (the
-  durable knowledge one only while durable memory is switched on). Until now
+  `true` when the store behind the block could not be opened at boot. Until now
   those blocks came out empty and marked complete, as if the account held no
   contacts, deals, tables, chats or memory entries. A client that reads the
   flags only as "a cap was reached" also sees them on such an instance.
+- With durable memory switched off, `GET /api/export` now carries the durable
+  knowledge entries and memory blocks still held from when it was on, read
+  without changing anything. Switching it off never deleted them, and until now
+  the block came out empty and marked complete. The block's new `enabled` field
+  says whether durable memory is switched on. The same read runs when durable
+  memory is on but its store did not open, and the block is marked incomplete
+  while entries the owner rejected or that were superseded are stored, since
+  the export does not carry those yet.
+- `GET /api/export` has three new fields. `knowledge_graph_may_be_incomplete`
+  is `true` when the knowledge graph could not be read: reading it failed, it
+  did not open at boot although it is switched on, a read fell back to the
+  older store, or an entity reached the per-entity relation limit. While the
+  graph is switched off the block is empty with `enabled: false` and the flag
+  `true`: switching it off deletes nothing, and what it held is not read there
+  yet. `secrets` now also lists names
+  written to the vault after boot (mail and OAuth credentials, for example).
+  `secrets_may_be_incomplete` is `true` when the secret store or its vault did
+  not open. `secrets_note` says that only secret names are exported, never
+  values.
+
+### Changed: web UI
+
+- The person erasure's done line uses the singular for a count of one, leaves
+  out a count of zero, and says "no entries and no memories" when both are zero.
+  On a narrow screen the subject panel is now opaque, so the page behind it no
+  longer shows through.
 
 ## 2.18.0 — 2026-11-17
 

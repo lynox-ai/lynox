@@ -4134,7 +4134,7 @@ export class WorkerLoop {
         this.#recordRun(taskManager, task.id, refusedBy.privateAddress === true
           // The address may carry a key; the run's catch masks a thrown failure, this one is recorded here.
           ? maskSecretPatterns(this.#notices().watchFetchFailed(config.url, { kind: 'blocked' }), { includeGeneric: true })
-          : `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed',
+          : this.#notices().watchPolicyRefused(refusedBy.reason, refusedBy.alsoHttps === true), 'failed',
           undefined, refusedBy.privateAddress === true ? { cause: { kind: 'watch_fetch', cause: { kind: 'blocked' } } } : undefined);
       }
       return;

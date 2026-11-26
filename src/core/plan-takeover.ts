@@ -72,6 +72,12 @@ export interface TakeoverPreview {
   readonly runsAs: string;
   /** F2 names the member in `from`. */
   readonly workflow: TakeoverWorkflowView | null;
+  /**
+   * A workflow plan without its workflow, which then runs nothing: deleting a workflow clears the
+   * plan's reference to it (`ON DELETE SET NULL`), and a reference that matched no workflow, or
+   * more than one, was stored empty (`TriggerStore`). Either way the plan stays a workflow plan.
+   */
+  readonly workflowGone: boolean;
   readonly memberChanges: readonly TakeoverMemberChange[];
   readonly alsoReleased: ReadonlyArray<{ readonly id: string; readonly title: string }>;
   readonly connections: readonly StampEntry[];
@@ -265,6 +271,7 @@ export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreview
       members: plan.members,
       runsAs: principalTag(plan.runsAs),
       workflow: workflowOfPreview(plan.wf, plan.coverWorkflow),
+      workflowGone: plan.trigger.effect === 'run_workflow' && plan.wf === undefined,
       memberChanges: plan.memberChanges,
       alsoReleased: plan.released.map((r) => ({ id: r.id, title: r.title })),
       connections: plan.connections,

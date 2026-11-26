@@ -434,6 +434,10 @@ vi.mock('../core/engine.js', () => ({
     // `not.toBe(403)`, so a route that threw read as a route that answered.
     this.getEngineDb = vi.fn().mockReturnValue(null);
     this.getDataStore = vi.fn().mockReturnValue(null);
+    // The owner sessions' generation: the auth gate asks it on every cookie, and a stub without it
+    // throws, which the gate takes as "cannot be read" and refuses every owner session.
+    this.getOwnerSessions = vi.fn().mockReturnValue(null);
+    this.liveOwnerGeneration = vi.fn().mockReturnValue(0);
     this.getApiStore = mockGetApiStore;
     // R2b subject-graph surface — null by default (flag off); route tests swap in.
     // getSubjectStore is also read by GET /api/config (has_subject_graph capability).
@@ -6010,7 +6014,8 @@ describe('LynoxHTTPApi', () => {
       await withStore(async (_store, rows) => {
         api.setPrincipalResolverForTesting(() => EVA);
         const res = await jsonFetch('/api/sessions/s-none/reply', { method: 'POST', body: JSON.stringify({ promptId: 'no-such-prompt', answer: 'B' }) });
-        expect(res.status).toBe(404);
+        // No conversation of hers: refused as on a question someone else's run asked.
+        expect(res.status).toBe(403);
         expect(answerRows(rows)).toEqual([]);
       });
     });
@@ -12008,6 +12013,28 @@ describe('LynoxHTTPApi', () => {
       expect(mockConfirmTrigger).not.toHaveBeenCalled();
     });
 
+    // The other consents a token does not give: stamping a workflow and taking a plan or a
+    // workflow over. Each route by name, so a check taken off one fails that route's test.
+    describe.each([
+      { route: 'POST /api/workflows/:id/confirm', path: '/api/workflows/wf-token/confirm' },
+      { route: 'POST /api/workflows/:id/takeover', path: '/api/workflows/wf-token/takeover' },
+      { route: 'POST /api/triggers/:id/takeover', path: '/api/triggers/task-1/takeover' },
+    ])('$route is the owner\'s browser session only', ({ path }) => {
+      it('with a token, the owner\'s included, it refuses (403 session_only)', async () => {
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        const res = await jsonFetch(path, { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { code?: string }).code).toBe('session_only');
+      });
+
+      it('control: in the owner\'s browser session the request goes past that check', async () => {
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        const res = await ownerSessionFetch(path, { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+        expect([401, 403], `the owner's session was refused (${res.status})`).not.toContain(res.status);
+        expect(((await res.json()) as { code?: string }).code).not.toBe('session_only');
+      });
+    });
+
     it('POST /api/tasks/:id/confirm returns 404 for a trigger gone by the time it is stamped', async () => {
       mockConfirmTrigger.mockReturnValueOnce(undefined);
       const res = await ownerSessionFetch('/api/tasks/nope/confirm', { method: 'POST', body: await confirmBody('nope') });
@@ -14050,6 +14077,155 @@ describe('LynoxHTTPApi', () => {
         const ok = await start(id, { judgeRuleHash: shown['judgeRuleHash'], costCapUsd: 1.5 });
         expect(ok.status).toBe(200);
         expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
+      });
+
+      it('starts a run whose rule came from an artifact only while the artifact holds the planned text', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const sha = createHash('sha256').update(text, 'utf8').digest('hex');
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: sha, title: 'Regeln' } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const engineRef = (api as unknown as { engine: { getArtifactStore: ReturnType<typeof vi.fn> } }).engine;
+        const store = engineRef.getArtifactStore() as { get: ReturnType<typeof vi.fn> };
+        type Refusal = { error: string; code?: string; title?: string };
+        // Edited and renamed after the plan: refused by its code, named by the planned title, and
+        // the run waits as it was.
+        store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 2, title: 'Umbenannt', content: text.replace('keine', 'wenige'), type: 'markdown' });
+        const refused = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+        expect(refused.status).toBe(409);
+        expect((await refused.json()) as Refusal).toEqual({
+          code: 'rule_source_changed', title: 'Regeln',
+          error: "This run's rule has changed since it was planned. The change may not be yours. Read the rule under Artifacts, then ask lynox in the chat to plan the run again.",
+        });
+        expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        // Gone: its own code, still named by the planned title.
+        store.get.mockReturnValueOnce(null);
+        const gone = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+        expect(gone.status).toBe(409);
+        expect(((await gone.json()) as Refusal)).toMatchObject({ code: 'rule_source_gone', title: 'Regeln' });
+        // No store right now: its code, and neither a title nor anything the store said.
+        engineRef.getArtifactStore.mockReturnValueOnce(null);
+        const unreadable = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+        expect(unreadable.status).toBe(409);
+        expect((await unreadable.json()) as Refusal).toEqual({
+          code: 'rule_source_unreadable',
+          error: "Saved artifacts cannot be read on this instance right now, so lynox cannot check this run's rule. Nothing was judged. Try again later.",
+        });
+        expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        // The same text: the start goes on to the checks it always had, and starts.
+        store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 2, content: text, type: 'markdown' });
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 })).status).toBe(200);
+      });
+
+      it('answers a start with a rule hash other than the planned one as a changed run, without reading the artifact', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex') } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const engineRef = (api as unknown as { engine: { getArtifactStore: ReturnType<typeof vi.fn> } }).engine;
+        const store = engineRef.getArtifactStore() as { get: ReturnType<typeof vi.fn> };
+        store.get.mockClear();
+        try {
+          // The artifact was edited too: the wrong hash is what the owner is told about.
+          store.get.mockReturnValue({ id: 'a1b2c3d4', version: 2, content: text.replace('keine', 'wenige'), type: 'markdown' });
+          const res = await start(id, { judgeRuleHash: 'not-the-planned-hash', costCapUsd: 1.5 });
+          expect(res.status).toBe(409);
+          const body = (await res.json()) as { error: string; code?: string };
+          expect(body.error).toBe('The bulk run changed since it was shown — reload it and check again.');
+          expect(body.code).not.toBe('rule_source_changed');
+          expect(store.get).not.toHaveBeenCalled();
+          expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        } finally {
+          store.get.mockReset();
+          store.get.mockReturnValue(null);
+        }
+      });
+
+      it('once judging began, the run judges by its planned text: a halt resumes after the artifact changed, without reading it', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex') } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const engineRef = (api as unknown as { engine: { getArtifactStore: ReturnType<typeof vi.fn> } }).engine;
+        const store = engineRef.getArtifactStore() as { get: ReturnType<typeof vi.fn> };
+        store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 1, content: text, type: 'markdown' });
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 })).status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.phase).toBe('planned');
+        // Judging, not halted: a second start is refused for its phase, not for the artifact.
+        store.get.mockClear();
+        store.get.mockReturnValue({ id: 'a1b2c3d4', version: 2, content: text.replace('keine', 'wenige'), type: 'markdown' });
+        try {
+          const again = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+          expect(again.status).toBe(409);
+          expect(((await again.json()) as { error: string; code?: string }).error).toBe('The bulk run is not in a phase that allows this.');
+          // Halted at its spend limit mid-judging, the artifact edited meanwhile: the owner resumes
+          // it, and the judge goes on with the text the run was started with.
+          bulkLedger.halt(id, BULK_HALT_REASONS.costCap);
+          new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
+          const resumed = await start(id, { judgeRuleHash: hash, costCapUsd: 3 });
+          expect(resumed.status).toBe(200);
+          expect(bulkLedger.getJudgeRuleForOwner(id)!.rule).toBe(text);
+          expect(bulkLedger.getJudgeRuleForOwner(id)!.hash).toBe(hash);
+          expect(store.get).not.toHaveBeenCalled();
+        } finally {
+          store.get.mockReset();
+          store.get.mockReturnValue(null);
+        }
+      });
+
+      it('an access never reads a rule taken from an artifact nor where it came from: not on the run\'s page, and it cannot start or resume the run', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex'), title: 'Regelwerk Shop' } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const owner = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+        // Control: the owner is shown the text as planned, and where it came from by its planned title.
+        expect((owner['judgeRule'] as { rule: string }).rule).toBe(text);
+        expect(owner['ruleFromArtifact']).toEqual({ title: 'Regelwerk Shop' });
+        const self = api as unknown as { _principalOf: (req: unknown) => unknown };
+        const orig = self._principalOf;
+        self._principalOf = () => ({ kind: 'mandate', email: 'helper@example.ch', mandateId: 'M-1' });
+        try {
+          const page = await jsonFetch(`/api/bulk/runs/${id}`);
+          const body = await page.text();
+          // The page answers the access, without the rule and without the artifact it came from.
+          expect(page.status).toBe(200);
+          expect(body).not.toContain('sachlich');
+          expect(body).not.toContain('Regelwerk');
+          const shown = JSON.parse(body) as Record<string, unknown>;
+          expect([shown['judgeRule'], shown['ruleFromArtifact']]).toEqual([null, null]);
+          const started = await start(id, { judgeRuleHash: bulkLedger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1.5 });
+          expect(started.status).toBe(403);
+          expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        } finally {
+          self._principalOf = orig;
+        }
       });
 
       // The link domains the owner allows a judged list run's verdicts to add (PRD
@@ -20207,7 +20383,11 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getKnowledgeStore: () => ({
           listActive, listPending, listPendingMasked, listSourcesMasked,
-          getBlock: (id: string) => ({ content: `block:${id}`, charLimit: 100 }),
+          // Likewise the blocks: the export reads them masked, never as stored.
+          getBlock: () => { throw new Error('export must use getBlockMasked'); },
+          getBlockMasked: (id: string) => `block:${id}`,
+          // Nothing rejected or superseded is held, so the block can read complete.
+          countRejectedOrSuperseded: () => 0,
         }),
         getKnowledgeLayer: () => null,
         getCRM: () => null,
@@ -20465,7 +20645,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       }
     });
 
-    it('GET /api/export caps the entity page-loop at MAX_PAGES (no runaway on a full-page-forever store)', async () => {
+    it('GET /api/export caps the entity page-loop at MAX_PAGES (no runaway on a full-page-forever store) and marks the graph incomplete', async () => {
       // A store that always returns a full PAGE would loop forever without the
       // MAX_PAGES bound — assert the loop stops at the 1000-page cap.
       const full = Array.from({ length: 200 }, (_, i) => ({
@@ -20486,6 +20666,8 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         const res = await jsonFetch('/api/export');
         expect(res.status).toBe(200);
         expect(listEntities).toHaveBeenCalledTimes(1000);
+        const body = await res.json() as { knowledge_graph_may_be_incomplete: boolean };
+        expect(body.knowledge_graph_may_be_incomplete, 'the cap stopped the read, so the graph may hold more').toBe(true);
       });
     });
 
@@ -23784,7 +23966,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           row({ last_run_result: 'Bulk run halted at its approved maximum.' }),
         ] });
         try {
-          const ok = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+          const ok = await ownerSessionFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
           expect(ok.status).toBe(200);
           expect(((await ok.json()) as { stillOff: number }).stillOff).toBe(3);
           expect(setEnabled).not.toHaveBeenCalled();
@@ -23938,18 +24120,18 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         const restore = shaped();
         try {
           mockSetWorkflowConfirmedAt.mockClear();
-          const none = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: '{}' });
+          const none = await ownerSessionFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: '{}' });
           expect(none.status).toBe(400);
           expect(((await none.json()) as { code: string }).code).toBe('expect_required');
           expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
           mockSetWorkflowConfirmedAt.mockReturnValueOnce(false);
-          const stale = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-0' }) });
+          const stale = await ownerSessionFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-0' }) });
           expect(stale.status).toBe(409);
           expect(((await stale.json()) as { code: string }).code).toBe('steps_changed');
-          const ok = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+          const ok = await ownerSessionFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
           expect(ok.status).toBe(200);
           expect(mockSetWorkflowConfirmedAt).toHaveBeenLastCalledWith('wf-sched', expect.any(String), 'digest-1');
-          expect((await jsonFetch('/api/workflows/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) })).status).toBe(404);
+          expect((await ownerSessionFetch('/api/workflows/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) })).status).toBe(404);
         } finally { restore(); }
       });
 
@@ -25643,6 +25825,80 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     });
   });
 
+  // Someone else's conversation is refused before the session is looked up, so the answer does
+  // not tell a mandate whether a session is live in it. Each route by name: a lookup moved back
+  // before the check on one of them fails that route's test.
+  describe.each([
+    { route: 'DELETE /api/sessions/:id', method: 'DELETE', suffix: '', body: undefined },
+    { route: 'POST /api/sessions/:id/run', method: 'POST', suffix: '/run', body: { task: 'hi' } },
+    { route: 'POST /api/sessions/:id/changeset/review', method: 'POST', suffix: '/changeset/review', body: { action: 'accept' } },
+    { route: 'POST /api/sessions/:id/compact', method: 'POST', suffix: '/compact', body: {} },
+    { route: 'PATCH /api/sessions/:id/model', method: 'PATCH', suffix: '/model', body: { tier: 'fast' } },
+  ])('$route on another person\'s conversation', ({ method, suffix, body }) => {
+    const call = (id: string): Promise<Response> =>
+      jsonFetch(`/api/sessions/${id}${suffix}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+
+    it('refuses a mandate alike whether a session is live in it or not', async () => {
+      asMandate();
+      sessionRanBy(OWNER_PRINCIPAL);
+      const live = await call(FOREIGN);
+      expect(live.status, 'with a live session').toBe(403);
+      mockSessionGet.mockReturnValue(undefined);
+      const none = await call(FOREIGN);
+      expect(none.status, 'without a session').toBe(403);
+      expect(await none.text(), 'the refusal differs with the session').toBe(await live.text());
+    });
+
+    it('control: the owner, and a mandate in its own conversation, still get the 404 for no session', async () => {
+      mockSessionGet.mockReturnValue(undefined);
+      expect((await call(FOREIGN)).status).toBe(404);
+      asMandate();
+      expect((await call(OWN)).status).toBe(404);
+    });
+  });
+
+  // The same for the routes that answer a question: in another person's conversation a mandate is
+  // refused alike whether a question is open there or not.
+  describe.each([
+    { route: 'POST /api/sessions/:id/reply', suffix: '/reply', body: { answer: 'A' } },
+    { route: 'POST /api/sessions/:id/reply-tabs', suffix: '/reply-tabs', body: { promptId: 'no-such-prompt', answers: ['A'] } },
+    { route: 'POST /api/sessions/:id/tab-progress', suffix: '/tab-progress', body: { promptId: 'no-such-prompt', partial: ['A'] } },
+    { route: 'POST /api/sessions/:id/secret-saved', suffix: '/secret-saved', body: { status: 'saved' } },
+    { route: 'POST /api/sessions/:id/mail-connected', suffix: '/mail-connected', body: { status: 'connected' } },
+  ])('$route on another person\'s conversation', ({ suffix, body }) => {
+    const call = (id: string): Promise<Response> =>
+      jsonFetch(`/api/sessions/${id}${suffix}`, { method: 'POST', body: JSON.stringify(body) });
+
+    it('refuses a mandate alike whether a question is open in it or not', async () => {
+      asMandate();
+      const none = await call(FOREIGN);
+      expect(none.status, 'without an open question').toBe(403);
+      prompts.insertAskUser(FOREIGN, 'Owner asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag('owner') });
+      const open = await call(FOREIGN);
+      expect(open.status, 'with an open question').toBe(403);
+      expect(await none.text(), 'the refusal differs with the question').toBe(await open.text());
+    });
+
+    it('naming a question of its own from another conversation, a mandate is refused alike whether one is open or not', async () => {
+      const mine = prompts.insertAskUser(OWN, 'Mandate asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag(M) });
+      asMandate();
+      const named = (): Promise<Response> =>
+        jsonFetch(`/api/sessions/${FOREIGN}${suffix}`, { method: 'POST', body: JSON.stringify({ ...body, promptId: mine }) });
+      const none = await named();
+      expect(none.status, 'without an open question').toBe(403);
+      prompts.insertAskUser(FOREIGN, 'Owner asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag('owner') });
+      const open = await named();
+      expect(open.status, 'with an open question').toBe(403);
+      expect(await none.text(), 'the refusal differs with the question').toBe(await open.text());
+      expect(prompts.getById(mine)!.status, 'its own question was answered from another conversation').toBe('pending');
+    });
+
+    it('control: a mandate in its own conversation without a question still gets the 404', async () => {
+      asMandate();
+      expect((await call(OWN)).status).toBe(404);
+    });
+  });
+
   describe('POST /api/onboarding/knowledge/start (E9)', () => {
     it('refuses a mandate on the owner\'s conversation and on an id that names none', async () => {
       asMandate();
@@ -26054,10 +26310,11 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   describe('the positive list (PRD cp-admin-line §3.1)', () => {
     type Row = { method: string; path: string; scope: 'admin' | 'user'; stance: unknown; cpAdmin: boolean };
     const table = (): Row[] => (api as unknown as { routeStancesForTesting: () => Row[] }).routeStancesForTesting();
-    // The five calls the control plane makes with its admin bearer.
-    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke', 'GET /api/admin/workspace/status'];
+    // The six calls the control plane makes with its admin bearer; the sixth ends the owner's
+    // sessions, or re-asserts their generation after a restore.
+    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke', 'GET /api/admin/workspace/status', 'POST /api/admin/owner-sessions/end'];
 
-    it('names exactly the five routes the control plane calls, all admin routes without a stance', () => {
+    it('names exactly the six routes the control plane calls, all admin routes without a stance', () => {
       const marked = table().filter((r) => r.cpAdmin);
       expect(marked.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...CP_ROUTES].sort());
       for (const r of marked) expect([r.path, r.scope, r.stance]).toEqual([r.path, 'admin', undefined]);

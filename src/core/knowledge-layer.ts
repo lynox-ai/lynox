@@ -90,6 +90,12 @@ function addCreated(into: KnowledgeCreatedCounts, made: Partial<KnowledgeCreated
  * Integrates: AgentMemoryDb (SQLite) + EntityResolver + RetrievalEngine +
  * ContradictionDetector + KpiEngine + RunHistory (for insights).
  */
+/**
+ * How many relations of one entity the data export reads, newest first. An entity that returns
+ * this many may hold more, so the export marks its graph block as possibly incomplete.
+ */
+export const EXPORT_RELATIONS_PER_ENTITY = 50;
+
 export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly db: AgentMemoryDb;
   private readonly embeddingProvider: EmbeddingProvider;
@@ -1602,7 +1608,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * stored belongs in the export until the reap removes it. Same store choice and cap.
    */
   async getEntityRelationsForExport(entityId: string): Promise<Array<RelationRecord & { sourceDeleted: boolean }>> {
-    const limit = 50;
+    const limit = EXPORT_RELATIONS_PER_ENTITY;
     if (this.subjectGraphEnabled && this.relationshipStore) {
       try {
         return this.relationshipStore.getRelationshipsForSubjectForExport(entityId, limit)
@@ -1630,7 +1636,28 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * degrades to "not found" (subject ids don't resolve legacy rows) rather than
    * returning wrong data.
    */
+  /**
+   * How many subject-graph reads fell back to the legacy store since boot. A reader that needs
+   * the whole set (the data export) compares it before and after: a fallback read answers from
+   * another store, by-id reads degrade to "not found", so the result may be partial.
+   */
+  get readFallbackCount(): number {
+    return this._readFallbacks;
+  }
+
+  /**
+   * The subject graph is switched on but its store is missing (engine.db did not open at boot).
+   * Every read then answers from the legacy store alone, without a fallback being logged, and
+   * what only engine.db holds is not in it.
+   */
+  get subjectGraphUnavailable(): boolean {
+    return this.subjectGraphEnabled && this.subjectStore === null;
+  }
+
+  private _readFallbacks = 0;
+
   private _logReadFallback(method: string, err: unknown): void {
+    this._readFallbacks += 1;
     process.stderr.write(
       `[lynox:subject-graph] read ${method} fell back to legacy: ${err instanceof Error ? err.message : String(err)}\n`,
     );

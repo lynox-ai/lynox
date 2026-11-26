@@ -17,6 +17,7 @@ import type { StampEntry } from './plan-run-context.js';
 import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
 import { stripHidden } from './hidden-text.js';
 import { EngineLessRefused } from './engine-less-refusal.js';
+import { watchPolicyWordsEn, type WatchPolicyReason } from './watch-policy-reason.js';
 import { parseWatchFetchCause, type WatchFetchCause } from './watch-fetch-cause.js';
 
 /**
@@ -1385,38 +1386,37 @@ const HTTPS_REFUSAL_START = 'Blocked: HTTP not allowed';
  * is neither created nor read, and one created before the policy changed stops being read.
  * The reason is told by the whole refusal, never by a word in it, since a host name can carry one.
  */
-export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefined): { why: string; wayOut: string; shown: BlockedReason | null; privateAddress?: true } | null {
+export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefined): { why: string; wayOut: string; reason: WatchPolicyReason; alsoHttps?: true; shown: BlockedReason | null; privateAddress?: true } | null {
+  const refused = (reason: WatchPolicyReason, shown: BlockedReason | null, extra: { alsoHttps?: true; privateAddress?: true } = {}) =>
+    ({ ...watchPolicyWordsEn(reason, extra.alsoHttps === true), reason, ...(extra.alsoHttps ? { alsoHttps: true as const } : {}), shown, ...(extra.privateAddress ? { privateAddress: true as const } : {}) });
   try {
     assertHostPolicy(url, { surface: 'discovery' }, ctx);
     return null;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    if (message.startsWith('Blocked: unsupported protocol') || err instanceof TypeError) return { why: 'it is not an http or https address.', wayOut: '', shown: null };
+    if (message.startsWith('Blocked: unsupported protocol') || err instanceof TypeError) return refused({ kind: 'protocol' }, null);
     // enforce_https is checked first; when the policy would refuse the https address too, that
     // reason is the one to tell, since switching to https alone would not help, and the way out
     // names both steps.
     if (message.startsWith(HTTPS_REFUSAL_START) && /^http:/i.test(url)) {
       const deeper = watchPolicyRefusal(`https:${url.slice('http:'.length)}`, ctx);
-      if (deeper !== null && deeper.shown !== null) return { ...deeper, wayOut: `${deeper.wayOut} The address must also be https://, since this instance only reads HTTPS pages (enforce_https).` };
+      if (deeper !== null && deeper.shown !== null) return refused(deeper.reason, deeper.shown, { alsoHttps: true });
       // Refused at https for a reason the view has no kind for (a private address, a policy this
       // code does not know): that reason, told as is.
       if (deeper !== null) return deeper;
     }
-    if (message === DENY_ALL_REFUSAL) {
-      return { why: 'this instance\'s network_policy is deny-all, so lynox reads no web page.', wayOut: 'Only the operator can change network_policy.', shown: { kind: 'watch_deny_all' } };
-    }
+    if (message === DENY_ALL_REFUSAL) return refused({ kind: 'deny_all' }, { kind: 'watch_deny_all' });
     if (message.startsWith(ALLOW_LIST_REFUSAL_START) && message.endsWith(ALLOW_LIST_REFUSAL_END)) {
       // The host as the allow-list compared it (an IPv6 literal without its brackets), so an
       // operator who copies it adds the entry that matches.
       const host = message.slice(ALLOW_LIST_REFUSAL_START.length, -ALLOW_LIST_REFUSAL_END.length);
-      return { why: `its host ${host} is not in this instance's network allow-list.`, wayOut: 'The operator can add the host to the allow-list (network_policy).', shown: { kind: 'watch_allow_list', host } };
+      return refused({ kind: 'allow_list', host }, { kind: 'watch_allow_list', host });
     }
-    if (message.startsWith(HTTPS_REFUSAL_START)) return { why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' } };
-    const why = message.replace(/^Blocked:\s*/, '');
+    if (message.startsWith(HTTPS_REFUSAL_START)) return refused({ kind: 'https' }, { kind: 'watch_https' });
     // A private address literal (the host check resolves no name): the poll tells it as lynox's
     // own sentence, as a fetch refused for the same reason (`watch-fetch-cause.ts`).
     const privateAddress = message.startsWith('Blocked: private IP address "');
-    return { why: `this instance's network settings refuse it: ${/[.!?]$/.test(why) ? why : `${why}.`}`, wayOut: '', shown: null, ...(privateAddress ? { privateAddress: true as const } : {}) };
+    return refused({ kind: 'other', detail: message.replace(/^Blocked:\s*/, '') }, null, privateAddress ? { privateAddress: true } : {});
   }
 }
 
