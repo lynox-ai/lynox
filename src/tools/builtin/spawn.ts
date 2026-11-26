@@ -38,7 +38,7 @@ import {
   MAX_SPAWN_TURNS,
 } from '../../core/limits.js';
 
-const SPAWN_TIMEOUT = 10 * 60 * 1000;
+export const SPAWN_TIMEOUT = 10 * 60 * 1000;
 
 /**
  * What a child's run is debited with: its OWN spend. What was booked onto it

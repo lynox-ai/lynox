@@ -293,7 +293,7 @@ describe('release_secret: the owner answers in person', () => {
     let question = '';
     await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
     expect(question).not.toContain('X-Api-Key');
-    expect(question).toMatch(/ 2 more settings of this profile \(such as its auth type, scopes, path or query\) are part of the release too; a change to any of them ends it\./);
+    expect(question).toMatch(/ 2 more settings of this connection \(such as its auth type, scopes, path or query\) are part of the release too; a change to any of them ends it\./);
     expect(question).toContain('your own and bulk runs included, until that mandate ends or you withdraw the release');
     expect(question).not.toContain('while that mandate is active');
   });
@@ -386,11 +386,11 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
     return { question, apf: apiStore.trailIdOf(p.id)!, apiStore, p };
   }
   const head = (apf: string, role: string, hosts: string): string =>
-    `⚠ API profiles: release the vault key "CRM_KEY" to API profile ${apf}? It was set up in the session of ${M}. If you allow it, lynox sends the value of "CRM_KEY", as ${role}, to ${hosts}, with every request and run through this profile, your own and bulk runs included, until that mandate ends or you withdraw the release.`;
+    `⚠ API connections: release the vault key "CRM_KEY" to API connection ${apf}? It was set up in the session of ${M}. If you allow it, lynox sends the value of "CRM_KEY", as ${role}, to ${hosts}, with every request and run through this connection, your own and bulk runs included, until that mandate ends or you withdraw the release.`;
   const tail = (held = 'holds a value'): string => ` The vault ${held} under this name. Any change to where the value goes ends the release. Release it?`;
   const more = (n: number, apf: string): string => n === 1
-    ? ` 1 more setting of this profile (such as its auth type, scopes, path or query) is part of the release too; a change to it ends it. To see it first, deny, ask here to view API profile ${apf}, then ask to release "CRM_KEY" again.`
-    : ` ${n} more settings of this profile (such as its auth type, scopes, path or query) are part of the release too; a change to any of them ends it. To see them first, deny, ask here to view API profile ${apf}, then ask to release "CRM_KEY" again.`;
+    ? ` 1 more setting of this connection (such as its auth type, scopes, path or query) is part of the release too; a change to it ends it. To see it first, deny, ask here to view API connection ${apf}, then ask to release "CRM_KEY" again.`
+    : ` ${n} more settings of this connection (such as its auth type, scopes, path or query) are part of the release too; a change to any of them ends it. To see them first, deny, ask here to view API connection ${apf}, then ask to release "CRM_KEY" again.`;
 
   it('asks a profile with a phrase in every free field in fixed wording, by its opaque id, counting what it does not print', async () => {
     const { question, apf, apiStore, p } = await questionFor(injected());
@@ -547,7 +547,7 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
       apiStore.register(changed, 'load');
       ask(changed);
       const after = await asked(apiStore, apf);
-      expect(after).toContain(` These settings changed after they were last read in one of your chats at 13:05 UTC; deny and view the profile again before you allow it (version ${settingsVersion(changed)}).`);
+      expect(after).toContain(` These settings changed after they were last read in one of your chats at 13:05 UTC; deny and view the connection again before you allow it (version ${settingsVersion(changed)}).`);
       expect(before).not.toContain('changed after');
       // Apart from that sentence, the two questions read the same.
       const strip = (q: string): string => q.replace(/ These settings (were last read|changed after)[^()]*\(version [0-9a-f]{8}\)\./, '');
