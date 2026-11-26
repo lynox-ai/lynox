@@ -9,12 +9,14 @@
  *
  * Both suites below are regression tests for defects the harness actually shipped with.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { classifySpawn, decideVerdict, isDirectInvocation } from '../scripts/model-fitness/replay.js';
+import { CANDIDATES, STAGE_SUCCESSOR, classifySpawn, compareStageCost, decideVerdict, isDirectInvocation, turnCostUSD } from '../scripts/model-fitness/replay.js';
+import { _resetOverridePricingForTests } from '../src/core/pricing.js';
+import { MODEL_CAPABILITIES, MODEL_MAP, ownEntry } from '../src/types/models.js';
 
 const SCRIPT = new URL('../scripts/model-fitness/replay.ts', import.meta.url).pathname;
 
@@ -145,7 +147,73 @@ describe('isDirectInvocation', () => {
   });
 });
 
+describe('turnCostUSD', () => {
+  // A pricing.json on the machine running the suite would otherwise price these ids.
+  beforeEach(() => { _resetOverridePricingForTests({}); });
+  afterEach(() => { _resetOverridePricingForTests(null); });
+
+  it('prices input, output, cache writes and cache reads at the registry card', () => {
+    // sonnet-5-5: $2 in, $10 out, $4 cache write, $0.10 cache read per MTok.
+    const r = turnCostUSD('claude-sonnet-5-5', { input_tokens: 1_000_000, output_tokens: 100_000, cache_creation_input_tokens: 500_000, cache_read_input_tokens: 2_000_000 });
+    expect(r.usd).toBeCloseTo(2 + 1 + 2 + 0.2, 10);
+    expect(r.priced).toBe(true);
+  });
+
+  it('counts a missing cache field as none', () => {
+    expect(turnCostUSD('claude-opus-5-5', { input_tokens: 1_000_000, output_tokens: 0 }).usd).toBeCloseTo(4, 10);
+  });
+
+  it('prices a Haiku 5.5 prompt over 100K tokens at the long-prompt card, and one at 100K at the short one', () => {
+    // Short card $0.10 / $0.50, long card $0.50 / $2.50: five times, input and output.
+    const short = turnCostUSD('claude-haiku-5-5', { input_tokens: 100_000, output_tokens: 1_000 });
+    expect(short.usd).toBeCloseTo(0.1 * 0.1 + 0.001 * 0.5, 10);
+    const long = turnCostUSD('claude-haiku-5-5', { input_tokens: 60_000, output_tokens: 1_000, cache_read_input_tokens: 40_001 });
+    expect(long.usd).toBeCloseTo(5 * (0.06 * 0.1 + 0.001 * 0.5 + 0.040001 * 0.01), 10);
+  });
+
+  it('keeps every other model at its card however long the prompt', () => {
+    expect(turnCostUSD('claude-sonnet-4-6', { input_tokens: 500_000, output_tokens: 0 }).usd).toBeCloseTo(1.5, 10);
+  });
+
+  it('says when a model has no registered price', () => {
+    expect(turnCostUSD('no-such-model-xyz', { input_tokens: 1000, output_tokens: 1000 }).priced).toBe(false);
+  });
+});
+
+describe('compareStageCost', () => {
+  it('sets each stage’s 5.5 successor against today’s model', () => {
+    const rows = compareStageCost(new Map([
+      [MODEL_MAP.deep, 0.10], [STAGE_SUCCESSOR.deep, 0.12],
+      [MODEL_MAP.fast, 0.02], [STAGE_SUCCESSOR.fast, 0.005],
+    ]));
+    expect(rows.map(r => r.stage)).toEqual(['fast', 'deep']);
+    const deep = rows.find(r => r.stage === 'deep')!;
+    expect(deep).toMatchObject({ today: MODEL_MAP.deep, successor: 'claude-opus-5-5', todayUsd: 0.10, successorUsd: 0.12 });
+    expect(deep.ratio).toBeCloseTo(1.2, 10);
+    expect(rows.find(r => r.stage === 'fast')!.ratio).toBeCloseTo(0.25, 10);
+  });
+
+  it('leaves out a stage where either side has no valid turn', () => {
+    expect(compareStageCost(new Map([[MODEL_MAP.balanced, 0.05]]))).toEqual([]);
+    expect(compareStageCost(new Map([[STAGE_SUCCESSOR.balanced, 0.05]]))).toEqual([]);
+  });
+});
+
 describe('CANDIDATES stay in lockstep with the model registry', () => {
+  it('every Anthropic candidate id is registered, and every stage has today’s model and its 5.5 successor', () => {
+    const anthropic = CANDIDATES.filter((c) => c.keyName === 'anthropic');
+    for (const c of anthropic) {
+      expect(ownEntry(MODEL_CAPABILITIES, c.modelId), `${c.label}: ${c.modelId} must be registered`).toBeDefined();
+    }
+    for (const stage of ['fast', 'balanced', 'deep'] as const) {
+      for (const id of [MODEL_MAP[stage], STAGE_SUCCESSOR[stage]]) {
+        const c = anthropic.find((x) => x.modelId === id);
+        expect(c, `${stage}: ${id} must be a replay candidate`).toBeDefined();
+        expect(c!.stage).toBe(stage);
+      }
+    }
+  });
+
   it('every Fireworks candidate id is registered in MODEL_CAPABILITIES', async () => {
     // A typo'd id in the candidate list would otherwise surface only at replay
     // time as a live-endpoint 404 — this pins the list to the registry, which is
