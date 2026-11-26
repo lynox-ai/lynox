@@ -520,6 +520,8 @@ describe('a scheduled workflow question on an instance the control plane runs', 
     const env: Record<string, string> = {
       LYNOX_DATA_DIR: dir, LYNOX_BILLING_TIER: 'hosted', LYNOX_MANAGED_INSTANCE_ID: 'inst-wfq',
       LYNOX_MANAGED_CONTROL_PLANE_URL: 'https://cp.test', LYNOX_HTTP_SECRET: 'wfq-secret',
+      // A hosted instance starts only on the vault key the platform delivers in the environment.
+      LYNOX_VAULT_KEY: 'A'.repeat(64),
     };
     for (const k of ENV_KEYS) {
       if (!saved.has(k)) saved.set(k, process.env[k]);

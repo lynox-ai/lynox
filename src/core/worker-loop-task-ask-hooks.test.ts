@@ -56,6 +56,8 @@ async function bootManaged(): Promise<{ engine: Engine; fetchSpy: ReturnType<typ
     LYNOX_DATA_DIR: tempDir('lynox-task-question-cp-'), LYNOX_BILLING_TIER: 'hosted',
     LYNOX_MANAGED_INSTANCE_ID: 'inst-tq', LYNOX_MANAGED_CONTROL_PLANE_URL: 'https://cp.test',
     LYNOX_HTTP_SECRET: 'tq-secret',
+    // A hosted instance starts only on the vault key the platform delivers in the environment.
+    LYNOX_VAULT_KEY: 'A'.repeat(64),
   };
   for (const k of ENV_KEYS) {
     if (!saved.has(k)) saved.set(k, process.env[k]);
