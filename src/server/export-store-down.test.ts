@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { EXPORT_RELATIONS_PER_ENTITY } from '../core/knowledge-layer.js';
+import { MEMORY_TEXTS_RELATIONSHIPS_NOTE } from '../core/graph-export.js';
 import { SecretStore } from '../core/secret-store.js';
 import { EngineDb } from '../core/engine-db.js';
 import { SubjectStore } from '../core/subject-store.js';
@@ -38,13 +39,13 @@ type ExportBody = {
 
 type MemoryTexts = {
   'agent-memory.db'?: { memories: Array<Record<string, unknown>>; mentions: Array<Record<string, unknown>> };
-  'engine.db'?: { memories: Array<Record<string, unknown>>; memory_subjects: Array<Record<string, unknown>>; relationships?: Array<Record<string, unknown>> };
+  'engine.db'?: { memories: Array<Record<string, unknown>>; memory_subjects: Array<Record<string, unknown>>; relationships: Array<Record<string, unknown>>; relationships_note: string };
 };
 
 /** The remembered-text half of a store that holds none. */
 const NO_MEMORY_TEXTS = {
   'agent-memory.db': { memories: [], mentions: [] },
-  'engine.db': { memories: [], memory_subjects: [], relationships: [] },
+  'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE },
 };
 
 type EngineView = {
@@ -263,7 +264,7 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     const legacy = new Database(join(h.dir(), 'agent-memory.db'));
     try {
       legacy.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active, embedding, created_at, updated_at) VALUES ('m-legacy', ?, 'knowledge', 'global', 'global', 0, x'00', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')").run(`Alice's key is ${key}`);
-      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active) VALUES ('m-held', ?, 'knowledge', 'global', 'global', 0)").run(engineDb!.enc('Bob prefers mornings'));
+      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active) VALUES ('m-held', ?, 'knowledge', 'global', 'global', 0)").run(engineDb!.enc(`Bob prefers mornings, key ${key}`));
 
       const res = await fetch(`${h.baseUrl()}/api/export`, { headers: { Authorization: `Bearer ${h.secret}` } });
       const text = await res.text();
@@ -273,7 +274,8 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       expect(legacyRow?.['text'], 'a replaced text of agent-memory.db, masked').toMatch(/^Alice's key is (?!sk-ant-)/);
       expect(text.includes(key), 'the key is not in the export').toBe(false);
       expect(legacyRow && 'embedding' in legacyRow, 'no embedding').toBe(false);
-      expect(memories['engine.db']!.memories.map(m => [m['id'], m['text']]), 'engine.db, decrypted').toEqual([['m-held', 'Bob prefers mornings']]);
+      const engineRow = memories['engine.db']!.memories.find(m => m['id'] === 'm-held');
+      expect(engineRow?.['text'], 'engine.db, decrypted and masked').toMatch(/^Bob prefers mornings, key (?!sk-ant-)/);
       expect(body.knowledge_graph_may_be_incomplete, 'both stores read in full').toBe(false);
 
       const getEngineDb = h.engine().getEngineDb;
@@ -423,6 +425,9 @@ describe('export with the knowledge graph switched off after it held entities an
     const alice = db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'global' });
     const acme = db.createEntity({ canonicalName: 'ACME', entityType: 'organization', scopeType: 'global', scopeId: 'global' });
     db.createRelation(alice, acme, 'works_at', 'Alice works at ACME', 'm-not-stored');
+    db.setEmbeddingDimensions(3);
+    const memory = db.createMemory({ text: 'Alice prefers mornings', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
+    db.createMention(memory, alice);
     db.close();
   }, false);
 
@@ -435,7 +440,10 @@ describe('export with the knowledge graph switched off after it held entities an
     expect(graph.entities.map(e => e.canonicalName).sort()).toEqual(['ACME', 'Alice']);
     expect(graph.relationships.map(r => r.description)).toEqual(['Alice works at ACME']);
     expect(graph.enabled, 'switched off').toBe(false);
-    expect(body.knowledge_graph_may_be_incomplete, 'read in full, and no remembered text is held').toBe(false);
+    const legacy = body.knowledge_graph.memories?.['agent-memory.db'];
+    expect(legacy?.memories.map(m => m['text']), 'the remembered text it still holds').toEqual(['Alice prefers mornings']);
+    expect(legacy?.mentions, 'and its mention of Alice').toHaveLength(1);
+    expect(body.knowledge_graph_may_be_incomplete, 'read in full, the remembered text included').toBe(false);
   }, 60_000);
 });
 

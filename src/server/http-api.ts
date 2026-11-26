@@ -15013,7 +15013,6 @@ export class LynoxHTTPApi {
         const read = readMemoryTextsForExport({
           agentMemoryFile: join(getLynoxDir(), 'agent-memory.db'),
           engineDb: engine.getEngineDb(),
-          subjectGraph: engine.getUserConfig().subject_graph_enabled === true,
           mask: (t: string) => maskSecretPatterns(exportSecrets ? exportSecrets.maskSecrets(t) : t),
         });
         memoryTexts = { block: { 'agent-memory.db': read['agent-memory.db'], 'engine.db': read['engine.db'] }, mayBeIncomplete: read.mayBeIncomplete };

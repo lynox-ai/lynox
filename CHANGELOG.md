@@ -80,12 +80,14 @@
 - `GET /api/export` now carries the remembered texts of the knowledge graph,
   under `knowledge_graph.memories`, keyed by the store that holds them:
   `agent-memory.db` with its `memories` and `mentions`, and `engine.db` with
-  its `memories` and `memory_subjects`, plus its `relationships` while the
-  subject graph is off (with it on, the graph block already carries them).
-  Every stored column is included except the embedding, and replaced or retired
-  texts are included as well, with their `is_active` and `superseded_by`. Texts
-  and relationship descriptions are masked the way durable knowledge is. A text
-  that cannot be decrypted is written as a marker, never as ciphertext.
+  its `memories`, `memory_subjects` and every row of `relationships`, with
+  `source_deleted` and a `relationships_note`; the graph block lists only the
+  subjects it maps to entities, so relations between other subjects were in no
+  block. Every stored column is included except the embedding, and replaced or
+  retired texts are included as well, with their `is_active` and
+  `superseded_by`. Texts and relationship descriptions and notes are masked the
+  way durable knowledge is. A text that cannot be decrypted, or is not stored as
+  text, is written as a marker, never as what is stored.
   `knowledge_graph_may_be_incomplete` no longer turns `true` just because such
   texts are stored. It turns `true` when one of these tables could not be read,
   a table returned more than 20,000 rows (the rest is left out), a text could not

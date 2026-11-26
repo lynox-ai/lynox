@@ -8,6 +8,7 @@ import {
 } from './agent-memory-db.js';
 import { toEntityRecord } from './entity-resolver.js';
 import { EXPORT_RELATIONS_PER_ENTITY, legacyRelationForExport, listSubjectEntitiesOn, relRowToRelationRecord } from './knowledge-layer.js';
+import { sourceDeletedSql } from './relation-source.js';
 import { RelationshipStore } from './relationship-store.js';
 import { ENTITY_MAPPABLE_SUBJECT_KINDS, SubjectStore } from './subject-store.js';
 
@@ -180,14 +181,18 @@ export const UNREADABLE_MEMORY_TEXT = '[not readable: stored encrypted and could
 /** Rows read per table. A table that returns more is cut here and marks the block. */
 export const MEMORY_TEXT_EXPORT_CAP = 20_000;
 
+export const MEMORY_TEXTS_RELATIONSHIPS_NOTE = 'source_deleted: 1 when the memory this relation was derived from '
+  + 'was removed or replaced by a newer memory that contradicts it; the relation is no longer shown or used. '
+  + 'An empty source_memory_id means no source was recorded, or the memory it came from was deleted.';
+
 type ExportRow = Record<string, unknown>;
 
 export interface HeldMemoryTexts {
   /** The legacy store: each remembered text, and which entity it mentions. */
   'agent-memory.db': { memories: ExportRow[]; mentions: ExportRow[] };
-  /** The subject-graph store: each remembered text and which subject it is about; with the
-   * subject graph off also the relations between subjects, which the graph block then leaves out. */
-  'engine.db': { memories: ExportRow[]; memory_subjects: ExportRow[]; relationships?: ExportRow[] };
+  /** The subject-graph store: each remembered text, which subject it is about, and every
+   * relation between subjects, those of a kind the graph block does not list included. */
+  'engine.db': { memories: ExportRow[]; memory_subjects: ExportRow[]; relationships: ExportRow[]; relationships_note: string };
   /** Not the whole of what is held: a read failed or was cut at the cap, a text could not be
    * decrypted, agent-memory.db has a newer schema than this build, or engine.db is not open. */
   mayBeIncomplete: boolean;
@@ -197,9 +202,13 @@ export interface HeldMemoryTexts {
  * Every remembered text both stores hold, and what links it to the graph, for the data export.
  * Active or not: a text that was replaced or retired is still stored, and Art. 15 asks what is
  * held. Each row carries its stored columns except the embedding (numbers, no content of their
- * own). Every text, and a relationship's free-text description, goes through `mask`, as the
- * other blocks do; engine.db texts are decrypted first, and one that cannot be is written as
- * {@link UNREADABLE_MEMORY_TEXT}, never as ciphertext.
+ * own), which is not even read. Every text, and a relationship's free-text description and
+ * notes, goes through `mask`, as the other blocks do; engine.db texts are decrypted first, and
+ * one that cannot be, or is not stored as text at all, is written as
+ * {@link UNREADABLE_MEMORY_TEXT}, never as what is stored.
+ *
+ * engine.db's relationships are read in full whatever the subject-graph setting: the graph block
+ * lists only the subjects it maps to entities and reads a capped number of relations for each.
  *
  * agent-memory.db is opened read-only, as {@link readHeldGraph} opens it and for the same
  * reasons; one stamped with a newer schema is left unread. engine.db is read on the engine's
@@ -209,16 +218,21 @@ export interface HeldMemoryTexts {
 export function readMemoryTextsForExport(opts: {
   agentMemoryFile: string;
   engineDb: EngineDb | null;
-  subjectGraph: boolean;
   mask: (text: string) => string;
   /** Rows per table; {@link MEMORY_TEXT_EXPORT_CAP} unless a test sets a smaller one. */
   cap?: number;
 }): HeldMemoryTexts {
   const cap = opts.cap ?? MEMORY_TEXT_EXPORT_CAP;
   let incomplete = false;
-  const read = (db: Database.Database, sql: string, label: string): ExportRow[] => {
+  /** The table's columns, the embedding left out, as a select list for alias `t`. */
+  const columns = (db: Database.Database, table: string): string =>
+    (db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all() as Array<{ name: string }>)
+      .filter(c => c.name !== 'embedding')
+      .map(c => `t."${c.name.replaceAll('"', '""')}"`)
+      .join(', ');
+  const read = (db: Database.Database, table: string, extra: string, order: string, label: string): ExportRow[] => {
     try {
-      const rows = db.prepare(`${sql} LIMIT ?`).all(cap + 1) as ExportRow[];
+      const rows = db.prepare(`SELECT ${columns(db, table)}${extra} FROM ${table} t ORDER BY ${order} LIMIT ?`).all(cap + 1) as ExportRow[];
       if (rows.length > cap) {
         incomplete = true;
         process.stderr.write(`⚠ /api/export: ${label} hit the ${String(cap)}-row cap — knowledge graph marked incomplete\n`);
@@ -231,9 +245,12 @@ export function readMemoryTextsForExport(opts: {
       return [];
     }
   };
-  const withoutEmbedding = (row: ExportRow): ExportRow => {
-    const { embedding: _embedding, ...rest } = row;
-    return rest;
+  const maskField = (row: ExportRow, field: string): ExportRow =>
+    typeof row[field] === 'string' ? { ...row, [field]: opts.mask(row[field]) } : row;
+  /** A text that is not stored as text cannot be read as one, and is not written out as stored. */
+  const unreadable = (row: ExportRow): ExportRow => {
+    incomplete = true;
+    return { ...row, text: UNREADABLE_MEMORY_TEXT };
   };
 
   const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [] };
@@ -244,12 +261,9 @@ export function readMemoryTextsForExport(opts: {
       if (agentMemoryVersionOn(legacy) > AGENT_MEMORY_SCHEMA_VERSION) {
         incomplete = true;
       } else {
-        legacyHalf.memories = read(legacy, 'SELECT * FROM memories ORDER BY created_at, id', 'agent-memory.db memories')
-          .map(r => {
-            const row = withoutEmbedding(r);
-            return typeof row['text'] === 'string' ? { ...row, text: opts.mask(row['text']) } : row;
-          });
-        legacyHalf.mentions = read(legacy, 'SELECT * FROM mentions ORDER BY created_at, memory_id, entity_id', 'agent-memory.db mentions');
+        legacyHalf.memories = read(legacy, 'memories', '', 't.created_at, t.id', 'agent-memory.db memories')
+          .map(row => typeof row['text'] === 'string' ? maskField(row, 'text') : unreadable(row));
+        legacyHalf.mentions = read(legacy, 'mentions', '', 't.created_at, t.memory_id, t.entity_id', 'agent-memory.db mentions');
       }
     }
   } catch {
@@ -259,24 +273,21 @@ export function readMemoryTextsForExport(opts: {
     try { legacy?.close(); } catch { /* ignore */ }
   }
 
-  const engineHalf: HeldMemoryTexts['engine.db'] = { memories: [], memory_subjects: [] };
+  const engineHalf: HeldMemoryTexts['engine.db'] = { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE };
   if (opts.engineDb) {
     const engineDb = opts.engineDb;
     const db = engineDb.getDb();
-    engineHalf.memories = read(db, 'SELECT * FROM memories ORDER BY created_at, id', 'engine.db memories')
-      .map(r => {
-        const row = withoutEmbedding(r);
-        if (typeof row['text'] !== 'string') return row;
+    engineHalf.memories = read(db, 'memories', '', 't.created_at, t.id', 'engine.db memories')
+      .map(row => {
+        if (typeof row['text'] !== 'string') return unreadable(row);
         let plain: string | null = null;
         try { plain = engineDb.tryDec(row['text']); } catch { plain = null; }
-        if (plain === null) { incomplete = true; return { ...row, text: UNREADABLE_MEMORY_TEXT }; }
+        if (plain === null) return unreadable(row);
         return { ...row, text: opts.mask(plain) };
       });
-    engineHalf.memory_subjects = read(db, 'SELECT * FROM memory_subjects ORDER BY created_at, memory_id, subject_id', 'engine.db memory_subjects');
-    if (!opts.subjectGraph) {
-      engineHalf.relationships = read(db, 'SELECT * FROM relationships ORDER BY created_at, id', 'engine.db relationships')
-        .map(r => typeof r['description'] === 'string' ? { ...r, description: opts.mask(r['description']) } : r);
-    }
+    engineHalf.memory_subjects = read(db, 'memory_subjects', '', 't.created_at, t.memory_id, t.subject_id', 'engine.db memory_subjects');
+    engineHalf.relationships = read(db, 'relationships', `, CASE WHEN ${sourceDeletedSql('t')} THEN 1 ELSE 0 END AS source_deleted`, 't.created_at, t.id', 'engine.db relationships')
+      .map(row => maskField(maskField(row, 'description'), 'notes'));
   } else {
     // No engine.db: what it holds was not read, and cannot be shown to be nothing.
     incomplete = true;

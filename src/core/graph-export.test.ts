@@ -8,7 +8,7 @@ import { AgentMemoryDb, AGENT_MEMORY_SCHEMA_VERSION } from './agent-memory-db.js
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
-import { MEMORY_TEXT_EXPORT_CAP, UNREADABLE_MEMORY_TEXT, readHeldGraph, readMemoryTextsForExport } from './graph-export.js';
+import { MEMORY_TEXTS_RELATIONSHIPS_NOTE, MEMORY_TEXT_EXPORT_CAP, UNREADABLE_MEMORY_TEXT, readHeldGraph, readMemoryTextsForExport } from './graph-export.js';
 import { EXPORT_RELATIONS_PER_ENTITY } from './knowledge-layer.js';
 
 /**
@@ -289,7 +289,7 @@ describe('readMemoryTextsForExport', () => {
 
   it('reads every remembered text and mention of agent-memory.db, a replaced one included, masked, without the embedding', () => {
     const { oldId, newId, entity } = seedLegacy();
-    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, subjectGraph: false, mask });
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
     const memories = texts['agent-memory.db'].memories;
     expect(memories.map(m => [m['id'], m['text'], m['is_active']]).sort()).toEqual([
       [oldId, 'Alice used password [masked]', 0],
@@ -300,16 +300,28 @@ describe('readMemoryTextsForExport', () => {
     expect(texts.mayBeIncomplete, 'read in full').toBe(false);
   });
 
-  it('changes neither agent-memory.db nor its -wal, migrates nothing, and writes no page to a -wal', () => {
-    seedLegacy();
-    const before = fileState(file);
-    const mtime = statSync(file).mtimeMs;
-    readMemoryTextsForExport({ agentMemoryFile: file, engineDb, subjectGraph: false, mask });
-    const after = fileState(file);
-    expect(after.main, 'the file is byte-identical').toBe(before.main);
-    expect(statSync(file).mtimeMs, 'the file was not written').toBe(mtime);
+  it('reads the texts still in the -wal of a file left without a checkpoint, and changes neither file nor its schema stamp', () => {
+    const writer = new AgentMemoryDb(file);
+    writer.setEmbeddingDimensions(3);
+    writer.createMemory({ text: 'Dora prefers tea', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
+    // A crash image: main file and -wal as the process left them, without the checkpoint a
+    // clean close runs. A connection that may write checkpoints the -wal into the main file
+    // when it closes; one opened read-only cannot.
+    const image = join(dir, 'image.db');
+    copyFileSync(file, image);
+    copyFileSync(`${file}-wal`, `${image}-wal`);
+    writer.close();
+    expect(statSync(`${image}-wal`).size, 'fixture: the text is in the -wal').toBeGreaterThan(0);
+    const before = fileState(image);
+    const mtime = statSync(image).mtimeMs;
+
+    const texts = readMemoryTextsForExport({ agentMemoryFile: image, engineDb, mask });
+    expect(texts['agent-memory.db'].memories.map(m => m['text']), 'the row in the -wal is read').toEqual(['Dora prefers tea']);
+    const after = fileState(image);
+    expect(after.main, 'main file unchanged: no checkpoint ran').toBe(before.main);
+    expect(after.wal, 'the -wal is unchanged').toBe(before.wal);
+    expect(statSync(image).mtimeMs, 'the main file was not written').toBe(mtime);
     expect(after.version, 'the schema stamp is unchanged').toBe(before.version);
-    expect(after.walSize ?? 0, 'no page was written to a -wal').toBe(0);
   });
 
   it('leaves a newer agent-memory.db unread and unmigrated, marks the block, and still reads engine.db', () => {
@@ -320,7 +332,7 @@ describe('readMemoryTextsForExport', () => {
     engineDb.getDb().prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('e1', ?, 'knowledge', 'global', 'global')").run(engineDb.enc('Bob is in Bern'));
     const before = fileState(file);
 
-    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, subjectGraph: false, mask });
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
     expect(texts['agent-memory.db'], 'a newer schema is not guessed at').toEqual({ memories: [], mentions: [] });
     expect(texts['engine.db'].memories.map(m => m['text'])).toEqual(['Bob is in Bern']);
     expect(texts.mayBeIncomplete).toBe(true);
@@ -329,7 +341,7 @@ describe('readMemoryTextsForExport', () => {
     expect(after.version, 'not migrated').toBe(AGENT_MEMORY_SCHEMA_VERSION + 1);
   });
 
-  it('reads engine.db texts decrypted and masked, their subjects, and the relationships while the subject graph is off', () => {
+  it('reads engine.db texts decrypted and masked, their subjects, and every relationship, masked and marked by its source', () => {
     const subjects = new SubjectStore(engineDb);
     const bob = subjects.createSubject({ kind: 'person', name: 'Bob' });
     const globex = subjects.createSubject({ kind: 'organization', name: 'Globex' });
@@ -337,16 +349,32 @@ describe('readMemoryTextsForExport', () => {
     raw.prepare("INSERT INTO memories (id, text, namespace, subject_id, scope_type, scope_id, is_active, embedding) VALUES ('e1', ?, 'knowledge', ?, 'global', 'global', 0, x'00')").run(engineDb.enc('Bob uses hunter2'), bob);
     raw.prepare("INSERT INTO memory_subjects (memory_id, subject_id) VALUES ('e1', ?)").run(bob);
     new RelationshipStore(engineDb).createRelationship({ fromSubjectId: bob, toSubjectId: globex, kind: 'works_at', description: 'Bob told hunter2 at Globex' });
+    raw.prepare("UPDATE relationships SET notes = 'note with hunter2', source_memory_id = 'e1'").run();
     expect(String((raw.prepare("SELECT text FROM memories WHERE id = 'e1'").get() as { text: string }).text).startsWith('enc:'), 'fixture: stored encrypted').toBe(true);
 
-    const off = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, subjectGraph: false, mask });
-    expect(off['engine.db'].memories.map(m => [m['id'], m['text'], m['is_active'], 'embedding' in m])).toEqual([['e1', 'Bob uses [masked]', 0, false]]);
-    expect(off['engine.db'].memory_subjects.map(m => [m['memory_id'], m['subject_id']])).toEqual([['e1', bob]]);
-    expect(off['engine.db'].relationships?.map(r => [r['from_subject_id'], r['to_subject_id'], r['description']])).toEqual([[bob, globex, 'Bob told [masked] at Globex']]);
-    expect(off.mayBeIncomplete).toBe(false);
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(texts['engine.db'].memories.map(m => [m['id'], m['text'], m['is_active'], 'embedding' in m])).toEqual([['e1', 'Bob uses [masked]', 0, false]]);
+    expect(texts['engine.db'].memory_subjects.map(m => [m['memory_id'], m['subject_id']])).toEqual([['e1', bob]]);
+    expect(texts['engine.db'].relationships.map(r => [r['from_subject_id'], r['to_subject_id'], r['description'], r['notes'], r['source_deleted']]),
+      'its source e1 is no longer active').toEqual([[bob, globex, 'Bob told [masked] at Globex', 'note with [masked]', 1]]);
+    expect(texts['engine.db'].relationships_note).toBe(MEMORY_TEXTS_RELATIONSHIPS_NOTE);
+    expect(texts.mayBeIncomplete).toBe(false);
+  });
 
-    const on = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, subjectGraph: true, mask });
-    expect(on['engine.db'].relationships, 'with the subject graph on the graph block carries them').toBeUndefined();
+  it('carries a relationship between subjects the graph block does not list', () => {
+    const subjects = new SubjectStore(engineDb);
+    const hosting = subjects.createSubject({ kind: 'service', name: 'Hosting' });
+    const misc = subjects.createSubject({ kind: 'other', name: 'Misc' });
+    new RelationshipStore(engineDb).createRelationship({ fromSubjectId: hosting, toSubjectId: misc, kind: 'related_to', description: 'Hosting relates to Misc' });
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(texts['engine.db'].relationships.map(r => [r['description'], r['source_deleted']])).toEqual([['Hosting relates to Misc', 0]]);
+  });
+
+  it('writes a text stored as something other than text as the marker, and marks the block', () => {
+    engineDb.getDb().prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('e3', x'656e633a41414141', 'knowledge', 'global', 'global')").run();
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(texts['engine.db'].memories.map(m => m['text'])).toEqual([UNREADABLE_MEMORY_TEXT]);
+    expect(texts.mayBeIncomplete).toBe(true);
   });
 
   it('writes a text it cannot decrypt as the marker, never as ciphertext, and marks the block', () => {
@@ -356,7 +384,7 @@ describe('readMemoryTextsForExport', () => {
     engineDb = new EngineDb(join(dir, 'engine.db'), 'another-key');
     engineDb.getDb().prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('e2', ?, 'knowledge', 'global', 'global')").run(ciphertext);
 
-    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, subjectGraph: false, mask });
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
     expect(texts['engine.db'].memories.map(m => m['text'])).toEqual([UNREADABLE_MEMORY_TEXT]);
     const out = JSON.stringify(texts);
     expect(out.includes(ciphertext.slice(4, 24)), 'no part of the ciphertext is written').toBe(false);
@@ -369,21 +397,48 @@ describe('readMemoryTextsForExport', () => {
     for (let i = 0; i < 3; i++) {
       raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES (?, ?, 'knowledge', 'global', 'global')").run(`e${String(i)}`, engineDb.enc(`text ${String(i)}`));
     }
-    const at = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, subjectGraph: false, mask, cap: 2 });
+    const at = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, cap: 2 });
     expect(at['engine.db'].memories).toHaveLength(2);
     expect(at.mayBeIncomplete, 'more rows than the cap').toBe(true);
 
-    const under = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, subjectGraph: false, mask, cap: 3 });
+    const under = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, cap: 3 });
     expect(under['engine.db'].memories).toHaveLength(3);
     expect(under.mayBeIncomplete, 'exactly the cap: every row was read').toBe(false);
     expect(MEMORY_TEXT_EXPORT_CAP, 'the default cap').toBe(20_000);
   });
 
+  it('cuts every table at the cap, mentions, subjects and relationships included', () => {
+    seedLegacy();
+    const legacy = new AgentMemoryDb(file);
+    const second = legacy.createEntity({ canonicalName: 'Bob', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    const [first] = (legacy as unknown as { db: Database.Database }).db.prepare('SELECT id FROM memories').all() as Array<{ id: string }>;
+    legacy.createMention(first!.id, second);
+    legacy.close();
+    const subjects = new SubjectStore(engineDb);
+    const a = subjects.createSubject({ kind: 'person', name: 'A' });
+    const b = subjects.createSubject({ kind: 'person', name: 'B' });
+    const raw = engineDb.getDb();
+    for (const id of ['x1', 'x2']) {
+      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES (?, 't', 'knowledge', 'global', 'global')").run(id);
+      raw.prepare('INSERT INTO memory_subjects (memory_id, subject_id) VALUES (?, ?)').run(id, a);
+    }
+    const rels = new RelationshipStore(engineDb);
+    rels.createRelationship({ fromSubjectId: a, toSubjectId: b, kind: 'knows', description: '' });
+    rels.createRelationship({ fromSubjectId: b, toSubjectId: a, kind: 'knows', description: '' });
+
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, cap: 1 });
+    expect([
+      texts['agent-memory.db'].memories.length, texts['agent-memory.db'].mentions.length,
+      texts['engine.db'].memories.length, texts['engine.db'].memory_subjects.length, texts['engine.db'].relationships.length,
+    ], 'each table holds two rows and is cut to one').toEqual([1, 1, 1, 1, 1]);
+    expect(texts.mayBeIncomplete).toBe(true);
+  });
+
   it('marks the block without engine.db, and still reads agent-memory.db', () => {
     seedLegacy();
-    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb: null, subjectGraph: false, mask });
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb: null, mask });
     expect(texts['agent-memory.db'].memories).toHaveLength(2);
-    expect(texts['engine.db']).toEqual({ memories: [], memory_subjects: [] });
+    expect(texts['engine.db']).toEqual({ memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE });
     expect(texts.mayBeIncomplete, 'what engine.db holds was not read').toBe(true);
   });
 
@@ -395,7 +450,7 @@ describe('readMemoryTextsForExport', () => {
     const closed = new EngineDb(join(dir, 'closed.db'), 'memory-texts-test-key');
     closed.close();
 
-    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb: closed, subjectGraph: false, mask });
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb: closed, mask });
     expect(texts['agent-memory.db'].memories, 'the texts are still read').toHaveLength(2);
     expect(texts['agent-memory.db'].mentions).toEqual([]);
     expect(texts['engine.db'].memories).toEqual([]);
@@ -403,10 +458,10 @@ describe('readMemoryTextsForExport', () => {
   });
 
   it('reads a fresh instance that holds no texts as complete, and creates no agent-memory.db', () => {
-    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, subjectGraph: false, mask });
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
     expect(texts).toEqual({
       'agent-memory.db': { memories: [], mentions: [] },
-      'engine.db': { memories: [], memory_subjects: [], relationships: [] },
+      'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE },
       mayBeIncomplete: false,
     });
     expect(existsSync(file)).toBe(false);
