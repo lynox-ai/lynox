@@ -2264,7 +2264,9 @@ describe('the sentence for an answer the rule refused', () => {
 		expect(bulkInvalidText('verdict_invalid', false, true, EN)).not.toContain('reason:');
 		// A kept field still names the field and the rule there, ahead of the sentence without one.
 		const kept = { ...other, refusal: { field: 'summary', kind: 'minLength', limit: 3 } };
-		expect(bulkInvalidText('verdict_invalid', false, true, DE, kept)).toContain('Feld summary: Der Text ist kürzer als 3 Zeichen.');
+		expect(bulkInvalidText('verdict_invalid', false, true, DE, kept)).toBe(
+			'Das Modell hat für dieses Ziel keine verwertbare Antwort gegeben. Feld summary: Der Text ist kürzer als 3 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.',
+		);
 		// A Shopify run keeps its own sentence about the product.
 		expect(bulkInvalidText('verdict_invalid', true, true, EN)).toBe(en['bulk.invalid.verdict_invalid']);
 	});

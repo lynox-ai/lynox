@@ -1763,8 +1763,9 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
 };
 
 /** What the owner reads under a target lynox leaves out: on a Shopify run what is wrong, that
- *  lynox does not change it, and the next step; elsewhere the reason by its code and the step
- *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
+ *  lynox does not change it, and the next step; elsewhere a reason without a sentence of its own
+ *  by its code and the step every run has. Unknown (not yet loaded) reads as managed, as the halt
+ *  sentences do. */
 export function bulkInvalidText(
 	reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n,
 	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's.
