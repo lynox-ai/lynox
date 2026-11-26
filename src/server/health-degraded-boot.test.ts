@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
+import { Engine } from '../core/engine.js';
 
 /**
  * `/api/health` after a boot in which engine.db or history.db could not be opened.
@@ -105,5 +106,37 @@ describe('/api/health names whether durable knowledge runs', () => {
     const r = await bootAndProbe('engine.db', 'true');
     expect(word(r.body)).toBe('not_loaded');
     expect(r.text).not.toMatch(/engine\.db|EngineDb|wiring/i);
+  }, 60_000);
+});
+
+/**
+ * `engine.audit_retention`: the word the control plane's monitor reads to tell its operator that
+ * the instance log stopped keeping its retention. Real boots, so the word comes from the sweep the
+ * boot ran; when it says `stalled` is covered on a booted engine in `audit-log-boot.test.ts`.
+ */
+describe('/api/health names whether the instance log keeps its retention', () => {
+  const word = (body: Record<string, unknown>): unknown => (body['engine'] as Record<string, unknown>)['audit_retention'];
+
+  it('says ok after a boot whose sweep ran', async () => {
+    expect(word((await bootAndProbe(null)).body)).toBe('ok');
+  }, 60_000);
+
+  it('says stalled, and keeps the rest of the body, when the trail cannot be asked', async () => {
+    const spy = vi.spyOn(Engine.prototype, 'getAuditRetentionState').mockImplementation(() => { throw new Error('SQLITE_IOERR secret-path'); });
+    try {
+      const r = await bootAndProbe(null);
+      expect(word(r.body)).toBe('stalled');
+      expect(r.body['status']).toBe('ok');
+      expect(Object.keys(r.body).sort()).toEqual(CONTRACT_KEYS);
+      expect(r.text).not.toContain('secret-path');
+    } finally {
+      spy.mockRestore();
+    }
+  }, 60_000);
+
+  it('leaves the word out when engine.db could not be opened, and says nothing more', async () => {
+    const r = await bootAndProbe('engine.db');
+    expect(r.body['engine']).not.toHaveProperty('audit_retention');
+    expect(r.text).not.toMatch(/audit_log|retention sweep|SQLITE_/i);
   }, 60_000);
 });

@@ -515,7 +515,8 @@ async function applyRunEffect(
     } catch (err: unknown) {
       // A local writer that throws has answered: its outcome is known, so its send is booked as
       // answered, as an external writer's refusal is (`onRefused`). Only the send of this pass,
-      // never one a loop that died left before it.
+      // never one a loop that died left before it. No count reads a local run's open sends today;
+      // this keeps the column true for whatever reads it next.
       if (localSent) ledger.markRefused(runId, t.seq);
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };

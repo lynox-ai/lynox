@@ -206,7 +206,7 @@ describe('a run the engine works on', () => {
 		expect(line()).toBe('lynox urteilt …');
 	});
 
-	it('says lynox writes, with the written targets out of those it writes, approved and while writing, and the head moves too', async () => {
+	it('says lynox writes, with the targets done out of those it writes, approved and while writing, and the head moves too', async () => {
 		run = makeRun({ phase: 'approved', total: 4, changes: { ...UPDATES(3), unchanged: 1 } });
 		await render();
 		expect(line()).toBe('lynox schreibt … 0 von 3 erledigt');
@@ -395,6 +395,36 @@ describe('the head names every target once', () => {
 		await render();
 		expect(label()).toBe('Status');
 		expect(counts()).toBe('16 targets: 2 taken out · 3 unchanged · 9 written · 0 conflicts · 1 failed · 1 open');
+	});
+
+	it('a run halted because the store\'s access ended reads halted in its head, counts its targets, and names connecting again as the step before continuing, in DE and EN', async () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		setLocale('de');
+		run = makeRun({
+			phase: 'writing', total: 6, changes: UPDATES(6), applied: 2, haltKey: 'storeAccessEnded', haltReason: 'engine English',
+			probeConfirmed: true, writeForm: 'measured', checksum: 'c1', resumeOpen: 4, resumeTries: 4,
+			heads: { ...NONE, written: 2, open: 4 },
+		});
+		const dts = (): string[] => [...target.querySelectorAll('dt')].map((d) => d.textContent?.trim() ?? '');
+		await render();
+		expect(dts()).toContain('Angehalten');
+		expect(dts()).not.toContain('Abgebrochen');
+		expect(label()).toBe('Stand');
+		expect(counts()).toBe('6 Ziele: 2 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 4 offen');
+		expect(shown()).not.toContain('engine English');
+		expect(shown()).toContain(tf('bulk.halt.storeAccessEnded', { provider: HOST }));
+		expect(shown()).toContain('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du den Lauf hier fortsetzen.');
+		if (component) unmount(component);
+		component = undefined;
+		setLocale('en');
+		await render();
+		expect(dts()).toContain('Halted');
+		expect(dts()).not.toContain('Aborted');
+		expect(shown()).not.toContain('engine English');
+		expect(counts()).toBe('6 targets: 2 written · 0 conflicts · 0 failed · 4 open');
+		expect(shown()).toContain(tf('bulk.halt.storeAccessEnded', { provider: HOST }));
+		expect(shown()).toContain('Ask lynox in the chat to connect the store again. Then you can continue the run here.');
 	});
 
 	it('names each class in the engine\'s order, a target taken back unwritten with the ones taken back', () => {

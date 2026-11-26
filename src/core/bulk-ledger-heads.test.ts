@@ -210,7 +210,9 @@ describe('the head counts of a run', () => {
       }
       expect(ledger.claimTarget(id, 0, at + BULK_CLAIM_STALE_MS + 1)).toBe(true);
     });
-    it('names a stale target in the pass count too, as the head does', () => {
+    it('the pass count reads the same stale bound as the head', () => {
+      // A built state, not one a pass leaves (recording a failure gives the claim back): it pins
+      // only that the pass count binds the bound where the head does.
       const id = run(EXTERNAL, [{ ...held, error: 'write_failed', failedOnce: true }]);
       expect(ledger.getStatus(id, LIVE)!.passUnclear).toBe(0);
       expect(ledger.getStatus(id, at + BULK_CLAIM_STALE_MS + 1)!.passUnclear).toBe(1);

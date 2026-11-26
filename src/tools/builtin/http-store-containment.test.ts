@@ -22,6 +22,15 @@ vi.mock('../../core/store-pass.js', async (importOriginal) => {
   };
 });
 
+const renewal = vi.hoisted(() => ({ result: false as boolean | 'client-misnamed' | 'dead' | 'ineligible', urls: [] as string[] }));
+vi.mock('../../core/store-token-refresh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/store-token-refresh.js')>();
+  return {
+    ...actual,
+    refreshStoreToken: async (id: string, trigger: string) => { renewal.urls.push(`${id}:${trigger}`); return renewal.result === 'client-misnamed' || renewal.result === 'dead' || renewal.result === 'ineligible' ? renewal.result : renewal.result ? 'renewed' : 'not-run'; },
+  };
+});
+
 import dns from 'node:dns/promises';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -37,7 +46,8 @@ import type { ContainmentMirror } from '../../core/history-markers.js';
 import { createToolContext, type ToolContext } from '../../core/tool-context.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
-import { attachStoredCredential, httpRequestTool } from './http.js';
+import { attachStoredCredential, httpRequestTool, storeAttachRefusal } from './http.js';
+import { SHOPIFY_NOT_CLEARED, SHOPIFY_NOT_SET_UP, SHOPIFY_SELF_HOSTED, SHOPIFY_UNCONFIRMED } from '../../core/shopify-host.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 const ORIGIN = 'https://acme.myshopify.com';
@@ -146,6 +156,111 @@ async function request(a: never, headers: Record<string, string> = {}): Promise<
 
 const containedRows = (): { container_kind: string; container_id: string; kind: string; connection_id: string }[] =>
   engineDb.getDb().prepare('SELECT container_kind, container_id, kind, connection_id FROM contained').all() as never;
+
+describe('a 401 from the store', () => {
+  const NOTE = 'The access token for this store had expired and the engine has renewed it. Send the same request once more';
+  beforeEach(() => {
+    renewal.result = false;
+    renewal.urls = [];
+    // A preset profile records its token URL for display, which is what the OAuth2 reminder reads.
+    const store = new ApiStore();
+    const p = shopProfile();
+    store.register({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, token_url: `${ORIGIN}/admin/oauth/access_token`, grant_type: 'refresh_token' } } } as ApiProfile);
+    ctx.apiStore = store;
+    ctx.vaultNameBindings = bindingsAsMigrated(store);
+  });
+  const REMINDER = /fetch_token|re-authoriz|authorize/i;
+
+  it('asks the engine to renew the store\'s token, and tells the model to send once more when it did', async () => {
+    renewal.result = true;
+    storeAnswer = async () => new Response('{"errors":"[API] Invalid API key or access token"}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual(['shop-acme:unauthorized']);
+    expect(out).toContain(NOTE);
+    // And not the reminder that says the opposite (connect again, fetch a token).
+    expect(out.slice(out.indexOf(NOTE))).not.toMatch(REMINDER);
+    // The engine does not send it again itself: one request reached the store.
+    expect(atReceipt).toHaveLength(1);
+  });
+
+  const NOT_THIS_TIME = 'The engine did not renew the access token for this store this time. Send the same request once more; if the store answers 401 again, tell the user';
+
+  it('a renewal that did not run this time says to send once more, and gives no advice to connect again', async () => {
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual(['shop-acme:unauthorized']);
+    expect(out).not.toContain(NOTE);
+    expect(out).toContain(NOT_THIS_TIME);
+    expect(out.slice(out.indexOf(NOT_THIS_TIME))).not.toMatch(REMINDER);
+    expect(out).not.toContain('Agent reminder');
+  });
+
+  it('a connection the renewal ended keeps the reminder, and says nothing of sending once more', async () => {
+    renewal.result = 'dead';
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual(['shop-acme:unauthorized']);
+    expect(out).not.toContain(NOTE);
+    expect(out).not.toContain(NOT_THIS_TIME);
+    expect(out).toMatch(REMINDER);
+  });
+
+  it('names a client under other names instead of the reminder, which would say to connect again', async () => {
+    renewal.result = 'client-misnamed';
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(out).toContain('the store\'s access could not be renewed');
+    expect(out).toContain('api_setup action "update"');
+    expect(out).not.toContain('nothing was sent to the store');
+    expect(out.slice(out.indexOf('could not be renewed'))).not.toMatch(REMINDER);
+  });
+
+  it('asks for no renewal on an answer that is not a 401', async () => {
+    renewal.result = true;
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual([]);
+    expect(out).not.toContain(NOTE);
+  });
+});
+
+describe('a 401 from the store, for a built-in provider\'s profile that records no token URL', () => {
+  const NOT_THIS_TIME = 'The engine did not renew the access token for this store this time. Send the same request once more; if the store answers 401 again, tell the user';
+  beforeEach(() => {
+    renewal.result = false;
+    renewal.urls = [];
+    const store = new ApiStore();
+    store.register(shopProfile());
+    ctx.apiStore = store;
+    ctx.vaultNameBindings = bindingsAsMigrated(store);
+  });
+
+  it('a renewal that did not run this time gives no advice to connect again', async () => {
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual(['shop-acme:unauthorized']);
+    expect(out).toContain(NOT_THIS_TIME);
+    expect(out).not.toContain('Agent reminder');
+    expect(out.slice(out.indexOf(NOT_THIS_TIME))).not.toMatch(/api_setup[^.]*connect/i);
+  });
+
+  it('a connection that cannot be renewed as it stands says to connect again, and nothing of sending once more', async () => {
+    renewal.result = 'ineligible';
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual(['shop-acme:unauthorized']);
+    expect(out).not.toContain(NOT_THIS_TIME);
+    expect(out).toContain('To connect it, call api_setup with action "connect" and id "shop-acme"');
+  });
+
+  it('a connection the renewal ended says nothing of sending once more, and says to connect again', async () => {
+    renewal.result = 'dead';
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(out).not.toContain(NOT_THIS_TIME);
+    // The way that still works is named: connect again.
+    expect(out).toContain('To connect it, call api_setup with action "connect" and id "shop-acme"');
+  });
+});
 
 describe('a request to the store under a thread', () => {
   it('contains the thread before the pass is minted, and the store sees the record when the request arrives', async () => {
@@ -267,7 +382,7 @@ describe('no container, or no record, means no request', () => {
 describe('a bulk run\'s request (attachStoredCredential)', () => {
   const attach = async (runId: string, over: Partial<{ containment: Containment | null }> = {}): Promise<{ attached: Awaited<ReturnType<typeof attachStoredCredential>>; pass: unknown }> => {
     const out: { pass?: unknown } = {};
-    const attached = await attachStoredCredential(URL_OK, {}, false, {
+    const attached = await attachStoredCredential(URL_OK, {}, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: ctx.apiStore!,
       secretStore: { resolve: (n: string) => (n === accessTokenKey('shop-acme') ? TOKEN : null) } as never,
       principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
@@ -310,6 +425,82 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
     expect(containedRows()).toEqual([]);
     // Both write nothing, so neither reaches the control plane, whose clearance records the instance.
     expect(cpAsked).toBe(0);
+  });
+});
+
+describe('a bulk run\'s request a store refuses names the cause it halts on', () => {
+  // The run halts on the cause (`BULK_HALT_REASONS[cause]`), not on `credential`: the connection
+  // is there, and connecting it again would not help. No such refusal names a reconnect: the two
+  // are the attach's two answers, and it gives at most one.
+  const attach = async (runId = 'run-1', over: Partial<{ containment: Containment | null }> = {}): Promise<{ attached: Awaited<ReturnType<typeof attachStoredCredential>>; refusal: unknown; reconnect: unknown }> => {
+    const out: { pass?: unknown; refusal?: unknown; reconnect?: unknown } = {};
+    const attached = await attachStoredCredential(URL_OK, {}, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },
+      apiStore: ctx.apiStore!,
+      secretStore: { resolve: (n: string) => (n === accessTokenKey('shop-acme') ? TOKEN : null) } as never,
+      principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
+      exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest,
+      containment: over.containment === undefined ? containment : over.containment,
+      vaultNameBindings: ctx.vaultNameBindings,
+      shellIsolation: ctx.shellIsolation,
+    }, { bulkRunId: runId }, out as never);
+    return { attached, refusal: out.refusal, reconnect: out.reconnect ?? null };
+  };
+
+  it('a request it attaches names none', async () => {
+    expect(await attach()).toEqual({ attached: expect.objectContaining({ id: 'shop-acme' }), refusal: undefined, reconnect: null });
+  });
+
+  it('self-hosted: no control plane', async () => {
+    vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifySelfHosted', reconnect: null });
+  });
+
+  it('not set up: no sidecar', async () => {
+    ctx.shellIsolation = { kind: 'local' } as never;
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyNotSetUp', reconnect: null });
+    expect(cpAsked).toBe(0);
+  });
+
+  it('the control plane does not answer: unconfirmed, also while its backoff holds', async () => {
+    cpAnswer = () => new Response('', { status: 503 });
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyUnconfirmed', reconnect: null });
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyUnconfirmed', reconnect: null });
+    expect(cpAsked).toBe(1);
+  });
+
+  it('the control plane refuses: not cleared, also while its backoff holds', async () => {
+    cpAnswer = () => new Response('{"ok":false,"reason":"below_floor"}', { status: 200 });
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyNotCleared', reconnect: null });
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyNotCleared', reconnect: null });
+    expect(cpAsked).toBe(1);
+  });
+
+  it('the run cannot be recorded as one that reads the store', async () => {
+    expect(await attach('run-1', { containment: null })).toEqual({ attached: null, refusal: 'containmentUnwritable', reconnect: null });
+  });
+
+  it('no connection to the store, or no run to contain: no cause of the store\'s, so the halt stays credential', async () => {
+    expect(await attach('')).toEqual({ attached: null, refusal: undefined, reconnect: null });
+    ctx.apiStore!.remove('shop-acme');
+    expect(await attach()).toEqual({ attached: null, refusal: undefined, reconnect: null });
+  });
+});
+
+describe('storeAttachRefusal', () => {
+  it.each([
+    [SHOPIFY_SELF_HOSTED, 'shopifySelfHosted'],
+    [SHOPIFY_NOT_SET_UP, 'shopifyNotSetUp'],
+    [SHOPIFY_UNCONFIRMED, 'shopifyUnconfirmed'],
+    [SHOPIFY_NOT_CLEARED, 'shopifyNotCleared'],
+  ])('reads %s with and without its Error: prefix', (text, cause) => {
+    expect(storeAttachRefusal(text)).toBe(cause);
+    expect(storeAttachRefusal(`Error: ${text}`)).toBe(cause);
+  });
+
+  it('reads no other text, not even one that holds a cause\'s', () => {
+    expect(storeAttachRefusal(`${SHOPIFY_NOT_CLEARED} And more.`)).toBeNull();
+    expect(storeAttachRefusal('Error: no credential')).toBeNull();
+    expect(storeAttachRefusal('')).toBeNull();
   });
 });
 
