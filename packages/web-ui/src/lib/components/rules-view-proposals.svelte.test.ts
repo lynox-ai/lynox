@@ -688,7 +688,7 @@ describe('RulesView — what a "then" choice says it does', () => {
 		await render({ viewer: 'owner', rules: [] });
 		await openForm();
 		const fixed = 'lynox legt die Mail unter „Erledigt heute“ ab, ausser sie wirkt sensibel; dann kommt sie unter „Braucht dich“. In deinem Postfach bleibt sie unverändert.';
-		const description = 'lynox legt die Mail unter „Erledigt heute“ ab, ausser sie wirkt sensibel oder ist weitergeleitet; dann kommt sie unter „Braucht dich“. In deinem Postfach bleibt sie unverändert.';
+		const description = 'lynox legt die Mail unter „Erledigt heute“ ab, ausser sie wirkt sensibel oder wie von einer Person weitergeleitet; dann kommt sie unter „Braucht dich“. In deinem Postfach bleibt sie unverändert.';
 		for (const kind of ['from', 'subject_contains'] as const) {
 			await choose('rule-match-kind', kind);
 			expect(byTestId('rules-then-effect')?.textContent, kind).toBe(fixed);
@@ -704,7 +704,7 @@ describe('RulesView — what a "then" choice says it does', () => {
 		await render({ viewer: 'owner', rules: [] });
 		await openForm();
 		await choose('rule-match-kind', 'matches_description');
-		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox files the mail under “Handled today”, unless it looks sensitive or was forwarded; then it goes to “Needs you”. It stays unchanged in your mailbox.');
+		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox files the mail under “Handled today”, unless it looks sensitive or looks like a person forwarded it; then it goes to “Needs you”. It stays unchanged in your mailbox.');
 	});
 
 	it.each(['archive', 'mark_read'])('shows a stored handled rule with action "%s" as "file as handled"', async (action) => {
