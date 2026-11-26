@@ -13,6 +13,7 @@ import { INLINE_NAMED_ONLY_TOOLS } from '../../orchestrator/runtime-adapter.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 import { runStepIds } from '../../orchestrator/step-id.js';
 import { isShownParamName } from '../../orchestrator/workflow-params.js';
+import { extractionFailureForModel } from '../../core/extraction-failure.js';
 
 /** save_workflow's answer when the session analysis names a parameter outside the allowed form. */
 export const SESSION_PARAM_NAME_REFUSAL =
@@ -22,11 +23,17 @@ export const SESSION_PARAM_NAME_REFUSAL =
   'yourself with plan_task and save that plan with save_workflow and its workflow_id. ' +
   'A workflow saved that way takes no parameters; tell the user so.';
 
-/** save_workflow's answer when the session analysis fails; the cause is logged, never returned. */
-export const SESSION_ANALYSIS_FAILED =
-  'Error: The analysis of this session failed. No workflow was saved. Call save_workflow once more to retry; ' +
-  'if it fails again, tell the user that lynox could not analyse the session, and offer to plan the steps ' +
-  'with plan_task instead (a workflow saved that way takes no parameters).';
+/**
+ * save_workflow's answer when the session analysis fails. It names the error class and the HTTP
+ * status (`extractionFailureForModel`), so the user and the run history keep the cause, and never
+ * the provider's message: an endpoint may echo what it was sent, the session's tool calls included.
+ */
+export function sessionAnalysisFailed(err: unknown): string {
+  return `Error: The analysis of this session failed: ${extractionFailureForModel(err)}. No workflow was saved. ` +
+    'Call save_workflow once more to retry; if it fails again, tell the user that lynox could not analyse ' +
+    'the session and name the cause in brackets, and offer to plan the steps with plan_task instead ' +
+    '(a workflow saved that way takes no parameters).';
+}
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
@@ -315,9 +322,8 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // A stopped call is not a failure to retry: the engine reports the stop.
     if (currentCallSignal()?.aborted === true) throw processCaptureStopped();
     logErrorChain('save_workflow:extract', err);
-    // Nothing has been persisted yet — safe to retry. The provider's error text stays in the log: an
-    // endpoint may echo what it was sent, which is the session's tool calls, outside content included.
-    return SESSION_ANALYSIS_FAILED;
+    // Nothing has been persisted yet — safe to retry.
+    return sessionAnalysisFailed(err);
   }
 
   // Stopped after the reply arrived: nothing is saved. Everything from here to the last write
