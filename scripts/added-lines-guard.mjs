@@ -45,17 +45,21 @@
  *   · wording that marks a security finding as open or known, German and English
  *     (see OPEN_FINDING). A scanner's all-clear ("no known vulnerabilities") is
  *     not such wording.
- *   · a raw invisible format character (see FORMAT_CHARS): direction controls,
- *     zero-width characters, word joiners and invisible operators, the byte order
- *     mark. In source a reader cannot see them, and the direction controls can show
- *     a line in another order than the one it runs in. A test or a comment that
- *     needs one writes its escape (`\u202E`), which is the same string at runtime.
- *     The one exception by character is the zero-width joiner inside an emoji
- *     sequence, where it joins two pictographs and its effect is the visible glyph
- *     (see joinsEmoji); the one exception by file is a binary fixture
- *     (FORMAT_EXEMPT_PATHS). The pragma does not let one pass: a direction control
- *     can rearrange how the pragma's own line reads. Only added lines are read, so
- *     a file that already carries one is not refused until a commit adds such a line.
+ *   · a raw invisible character (see INVISIBLE): every format character and
+ *     default-ignorable code point (direction controls, zero-width characters,
+ *     joiners, invisible operators, the byte order mark, the soft hyphen, the
+ *     Hangul fillers, variation selectors, tag characters), the line terminators
+ *     U+2028 and U+2029, a carriage return inside a line, and a NUL byte. A reader
+ *     cannot see them; direction controls can show a line in another order than the
+ *     one it runs in, invisible letters can make two names that read the same, and
+ *     U+2028 ends a JavaScript line that git shows as one. A test, a comment or copy
+ *     that needs one writes its escape (`\u202E`), the same string at runtime. The
+ *     exceptions are by position inside an emoji (see emojiParts) and by file for
+ *     data (isBinaryFile: an extension on a fixed list AND a NUL byte, never one
+ *     alone). The pragma does not let one pass: a direction control can rearrange
+ *     how the pragma's own line reads. A file NAME is read for them too, and printed
+ *     with them escaped. Only added lines are read, so a file that already carries
+ *     one is not refused until a commit adds such a line.
  * Spellings produced by accident count as the plain form: fullwidth letters, the
  * Cyrillic and Greek letters that look like `E`, invisible format and combining
  * characters inside an id, the Unicode hyphens, and the NUL bytes of a UTF-16 file.
@@ -67,7 +71,12 @@
  *
  * NOT covered, stated rather than implied: an id written with escapes, assembled
  * from pieces, or in a file PATH; wording outside the list, or broken across two
- * lines; commit messages, PR titles and bodies, and branch names. Those texts may
+ * lines; commit messages, PR titles and bodies, and branch names (also for
+ * invisible characters; with squash merges the public message is written at the
+ * merge). A text file saved as UTF-16 is not read for invisible characters (its
+ * bytes would only be guessed at; the repo carries none). A pull request that went
+ * green before this rule merged stays green against the older base copy until its
+ * check runs again. Those texts may
  * legitimately carry some ids, and which ones is decided by a reference that is
  * not public, so they are checked before publishing, outside this repo. Bounded,
  * not exact.
@@ -126,40 +135,108 @@ export function normalise(text) {
 }
 
 /**
- * Invisible format characters this repo does not carry raw: the Arabic letter mark,
- * zero-width space to right-to-left mark, the embedding and override controls, word
- * joiner to invisible plus, the isolates, and the byte order mark.
+ * Characters a reader cannot see, which this repo does not carry raw in a line it adds:
+ * every format character (Cf) and every default-ignorable code point (zero-width
+ * characters, direction marks, embeddings, overrides and isolates, joiners, invisible
+ * operators, the byte order mark, the soft hyphen, the Hangul fillers, the variation
+ * selectors, the tag characters), and the two Unicode line terminators U+2028 and
+ * U+2029, which JavaScript ends a line on and git does not. The set is the engine's
+ * own Unicode data; a test pins one code point of every range so a runtime with older
+ * data cannot shrink it unnoticed.
  */
-export const FORMAT_CHARS = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/gu;
-
-/** Files whose bytes are data, not text: their added "lines" are not read for format characters. */
-export const FORMAT_EXEMPT_PATHS = new Set(['tests/fixtures/html-pages/en.wikipedia.org.html.gz']);
-
-const PICTOGRAPH = /\p{Extended_Pictographic}/u;
-/** Before a joiner inside an emoji sequence: a pictograph, a skin tone or the emoji presentation selector. */
-const JOINS_AFTER = (cp) => PICTOGRAPH.test(cp) || /[\u{1F3FB}-\u{1F3FF}\uFE0F]/u.test(cp);
+export const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/u;
 
 /**
- * Whether the zero-width joiner at `at` (an index into the code points of a line)
- * joins two emoji: the code point before it is a pictograph, a skin tone or U+FE0F,
- * and the one after it is a pictograph. Checked per joiner, so a family of three
- * passes and two joiners in a row do not.
+ * File extensions whose content is data. A file counts as binary only when its
+ * extension is on this list AND its blob holds a NUL byte in the first 8000 bytes
+ * (git's own test): its "lines" in a `--text` diff are bytes, which reach these ranges
+ * by chance. Neither alone is enough: a NUL in a source file does not make it data,
+ * and a file named `.png` without one is read as text.
  */
-export function joinsEmoji(points, at) {
-  return at > 0 && at < points.length - 1 && JOINS_AFTER(points[at - 1]) && PICTOGRAPH.test(points[at + 1]);
+export const BINARY_EXTENSIONS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'bmp', 'woff', 'woff2', 'ttf', 'otf', 'eot',
+  'gz', 'tgz', 'zip', 'pdf', 'wasm', 'mp3', 'mp4', 'webm', 'ogg', 'wav', 'sqlite', 'db',
+]);
+
+/** Whether a file is data, by its extension and its bytes together (BINARY_EXTENSIONS). */
+export function isBinaryFile(path, bytes) {
+  const dot = path.lastIndexOf('.');
+  const ext = dot > path.lastIndexOf('/') ? path.slice(dot + 1).toLowerCase() : '';
+  return BINARY_EXTENSIONS.has(ext) && bytes.subarray(0, 8000).includes(0);
 }
 
-/** The raw format characters in one line, as `U+XXXX`, each once, in order of first appearance. */
+/** A code point as `U+XXXX`. */
+const named = (cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+
+/** The escape that writes a code point in a JavaScript string. */
+const escaped = (cp) => (cp > 0xffff ? `\\u{${cp.toString(16).toUpperCase()}}` : `\\u${cp.toString(16).toUpperCase().padStart(4, '0')}`);
+
+/** A path or text as it may be printed: every invisible character, NUL and carriage return as its escape. */
+export function shown(text) {
+  return text.replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029\r\0]/gu, (c) => escaped(c.codePointAt(0)));
+}
+
+/**
+ * A pictograph that is not also a letter or digit of a name: U+2139 is pictographic and
+ * an identifier character, so a joiner between two of them would make a name that
+ * reads the same as without it.
+ */
+const PICTOGRAPH = /^(?=\p{Extended_Pictographic})\P{ID_Continue}$/u;
+const SKIN_TONE = /^[\u{1F3FB}-\u{1F3FF}]$/u;
+const TAG_SPEC = /^[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]$/u;
+const KEYCAP_BASE = /^[0-9#*]$/;
+
+/**
+ * The positions of a line's code points that are part of an emoji and pass: a zero-width
+ * joiner between two pictographs (after one, its skin tone or its U+FE0F), U+FE0F right
+ * after a pictograph or before a keycap mark, and the tag characters of a complete flag
+ * sequence (U+1F3F4, tag letters or digits, U+E007F). Checked per character, so a family
+ * of three passes and two joiners in a row do not.
+ */
+export function emojiParts(points) {
+  const ok = new Set();
+  for (let i = 0; i < points.length; i++) {
+    const cp = points[i];
+    if (cp === '\u200D') {
+      const before = points[i - 1];
+      const after = points[i + 1];
+      if (before !== undefined && after !== undefined && (PICTOGRAPH.test(before) || SKIN_TONE.test(before) || before === '\uFE0F') && PICTOGRAPH.test(after)) ok.add(i);
+    } else if (cp === '\uFE0F') {
+      const before = points[i - 1];
+      if (before !== undefined && (PICTOGRAPH.test(before) || (KEYCAP_BASE.test(before) && points[i + 1] === '\u20E3'))) ok.add(i);
+    } else if (cp === '\u{1F3F4}') {
+      let j = i + 1;
+      while (j < points.length && TAG_SPEC.test(points[j])) j++;
+      if (j > i + 1 && points[j] === '\u{E007F}') for (let k = i + 1; k <= j; k++) ok.add(k);
+    }
+  }
+  return ok;
+}
+
+/**
+ * The invisible characters in one line, each once as `U+XXXX`, in order of first
+ * appearance: the INVISIBLE set outside emojiParts, a NUL byte, and a carriage return
+ * anywhere but at the end of the line (a CRLF file keeps its line ends).
+ */
 export function formatCharsIn(line) {
   const points = [...line];
+  const ok = emojiParts(points);
   const found = [];
-  points.forEach((cp, i) => {
-    if (!cp.match(FORMAT_CHARS)) return;
-    if (cp === '\u200D' && joinsEmoji(points, i)) return;
-    const name = `U+${cp.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
-    if (!found.includes(name)) found.push(name);
+  points.forEach((c, i) => {
+    const cp = c.codePointAt(0);
+    const hit = INVISIBLE.test(c) ? !ok.has(i) : cp === 0 || (c === '\r' && i < points.length - 1);
+    if (hit && !found.includes(named(cp))) found.push(named(cp));
   });
   return found;
+}
+
+/** How to write a code point instead, for the message. */
+export function wayFor(name) {
+  const cp = parseInt(name.slice(2), 16);
+  if (cp === 0) return 'a text file carries no NUL byte: write \\0 in a string (a file saved as UTF-16 is not read as text)';
+  if (cp === 0x0d) return 'write \\r in a string';
+  if (cp === 0xad) return `write ${escaped(cp)} in a string, &shy; in markup`;
+  return `write ${escaped(cp)}`;
 }
 
 /** The kinds of finding in one line of text (empty when clean or allowed). */
@@ -210,7 +287,7 @@ export function diffLines(diff) {
         newLeft--;
       } else if (!l.startsWith('\\')) {
         // The line itself is not quoted: this message can reach a public CI log.
-        throw new Error(`unexpected line inside a hunk of ${path}`);
+        throw new Error(`unexpected line inside a hunk of ${shown(path ?? '')}`);
       }
       continue;
     }
@@ -245,6 +322,24 @@ function git(args) {
  * its patch (`log.showRoot`), textconv and external diff drivers, paths relative to
  * a subdirectory, quoted names, colour, prefixes, replace refs.
  */
+/**
+ * The paths each commit in base..head adds or renames to, as { commit, path }: a name
+ * is read for invisible characters too, also of a file that adds no line.
+ */
+function pathsOf(base, head) {
+  const out = [];
+  let commit = null;
+  for (const field of git(['--no-replace-objects', '-c', 'core.quotePath=false', 'log', '-z', '--format=commit %H',
+    '--name-only', '--diff-filter=ACR', '-M', '--diff-merges=remerge', '--no-relative', `${base}..${head}`]).split('\0')) {
+    for (const part of field.split('\n')) {
+      const c = part.match(/^commit ([0-9a-f]+)$/);
+      if (c) commit = c[1];
+      else if (part !== '' && commit !== null) out.push({ commit, path: part });
+    }
+  }
+  return out;
+}
+
 function patchesOf(base, head) {
   return git(['--no-replace-objects', '-c', 'diff.suppressBlankEmpty=false', '-c', 'core.quotePath=false',
     '-c', 'log.showRoot=true',
@@ -293,6 +388,7 @@ export function main(argv) {
   }
   let commits;
   let added;
+  let pathsAdded;
   try {
     // Resolved first and on its own: an unresolvable ref must not read as an
     // empty range, i.e. as clean.
@@ -303,6 +399,7 @@ export function main(argv) {
       return 2;
     }
     added = withoutParentLines(addedLines(patchesOf(base, head)), base, head);
+    pathsAdded = pathsOf(base, head);
   } catch (e) {
     const why = String(e?.stderr ?? '').trim().split('\n')[0] || (e instanceof Error ? e.message.split('\n')[0] : String(e));
     console.error(`added-lines-guard: could not read ${base}..${head} — ${why}`);
@@ -321,15 +418,36 @@ export function main(argv) {
   }
   let total = 0;
   let formats = 0;
-  for (const a of added) {
-    for (const kind of findingsIn(a.text)) {
-      console.log(`commit ${a.commit.slice(0, 9)} ${a.path}:${a.line}: ${kind}`);
-      total++;
+  const binary = new Map();
+  const isBinaryAt = (commit, path) => {
+    const key = `${commit}\0${path}`;
+    if (!binary.has(key)) {
+      let bytes = Buffer.alloc(0);
+      try {
+        bytes = execFileSync('git', ['--no-replace-objects', 'cat-file', 'blob', `${commit}:${path}`], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
+      } catch {
+        // Not readable as a blob at that commit (a submodule, a path git cannot address): read as text.
+      }
+      binary.set(key, isBinaryFile(path, bytes));
     }
-    if (FORMAT_EXEMPT_PATHS.has(a.path)) continue;
-    for (const cp of formatCharsIn(a.text)) {
-      console.log(`commit ${a.commit.slice(0, 9)} ${a.path}:${a.line}: raw invisible format character ${cp}, write it as \\u${cp.slice(2)}`);
-      total++;
+    return binary.get(key);
+  };
+  const report = (where, what) => {
+    console.log(`${where}: ${what}`);
+    total++;
+  };
+  for (const a of added) {
+    const where = `commit ${a.commit.slice(0, 9)} ${shown(a.path)}:${a.line}`;
+    for (const kind of findingsIn(a.text)) report(where, kind);
+    if (isBinaryAt(a.commit, a.path)) continue;
+    for (const name of formatCharsIn(a.text)) {
+      report(where, `raw invisible character ${name}, ${wayFor(name)}`);
+      formats++;
+    }
+  }
+  for (const { commit, path } of pathsAdded) {
+    for (const name of formatCharsIn(path)) {
+      report(`commit ${commit.slice(0, 9)} ${shown(path)}`, `raw invisible character ${name} in the file name`);
       formats++;
     }
   }
@@ -337,7 +455,7 @@ export function main(argv) {
     console.error(`\nadded-lines-guard: ${total} finding(s) in lines this range adds. This is the PUBLIC repo.`);
     console.error('Describe the behaviour instead of naming an internal id; describe the change, not an open finding.');
     if (formats > 0) {
-      console.error('A raw invisible format character: write its escape instead (\\u202E, not the character); in a');
+      console.error('A raw invisible character: write its escape instead (\\u202E, not the character); in a');
       console.error('string it is the same value at runtime. The Edit and Write tools turn an escape into the raw');
       console.error('character, so write the line through a script or check it after the edit.');
     }

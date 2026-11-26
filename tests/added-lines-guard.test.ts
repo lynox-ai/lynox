@@ -10,7 +10,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addedLines, findingsIn, formatCharsIn, FORMAT_EXEMPT_PATHS } from '../scripts/added-lines-guard.mjs';
+import { addedLines, findingsIn, formatCharsIn, wayFor } from '../scripts/added-lines-guard.mjs';
 
 const GUARD = fileURLToPath(new URL('../scripts/added-lines-guard.mjs', import.meta.url));
 const ENTRY = fileURLToPath(new URL('../scripts/public-repo-guard.sh', import.meta.url));
@@ -340,16 +340,25 @@ describe('the pragma is an exception surface whose size is visible', () => {
   });
 });
 
-describe('a raw invisible format character in an added line', () => {
+describe('a raw invisible character in an added line', () => {
   // Every such character here is written as its escape, so this file carries none raw.
   const RLO = '\u202E';
+  const NUL = '\0';
+
+  function commitBytes(file: string, bytes: Buffer, message: string): string {
+    mkdirSync(join(dir, file, '..'), { recursive: true });
+    writeFileSync(join(dir, file), bytes);
+    git('add', '--', file);
+    git('commit', '-qm', message);
+    return git('rev-parse', 'HEAD');
+  }
 
   it('refuses one, naming the file, the line, the code point and the escape, never the character', () => {
     const base = git('rev-parse', 'HEAD');
     const adding = commit('t.ts', `ok\nconst s = 'a${RLO}b';\n`, 'add');
     const r = guard(base, 'HEAD');
     expect(r.code).toBe(1);
-    expect(r.out).toContain(`commit ${adding.slice(0, 9)} t.ts:2: raw invisible format character U+202E, write it as \\u202E`);
+    expect(r.out).toContain(`commit ${adding.slice(0, 9)} t.ts:2: raw invisible character U+202E, write \\u202E`);
     expect(r.out).toContain('write its escape instead');
     expect(r.out).not.toContain(RLO);
   });
@@ -368,15 +377,31 @@ describe('a raw invisible format character in an added line', () => {
     expect(r.out).toContain('U+202E');
   });
 
-  it('does not read a binary fixture on the exempt list, and reads the same bytes anywhere else', () => {
-    const [exempt] = [...FORMAT_EXEMPT_PATHS];
+  it('skips a data file only when its extension is on the list and it holds a NUL byte', () => {
+    const data = Buffer.from(`x${NUL}y${RLO}z\n`, 'utf8');
     const base = git('rev-parse', 'HEAD');
-    mkdirSync(join(dir, exempt!, '..'), { recursive: true });
-    commit(exempt!, `x${RLO}y\n`, 'fixture');
+    commitBytes('img/a.png', data, 'png with a NUL');
     expect(guard(base, 'HEAD').code).toBe(0);
+  });
+
+  it('reads a file with a NUL byte but a text extension as text, and refuses the NUL and the control', () => {
+    const base = git('rev-parse', 'HEAD');
+    commitBytes('src/a.ts', Buffer.from(`const s = 'x${NUL}y${RLO}z';\n`, 'utf8'), 'ts with a NUL');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('U+0000');
+    expect(r.out).toContain('U+202E');
     const base2 = git('rev-parse', 'HEAD');
-    commit('other.gz', `x${RLO}y\n`, 'elsewhere');
-    expect(guard(base2, 'HEAD').code).toBe(1);
+    commitBytes('Makefile', Buffer.from(`x${NUL}y\n`, 'utf8'), 'no extension');
+    expect(guard(base2, 'HEAD').out).toContain('U+0000');
+  });
+
+  it('reads a file with a data extension but no NUL byte as text', () => {
+    const base = git('rev-parse', 'HEAD');
+    commitBytes('img/b.png', Buffer.from(`x${RLO}y\n`, 'utf8'), 'png without a NUL');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('img/b.png:1: raw invisible character U+202E');
   });
 
   it('does not check removed lines: a commit taking one out is not refused', () => {
@@ -386,18 +411,60 @@ describe('a raw invisible format character in an added line', () => {
     expect(guard(base, 'HEAD').code).toBe(0);
   });
 
-  it('knows every range: Arabic letter mark, zero-width to direction marks, embeddings and overrides, joiners and invisible operators, isolates, byte order mark', () => {
-    const all = [0x061c, 0x200b, 0x200c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff];
-    for (const cp of all) {
+  it('reads a file name, also of a file that adds no line, and prints it escaped', () => {
+    const base = git('rev-parse', 'HEAD');
+    writeFileSync(join(dir, `x${RLO}gpj.ts`), '');
+    git('add', '-A');
+    git('commit', '-qm', 'empty file, odd name');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('x\\u202Egpj.ts: raw invisible character U+202E in the file name');
+    expect(r.out).not.toContain(RLO);
+  });
+
+  it('prints the name of a file with another finding escaped too', () => {
+    const base = git('rev-parse', 'HEAD');
+    commit(`n${RLO}.md`, `see ${ID}\n`, 'id in an odd name');
+    const r = guard(base, 'HEAD');
+    expect(r.out).toContain(`n\\u202E.md:1: internal register id`);
+    expect(r.out).not.toContain(RLO);
+  });
+
+  it('gives the escape hint only when an invisible character was found', () => {
+    const base = git('rev-parse', 'HEAD');
+    commit('note.md', `see ${ID}\n`, 'id only');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).not.toContain('write its escape instead');
+  });
+
+  it('knows one code point of every range, so older Unicode data in the runtime cannot shrink the set unnoticed', () => {
+    const pinned = [
+      0x00ad, 0x034f, 0x061c, 0x115f, 0x1160, 0x17b4, 0x17b5, 0x180b, 0x180e, 0x180f, 0x200b, 0x200c, 0x200e, 0x200f,
+      0x2028, 0x2029, 0x202a, 0x202e, 0x2060, 0x2064, 0x2066, 0x2069, 0x206a, 0x206f, 0x3164, 0xfe00, 0xfe0e, 0xfeff,
+      0xffa0, 0xfff9, 0xfffb, 0x1bca0, 0x1d173, 0xe0001, 0xe0020, 0xe007f, 0xe0100, 0xe01ef, 0x0000,
+    ];
+    for (const cp of pinned) {
       const name = `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
       expect(formatCharsIn(`a${String.fromCodePoint(cp)}b`), name).toEqual([name]);
     }
-    // Neighbours just outside the ranges are not format characters this check means.
-    for (const cp of [0x061b, 0x200a, 0x2010, 0x2029, 0x202f, 0x2065, 0x206a, 0xfefe]) {
+    // Visible neighbours are not invisible characters.
+    for (const cp of [0x0020, 0x00a0, 0x061b, 0x200a, 0x2010, 0x202f, 0x3000, 0xfefe, 0xac00]) {
       expect(formatCharsIn(`a${String.fromCodePoint(cp)}b`), cp.toString(16)).toEqual([]);
     }
     expect(formatCharsIn('\uFEFFfirst line')).toEqual(['U+FEFF']);
     expect(formatCharsIn(`a${RLO}b${RLO}c\u2066d`)).toEqual(['U+202E', 'U+2066']);
+  });
+
+  it('names the escaped way for a soft hyphen and the line terminators', () => {
+    expect(wayFor('U+00AD')).toBe('write \\u00AD in a string, &shy; in markup');
+    expect(wayFor('U+2028')).toBe('write \\u2028');
+    expect(wayFor('U+E0041')).toBe('write \\u{E0041}');
+  });
+
+  it('allows a carriage return only at the end of a line', () => {
+    expect(formatCharsIn('a line from a CRLF file\r')).toEqual([]);
+    expect(formatCharsIn('a\rb')).toEqual(['U+000D']);
   });
 
   it('lets a zero-width joiner pass only between emoji, checked per joiner', () => {
@@ -408,17 +475,36 @@ describe('a raw invisible format character in an added line', () => {
     expect(formatCharsIn('\u2764\uFE0F\u200D\u{1F525}')).toEqual([]);
   });
 
-  it('refuses a zero-width joiner between letters, at the end of a line after an emoji, and two in a row', () => {
+  it('refuses a zero-width joiner between letters, at a line edge, two in a row, and between pictographs that are letters of a name', () => {
     expect(formatCharsIn('a\u200Db')).toEqual(['U+200D']);
     expect(formatCharsIn('\u{1F469}\u200D')).toEqual(['U+200D']);
     expect(formatCharsIn('\u200D\u{1F469}')).toEqual(['U+200D']);
     expect(formatCharsIn('\u{1F468}\u200D\u200D\u{1F469}')).toEqual(['U+200D']);
     expect(formatCharsIn('a\u200D\u{1F469}')).toEqual(['U+200D']);
     expect(formatCharsIn('\u{1F469}\u200Db')).toEqual(['U+200D']);
+    // U+2139 is pictographic and an identifier character: two of them joined read as one name.
+    expect(formatCharsIn('\u2139\u200D\u2139')).toEqual(['U+200D']);
+  });
+
+  it('lets the emoji presentation selector pass only after a pictograph or in a keycap', () => {
+    expect(formatCharsIn('\u2764\uFE0F')).toEqual([]);
+    expect(formatCharsIn('1\uFE0F\u20E3')).toEqual([]);
+    expect(formatCharsIn('a\uFE0F')).toEqual(['U+FE0F']);
+    expect(formatCharsIn('1\uFE0F')).toEqual(['U+FE0F']);
+    expect(formatCharsIn('\u2139\uFE0F')).toEqual(['U+FE0F']);
+  });
+
+  it('lets tag characters pass only in a complete flag sequence', () => {
+    const scotland = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}';
+    expect(formatCharsIn(`flag ${scotland} end`)).toEqual([]);
+    expect(formatCharsIn('\u{1F3F4}\u{E0067}\u{E0062}')).toEqual(['U+E0067', 'U+E0062']);
+    expect(formatCharsIn('\u{1F3F4}\u{E007F}')).toEqual(['U+E007F']);
+    expect(formatCharsIn('x\u{E0067}\u{E007F}')).toEqual(['U+E0067', 'U+E007F']);
+    // Upper-case tag letters are not part of a flag: hidden text spelled in tags is refused.
+    expect(formatCharsIn('\u{1F3F4}\u{E0041}\u{E007F}')).toEqual(['U+E0041', 'U+E007F']);
   });
 
   it('keeps the id check apart: an id with a direction control inside is still read as the id', () => {
     expect(findingsIn(ID.replace('F-', `F${RLO}-`))).toEqual(['internal register id']);
   });
 });
-
