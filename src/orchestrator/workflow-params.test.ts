@@ -228,6 +228,11 @@ describe('a stored parameter name in a refusal', () => {
     expect(run({ type: 'date' }, 'soon')).toEqual({ ok: false, error: `Parameter ${at} must be an ISO date (YYYY-MM-DD).` });
   });
 
+  it('names it by its place when its pattern compiles only inside the run\'s anchors', () => {
+    const r = bindWorkflowParameters([param({ name: 'client' }), param({ name: SENT })], { client: 'Acme', [SENT]: 'anything' }, { constraints: { [SENT]: { regex: 'a)|(.*' } } });
+    expect(r).toEqual({ ok: false, error: 'Parameter 2 (lynox does not show its name) has an invalid constraint pattern.' });
+  });
+
   it('CONTROL: a name in the form is still quoted in the same refusals', () => {
     const schema = [param({ name: 'client' }), param({ name: 'count', type: 'number' })];
     expect(bindWorkflowParameters(schema, { client: 'Acme' })).toEqual({ ok: false, error: 'Missing required parameter "count".' });
