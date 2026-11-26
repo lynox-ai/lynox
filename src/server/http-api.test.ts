@@ -14418,6 +14418,8 @@ describe('LynoxHTTPApi', () => {
       bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 1, 'already');
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
       expect(await runOf()).toMatchObject({ probe: null, haltKey: 'maxTargets', undoable: 1 });
+      // The page names that one apart from the written targets: none written, one open.
+      expect(await runOf()).toMatchObject({ undoableParts: { written: 0, open: 1 }, undoOpen: 0 });
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(409);
     });
 
