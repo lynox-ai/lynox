@@ -12580,7 +12580,7 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, another helper to a helper as another mandate, and the owner\'s own by none', async () => {
+    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, another helper to a helper as another mandate, a helper\'s own address under another grant as its own, and the owner\'s own by none', async () => {
       const AT = '2026-11-10T00:00:00.000Z';
       const rows = [
         { id: 'trg-anna', title: 'Preise beobachten', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT },
@@ -12594,8 +12594,11 @@ describe('LynoxHTTPApi', () => {
         { id: 'trg-old', title: 'Alt' },
         // A helper's mark from before grant ids were stored: whose grant it was is not known.
         { id: 'trg-legacy', title: 'Ohne Grant', created_by: 'mandate:anna@example.com' },
+        // Bea's address under an earlier grant, and with no grant id: hers, as the trigger masking reads it.
+        { id: 'trg-bea-old', title: 'Früher', created_by: 'mandate:bea@example.com', created_mandate_id: 'grant-b-old', created_at: AT },
+        { id: 'trg-bea-legacy', title: 'Alt von Bea', created_by: 'mandate:bea@example.com' },
       ];
-      const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' };
+      const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.', 'grant-b-old': 'Beatrice (old grant)' };
       const reads: string[] = [];
       // A helper's read is recorded in the trail before it is answered, so the trail takes rows too.
       let trail: { displayNameOf: (id: string) => string | null; record: () => void } | null = { displayNameOf: (id) => { reads.push(id); return shown[id] ?? null; }, record: () => undefined };
@@ -12618,9 +12621,11 @@ describe('LynoxHTTPApi', () => {
             'trg-own': [],
             'trg-old': [],
             'trg-legacy': [{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }],
+            'trg-bea-old': [{ kind: 'set_up_by', name: 'Beatrice (old grant)', takenOver: false }],
+            'trg-bea-legacy': [{ kind: 'set_up_by', name: 'bea@example.com', takenOver: false }],
           });
           // Two triggers of grant-a, one request: the trail is read once per grant.
-          expect([...reads].sort()).toEqual(['grant-a', 'grant-b']);
+          expect([...reads].sort()).toEqual(['grant-a', 'grant-b', 'grant-b-old']);
           // A helper reads its own grant's name, and another grant as another mandate: not its own,
           // never whose. (Whether the row's own fields still carry the other address is the
           // route's field question, not the setup lines'.)
@@ -12629,8 +12634,15 @@ describe('LynoxHTTPApi', () => {
           expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
           expect(bea.byId['trg-taken']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: true }]);
           expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
-          // Without a grant id it cannot be told to be hers or another's: it says neither.
+          // Another address without a grant id: not hers, and not whose.
           expect(bea.byId['trg-legacy']).toEqual([{ kind: 'set_up_by', name: 'some mandate', takenOver: false }]);
+          // Her own address under another grant or none: hers, named as her own grant.
+          const readsAsBea = reads.length;
+          const beaAgain = await setupOf();
+          expect(beaAgain.byId['trg-bea-old']).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+          expect(beaAgain.byId['trg-bea-legacy']).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+          expect(reads.slice(readsAsBea)).not.toContain('grant-b-old');
+          expect(beaAgain.text).not.toContain('Beatrice (old grant)');
           expect(bea.text).not.toContain('Anna A.');
           expect(JSON.stringify(Object.values(bea.byId))).not.toContain('anna@example.com');
           // A session no scope names (a mandate without a grant): no lines at all, no read of the
@@ -12638,7 +12650,7 @@ describe('LynoxHTTPApi', () => {
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
           const readsBefore = reads.length;
           const none = await setupOf();
-          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-edit-taken', 'trg-own', 'trg-old', 'trg-legacy']) expect(none.byId[id]).toEqual([]);
+          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-edit-taken', 'trg-own', 'trg-old', 'trg-legacy', 'trg-bea-old', 'trg-bea-legacy']) expect(none.byId[id]).toEqual([]);
           expect(reads.length).toBe(readsBefore);
           for (const name of Object.values(shown)) expect(none.text).not.toContain(name);
           // A trail that cannot be read costs the owner the names, not the list: the address stands in.
