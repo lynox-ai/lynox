@@ -3197,7 +3197,8 @@ export class LynoxHTTPApi {
    * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
-   * answers its own 404.
+   * answers its own 404, but only in the request's own conversation: in another person's it is
+   * refused as when a question is open, so the answer does not say whether one is.
    */
   private _refuseUnlessOwnsPrompt(
     req: IncomingMessage,
@@ -3210,7 +3211,7 @@ export class LynoxHTTPApi {
     if (isOwnerPrincipal(principal)) return false;
     const candidates = [promptId ? ps.getById(promptId) : undefined, ps.getPending(sessionId)]
       .filter((row): row is PendingPromptRow => row !== undefined);
-    if (candidates.length === 0) return false;
+    if (candidates.length === 0) return this._refuseUnlessOwns(req, res, 'answer this question', () => [this._threadRow(sessionId)]);
     // A question names the grant it was asked under (v60). A later grant for the same address is
     // another grant (§3.13 B4): it does not answer what the earlier one left open.
     if (principal.kind === 'mandate' && candidates.some((row) => row.mandate_id !== null && row.mandate_id !== principal.mandateId)) {
@@ -9590,8 +9591,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/confirm', async (_req, res, params, body) => {
       // Only in the owner's browser session, as a schedule is confirmed: a token, the owner's
-      // included, goes to scripts and integrations, and the digest it would send back proves only
-      // that it fetched the preview, never that the owner read it.
+      // included, goes to scripts and integrations, which stamp nothing on the owner's behalf.
       if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
         errorResponse(res, 403, 'A workflow is stamped only in the owner\'s browser session, not with a token.', 'session_only');
         return;
@@ -9643,7 +9643,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/takeover', async (_req, res, params, body) => {
       // Only in the owner's browser session, as the stamp: the takeover lets a workflow run as the
-      // owner, and a token's client could send the preview's digest without anyone reading it.
+      // owner, which a script or an integration holding a token does not decide.
       if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
         errorResponse(res, 403, 'A workflow is taken over only in the owner\'s browser session, not with a token.', 'session_only');
         return;
@@ -10303,7 +10303,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/takeover', async (_req, res, params, body) => {
       // Only in the owner's browser session: the takeover releases a plan that was paused for a
-      // reason, the same consent a schedule's confirmation is, and a token cannot show it was read.
+      // reason, the same consent a schedule's confirmation is.
       if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
         errorResponse(res, 403, 'A plan is taken over only in the owner\'s browser session, not with a token.', 'session_only');
         return;

@@ -5845,7 +5845,8 @@ describe('LynoxHTTPApi', () => {
       await withStore(async (_store, rows) => {
         api.setPrincipalResolverForTesting(() => EVA);
         const res = await jsonFetch('/api/sessions/s-none/reply', { method: 'POST', body: JSON.stringify({ promptId: 'no-such-prompt', answer: 'B' }) });
-        expect(res.status).toBe(404);
+        // No conversation of hers: refused as on a question someone else's run asked.
+        expect(res.status).toBe(403);
         expect(answerRows(rows)).toEqual([]);
       });
     });
@@ -11838,6 +11839,7 @@ describe('LynoxHTTPApi', () => {
       it('control: in the owner\'s browser session the request goes past that check', async () => {
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
         const res = await ownerSessionFetch(path, { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+        expect([401, 403], `the owner's session was refused (${res.status})`).not.toContain(res.status);
         expect(((await res.json()) as { code?: string }).code).not.toBe('session_only');
       });
     });
@@ -25415,15 +25417,45 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     it('refuses a mandate alike whether a session is live in it or not', async () => {
       asMandate();
       sessionRanBy(OWNER_PRINCIPAL);
-      const live = await refusal(await call(FOREIGN));
+      const live = await call(FOREIGN);
+      expect(live.status, 'with a live session').toBe(403);
       mockSessionGet.mockReturnValue(undefined);
-      const none = await refusal(await call(FOREIGN));
-      expect(none, 'the refusal differs with the session').toBe(live);
+      const none = await call(FOREIGN);
+      expect(none.status, 'without a session').toBe(403);
+      expect(await none.text(), 'the refusal differs with the session').toBe(await live.text());
     });
 
     it('control: the owner, and a mandate in its own conversation, still get the 404 for no session', async () => {
       mockSessionGet.mockReturnValue(undefined);
       expect((await call(FOREIGN)).status).toBe(404);
+      asMandate();
+      expect((await call(OWN)).status).toBe(404);
+    });
+  });
+
+  // The same for the routes that answer a question: in another person's conversation a mandate is
+  // refused alike whether a question is open there or not.
+  describe.each([
+    { route: 'POST /api/sessions/:id/reply', suffix: '/reply', body: { answer: 'A' } },
+    { route: 'POST /api/sessions/:id/reply-tabs', suffix: '/reply-tabs', body: { promptId: 'no-such-prompt', answers: ['A'] } },
+    { route: 'POST /api/sessions/:id/tab-progress', suffix: '/tab-progress', body: { promptId: 'no-such-prompt', partial: ['A'] } },
+    { route: 'POST /api/sessions/:id/secret-saved', suffix: '/secret-saved', body: { status: 'saved' } },
+    { route: 'POST /api/sessions/:id/mail-connected', suffix: '/mail-connected', body: { status: 'connected' } },
+  ])('$route on another person\'s conversation', ({ suffix, body }) => {
+    const call = (id: string): Promise<Response> =>
+      jsonFetch(`/api/sessions/${id}${suffix}`, { method: 'POST', body: JSON.stringify(body) });
+
+    it('refuses a mandate alike whether a question is open in it or not', async () => {
+      asMandate();
+      const none = await call(FOREIGN);
+      expect(none.status, 'without an open question').toBe(403);
+      prompts.insertAskUser(FOREIGN, 'Owner asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag('owner') });
+      const open = await call(FOREIGN);
+      expect(open.status, 'with an open question').toBe(403);
+      expect(await none.text(), 'the refusal differs with the question').toBe(await open.text());
+    });
+
+    it('control: a mandate in its own conversation without a question still gets the 404', async () => {
       asMandate();
       expect((await call(OWN)).status).toBe(404);
     });
