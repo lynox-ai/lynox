@@ -14847,6 +14847,12 @@ export class LynoxHTTPApi {
           process.stderr.write('⚠ /api/export: engine database unavailable — durable knowledge exported empty and marked incomplete\n');
         }
       }
+      // Whether durable memory is switched on. With it off, the block still carries what is
+      // held, and `enabled: false` says the entries are stored but not in use.
+      exportData['durable_knowledge'] = {
+        ...(exportData['durable_knowledge'] as Record<string, unknown>),
+        enabled: engine.getUserConfig().durable_memory_enabled === true,
+      };
 
       // CRM contacts + deals, and every DataStore collection: walked to the END by
       // `_id`, the way the threads are walked above.

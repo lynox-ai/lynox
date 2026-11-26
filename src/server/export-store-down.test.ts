@@ -24,7 +24,7 @@ type ExportBody = {
   threads: unknown[]; threads_may_be_incomplete: boolean;
   durable_knowledge: {
     entries: Array<{ text: string }>; pending_entries: unknown[]; sources: unknown[];
-    blocks: Record<string, string | null>; may_be_incomplete: boolean;
+    blocks: Record<string, string | null>; may_be_incomplete: boolean; enabled: boolean;
   };
 };
 
@@ -123,20 +123,22 @@ describe('export with the stores down at boot (real engine)', () => {
     expect(body.datastore_may_be_incomplete, 'the DataStore was not read, not empty').toBe(true);
     expect(body.threads_may_be_incomplete, 'threads were not read, not absent').toBe(true);
     expect(body.durable_knowledge.may_be_incomplete, 'switched on but not read').toBe(true);
+    expect(body.durable_knowledge.enabled, 'switched on').toBe(true);
   }, 60_000);
 });
 
 describe('export with every store open, durable memory off, then the CRM gone (real engine)', () => {
   const h = harness(() => {}, false);
 
-  it('leaves durable knowledge and threads unmarked when nothing failed', async () => {
+  it('leaves durable knowledge and threads unmarked when nothing failed, and says durable memory is off', async () => {
     expect(h.engine().getUserConfig().durable_memory_enabled, 'fixture: durable memory off').toBe(false);
     expect(h.engine().getKnowledgeStore(), 'fixture: no store while it is off').toBeNull();
     expect(h.engine().getThreadStore(), 'fixture: the thread store opened').not.toBeNull();
 
     const body = await h.exportBody();
     expect(body.durable_knowledge.entries).toEqual([]);
-    expect(body.durable_knowledge.may_be_incomplete, 'off: no store was opened, so nothing failed').toBe(false);
+    expect(body.durable_knowledge.may_be_incomplete, 'off: nothing is held, and the read did not fail').toBe(false);
+    expect(body.durable_knowledge.enabled, 'switched off').toBe(false);
     expect(body.threads_may_be_incomplete, 'the thread store opened and was read').toBe(false);
   }, 60_000);
 
@@ -168,18 +170,23 @@ describe('export with durable memory switched off after it held entries (real en
     db.close();
   }, false);
 
-  it('carries the entries and blocks it still holds, unmarked', async () => {
+  it('carries the entries and blocks it still holds, unmarked and marked as switched off, and changes nothing', async () => {
     expect(h.engine().getUserConfig().durable_memory_enabled, 'fixture: durable memory off').toBe(false);
     expect(h.engine().getKnowledgeStore(), 'fixture: no store while it is off').toBeNull();
 
+    const db = h.engine().getEngineDb() as EngineDb;
+    const changesBefore = (db.getDb().prepare('SELECT total_changes() AS n').get() as { n: number }).n;
     const body = await h.exportBody();
+    expect(body.durable_knowledge.enabled, 'held, but switched off').toBe(false);
     expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['ACME renews in March']);
     expect(body.durable_knowledge.blocks['profile']).toBe('Runs a small bakery');
     expect(body.durable_knowledge.blocks['playbook'], 'a key in a block is masked').not.toContain('Q'.repeat(40));
     expect(body.durable_knowledge.blocks['playbook']).toContain('***');
     expect(body.durable_knowledge.may_be_incomplete, 'read in full').toBe(false);
-    const db = h.engine().getEngineDb() as EngineDb;
     expect((db.getDb().prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number }).done, 'the export wrote nothing').toBe(0);
+    expect((db.getDb().prepare('SELECT total_changes() AS n').get() as { n: number }).n, 'no row of engine.db changed').toBe(changesBefore);
+    expect(h.engine().getUserConfig().durable_memory_enabled, 'the export switched nothing on').toBe(false);
+    expect(h.engine().getKnowledgeStore(), 'the export attached no store to the engine').toBeNull();
   }, 60_000);
 
   it('marks the block incomplete when the read fails', async () => {
