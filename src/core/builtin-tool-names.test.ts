@@ -279,6 +279,7 @@ describe('every tool the engine can build is classified by where its result come
     memory_update: 'fixed texts and counts',
     plan_task: 'the approval, ids and the owner\'s feedback',
     remember: 'fixed texts and the subject it was given',
+    save_workflow: 'the name it was given, ids, counts, and parameter names only in the form a refusal quotes',
     suggest_follow_ups: 'a count',
     task_create: 'the new row, made from what it was given',
     write_file: 'the path',
@@ -292,9 +293,6 @@ describe('every tool the engine can build is classified by where its result come
   /** Tools whose results are not classified yet. */
   const NOT_YET_CLASSIFIED: ReadonlySet<string> = new Set([
     'google_calendar', 'memory_promote', 'run_workflow',
-    // Returns the name it was given, ids and counts, and the names of the parameters the session
-    // analysis found; those names are not checked for a shape yet. Tracked privately.
-    'save_workflow',
   ]);
 
   const classes = (): ReadonlyArray<readonly [string, ReadonlySet<string>]> => [
