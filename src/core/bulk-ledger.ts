@@ -758,6 +758,11 @@ export interface PreviewTarget {
   /** A rollback or an undo took this run's write back (`undone_at`). After a rollback that did
    *  not complete, a target that is `written` and not `undone` is one lynox left as it was. */
   undone: boolean;
+  /** An undo's target that gives a value back and takes back a source target sent to without a
+   *  confirmed write: the undo reads it first and resets only where the source's value is in place.
+   *  The same targets {@link BulkLedger.countUndoOpenTargets} counts, taken out or not. Set only
+   *  where it holds. */
+  undoOpen?: true | undefined;
 }
 
 interface RunRow {
@@ -1757,6 +1762,8 @@ export class BulkLedger {
     // the text the apply wrote, which its own preview already named. An undo is never approved
     // from a preview, so the line that counts the marks would not show either.
     const seoNoted = run !== undefined && run.kind !== 'undo' && this.shopifyFormOfRun(run) === 'shopify_product';
+    // An undo's targets that take back a write never confirmed: the page names each in its row.
+    const undoOpen = run?.kind === 'undo' ? this.undoOpenSeqs(runId) : new Set<number>();
     return rows.map((r) => {
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
       // A judged target without its verdict holds the template (every field null), not a plan:
@@ -1818,6 +1825,7 @@ export class BulkLedger {
         ...(shopMarkedAt !== undefined ? { shopMarkedAt } : {}),
         ...(hiddenAdds.length > 0 ? { hiddenAdds } : {}),
         ...(hiddenUnchecked.length > 0 ? { hiddenUnchecked } : {}),
+        ...(undoOpen.has(r.seq) ? { undoOpen: true as const } : {}),
       };
     });
   }
@@ -2564,6 +2572,18 @@ export class BulkLedger {
        WHERE u.run_id = ? AND u.change IN ('update','create') AND u.deselected_at IS NULL
          AND s.applied_at IS NULL AND s.write_sent = 1`,
     ).get(runId) as { n: number }).n;
+  }
+
+  /** The seqs of the targets {@link countUndoOpenTargets} counts, those the owner took out
+   *  included: a row says what the undo does with it once it is put back. */
+  private undoOpenSeqs(runId: string): Set<number> {
+    return new Set((this.engineDb.getDb().prepare(
+      `SELECT u.seq FROM bulk_targets u
+         JOIN bulk_runs r ON r.id = u.run_id AND r.kind = 'undo'
+         JOIN bulk_targets s ON s.run_id = r.source_run_id AND s.seq = u.source_seq
+       WHERE u.run_id = ? AND u.change IN ('update','create')
+         AND s.applied_at IS NULL AND s.write_sent = 1`,
+    ).all(runId) as { seq: number }[]).map((x) => x.seq));
   }
 
   /** The undo that took an undone run back, for the owner's page: the last finished undo started
