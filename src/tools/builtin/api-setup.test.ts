@@ -2035,7 +2035,8 @@ describe('api_setup tool', () => {
           throw new llmHelper.ExtractionStoppedError({ upperBoundUsd: 0.25, estimateUsd: 0.05, fromSnapshot: false });
         });
         try {
-          const agent = createMockAgent(new ApiStore());
+          const capOnly = vi.fn();
+          const agent = Object.assign(createMockAgent(new ApiStore()), { chargeExternalCapOnlyCost: capOnly });
           agent.sessionCounters.costUSD = 0.5;
           const onAfterRun = vi.fn();
           (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
@@ -2046,6 +2047,8 @@ describe('api_setup tool', () => {
             agent,
           ))).rejects.toMatchObject({ name: 'AbortError' });
           expect(agent.sessionCounters.costUSD).toBeCloseTo(0.75, 10);
+          // The run's ceiling counts the bound as cap-only. Kills: an aborted bound that skips the run's guard.
+          expect(capOnly).toHaveBeenCalledWith(0.25);
           // The bound is for the session cap only: no tenant debit.
           expect(onAfterRun).not.toHaveBeenCalled();
         } finally {
@@ -2328,6 +2331,31 @@ describe('api_setup tool', () => {
         expect((agent.sessionCounters as { costUSD: number }).costUSD).toBeCloseTo(0.0021, 6);
         expect(onAfterRun).toHaveBeenCalledOnce();
         expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.0021, 6);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('charges the docs-extraction spend to the run\'s cost ceiling, accepted or refused', async () => {
+      // Kills: a debit that skips the run's guard (a run with a ceiling could spend past it
+      // through extraction calls the ceiling never sees).
+      const fetchSpy = mockFetchOk('<html>plain docs body, no links...</html>');
+      try {
+        stubExtraction({ description: 'Some API', auth: { type: 'bearer' } }, 0.0021);
+        const charged = vi.fn();
+        const agent = { ...createMockAgent(new ApiStore()), chargeExternalCost: charged };
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/v1' }, agent as never);
+        expect(charged).toHaveBeenCalledOnce();
+        expect(charged.mock.calls[0]![0] as number).toBeCloseTo(0.0021, 6);
+
+        const refused = new llmHelper.ExtractShapeError('Model did not call the extract tool. Got content types: [text]');
+        llmHelper.attachExtractionSpend(refused, { costUsd: 0.0033, tier: 'balanced' });
+        mockedExtract.mockRejectedValue(refused);
+        const chargedRefused = vi.fn();
+        const agent2 = { ...createMockAgent(new ApiStore()), chargeExternalCost: chargedRefused };
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/v1' }, agent2 as never);
+        expect(chargedRefused).toHaveBeenCalledOnce();
+        expect(chargedRefused.mock.calls[0]![0] as number).toBeCloseTo(0.0033, 6);
       } finally {
         fetchSpy.mockRestore();
       }

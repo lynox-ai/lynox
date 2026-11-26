@@ -1333,18 +1333,28 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // `MODEL_MAP.balanced` — so a real customer's $0.3848 Sonnet extraction was
     // reported to the control plane as Haiku spend, and every per-tier breakdown
     // understated `balanced` by exactly the helper calls it could not see.
+    // Also charged to this run's cost ceiling, like the agent's own helper calls: the ceiling
+    // counts it, and the run stops at its next check once it is reached.
+    agent.chargeExternalCost?.(costUsd);
     debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, result.tier);
   } catch (err: unknown) {
     // A stopped call has no reply to book: its bound goes to the session cap, never to the
     // tenant debit (`aborted-call.ts`), and the engine reports the stop.
     if (err instanceof ExtractionStoppedError) {
-      if (err.abortedCost !== undefined) recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      if (err.abortedCost !== undefined) {
+        // And to this run's ceiling, as a bound it counts but does not bill.
+        agent.chargeExternalCapOnlyCost?.(err.abortedCost.upperBoundUsd);
+        recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      }
       throw err;
     }
     // A refused extraction still paid for its reply: book it here, once, as the success
     // path above does. Undefined when the call never reached the model.
     const spent = extractionSpendOf(err);
-    if (spent) debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, spent.costUsd, spent.tier);
+    if (spent) {
+      agent.chargeExternalCost?.(spent.costUsd);
+      debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, spent.costUsd, spent.tier);
+    }
     if (err instanceof BudgetError) {
       return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;
     }
