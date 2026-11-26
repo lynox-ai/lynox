@@ -88,7 +88,7 @@ import { noticeLanguage } from './notice-language.js';
 import { carriesAddress, normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
 import {
   originAsk, originCarriedAsk, originCarriedDenied, originCarriedMandate, originCarriedUnattended, originBashAfterForeign, originDenied, originLookupFailedHead, originLookupFailedMandate, originLookupFailedUnattended,
-  originRefusedMandate, originRefusedUnattended, originTokenUrlAsk, originTokenUrlRefused, originTokenUrlUnreadable, originUnreadable, watchEveryMinutes, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
+  heldTargets, originRefusedMandate, originRefusedUnattended, originTokenUrlAsk, originTokenUrlRefused, originTokenUrlUnreadable, originUnreadable, watchEveryMinutes, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
 } from './origin-notices.js';
 import type { CallTargetOrigin } from './call-connection.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -5476,9 +5476,12 @@ export class Agent implements IAgent {
     // Only the guard's own key allows; every other answer refuses (`decideConsent`).
     const outcome = decideConsent('guard', answer);
     if (outcome !== 'allow') {
-      const denied = saving ? originTokenUrlRefused('denied', shown, origin, carried, lookupFailed)
-        : carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
-      return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(consentRefusal(outcome, denied)), is_error: true } };
+      // The refusal's own sentences first, the sentence on an answer that was none of the keys
+      // after them, and the marked block of targets named by position last.
+      const denied = saving ? originTokenUrlRefused('denied', shown, origin, carried, lookupFailed, false)
+        : carried ? originCarriedDenied(shown, false) : lookupFailed ? `${originLookupFailedHead(shown, noun)} ${originDenied(shown, origin, noun, false)}` : originDenied(shown, origin, noun, false);
+      const held = heldTargets(shown, saving ? 'tokenUrl' : carried ? 'page' : noun);
+      return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(consentRefusal(outcome, denied)) + held, is_error: true } };
     }
     return { origin: passed };
   }
