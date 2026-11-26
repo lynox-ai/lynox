@@ -30,7 +30,7 @@ describe('signalDebuggerOff', () => {
   });
 
   it('refuses every other spelling of the flag, in the argv or in NODE_OPTIONS, even beside the flag', () => {
-    // Each of these node accepts (measured on node 22: every one starts), and none is the flag as written.
+    // node 22 starts with each of the first four (measured); none of them is the flag as written.
     for (const other of ['--no-disable-sigusr1', '--no_disable_sigusr1', '--disable-sigusr1=false', '--no-disable-sigusr1=1', '--no-disable-"sigusr1"']) {
       expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF, other], undefined), other).toBe(false);
       expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF], other), other).toBe(false);
@@ -55,7 +55,7 @@ describe('signalDebuggerOff', () => {
     expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF], `--title "a ${SIGNAL_DEBUGGER_OFF} b"`)).toBe(true);
   });
 
-  it("starts the image's way, the argv flag, whatever quoted NODE_OPTIONS an operator sets beside it; without it the refusal names the way out", () => {
+  it("starts the image's way, the argv flag, with a quoted NODE_OPTIONS an operator sets beside it; without it the refusal names the way out", () => {
     const operator = startedWith([SIGNAL_DEBUGGER_OFF], '--title "a b"');
     expect(operator.nodeOptions).toBe('--title "a b"');
     expect(signalDebuggerOff(operator.execArgv, operator.nodeOptions)).toBe(true);
@@ -123,7 +123,8 @@ describe.skipIf(process.platform === 'win32')('the flag in a real node process',
     const undone = await signalled(['--no-disable-sigusr1'], SIGNAL_DEBUGGER_OFF);
     expect(undone.ready).toBe(true);
     expect(undone.err).toMatch(/Debugger listening/);
-    expect(signalDebuggerOff(['--no-disable-sigusr1'], SIGNAL_DEBUGGER_OFF)).toBe(false);
+    const seen = startedWith(['--no-disable-sigusr1'], SIGNAL_DEBUGGER_OFF);
+    expect(signalDebuggerOff(seen.execArgv, seen.nodeOptions)).toBe(false);
   });
 });
 

@@ -18,6 +18,10 @@
  *   option that opens a debugger without a signal (`--inspect…` but the port settings).
  * To find those two, `NODE_OPTIONS` is read wider than node reads it (quotes and backslashes
  * dropped, split at any whitespace, `_` read as `-`): that can only refuse more, never less.
+ *
+ * What it cannot see: code a `--require` or `--import` loads, and a node that ignores
+ * `NODE_OPTIONS` in secure mode (setuid or file capabilities on the binary; the image has
+ * neither) while the value still stands in the environment.
  */
 
 import { realpathSync } from 'node:fs';
