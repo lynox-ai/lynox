@@ -193,6 +193,22 @@ describe('a confirmation\'s question field at little height', () => {
 		expect(by?.top).toBe(fieldHeights.client - LINE);
 	});
 
+	it('reads one long wrapped value on by the field less the fade, where the fade is taller than a line', async () => {
+		const realOffset = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+		Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, get(this: HTMLElement) { return this.hasAttribute('data-prompt-fade') ? 32 : 0; } });
+		try {
+			wraps = [12];
+			await show([{ kind: 'frame', text: '⚠ File access: "' }], [`/srv/${'d/'.repeat(150)}secret"`]);
+			let by: ScrollToOptions | undefined;
+			field().scrollBy = ((o: ScrollToOptions) => { by = o; }) as HTMLElement['scrollBy'];
+			readMore()!.click();
+			expect(by?.top).toBe(fieldHeights.client - 32);
+		} finally {
+			if (realOffset) Object.defineProperty(HTMLElement.prototype, 'offsetHeight', realOffset);
+			else delete (HTMLElement.prototype as { offsetHeight?: unknown }).offsetHeight;
+		}
+	});
+
 	it('watches each line too, so a field held at its full height still re-measures when its lines change size', async () => {
 		const watched: Element[] = [];
 		(globalThis as { ResizeObserver?: unknown }).ResizeObserver = class { observe(el: Element): void { watched.push(el); } unobserve(): void {} disconnect(): void {} };
