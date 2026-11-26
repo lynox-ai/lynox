@@ -1,7 +1,10 @@
 <script lang="ts">
+	import { consentAnswer } from '../contract/prompt.js';
 	import {
 		sendMessage,
 		retryFailedTurn,
+		sendHeldMessage,
+		removeHeldMessage,
 		abortRun,
 		replyPermission,
 		replyPermissionTabs,
@@ -127,6 +130,7 @@
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { onMount, tick, untrack } from 'svelte';
+	import PasskeyPrompt from './PasskeyPrompt.svelte';
 	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	// Welcome screen state
@@ -522,7 +526,7 @@
 
 	/** Tool call label: returns { action, subject } or null if hidden.
 	 *  Logic lives in `utils/tool-call-label.ts` so the per-tool rules
-	 *  (especially memory_recall's query/namespace fallback) are unit-tested
+	 *  (the subject each tool shows, and the bounds on it) are unit-tested
 	 *  outside this component. */
 	function toolCallLabel(tc: ToolCallInfo): { action: string; subject: string } | null {
 		return resolveToolCallLabel(tc.name, tc.input, t);
@@ -1301,14 +1305,16 @@
 		// and pushing the chat off-screen. Users only need the last answer
 		// to reconsider via the "edit" button below.
 		answeredPrompts = [{ question: pendingPermission.question, answer: display ?? answer }];
-		// Permission-guard answers ('y'/'n') hand off to a tool that takes
+		// Answers to the engine's confirmations (its keys) hand off to a tool that takes
 		// seconds to run. The store clears `pendingPermission` synchronously
 		// inside replyPermission(), so without this we'd swap straight from
 		// the prompt card to the streaming spinner with no acknowledgment
 		// that the click landed. Hold a transient confirmation in the same
 		// slot until the next assistant token streams or a short timeout.
-		if (answer === 'y' || answer === 'n') {
-			approvalInflight = { question: pendingPermission.question, answer };
+		// A click on one of the engine's confirmations, by its key; typed text is no key.
+		const decided = pendingPermission.consent !== undefined ? consentAnswer(pendingPermission.consent, answer) : undefined;
+		if (decided !== undefined) {
+			approvalInflight = { question: pendingPermission.question, answer: decided === 'deny' || decided === 'cancel' ? 'n' : 'y' };
 			if (approvalInflightTimer) clearTimeout(approvalInflightTimer);
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
 		}
@@ -1343,6 +1349,9 @@
 		// answer. Fixed timing (setTimeout) raced on slow connections; the
 		// observer approach below removes that race for legacy engines.
 		for (let idx = 0; idx < batchAnswers.length; idx++) {
+			// A model's answers answer the model's questions only: the engine's own confirmation,
+			// arrived between two of them, is left for its own card.
+			if (getPendingPermission()?.consent !== undefined) break;
 			const prevPromptId = getPendingPermission()?.promptId;
 			void replyPermission(batchAnswers[idx]!); /* never rejects; a reply that does not arrive is reported */
 			// A question without its id is not answered (`replyPermission` brings the open one back
@@ -1413,6 +1422,12 @@
 		if (pendingTabsPrompt) return; // v2 path owns it
 		if (!pendingPermission) {
 			if (!isStreaming && inBatchMode && batchMode === 'v1') resetBatch();
+			return;
+		}
+		// The engine's own confirmation is never one of the model's batched questions: its card
+		// is shown, and no batch answer can reach it.
+		if (pendingPermission.consent !== undefined) {
+			if (inBatchMode && batchMode === 'v1') resetBatch();
 			return;
 		}
 		const lastMsg = messages[messages.length - 1];
@@ -2559,14 +2574,17 @@
 	     it stays so the transcript's overscroll semantics remain local even
 	     if an ancestor becomes scrollable again someday. -->
 	<div class="relative flex min-h-0 flex-1 flex-col">
-	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
+	<div class="flex flex-1 min-w-0 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
+		<!-- The passkey hint (U-454): a strip at the top of the transcript, in its column, the only place
+		     it shows. It scrolls away with a long thread and never covers the composer or a work page. -->
+		<PasskeyPrompt />
 		{#if threadReadRefusal !== null && messages.length === 0}
 			<!-- Not this reader's chat to read: the reason, not an empty start page. -->
-			<div class="flex h-full items-center justify-center">
+			<div class="flex flex-1 items-center justify-center">
 				<p class="max-w-md text-center text-sm text-text-muted" role="status" data-thread-read-refused>{t(threadReadRefusal)}</p>
 			</div>
 		{:else if messages.length === 0 && !isStreaming}
-			<div class="flex h-full items-center justify-center">
+			<div class="flex flex-1 items-center justify-center">
 				{#if hasApiKey === false}
 					{@const variant = inlineProviderVariant()}
 					{@const labelText = variant === 'mistral' ? 'Mistral API Key' : variant === 'openai-custom' ? 'API Key' : t('onboard.api_key_label')}
@@ -2779,7 +2797,7 @@
 			</div>
 		{/if}
 
-		<div class="mx-auto max-w-3xl lg:max-w-4xl xl:max-w-5xl space-y-5">
+		<div class="mx-auto w-full max-w-3xl lg:max-w-4xl xl:max-w-5xl space-y-5">
 			{#each messages as msg, msgIdx (msg.queueId ?? msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.compactionNote}
 					<!-- Rendered as a left-bordered inline block, the same visual
@@ -2866,6 +2884,16 @@
 							{@const ts = formatMessageTime(msg.createdAt)}
 							{#if ts}<span class="mr-auto mt-2.5 shrink-0 text-[10px] text-text-subtle/50 select-none tabular-nums">{ts}</span>{/if}
 						{/if}
+						{#if msg.held}
+							<button
+								onclick={() => removeHeldMessage(msg)}
+								aria-label={t('chat.remove_held')}
+								title={t('chat.remove_held')}
+								class="mt-1 shrink-0 rounded-full p-1 text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+							</button>
+						{/if}
 						{#if msg.queued}
 							<button
 								onclick={() => removeQueuedMessage(msg)}
@@ -2877,8 +2905,8 @@
 							</button>
 						{/if}
 						<button
-							onclick={() => { if (msg.failed) void retryFailedTurn(msg, userText); /* never rejects; asks the server before sending again */ else void copyWithToast(userText); }}
-							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
+							onclick={() => { if (msg.held) void sendHeldMessage(msg); /* never rejects; asks the server before sending */ else if (msg.failed) void retryFailedTurn(msg, userText); /* never rejects; asks the server before sending again */ else void copyWithToast(userText); }}
+							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.held || msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
 							{#if hasVoicePrefix(userText)}
 								<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3.5 w-3.5 mr-1.5 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(userText)}
@@ -2887,6 +2915,8 @@
 							{/if}
 							{#if msg.failed}
 								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-danger/70 mt-1">{t('chat.send_failed')}</span>
+							{:else if msg.held}
+								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-text-subtle mt-1">{t('chat.send_held')}</span>
 							{:else if msg.queued}
 								<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle ml-2">{t('chat.queued')}</span>
 							{/if}
@@ -3361,6 +3391,7 @@
 					<ChangesetReview
 						files={pendingChangeset}
 						onReview={(action, rolledBackFiles) => submitChangesetReview(action, rolledBackFiles)}
+						messageWaiting={queueLength > 0}
 					/>
 				{/if}
 			</div>
@@ -3507,15 +3538,17 @@
 	<!-- Permission / Ask User prompt (hidden in batch mode) -->
 	{#if pendingPermission && !inBatchMode}
 		{@const opts = pendingPermission.options ?? []}
-		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
-		{@const isDeepConsent = opts.includes('Run on balanced')}
+		<!-- The engine's own confirmation is known by its marker alone, never by its option texts:
+		     a question the model writes may offer "Allow" and "Deny" and stays an ordinary one. -->
+		{@const isPermissionGuard = pendingPermission.consent === 'guard'}
+		{@const isDeepConsent = pendingPermission.consent === 'deep'}
 		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
 		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
 				{@render promptOrigin(pendingPermission.origin)}
 				<div class="flex items-start gap-2">
 					{#if isPermissionGuard || isDeepConsent}
-						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
+						<pre data-prompt-question class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
 					{:else}
 						<!-- renderPromptMarkdown, NOT MarkdownRenderer: the chat renderer
 						     keeps DOMPurify's defaults, which permit `div`, `style` and
@@ -3526,7 +3559,7 @@
 						     with MarkdownRenderer's own stylesheet: without them a single
 						     long token — a tracking URL in a body preview — scrolls the
 						     prompt sideways. -->
-						<div class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
+						<div data-prompt-question class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
 							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list; segment values are spliced in afterwards, HTML-escaped -->
 							{@html pendingPermission.segments
 								? renderPromptSegments(pendingPermission.segments)
@@ -3547,14 +3580,14 @@
 
 				{#if isDeepConsent}
 					<div class="flex flex-wrap gap-2">
-						<button onclick={() => answerPrompt('allow deep')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.consent_allow_deep')}</button>
-						<button onclick={() => answerPrompt('run on balanced')} class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/25 transition-opacity">{t('chat.consent_run_balanced')}</button>
-						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.consent_cancel')}</button>
+						<button onclick={() => answerPrompt('deep', t('chat.consent_allow_deep'))} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.consent_allow_deep')}</button>
+						<button onclick={() => answerPrompt('balanced', t('chat.consent_run_balanced'))} class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/25 transition-opacity">{t('chat.consent_run_balanced')}</button>
+						<button onclick={() => answerPrompt('cancel', t('chat.consent_cancel'))} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.consent_cancel')}</button>
 					</div>
 				{:else if isPermissionGuard}
 					<div class="flex flex-wrap gap-2">
-						<button onclick={() => answerPrompt('y')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
-						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
+						<button onclick={() => answerPrompt('allow', t('chat.allow'))} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
+						<button onclick={() => answerPrompt('deny', t('chat.deny'))} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
 					</div>
 				{:else if pendingPermission.multiSelect && visibleOptions.length > 0}
 					<!-- Multi-select: toggle several, then Send. -->

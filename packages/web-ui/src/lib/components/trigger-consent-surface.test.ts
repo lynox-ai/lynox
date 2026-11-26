@@ -85,8 +85,8 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const { cond, body } = ifBlockAround('data-trigger-watch');
 		// Not while it waits: the held block names the address there (`StampConfirm` or the consent box), never twice.
 		expect(cond).toBe('showsWatchAddress(trigger) && !held(trigger)');
-		expect(body).toContain("{watchOf(trigger)?.host ?? ''}");
-		expect(body).toContain("{watchOf(trigger)?.rest ?? ''}");
+		// Host and path through the address that keeps the host whole and set off.
+		expect(body).toContain(`<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="trigger-watch-address" />`);
 	});
 
 	it('a waiting trigger carries its own badge, whole', () => {
@@ -136,7 +136,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 			'<div class="text-xs text-text-muted" data-consent-watch>',
 			`<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>`,
 			'<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
-				+ `<span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>`,
+				+ `<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="consent-watch-address" /></p>`,
 			'{#if watchOf(trigger)?.intervalMinutes}',
 			`<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>`,
 			'{/if}',
@@ -162,10 +162,12 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const next = ifBlockAround("t('tasks.next_run')");
 		// The whole condition, not `toContain`: an `|| true` appended to it leaves the
 		// expected text in place and puts the date back on a waiting trigger.
-		expect(next.cond).toBe('trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true');
+		expect(next.cond).toBe("trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.running !== true && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && !(trigger.status === 'failed' && !trigger.schedule_cron) && trigger.paused !== true");
 		const run = ifBlockAround('runNow(trigger)');
-		// Nor at a completed plan that keeps its pause (ux U-179): the refusal names no way out there.
-		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger)');
+		// Nor at a completed plan that keeps its pause (U-179): the refusal names no way out there.
+		// Nor at a plan that waits for its takeover (U-410): the takeover is the way out.
+		// Nor at a watch the policy keeps from its page (U-392): the run would read nothing.
+		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !holdsNextRun(trigger.blocked_reason)');
 		expect(run.body.trim().startsWith('<button onclick={() => runNow(trigger)}')).toBe(true);
 	});
 

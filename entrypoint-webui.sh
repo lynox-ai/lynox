@@ -94,7 +94,7 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
     echo "           with the documented \${HOME}/.lynox volume mount" >&2
     echo "" >&2
   else
-    LYNOX_HTTP_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
+    LYNOX_HTTP_SECRET=$(node --disable-sigusr1 -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
     export LYNOX_HTTP_SECRET
     # Persist to volume so it survives container restarts
     mkdir -p "$HOME/.lynox"
@@ -175,7 +175,7 @@ elif [ -z "${LYNOX_VAULT_KEY:-}" ]; then
     echo "" >&2
     exit 1
   fi
-  LYNOX_VAULT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64'))")
+  LYNOX_VAULT_KEY=$(node --disable-sigusr1 -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64'))")
   export LYNOX_VAULT_KEY
   KEY_SOURCE=minted
   mkdir -p "$HOME/.lynox"
@@ -267,6 +267,8 @@ fi
 export LYNOX_VAULT_KEY_SOURCE="$KEY_SOURCE"
 
 # Single process: Engine auto-loads Web UI handler from /app/web-ui/handler.js
+# Every node here starts with --disable-sigusr1 in its own argv: a signal from a process of the
+# same user must not open the debugger, and an operator's NODE_OPTIONS can replace the image's.
 echo "Starting lynox on port ${LYNOX_HTTP_PORT:-3000}..."
 echo "  Phone access: Settings → Mobile Access → scan QR code" >&2
-exec node /app/dist/index.js --http-api
+exec node --disable-sigusr1 /app/dist/index.js --http-api

@@ -191,7 +191,7 @@ describe('run_workflow — inline steps', () => {
   it('does not hand a calling run\'s filing context to the workflow\'s steps', async () => {
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     const filing = { source: 'task', triggerId: 'trg-1', store: {}, createdBy: 'owner', mandateId: null };
-    const agent = { ...makePipelineAgent(), autonomy: 'autonomous', approvalFiling: filing, promptUser: async () => 'Allow' } as unknown as IAgent;
+    const agent = { ...makePipelineAgent(), autonomy: 'autonomous', approvalFiling: filing, promptUser: async () => 'allow' } as unknown as IAgent;
     await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'send the report by mail')] }, agent);
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
     const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
@@ -312,6 +312,24 @@ describe('run_workflow — inline steps', () => {
       makePipelineAgent(),
     );
     expect(result).toBe('Error: step #3 (steps[2].id): a step id is 1 to 40 characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. Choose an id in that form. If other steps refer to this step, use the new id there too.');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('refuses an inline step with a reserved id before anything runs', async () => {
+    const result = await runWorkflowTool.handler(
+      { name: 'test', steps: [makeStep('fetch', 'first'), makeStep('params', 'second')] },
+      makePipelineAgent(),
+    );
+    expect(result).toBe('Error: step #2 (steps[1].id): "params", "__proto__" and "constructor" cannot be step ids, because a run already uses these names ("params" holds the workflow\'s parameters). Choose another id in the allowed form, for example fetch_orders. If other steps refer to this step, use the new id there too.');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('refuses an inline step whose id is a key of the inline context, before anything runs', async () => {
+    const result = await runWorkflowTool.handler(
+      { name: 'test', steps: [makeStep('fetch', 'first'), makeStep('customer', 'second')], context: { customer: 'Acme' } },
+      makePipelineAgent(),
+    );
+    expect(result).toBe('Error: step #2 (steps[1].id): the run\'s context already holds a value under this step\'s id, and the step\'s output would take its place. Give the step another id, or the value another name.');
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
@@ -1276,6 +1294,18 @@ describe('run_workflow — a step id stored before ids had a shape', () => {
     expect(manifest.agents.map(a => a.id)).toEqual(['step-2']);
   });
 
+  // A workflow stored with a step `params` before a save refused it: the run hands the runner the id
+  // as stored, next to the workflow's params, never renamed, so the runner's own check refuses it
+  // before any step (`reserved-step-ids.test.ts`).
+  it('a stored step id params reaches the runner as stored, beside the workflow\'s params', async () => {
+    const pipelineId = seedStoredPipeline([{ id: 'params', task: 'Fetch' }, { id: 'b', task: 'Use {{params.result}}', input_from: ['params'] }]);
+    await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
+    const manifest = mockRunManifest.mock.calls.at(-1)![0] as Manifest;
+    expect(manifest.agents.map(a => a.id)).toEqual(['params', 'b']);
+    expect(manifest.agents[1]!.input_from).toEqual(['params']);
+    expect(Object.hasOwn(manifest.context, 'params')).toBe(true);
+  });
+
   it('refuses a stored reference outside the shape that names no step without quoting it', async () => {
     const real = await vi.importActual<typeof import('../../orchestrator/validate.js')>('../../orchestrator/validate.js');
     mockValidateManifest.mockImplementationOnce((m: Manifest) => real.validateManifest(m));
@@ -1546,6 +1576,19 @@ describe('runSavedWorkflow', () => {
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
+  it('a stored workflow with a reserved step id is refused before the run, with the step the owner is told', async () => {
+    const id = seedSavedWorkflow({ steps: [{ id: 'params', task: 'Fetch' }, { id: 'sum', task: 'Sum {{params.result}}', input_from: ['params'] }] });
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('step #1 (steps[0].id): "params", "__proto__" and "constructor" cannot be step ids');
+    expect(result.error).toContain('In a saved workflow, rename the step with rename_step');
+    // Named as a step the owner renames, so the worker does not retry a run that cannot start, and
+    // not as an unresolved reference, which the owner would be told something false about.
+    expect(result.reservedIdStep).toBe(1);
+    expect(result.unresolvedRefStep).toBeUndefined();
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
   it('CONTROL: runs a workflow the caller\'s check lets through', async () => {
     const id = seedSavedWorkflow();
     mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'fresh-run-2' }));
@@ -1753,7 +1796,7 @@ describe('runSavedWorkflow', () => {
       mockRunManifest.mockResolvedValueOnce(makeRunState());
       // A caller that passed `parentPromptUser` too still hands on only the channel.
       const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL,
-        parentPrompt: { ...channel, parentPromptUser: async () => 'Allow' }, questionWait: wait,
+        parentPrompt: { ...channel, parentPromptUser: async () => 'allow' }, questionWait: wait,
       });
       expect(result.ok).toBe(true);
       const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;

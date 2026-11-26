@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
@@ -17,7 +18,6 @@ import type {
   EffortLevel,
   ThinkingMode,
   TabQuestion,
-  IAgent,
   PromptUserFn,
   PromptTabsFn,
   PromptSecretFn,
@@ -97,6 +97,8 @@ import { ConversationLatch } from './conversation-latch.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { turnIsLocked } from './mandate-tool-lock.js';
 import { ConversationGrants } from './conversation-grants.js';
+import { SearchResultAddresses } from './search-result-addresses.js';
+import { wrapHandler } from '../tools/wrap-handler.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -386,15 +388,12 @@ export interface RunUsageSummary {
  * plugin-enabled instance. The spread keeps those, and any field added to ToolEntry later.
  */
 export function applyPluginToolGate(entries: ToolEntry[], pluginManager: PluginManager): ToolEntry[] {
-  return entries.map(entry => ({
-    ...entry,
-    handler: async (input: unknown, agent: IAgent): Promise<string> => {
-      const gate = await pluginManager.fireToolGate(entry.definition.name, input);
-      if (gate === false) {
-        throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
-      }
-      return entry.handler(input, agent);
-    },
+  return entries.map(entry => wrapHandler(entry, async (input, _agent, run): Promise<string> => {
+    const gate = await pluginManager.fireToolGate(entry.definition.name, input);
+    if (gate === false) {
+      throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
+    }
+    return run();
   }));
 }
 
@@ -566,6 +565,7 @@ export class Session {
    * state in tools/builtin/http.ts and tools/builtin/fs.ts and grew
    * (or, in the Set/Map's case, leaked) for the lifetime of the process.
    */
+  private readonly _searchResultAddresses = new SearchResultAddresses();
   private readonly _sessionCounters: import('../types/agent.js').SessionCounters = {
     httpRequests: 0,
     writeBytes: 0,
@@ -1004,7 +1004,10 @@ export class Session {
         const runId = randomUUID();
         // Relative to the workspace the files live in, not to the process: in the image the
         // process runs in /app and every workspace path would start with `../`.
-        runChangeset = workspaceChangeset(runId);
+        // Who made this review and whether this run's client shows it travel with the manager:
+        // the principal set above is this run's, and a later run that fails before it gets
+        // here must not change who may answer this one.
+        runChangeset = workspaceChangeset(runId, { createdBy: principalTag(this._principal), shownForReview: this._runShowsReview });
         this._changesetManager = runChangeset;
         this._recreateAgent();
       } else {
@@ -1079,7 +1082,8 @@ export class Session {
         try {
           answer = await this.agent.promptUser(
             pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
-            ['Allow', 'Deny', '\x00'],
+            consentOptions('guard'),
+            consentMeta('guard'),
           );
         } catch (err: unknown) {
           // A prompt path that cannot reach anyone (an HTTP engine without its prompt store)
@@ -1091,7 +1095,10 @@ export class Session {
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          // The run's result, read by the person, not by the model: no sentence for the model here
+          // (the reply route already tells the person an unrecognised answer allowed nothing).
           const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
@@ -2733,9 +2740,13 @@ export class Session {
   private _rebuildAgentKeepingConversation(): void {
     const messages = this.saveMessages();
     const tainted = this.agent?.conversationSawUntrusted ?? false;
+    const searched = this.agent?.heldProviderSearch() ?? false;
     this._createAgent();
     this.loadMessages(messages);
     if (tainted) this.agent?.restoreConversationTaint();
+    // Likewise a server tool the provider ran (its web search), whose blocks the context window
+    // may have dropped.
+    if (searched) this.agent?.restoreProviderSearch();
   }
 
   /**
@@ -2994,6 +3005,7 @@ export class Session {
       // the reason the plain read replaced a conditional spread that was doing nothing.
       abortScope: this.agent?.abortScope,
       name: 'lynox',
+      language: this.engine.config.language,
       model,
       // A background slot on another endpoint pins the pair the same way a profile does.
       modelPinnedByProfile: this._profileOverride !== null || (this._backgroundSlot !== null && slotCfg.crossProviderSlot),
@@ -3106,6 +3118,8 @@ export class Session {
       changesetReviewedAfterRun: this._changesetManager !== null && this._runShowsReview,
       toolContext,
       sessionCounters: this._sessionCounters,
+      // The same record of what this conversation's searches listed, for every agent built for it.
+      searchResultAddresses: this._searchResultAddresses,
       // Phase 2: same blob-store reference across every Agent recreation so
       // `recall_tool_result` resolves handles minted by a prior `compact()`.
       toolResultBlobStore: this._toolResultBlobStore,

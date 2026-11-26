@@ -142,7 +142,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       promptId = store.insertQuestion({ blocked: meta?.blocked === true, attended: false }, deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
         principal: deps.principal,
         handRun: deps.handRun,
-      });
+      }, meta?.consent);
     } catch (err: unknown) {
       // A blocked question (where a send target comes from, a guard's hard block) is refused before
       // it is stored. The run ends there, visibly, as a question it could not ask: a step that

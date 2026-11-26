@@ -432,6 +432,14 @@ describe('spawn_agent tool', () => {
     expect(config['sendOrigin']).toEqual({ kind: 'childAgent' });
   });
 
+  it('a child shares the parent\'s record of what this conversation\'s searches listed', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    const searches = { has: () => false };
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ searchResultAddresses: searches } as unknown as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['searchResultAddresses']).toBe(searches);
+  });
+
   it('a child of a trigger\'s run keeps the trigger as where a target comes from', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     vi.mocked(MockAgent).mockClear();
@@ -6246,7 +6254,9 @@ describe('spawn_agent tool', () => {
       expect(typeof payload).toBe('object');
       const p = payload as WarningPayload;
       expect(p.message).toContain('DEEP');
-      expect(p.message).toMatch(/Estimated cost/i);
+      // The amount is the model's list-price cost in the budget's own unit ($), named as model cost,
+      // at the end of its sentence.
+      expect(p.message).toMatch(/Estimated model cost for this session: about \$\d+\.\d{2}\./);
       expect(p.tier).toBe('deep');
       expect(p.costUsd).toBeGreaterThan(0);
     });

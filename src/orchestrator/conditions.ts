@@ -2,7 +2,8 @@ import type { ManifestCondition, AgentOutput } from '../types/orchestration.js';
 
 /**
  * Resolve a dot-notation path into an object.
- * Returns `undefined` if any segment is missing.
+ * Returns `undefined` if any segment is missing. Only an object's own properties count: a path
+ * never reads through to a prototype (`{{constructor.name}}`, `{{params.toString}}`).
  */
 export function getByPath(obj: Record<string, unknown>, path: string): unknown {
   const segments = path.split('.');
@@ -11,6 +12,7 @@ export function getByPath(obj: Record<string, unknown>, path: string): unknown {
     if (current === null || current === undefined || typeof current !== 'object') {
       return undefined;
     }
+    if (!Object.hasOwn(current, segment)) return undefined;
     current = (current as Record<string, unknown>)[segment];
   }
   return current;
@@ -73,7 +75,8 @@ export function buildConditionContext(
   globalContext: Record<string, unknown>,
   outputs: Map<string, AgentOutput>,
 ): Record<string, unknown> {
-  const ctx: Record<string, unknown> = { ...globalContext };
+  // Without a prototype, as `buildStepContext`: a step id is a key here.
+  const ctx: Record<string, unknown> = Object.assign(Object.create(null) as Record<string, unknown>, globalContext);
   for (const [id, out] of outputs) {
     if (!out.skipped) {
       ctx[id] = { result: out.result, costUsd: out.costUsd, error: out.error };
