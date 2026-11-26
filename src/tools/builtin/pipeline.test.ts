@@ -191,7 +191,7 @@ describe('run_workflow — inline steps', () => {
   it('does not hand a calling run\'s filing context to the workflow\'s steps', async () => {
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     const filing = { source: 'task', triggerId: 'trg-1', store: {}, createdBy: 'owner', mandateId: null };
-    const agent = { ...makePipelineAgent(), autonomy: 'autonomous', approvalFiling: filing, promptUser: async () => 'Allow' } as unknown as IAgent;
+    const agent = { ...makePipelineAgent(), autonomy: 'autonomous', approvalFiling: filing, promptUser: async () => 'allow' } as unknown as IAgent;
     await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'send the report by mail')] }, agent);
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
     const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
@@ -1796,7 +1796,7 @@ describe('runSavedWorkflow', () => {
       mockRunManifest.mockResolvedValueOnce(makeRunState());
       // A caller that passed `parentPromptUser` too still hands on only the channel.
       const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL,
-        parentPrompt: { ...channel, parentPromptUser: async () => 'Allow' }, questionWait: wait,
+        parentPrompt: { ...channel, parentPromptUser: async () => 'allow' }, questionWait: wait,
       });
       expect(result.ok).toBe(true);
       const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;

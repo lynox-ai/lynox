@@ -70,7 +70,7 @@ describe('api_setup stamps a save the owner made in a batch that began clean', (
       heldProviderSearch: () => false,
       ...run,
       sessionCounters: { httpRequests: 0 },
-      promptUser: async () => 'Allow',
+      promptUser: async () => 'allow',
       secretStore: { resolve: (): string | null => null, listNames: (): string[] => [] },
       toolContext: { ...createToolContext({}), auditLog: testAuditLog().log, apiStore: store, vaultNameBindings: bindingsAsMigrated(store) },
     } as never;
@@ -131,7 +131,7 @@ function agentWith(tool: ToolEntry, store: ApiStore, asked: string[]): Agent {
   const agent = new Agent({
     name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', noticeLanguage: 'en',
     tools: [tool],
-    promptUser: async (q: string | PromptText) => { asked.push(flattenPrompt(q)); return 'Deny'; },
+    promptUser: async (q: string | PromptText) => { asked.push(flattenPrompt(q)); return 'deny'; },
     ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => ['nothing named'] }),
     conversationLatch: ConversationLatch.detached(),
     toolContext: { ...createToolContext({}), apiStore: store },

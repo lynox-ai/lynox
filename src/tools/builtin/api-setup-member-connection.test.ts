@@ -95,7 +95,7 @@ function agentWith(store: ApiStore, principal: RequestPrincipal, live: readonly 
     principal,
     ...(secretStore !== undefined ? { secretStore } : {}),
     sessionCounters: { httpRequests: 0 },
-    promptUser: async () => 'Allow',
+    promptUser: async () => 'allow',
     toolContext: {
       // A mandate's writes leave rows in the actor trail and are refused without one.
       auditLog: testAuditLog().log,

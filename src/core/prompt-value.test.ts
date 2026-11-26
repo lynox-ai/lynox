@@ -160,12 +160,12 @@ describe('promptUser callers', () => {
     // The danger gate asks with `DangerSignal.prompt`, which `_detectDanger` builds with
     // `framed`: the agent's command preview and paths are values (`agentText`), the rest is
     // the system's own text. Asking with `.warning`, the plain string, would carry them
-    // unmarked again. The proof checks the text of the file: both danger-gate calls ask with
+    // unmarked again. The proof checks the text of the file: the danger gate asks with
     // `guardPrompt`, which is `effectiveSignal.prompt` or that prompt with a sentence of the
     // system's own appended (`pv`), and `effectiveSignal.warning` appears nowhere but in its
     // `[BLOCKED` check. An alias of the signal is not seen, and the file's other promptUser
     // calls are not checked by this entry.
-    'core/agent.ts': { proof: /^(?![\s\S]*effectiveSignal\.warning(?!\.includes\('\[BLOCKED'\)))(?=[\s\S]*\? pv`\$\{effectiveSignal\.prompt\}[^`]*`\s*: effectiveSignal\.prompt;)(?=[\s\S]*this\.promptUser\(guardPrompt, \['Allow deep')(?=[\s\S]*this\.promptUser\(guardPrompt, \['Allow', 'Deny')/ },
+    'core/agent.ts': { proof: /^(?![\s\S]*effectiveSignal\.warning(?!\.includes\('\[BLOCKED'\)))(?=[\s\S]*\? pv`\$\{effectiveSignal\.prompt\}[^`]*`\s*: effectiveSignal\.prompt;)(?=[\s\S]*this\.promptUser\(guardPrompt, consentOptions\(kind\), consentMeta\(kind, askMeta\)\))/ },
   };
 
   /** Blank out comment bodies and string contents, keeping offsets intact. */

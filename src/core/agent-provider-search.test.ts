@@ -44,7 +44,7 @@ function agentFor(tools: ToolEntry[], asked: string[], grants: ConversationGrant
     conversationRoot: root,
     name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', noticeLanguage: 'en',
     tools,
-    promptUser: async (q: string | PromptText) => { asked.push(flattenPrompt(q)); return 'Deny'; },
+    promptUser: async (q: string | PromptText) => { asked.push(flattenPrompt(q)); return 'deny'; },
     ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => ['nothing named'] }),
     conversationLatch: ConversationLatch.detached(),
     conversationGrants: grants,

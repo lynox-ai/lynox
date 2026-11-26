@@ -98,7 +98,7 @@ describe('the language of the binding question comes from the session', () => {
       principal: OWNER_PRINCIPAL,
       sessionCounters: { httpRequests: 0 },
       ...(language === undefined ? {} : { dialogLanguage: language }),
-      promptUser: async (q: unknown): Promise<string> => { out.push(flattenPrompt(q as PromptText)); return 'Allow'; },
+      promptUser: async (q: unknown): Promise<string> => { out.push(flattenPrompt(q as PromptText)); return 'allow'; },
       secretStore: { resolve: (): string | null => null, listNames: (): string[] => [] },
       toolContext: {
         auditLog: testAuditLog().log,

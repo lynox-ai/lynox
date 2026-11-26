@@ -107,7 +107,7 @@ describe('the agent asks a hard block with meta.blocked, and reports a refusal o
     const metas: Array<PromptMeta | undefined> = [];
     const promptUser = vi.fn(async (_q: unknown, _o?: string[], meta?: PromptMeta) => {
       metas.push(meta);
-      return meta?.blocked === true ? UNATTENDED_BLOCK_ANSWER : 'Allow';
+      return meta?.blocked === true ? UNATTENDED_BLOCK_ANSWER : 'allow';
     });
     const streamed: Array<{ type: string; result?: unknown; isError?: boolean }> = [];
     const onStream = vi.fn(async (e: { type: string; result?: unknown; isError?: boolean }) => { streamed.push(e); });
@@ -125,7 +125,7 @@ describe('the agent asks a hard block with meta.blocked, and reports a refusal o
     const mail = stub('mail_send');
     const bash = stub('bash');
     const metas: Array<PromptMeta | undefined> = [];
-    const promptUser = vi.fn(async (_q: unknown, _o?: string[], meta?: PromptMeta) => { metas.push(meta); return 'Allow'; });
+    const promptUser = vi.fn(async (_q: unknown, _o?: string[], meta?: PromptMeta) => { metas.push(meta); return 'allow'; });
     const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [mail, bash], autonomy: 'autonomous', promptUser });
     await call(agent, 'mail_send', { to: 'a@example.org', subject: 's', body: 'b' });
     expect(mail.calls).toHaveLength(1);
@@ -157,7 +157,7 @@ describe('a tool from outside the engine that confirms by itself', () => {
   ])('unattended, %s from its check is asked about, and a denial keeps the handler from running', async (_kind, check) => {
     const tool = plugin(check);
     const asked: string[] = [];
-    const promptUser = vi.fn(async (q: unknown) => { asked.push(typeof q === 'string' ? q : JSON.stringify(q)); return 'Deny'; });
+    const promptUser = vi.fn(async (q: unknown) => { asked.push(typeof q === 'string' ? q : JSON.stringify(q)); return 'deny'; });
     const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [tool], autonomy: 'autonomous', promptUser });
     const result = await call(agent, 'Merge', {});
     expect(asked).toHaveLength(1);
@@ -168,7 +168,7 @@ describe('a tool from outside the engine that confirms by itself', () => {
 
   it('attended, its own confirmation replaces the generic one: the handler runs unasked by the agent', async () => {
     const tool = plugin(() => ({ message: 'drop everything' }));
-    const promptUser = vi.fn(async () => 'Deny');
+    const promptUser = vi.fn(async () => 'deny');
     const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [tool], autonomy: 'guided', promptUser });
     await call(agent, 'Merge', {});
     expect(promptUser).not.toHaveBeenCalled();
@@ -183,7 +183,7 @@ describe('the agent asks in the instance\'s language', () => {
   ])('configured %s', async (language, question) => {
     const bash = stub('bash');
     const asked: string[] = [];
-    const promptUser = vi.fn(async (q: unknown) => { asked.push(flattenPrompt(q as PromptText)); return 'Deny'; });
+    const promptUser = vi.fn(async (q: unknown) => { asked.push(flattenPrompt(q as PromptText)); return 'deny'; });
     const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [bash], autonomy: 'autonomous', promptUser, language } as ConstructorParameters<typeof Agent>[0]);
     await call(agent, 'bash', { command: 'rm -rf /tmp/x' });
     expect(asked).toEqual([question]);
@@ -198,7 +198,7 @@ describe('a German instance is asked with [GESPERRT; what decides still reads th
     try {
       const bash = stub('bash');
       const asked: string[] = [];
-      const promptUser = vi.fn(async (q: unknown) => { asked.push(flattenPrompt(q as PromptText)); return 'Deny'; });
+      const promptUser = vi.fn(async (q: unknown) => { asked.push(flattenPrompt(q as PromptText)); return 'deny'; });
       const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [bash], autonomy: 'autonomous', promptUser, language: 'de-CH' } as ConstructorParameters<typeof Agent>[0]);
       await call(agent, 'bash', { command: 'rm -rf /tmp/x' });
       expect(asked).toHaveLength(1);
@@ -226,7 +226,7 @@ describe('a German instance is asked with [GESPERRT; what decides still reads th
       destructive: { mode: 'data', check: () => 'drop everything' },
     } as unknown as ToolEntry;
     const asked: string[] = [];
-    const promptUser = vi.fn(async (q: unknown) => { asked.push(flattenPrompt(q as PromptText)); return 'Deny'; });
+    const promptUser = vi.fn(async (q: unknown) => { asked.push(flattenPrompt(q as PromptText)); return 'deny'; });
     const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [tool], autonomy: 'autonomous', promptUser, language: 'de-CH' } as ConstructorParameters<typeof Agent>[0]);
     const result = await call(agent, 'Merge', {});
     expect(asked).toHaveLength(1);

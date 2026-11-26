@@ -202,7 +202,7 @@ describe('the language comes from the session', () => {
       principal: OWNER_PRINCIPAL,
       sessionCounters: { httpRequests: 0 },
       ...(language === undefined ? {} : { dialogLanguage: language }),
-      promptUser: async (q: unknown): Promise<string> => { asked.push(flattenPrompt(q as string)); return 'Allow'; },
+      promptUser: async (q: unknown): Promise<string> => { asked.push(flattenPrompt(q as string)); return 'allow'; },
       secretStore: { resolve: (): string | null => null, listNames: (): string[] => [] },
       toolContext: {
         auditLog: testAuditLog().log,
