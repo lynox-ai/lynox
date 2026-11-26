@@ -63,9 +63,9 @@
 	});
 
 	/** On to the first line not wholly seen above the fade: it stands whole at the top after, so no
-	 *  line is only ever seen cut or under the fade. A line taller than the field (one long value
-	 *  wrapped over many screen lines) already at the top is read on by the field's height less one
-	 *  line, or less the fade where it is taller. */
+	 *  line is only ever seen cut or under the fade. A line that already starts at or above the top
+	 *  (one long value wrapped over many screen lines) is read on by whole screen lines, counted from
+	 *  its own top, so the screen line cut by the edge or the fade stands whole at the top after. */
 	function readOn(): void {
 		const el = field;
 		if (!el) return;
@@ -76,9 +76,13 @@
 		let step = 0;
 		for (const line of el.querySelectorAll<HTMLElement>('[data-prompt-line]')) {
 			const box = line.getBoundingClientRect();
-			if (box.bottom > seenTo + 0.5) { step = box.top - top; break; }
+			if (box.bottom > seenTo + 0.5) {
+				step = box.top - top;
+				if (step < 0.5) step += Math.max(1, Math.floor((seenTo - box.top + 0.5) / lineHeight)) * lineHeight;
+				break;
+			}
 		}
-		if (step < lineHeight) step = Math.max(lineHeight, el.clientHeight - Math.max(lineHeight, fadeHeight));
+		if (step < 0.5) step = Math.max(lineHeight, el.clientHeight - Math.max(lineHeight, fadeHeight));
 		el.scrollBy({ top: step, behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
 	}
 </script>
