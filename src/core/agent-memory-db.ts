@@ -1570,6 +1570,13 @@ export class AgentMemoryDb {
     }
   }
 
+  /** One metric row by name and scope (the default window), or `undefined`. */
+  getMetric(metricName: string, scopeType: string, scopeId: string, window = 'all_time'): MetricRow | undefined {
+    return this.db.prepare(`
+      SELECT * FROM metrics WHERE metric_name = ? AND window = ? AND scope_type = ? AND scope_id = ?
+    `).get(metricName, window, scopeType, scopeId) as MetricRow | undefined;
+  }
+
   getMetrics(metricName?: string | undefined, window?: string | undefined): MetricRow[] {
     const clauses: string[] = [];
     const params: unknown[] = [];

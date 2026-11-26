@@ -46,6 +46,7 @@ vi.mock('../../core/metered-request.js', async (importActual) => {
 
 import {
   runWorkflowTool,
+  workflowUnderRunCeiling,
   storePipeline,
   getPipeline,
   runSavedWorkflow,
@@ -116,6 +117,8 @@ function makePipelineAgent(opts?: {
     // child-agents as its consumers, and a stub without it cannot see which of the two lists
     // a route reads.
     getAvailableTools: () => opts?.granted ?? ctx.tools,
+    // Required on `IAgent`; a run_workflow on an agent without it is refused (fail closed).
+    hasRunCostCeiling: () => false,
   } as unknown as IAgent;
 }
 
@@ -198,6 +201,47 @@ describe('run_workflow — inline steps', () => {
     const handed = ctx['parentPrompt'] as Record<string, unknown> | undefined;
     expect(handed, 'positive control: the caller\'s prompt callbacks are passed on').toBeDefined();
     expect(handed).not.toHaveProperty('approvalFiling');
+  });
+
+  it('does not start a workflow in a run admitted with a spending bound of its own', async () => {
+    // Kills: dropping the check (the steps' spend would pass the run's bound unseen).
+    // The same handler serves the first run, the retry and the continuation, so one
+    // refusal at its entry covers all three; a workflow_id call is refused the same way.
+    const bounded = { ...makePipelineAgent(), hasRunCostCeiling: () => true } as unknown as IAgent;
+    for (const input of [
+      { name: 'test', steps: [makeStep('s1', 'do thing')] },
+      { workflow_id: 'wf-1' },
+    ]) {
+      expect(await runWorkflowTool.handler(input as never, bounded)).toBe(workflowUnderRunCeiling(50));
+    }
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    // An agent that cannot say whether it is bounded is treated as bounded.
+    // Kills: an optional-call check (`?.() === true`) that waves an agent without the method through.
+    const silent = { ...makePipelineAgent(), hasRunCostCeiling: undefined } as unknown as IAgent;
+    expect(await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'do thing')] }, silent)).toBe(workflowUnderRunCeiling(50));
+    // Without a bound of its own the run starts as before (positive control).
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const unbounded = { ...makePipelineAgent(), hasRunCostCeiling: () => false } as unknown as IAgent;
+    await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'do thing')] }, unbounded);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the amount a saved workflow is admitted on, read from the session ceiling', async () => {
+    // Kills: a fixed amount in the sentence instead of getSessionCostCeiling() (the $12.50 case
+    // would still read $50), and a formatter that drops the cents or pads whole dollars.
+    const { configurePersistentBudget, resetPersistentBudget } = await import('../../core/session-budget.js');
+    const bounded = { ...makePipelineAgent(), hasRunCostCeiling: () => true } as unknown as IAgent;
+    const input = { name: 'test', steps: [makeStep('s1', 'do thing')] };
+    try {
+      expect(await runWorkflowTool.handler(input, bounded)).toContain('once at least $50 of AI budget is left;');
+      configurePersistentBudget({ costProvider: null, sessionCapUSD: 12.5 });
+      expect(await runWorkflowTool.handler(input, bounded)).toBe(
+        "Not run: in this conversation lynox may spend only what is left of the AI budget, and a workflow's steps cannot be kept within that. Tell the user the workflow was not run for this reason. If it is a saved workflow, they can start it from the Workflows page once at least $12.50 of AI budget is left; otherwise they can run it here in the next billing period.",
+      );
+    } finally {
+      resetPersistentBudget();
+    }
+    expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
   it('returns error when config not initialized', async () => {
@@ -2331,7 +2375,7 @@ function makeAutonomyAgent(autonomy: AutonomyLevel | undefined): IAgent {
   // assert is the COMPLETENESS of the run context, and this stub was missing the accessor the
   // pool is read from — which is why they all threw rather than failed when it started being
   // read. Same list, because these tests are about autonomy and not about the grant.
-  return { toolContext: ctx, autonomy, principal: OWNER_PRINCIPAL, getAvailableTools: () => ctx.tools } as unknown as IAgent;
+  return { toolContext: ctx, autonomy, principal: OWNER_PRINCIPAL, getAvailableTools: () => ctx.tools, hasRunCostCeiling: () => false } as unknown as IAgent;
 }
 
 describe('A1: buildRunCtx — complete run-context shaping', () => {

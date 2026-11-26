@@ -709,6 +709,10 @@ function resolveRunWallClockMs(): number {
 }
 /** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
 const SPEAK_MAX_TEXT_CHARS = 10_000;
+/** The 402 a voice request (speech or transcription) gets when it is refused only because what is
+ *  free of the balance cannot cover it, while runs are admitted only within the balance. */
+const VOICE_HOLD_REFUSAL =
+  'Not enough AI budget is free for voice right now. If another task is running, try again once it has finished; otherwise buy a credit pack or wait for your next billing cycle.';
 /**
  * Mistral's list price for Voxtral TTS 3 (`voxtral-mini-tts-3-0`): $13 per million characters,
  * docs.mistral.ai/inference/pricing, read 2026-11-08. No usage headers exposed — billed client-side.
@@ -11921,7 +11925,7 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
-      const { hasSpeakProvider, speakStream, isVoiceLanguageTag, VOXTRAL_TTS_MODEL } = await import('../core/speak.js');
+      const { hasSpeakProvider, speakStream, isVoiceLanguageTag, prepareForSpeech, VOXTRAL_TTS_MODEL } = await import('../core/speak.js');
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -11993,9 +11997,16 @@ export class LynoxHTTPApi {
       // gate checks the instance's daily and monthly spending caps first, on
       // every instance. The matching debit fires after synthesis below, keyed on
       // this run id.
-      const gate = await fireBeforeRunGate(engine, 'fast');
+      // Admitted on this request's own cost, in cents, rounded up: the text as text-prep turns
+      // it into what is billed per character. Prep is deterministic and runs again inside the
+      // call with the same language, and it can lengthen a text several times over (a table of
+      // arrows becomes words), so the raw length is not a bound.
+      const preparedChars = prepareForSpeech(text, lang ?? 'auto').length;
+      const gate = await fireBeforeRunGate(engine, 'fast', {
+        maxCostCents: Math.ceil(preparedChars * SPEAK_USD_PER_CHAR * 100),
+      });
       if (gate.blockedReason) {
-        errorResponse(res, 402, gate.blockedReason);
+        errorResponse(res, 402, gate.refusedWithinBalance ? VOICE_HOLD_REFUSAL : gate.blockedReason);
         return;
       }
 
@@ -12110,9 +12121,9 @@ export class LynoxHTTPApi {
       const sttSpends = getActiveTranscribeProvider()?.name !== 'whisper-cpp';
       const sttGate = sttSpends
         ? await fireBeforeRunGate(engine, 'fast')
-        : { runId: randomUUID(), blockedReason: null, capReached: null };
+        : { runId: randomUUID(), blockedReason: null, capReached: null, refusedWithinBalance: false };
       if (sttGate.blockedReason) {
-        errorResponse(res, 402, sttGate.blockedReason);
+        errorResponse(res, 402, sttGate.refusedWithinBalance ? VOICE_HOLD_REFUSAL : sttGate.blockedReason);
         return;
       }
 
