@@ -186,7 +186,8 @@ describe('the undo offer and approval sentences', () => {
 	it('keep each number with its word: a no-break space between them, in both languages', () => {
 		const keys = ['bulk.undo.approve_explain', 'bulk.undo.approve_explain_one', 'bulk.undo.approve_written', 'bulk.undo.approve_written_one',
 			'bulk.undo.approve_open_more', 'bulk.undo.approve_open_only', 'bulk.undo.explain_open', 'bulk.undo.explain_open_only',
-			'bulk.undo.creates', 'bulk.undo.creates_one'];
+			'bulk.undo.creates', 'bulk.undo.creates_one', 'bulk.undo.only_deletes', 'bulk.undo.deletes_only',
+			'bulk.undo.none_back_deletes'];
 		for (const lang of ['de', 'en'] as const) {
 			setLocale(lang);
 			for (const k of keys) {

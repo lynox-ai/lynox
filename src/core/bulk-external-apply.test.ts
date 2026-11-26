@@ -421,6 +421,30 @@ describe('applying an external run', () => {
     }
   });
 
+  it('marks in the undo\'s preview the target that takes back a write never confirmed, not the written one, and keeps the mark once it is taken out', async () => {
+    const s = shop();
+    s.dropAfter = new Set(['PATCH /products/1']);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ? AND phase = 'writing'`).run(runId);
+      // The source's own preview marks nothing: only an undo reads first.
+      expect(ledger.getPreview(runId).filter((x) => x.undoOpen === true)).toHaveLength(0);
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      const seqOf = (sourceSeq: number): number => (engineDb.getDb().prepare('SELECT seq FROM bulk_targets WHERE run_id = ? AND source_seq = ?').get(undo.status.id, sourceSeq) as { seq: number }).seq;
+      const marks = (): Record<number, boolean> => Object.fromEntries(ledger.getPreview(undo.status.id).map((x) => [x.seq, x.undoOpen === true]));
+      expect(marks()).toEqual({ [seqOf(0)]: false, [seqOf(1)]: true });
+      expect(ledger.deselectTarget(undo.status.id, seqOf(1), { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      // The count leaves it out; the row keeps its mark, for the owner who puts it back.
+      expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(0);
+      expect(marks()).toEqual({ [seqOf(0)]: false, [seqOf(1)]: true });
+    } finally {
+      restore();
+    }
+  });
+
   it('does not count an undo target the owner took out as one that is checked first', async () => {
     const s = shop();
     s.dropAfter = new Set(['PATCH /products/1']);

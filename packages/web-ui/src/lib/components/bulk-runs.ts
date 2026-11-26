@@ -886,6 +886,10 @@ export interface BulkTarget {
 	hiddenAdds?: { field: string; codePoints: number[]; html?: true | undefined }[] | undefined;
 	/** HTML fields not checked for hidden characters: too large or too complex to read. */
 	hiddenUnchecked?: string[] | undefined;
+	/** An undo's target that takes back a write never confirmed: of it, it is open whether the
+	 *  change reached the provider, and the undo checks it first. Set only where it holds; an older
+	 *  engine sends none. */
+	undoOpen?: true | undefined;
 }
 
 /** One element or comment a new value adds or removes, as the engine's parser read it. */
@@ -1214,9 +1218,24 @@ export function bulkUndoExplainText(run: Pick<BulkRunDetailData, 'undoableParts'
 
 /** The undo approval's count sentence. `n` is every target the undo gives a value back; of those,
  *  `undoOpen` take back a write that was never confirmed, so they are not counted as getting a
- *  value back but named as checked first. */
-export function bulkUndoApproveText(run: Pick<BulkRunDetailData, 'changes' | 'undoOpen'>, i18n: BulkI18n): string {
+ *  value back but named as checked first. The counts leave out the targets the owner took out.
+ *  Where none gets a value back, the sentence says why: the owner took out every target that got
+ *  one (`tookOut`, one of the listed targets is taken out); no listed target gets its previous value back, say because the shop kept markup of
+ *  its own on each (`listed`, the table holds a target, none taken out); or a source that only
+ *  created entries. With no entry to delete either, the approval is locked. */
+export function bulkUndoApproveText(
+	run: Pick<BulkRunDetailData, 'changes' | 'undoOpen'>,
+	i18n: BulkI18n,
+	opts: { tookOut?: boolean; listed?: boolean } = {},
+): string {
 	const n = run.changes.update + run.changes.create;
+	if (n === 0) {
+		const deletes = run.changes.delete;
+		const { tookOut = false, listed = false } = opts;
+		if (deletes === 0) return i18n.t(tookOut ? 'bulk.undo.all_taken_out' : 'bulk.undo.nothing_back');
+		const key = tookOut ? 'bulk.undo.only_deletes' : (listed ? 'bulk.undo.none_back_deletes' : 'bulk.undo.deletes_only');
+		return i18n.tf(bulkOne(key, deletes), { n: String(deletes) });
+	}
 	const open = Math.min(run.undoOpen ?? 0, n);
 	if (open === 0) return i18n.tf(bulkOne('bulk.undo.approve_explain', n), { n: String(n) });
 	const openOne = open === 1 ? '_one' : '';
