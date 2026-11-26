@@ -29,19 +29,38 @@ describe('signalDebuggerOff', () => {
     expect(signalDebuggerOff([`${SIGNAL_DEBUGGER_OFF}x`], `${SIGNAL_DEBUGGER_OFF}x`)).toBe(false);
   });
 
-  it('reads the flag the way node applies it: NODE_OPTIONS first, the argv after, the last word wins', () => {
-    expect(signalDebuggerOff(['--no-disable-sigusr1'], SIGNAL_DEBUGGER_OFF)).toBe(false);
-    expect(signalDebuggerOff([], `${SIGNAL_DEBUGGER_OFF} --no-disable-sigusr1`)).toBe(false);
-    expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF], '--no-disable-sigusr1')).toBe(true);
-    expect(signalDebuggerOff([], `"${SIGNAL_DEBUGGER_OFF}"`)).toBe(true);
+  it('refuses every other spelling of the flag, in the argv or in NODE_OPTIONS, even beside the flag', () => {
+    // Each of these node accepts (measured on node 22: every one starts), and none is the flag as written.
+    for (const other of ['--no-disable-sigusr1', '--no_disable_sigusr1', '--disable-sigusr1=false', '--no-disable-sigusr1=1', '--no-disable-"sigusr1"']) {
+      expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF, other], undefined), other).toBe(false);
+      expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF], other), other).toBe(false);
+      expect(signalDebuggerOff([], `${SIGNAL_DEBUGGER_OFF} ${other}`), other).toBe(false);
+    }
   });
 
-  it('refuses an option that opens a debugger without a signal, even with the flag', () => {
-    for (const open of ['--inspect', '--inspect=0.0.0.0:9229', '--inspect-brk', '--inspect-wait=9229']) {
-      expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF, open], undefined), open).toBe(false);
+  it('refuses an option that opens a debugger without a signal, in any spelling, even with the flag', () => {
+    for (const open of ['--inspect', '--inspect=0.0.0.0:9229', '--inspect-brk', '--inspect-wait=9229', '--inspect_brk', '--inspect-brk-node', '--inspect"-brk"', '"--insp\\ect"']) {
       expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF], open), open).toBe(false);
     }
-    expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF, '--inspect-port=0'], undefined)).toBe(true);
+    for (const open of ['--inspect', '--inspect_brk', '--inspect-brk-node']) {
+      expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF, open], undefined), open).toBe(false);
+    }
+    expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF, '--inspect-port=0'], '--inspect-publish-uid=http')).toBe(true);
+  });
+
+  it('takes the flag from NODE_OPTIONS only when it holds nothing to unquote or split otherwise', () => {
+    expect(signalDebuggerOff([], `--title "a ${SIGNAL_DEBUGGER_OFF} b"`)).toBe(false);
+    expect(signalDebuggerOff([], `"${SIGNAL_DEBUGGER_OFF}"`)).toBe(false);
+    expect(signalDebuggerOff([], `--title=x\t${SIGNAL_DEBUGGER_OFF}`)).toBe(false);
+    expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF], `--title "a ${SIGNAL_DEBUGGER_OFF} b"`)).toBe(true);
+  });
+
+  it("starts the image's way, the argv flag, whatever quoted NODE_OPTIONS an operator sets beside it; without it the refusal names the way out", () => {
+    const operator = startedWith([SIGNAL_DEBUGGER_OFF], '--title "a b"');
+    expect(operator.nodeOptions).toBe('--title "a b"');
+    expect(signalDebuggerOff(operator.execArgv, operator.nodeOptions)).toBe(true);
+    const bypassed = startedWith([], `--title "a b" ${SIGNAL_DEBUGGER_OFF}`);
+    expect(() => assertSignalDebuggerOff('the engine', bypassed.execArgv, bypassed.nodeOptions)).toThrow(/start it with --disable-sigusr1 in its argv/);
   });
 
   it('reads a real start: the image NODE_OPTIONS replaced by an operator and no argv flag fails, the argv flag holds', () => {
@@ -98,6 +117,13 @@ describe.skipIf(process.platform === 'win32')('the flag in a real node process',
     const byEnv = await signalled([], SIGNAL_DEBUGGER_OFF);
     expect(byEnv.ready).toBe(true);
     expect(byEnv.err).not.toMatch(/Debugger listening/);
+  });
+
+  it('opens the debugger for the flag in NODE_OPTIONS undone in the argv, which the check refuses', async () => {
+    const undone = await signalled(['--no-disable-sigusr1'], SIGNAL_DEBUGGER_OFF);
+    expect(undone.ready).toBe(true);
+    expect(undone.err).toMatch(/Debugger listening/);
+    expect(signalDebuggerOff(['--no-disable-sigusr1'], SIGNAL_DEBUGGER_OFF)).toBe(false);
   });
 });
 
