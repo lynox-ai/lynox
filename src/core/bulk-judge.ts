@@ -755,9 +755,9 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       ledger.releaseJudgeClaim(runId, seq, token);
       return halt(BULK_HALT_REASONS.spendLimit);
     }
-    // The gate holds the call to its own worst case, not a default: within the balance it sets
-    // aside what this call can cost, so it neither admits a call the balance cannot carry nor
-    // refuses one it can.
+    // The gate holds the call to its own worst case, not a default: within the balance it is
+    // admitted only if what this call can cost is free, so the gate neither admits a call the
+    // balance cannot carry nor refuses one it can.
     const gate = await deps.gate(model.tier, Number.isFinite(worst) && worst > 0 ? Math.ceil(worst * 100) : undefined);
     if (gate.blockedReason !== null) {
       // Both causes of a blocked gate — no credit, or a control plane out of reach — are one
