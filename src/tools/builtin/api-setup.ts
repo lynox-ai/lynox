@@ -2133,6 +2133,63 @@ export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile,
 }
 
 /**
+ * A delete in an autonomous run (a trigger, a worker task), refused like the other questions of
+ * this tool: its prompt channel only parks the question for later. A delete also clears the way for
+ * a new profile under the same id, whose grant nothing compares with the one deleted
+ * (`createsOnBoundSecrets` asks about that create).
+ */
+function autonomousDeleteRefusal(id: unknown): string {
+  const shown = typeof id === 'string' && id !== '' ? ` "${shapedForLog(id, ID_PATTERN, 80)}"` : '';
+  return `Blocked: connection${shown} not deleted. Deleting a connection needs the user's acceptance, and a scheduled or background run cannot ask them. Nothing was deleted. Tell the user in one sentence that the connection was not deleted because this needs their acceptance, and that they can delete it by asking lynox for it in a chat. Do not try to delete it in another way.`;
+}
+
+/**
+ * Everything a new profile may do, in the fields and the order of {@link securityChanges}, each
+ * as it is (no arrow from nothing). For a create that has nothing stored to be compared with but
+ * whose secrets may already go to its addresses: there no other question names its grant.
+ */
+export function grantListed(next: ApiProfile, language: DialogLanguage = 'en'): SecurityChange[] {
+  const w = SECURITY_CHANGE_WORDS[language];
+  const out: SecurityChange[] = [];
+  const field = (label: string, b: string | undefined, show: (v: string, w: SecurityChangeWords) => string = shownValue): void => {
+    if (b !== undefined && b !== '') out.push({ text: w.held(label, show(b, w)), widens: true });
+  };
+  field(w.address, next.base_url, shownUrl);
+  field(w.tokenAddress, next.auth?.oauth?.token_url, shownUrl);
+  field(w.authType, next.auth?.type);
+  field(w.headerName, next.auth?.header_name);
+  field(w.queryParam, next.auth?.query_param);
+  field(w.basicFormat, next.auth?.basic_format);
+  field(w.tokenBody, next.auth?.oauth?.body_format);
+  for (const [label, name] of secretPlacesOf(next, (next.auth?.vault_keys?.length ?? 0) > 1, w)) field(label, name);
+  field(w.grantType, next.auth?.oauth?.grant_type);
+  field(w.audience, next.auth?.oauth?.audience);
+  const scopes = [...new Set(scopeTokens(next.auth?.oauth?.scope))];
+  if (scopes.length > 0) out.push({ text: w.scopesHeld(shownScopes(scopes, w)), widens: true });
+  const pp = isPlainRecord(next.auth?.oauth?.preset_params) ? next.auth!.oauth!.preset_params as Record<string, unknown> : {};
+  for (const key of Object.keys(pp).sort()) {
+    if (pp[key] !== undefined) out.push({ text: w.providerParameterHeld(shownValue(key, w), shownValue(String(pp[key]), w)), widens: true });
+  }
+  return out;
+}
+
+/**
+ * A create that reads a secret already bound to some address: the save question has nothing stored
+ * to compare with, and the binding question names only addresses a name does not have yet, never
+ * the grant. It happens when a profile is deleted and saved again (the record of where a name may
+ * go outlives the profile) or when a second profile reads a name the first one bound. Any binding
+ * counts, not only one that covers this profile's addresses: an address spelled a little
+ * differently (a trailing `#` or `?`) would otherwise read as new and keep the list away. Only the
+ * owner's save, as with the binding question: a mandate's sends wait for the owner's release.
+ */
+function createsOnBoundSecrets(agent: IAgent, prior: ApiProfile | undefined, profile: ApiProfile): boolean {
+  if (prior !== undefined || !isOwnerPrincipal(agent.principal)) return false;
+  const bindings = agent.toolContext?.vaultNameBindings ?? null;
+  if (bindings === null) return false;
+  return secretBearingNames(profile).some((name) => bindings.boundOf(name).length > 0);
+}
+
+/**
  * A mandate's turn changes only a profile the mandate wrote (PRD customer-granted-operator-
  * access §3.13, H2). Every rule that reads a profile — the preset write refusal, the vetted
  * host, the names the engine resolves — holds only while the profile is the one its author
@@ -2172,13 +2229,16 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   },
   readAddress: (input) => bootstrapUrl(input),
   // `delete` removes a profile and the tokens its sign-in stored. Under `autonomous` the guard
-  // raises `[BLOCKED]`, which no contract lifts: refused without a prompt
-  // channel, a generic question with one. Interactively the handler asks its own question,
-  // which names what is lost, so the guard adds none (`null`).
+  // raises `[BLOCKED]`, which no contract lifts; `refusesUnasked` below refuses such a call before
+  // that question is reached, and the handler refuses it too. Interactively the handler asks its
+  // own question, which names what is lost, so the guard adds none (`null`).
   destructive: {
     mode: 'data',
     check: (input, ctx) => (input.action === 'delete' && ctx?.autonomy === 'autonomous' ? 'delete' : null),
   },
+  // A delete in an autonomous run is refused by the handler (`autonomousDeleteRefusal`), so it is
+  // refused here first, before the guard's question above: a yes to that could not change it.
+  refusesUnasked: (input, _ctx, run) => (input.action === 'delete' && run.autonomy === 'autonomous' ? autonomousDeleteRefusal(input.id ?? input.profile?.id) : null),
   // `create` shares `update`'s save path (an existing id is overwritten, `isNew` false),
   // so no action is a pure create. `fetch_token` may run a refresh grant, which rotates
   // the token at the provider — a vault before-image would restore a dead token. The
@@ -2689,7 +2749,11 @@ ${draftJson}
       // swap to a name already bound to the same address sends another credential there, so
       // neither the host check nor the binding question covers them.
       // Worded in the language the person is asked in; `widens` does not depend on the wording.
-      const changes = securityChanges(prior, profile, agent.dialogLanguage ?? 'en');
+      // A create on secrets that may already go to its addresses lists everything it may do instead,
+      // and is asked like a widening (`createsOnBoundSecrets`): every line of that list widens, and
+      // it always has one, since a profile has a base_url.
+      const listsAll = createsOnBoundSecrets(agent, prior, profile);
+      const changes = listsAll ? grantListed(profile, agent.dialogLanguage ?? 'en') : securityChanges(prior, profile, agent.dialogLanguage ?? 'en');
       // Only a change that widens or moves something asks on its own; a save that only takes a
       // scope or a secret away narrows the profile. Every change is still listed when it asks.
       const widens = changes.some((c) => c.widens);
@@ -2738,8 +2802,7 @@ ${draftJson}
         // question as a notification for later: nobody is there to weigh a change to where a
         // credential goes while the run that asked for it waits. So it is treated like a run with
         // no prompt at all, the same as the binding question (`askBindingGrowth`), `release_secret`
-        // and `adopt_connection`. The delete questions further down are not of this kind: they
-        // take something away, and under `autonomous` the permission guard acts first (`destructive`).
+        // and `adopt_connection`. A delete in such a run is refused as well (`autonomousDeleteRefusal`).
         if (agent.autonomy === 'autonomous' || !agent.promptUser) {
           // Two halves, two answers, because they fail in opposite directions.
           // The egress half has to refuse the SAVE: a stored profile with a
@@ -2754,19 +2817,24 @@ ${draftJson}
           // secret may go grows only when the owner answers a question naming it
           // and its new destinations at an interactive save (`askBindingGrowth`
           // below); with nobody to answer, such a save is refused there. What
-          // still saves without anyone is a profile that names no secret, one
-          // whose secrets are already bound to its destinations, or one a
-          // mandate's session saves (its sends wait for the owner's release).
+          // still saves without anyone is a profile that names no secret, an
+          // update whose secrets are already bound to its destinations and that
+          // widens nothing, or one a mandate's session saves (its sends wait for
+          // the owner's release). A create on a secret bound anywhere is refused
+          // below (`listsAll`).
           if (nonVetted.length > 0) {
             return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
           }
           // A change to where a credential goes or what it may do, with nobody to accept it: refused.
+          if (listsAll) {
+            return `Blocked: connection "${profile.id}" not saved. It is new, but its secrets may already be sent to its addresses, so saving it needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the connection was not saved because it needs their acceptance, name in a few words what it would have been allowed to do (from the list below), and tell them they can save it by asking lynox for it in a chat, since a scheduled or background run cannot ask them. Do not try to save it in another way.\n\nWhat it would have been allowed to do:\n${grantListed(profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`).join('\n')}`;
+          }
           if (widens) {
             return `Blocked: profile "${profile.id}" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, name in a few words what the save would have changed (from the list below), and tell them they can save it by asking lynox for it in a chat, since a scheduled or background run cannot ask them. Do not try to save it in another way.\n\nThis save changes:\n${securityChanges(prior, profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`).join('\n')}`;
           }
         } else {
           const answer = await agent.promptUser(
-            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].save(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), profile.name, changes.map((c) => c.text), disclosureIn(agent.dialogLanguage ?? 'en')),
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].save(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), profile.name, changes.map((c) => c.text), disclosureIn(agent.dialogLanguage ?? 'en'), listsAll),
             consentOptions('guard'),
             consentMeta('guard'),
           );
@@ -2901,6 +2969,13 @@ ${draftJson}
         // No await from here to the save.
         if (JSON.stringify(apiStore.storedProfile(savedId) ?? null) !== priorState) {
           return `Error: API profile "${savedId}" changed while the question was open (for example, another chat saved it or its token was renewed), so the answer no longer covers this save. Nothing was saved and no stored token was removed. Read the profile again; if the change is still wanted, save it again; if it still needs their acceptance, the user is asked again.`;
+        }
+        // A secret of this new profile was bound while its questions were open (another save's
+        // answer): none of them listed what this profile may do with it. Two creates on one fresh
+        // secret whose questions overlap meet this too, and the second is saved again with the
+        // list: fail-closed on purpose, at the price of one more question.
+        if (!listsAll && createsOnBoundSecrets(agent, prior, profile)) {
+          return `Error: connection "${savedId}" was not saved: while the user was being asked, another save allowed one of its secrets to be sent to its addresses, so their answer did not cover everything this new connection may do. Nothing was saved. Save it again; the user is then asked with the whole list.`;
         }
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);
@@ -3191,6 +3266,7 @@ ${draftJson}
       // Before the profile is read: the refusal is the same whether the id exists.
       const engineLess = apiStore.engineLessRefusal('remove', 'model');
       if (engineLess !== null) return `Error: ${engineLess}`;
+      if (agent.autonomy === 'autonomous') return autonomousDeleteRefusal(id);
       // Read before the delete: what the vault holds for this profile is decided
       // by the profile, and afterwards there is no profile to ask. The stored
       // profile, registered or held back by the boot: a held-back profile's
@@ -3212,10 +3288,9 @@ ${draftJson}
       // the tokens its sign-in stored, and the person notices only when the connection is gone;
       // in an owner's own session a text the model read (a mail, a page) can ask for it. The
       // question is the engine's, not the model's: it names the profile, its host and what the
-      // vault loses. With no one to ask, nothing is deleted. Under `autonomous` the permission
-      // guard raises its `[BLOCKED]` signal first (`destructive` on the entry): with no prompt
-      // channel that refuses the call, with one (a worker run) it is a generic question, and
-      // this one follows it.
+      // vault loses. With no one to ask, nothing is deleted, and an autonomous run is refused above
+      // whether or not it carries a prompt channel (`autonomousDeleteRefusal`, also read before
+      // the guard's own question through `refusesUnasked`).
       // An entry the boot could not read is asked about too (the owner's only, above). Not asked:
       // an id with neither a stored profile nor such an entry, where nothing is there. A profile
       // the boot held back is stored: it is asked like a registered one, by its author only,

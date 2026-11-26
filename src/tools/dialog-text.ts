@@ -506,7 +506,8 @@ export function presetParamDescribe(describe: string, language: DialogLanguage):
 /** `api_setup`'s own questions. Every `${…}` is a value, as in any `pv`. */
 export interface ApiSetupDialog {
   /** `changes`: what the save changes, one line each (`securityChanges`, in this language); `disclosure` may be empty. */
-  readonly save: (word: PromptText, name: string, changes: readonly PromptText[], disclosure: string) => PromptText;
+  /** `listsAll`: a new profile whose secrets may already go to its addresses; `changes` is then everything it may do. */
+  readonly save: (word: PromptText, name: string, changes: readonly PromptText[], disclosure: string, listsAll?: boolean) => PromptText;
   readonly redirect: (hosts: string[]) => string;
   /** The sentence before the acceptance of each host outside the listed sub-processors; `disclosures` (the acceptances, English, binding text) as given. */
   readonly outsideSubProcessors: (oauth: boolean, hosts: readonly string[], disclosures: string) => string;
@@ -559,9 +560,11 @@ function roleText(language: DialogLanguage, slots: readonly SendSlot[]): string 
 
 export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> = {
   en: {
-    save: (word, name, changes, disclosure) => {
+    save: (word, name, changes, disclosure, listsAll = false) => {
       const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
-      const changeBlock = changeList === undefined ? pv`` : pv`This save changes:${changeList}\n\n`;
+      const changeBlock = changeList === undefined ? pv``
+        : listsAll ? pv`This connection is new, but its secrets may already be sent to these addresses. That is why everything it may do with them is listed:${changeList}\n\n`
+        : pv`This save changes:${changeList}\n\n`;
       const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
       return pv`⚠ ${word}: saving “${shownName(name)}” needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this connection?`;
     },
@@ -589,9 +592,11 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
     },
   },
   de: {
-    save: (word, name, changes, disclosure) => {
+    save: (word, name, changes, disclosure, listsAll = false) => {
       const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
-      const changeBlock = changeList === undefined ? pv`` : pv`Das Speichern ändert:${changeList}\n\n`;
+      const changeBlock = changeList === undefined ? pv``
+        : listsAll ? pv`Die Verbindung ist neu, aber ihre Secrets dürfen schon an diese Adressen gehen. Darum steht hier alles, was sie damit tun darf:${changeList}\n\n`
+        : pv`Das Speichern ändert:${changeList}\n\n`;
       const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
       return pv`⚠ ${word}: Zum Speichern von „${shownName(name)}“ braucht es deine Zustimmung.\n\n${changeBlock}${disclosureBlock}Diese Verbindung annehmen und speichern?`;
     },
@@ -659,6 +664,10 @@ export interface SecurityChangeWords {
   readonly scopesAdded: (scopes: string) => PromptText;
   readonly scopesRemoved: (scopes: string, noneLeft: boolean) => PromptText;
   readonly providerParameter: (key: string, was: string, now: string) => PromptText;
+  /** A field of a new profile listed as it is, with nothing to compare it with (no arrow). */
+  readonly held: (label: string, now: string) => PromptText;
+  readonly scopesHeld: (scopes: string) => PromptText;
+  readonly providerParameterHeld: (key: string, now: string) => PromptText;
 }
 
 export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChangeWords>> = {
@@ -697,6 +706,9 @@ export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChan
       ? pv`scopes removed: ${scopes} (none left: the provider decides which it grants)`
       : pv`scopes removed: ${scopes}`,
     providerParameter: (key, was, now) => pv`provider parameter ${key}: ${was} → ${now}`,
+    held: (label, now) => pv`${label}: ${now}`,
+    scopesHeld: (scopes) => pv`scopes: ${scopes}`,
+    providerParameterHeld: (key, now) => pv`provider parameter ${key}: ${now}`,
   },
   de: {
     address: 'Adresse (base_url)',
@@ -733,6 +745,9 @@ export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChan
       ? pv`Scopes entfernt: ${scopes} (keiner mehr: der Anbieter entscheidet, welche er gewährt)`
       : pv`Scopes entfernt: ${scopes}`,
     providerParameter: (key, was, now) => pv`Anbieter-Parameter ${key}: ${was} → ${now}`,
+    held: (label, now) => pv`${label}: ${now}`,
+    scopesHeld: (scopes) => pv`Scopes: ${scopes}`,
+    providerParameterHeld: (key, now) => pv`Anbieter-Parameter ${key}: ${now}`,
   },
 };
 
