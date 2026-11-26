@@ -1315,7 +1315,7 @@
 					{/each}
 					{#if run.changes.delete > 0}
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
+							<p data-testid="bulk-undo-creates">{run.changes.delete === 1 ? t('bulk.undo.creates_one') : tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
 							<ul class="list-disc pl-5 mt-1">
 								{#each creates as c (c.seq)}<li>{@render targetName(c)}</li>{/each}
 							</ul>
