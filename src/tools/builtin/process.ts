@@ -12,6 +12,15 @@ import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import { INLINE_NAMED_ONLY_TOOLS } from '../../orchestrator/runtime-adapter.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 import { runStepIds } from '../../orchestrator/step-id.js';
+import { isShownParamName } from '../../orchestrator/workflow-params.js';
+
+/** save_workflow's answer when the session analysis names a parameter outside the allowed form. */
+export const SESSION_PARAM_NAME_REFUSAL =
+  'Error: The analysis of this session named a parameter in a form lynox does not accept ' +
+  '(1 to 40 characters: ASCII letters, digits, _ or -). No workflow was saved. ' +
+  'Call save_workflow once more to analyse the session again; if it is refused again, plan the steps ' +
+  'yourself with plan_task and save that plan with save_workflow and its workflow_id. ' +
+  'A workflow saved that way takes no parameters; tell the user so.';
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
@@ -307,6 +316,14 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
   // Stopped after the reply arrived: nothing is saved. Everything from here to the last write
   // is synchronous, so no stop can land between this check and the writes.
   if (currentCallSignal()?.aborted === true) throw processCaptureStopped();
+
+  // The parameter names come from the analysis, which read the session's tool calls, outside
+  // content included, and the result below returns them. A name outside the form a refusal may
+  // quote (`isShownParamName`) refuses the whole capture: dropping only that name would leave a
+  // step's `{{name}}` that resolves to nothing. Nothing is stored yet, and the name is not quoted.
+  if (!record.parameters.every((p) => isShownParamName(p.name))) {
+    return SESSION_PARAM_NAME_REFUSAL;
+  }
 
   // --- Phase 2: build the reusable pipeline from the extracted steps ---
   const pipelineSteps = processToSteps(record);
