@@ -690,5 +690,5 @@ export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChan
  */
 export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentKey, string>>>> = {
   en: { allow: 'Allow', deny: 'Deny', deep: 'Allow deep', balanced: 'Run on balanced', cancel: 'Cancel' },
-  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Deep erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen' },
+  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Stufe Tief erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen' },
 };
