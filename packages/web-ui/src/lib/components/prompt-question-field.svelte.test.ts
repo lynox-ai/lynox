@@ -156,16 +156,16 @@ describe('a confirmation\'s question field at little height', () => {
 		expect(readMore()).toBeNull();
 	});
 
-	it('scrolls on by the field\'s height less one line when the hint is clicked', async () => {
+	it('scrolls on to the line cut at the edge when the hint is clicked, so it stands whole at the top', async () => {
 		await show('⚠ Command: delete files (cannot be undone) — "', fourteen);
 		let by: ScrollToOptions | undefined;
 		field().scrollBy = ((o: ScrollToOptions) => { by = o; }) as HTMLElement['scrollBy'];
 		readMore()!.click();
-		// The line cut at the edge stands whole at the top afterwards.
-		expect(by?.top).toBe(fieldHeights.client - LINE);
+		// 100 px show lines 1 to 4 whole (to 92 px); line 5 is cut and goes to the top.
+		expect(by?.top).toBe(4 * LINE);
 	});
 
-	it('scrolls on by the fade\'s height where the fade is taller than a line', async () => {
+	it('scrolls on to the first line that reaches under the fade, even by a little', async () => {
 		const realOffset = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
 		Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, get(this: HTMLElement) { return this.hasAttribute('data-prompt-fade') ? 32 : 0; } });
 		try {
@@ -173,12 +173,22 @@ describe('a confirmation\'s question field at little height', () => {
 			let by: ScrollToOptions | undefined;
 			field().scrollBy = ((o: ScrollToOptions) => { by = o; }) as HTMLElement['scrollBy'];
 			readMore()!.click();
-			// A line under the fade, never wholly seen, stands whole at the top afterwards.
-			expect(by?.top).toBe(fieldHeights.client - 32);
+			// The fade covers 68 to 100 px. Line 3 (46 to 69) reaches 1 px under it and goes to the top;
+			// a step of the field less the fade (68) would cut it off at the top instead.
+			expect(by?.top).toBe(2 * LINE);
 		} finally {
 			if (realOffset) Object.defineProperty(HTMLElement.prototype, 'offsetHeight', realOffset);
 			else delete (HTMLElement.prototype as { offsetHeight?: unknown }).offsetHeight;
 		}
+	});
+
+	it('reads one long wrapped value on by the field less one screen line, since its top is already shown', async () => {
+		wraps = [12];
+		await show([{ kind: 'frame', text: '⚠ File access: "' }], [`/srv/${'d/'.repeat(150)}secret"`]);
+		let by: ScrollToOptions | undefined;
+		field().scrollBy = ((o: ScrollToOptions) => { by = o; }) as HTMLElement['scrollBy'];
+		readMore()!.click();
+		expect(by?.top).toBe(fieldHeights.client - LINE);
 	});
 
 	it('watches each line too, so a field held at its full height still re-measures when its lines change size', async () => {
