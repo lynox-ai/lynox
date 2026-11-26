@@ -18540,6 +18540,7 @@ describe('metered audio routes: managed credit gate + debit', () => {
 
     it('a refusal within the balance gets the voice sentence; a plain refusal keeps its own text', async () => {
       // Kills: the voice sentence on every refusal, and the hook's budget text on a refusal within the balance.
+      repayRateWindow();
       const { RunAdmissionRefusedError } = await import('../core/run-admission.js');
       mockEngineHooks = [{ onBeforeRun: () => { throw new RunAdmissionRefusedError('AI budget for this period reached.'); } }];
       const held = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
@@ -18791,6 +18792,7 @@ describe('metered audio routes: managed credit gate + debit', () => {
 
     it('a transcription refused within the balance gets the voice sentence', async () => {
       // Kills: the STT route passing the hook's budget text through on a refusal within the balance.
+      repayRateWindow();
       const { RunAdmissionRefusedError } = await import('../core/run-admission.js');
       mockEngineHooks = [{ onBeforeRun: () => { throw new RunAdmissionRefusedError('AI budget for this period reached.'); } }];
       mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
