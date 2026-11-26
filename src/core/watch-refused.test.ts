@@ -35,25 +35,27 @@ describe('watchRefusedNow', () => {
     expect(watchPolicyRefusal('http://other.example/p', ctx('allow-list', true))).toEqual({
       why: "its host other.example is not in this instance's network allow-list.",
       wayOut: 'The operator can add the host to the allow-list (network_policy). The address must also be https://, since this instance only reads HTTPS pages (enforce_https).',
+      reason: { kind: 'allow_list', host: 'other.example' }, alsoHttps: true,
       shown: { kind: 'watch_allow_list', host: 'other.example' },
     });
     expect(watchPolicyRefusal('http://listed.example/p', ctx('deny-all', true))).toEqual({
       why: "this instance's network_policy is deny-all, so lynox reads no web page.",
       wayOut: 'Only the operator can change network_policy. The address must also be https://, since this instance only reads HTTPS pages (enforce_https).',
+      reason: { kind: 'deny_all' }, alsoHttps: true,
       shown: { kind: 'watch_deny_all' },
     });
     expect(watchPolicyRefusal('http://listed.example/p', ctx('allow-list', true))).toEqual({
-      why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' },
+      why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', reason: { kind: 'https' }, shown: { kind: 'watch_https' },
     });
   });
 
   it('tells a refusal of the https address that no setting names as it is, without a way out or a line in the view', () => {
     expect(watchPolicyRefusal('http://10.0.0.1/p', ctx('guarded', true))).toEqual({
-      why: 'this instance\'s network settings refuse it: private IP address "10.0.0.1".', wayOut: '', shown: null, privateAddress: true,
+      why: 'this instance\'s network settings refuse it: private IP address "10.0.0.1".', wayOut: '', reason: { kind: 'other', detail: 'private IP address "10.0.0.1"' }, shown: null, privateAddress: true,
     });
     const unknown = { ...ctx('guarded', true), networkPolicy: 'no-such-policy' } as unknown as Parameters<typeof watchPolicyRefusal>[1];
     expect(watchPolicyRefusal('http://listed.example/p', unknown)).toEqual({
-      why: 'this instance\'s network settings refuse it: network access denied (unrecognised egress policy).', wayOut: '', shown: null,
+      why: 'this instance\'s network settings refuse it: network access denied (unrecognised egress policy).', wayOut: '', reason: { kind: 'other', detail: 'network access denied (unrecognised egress policy)' }, shown: null,
     });
   });
 

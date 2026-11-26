@@ -584,6 +584,28 @@ describe('WorkerLoop', () => {
     await fire(makeTask({ id: 't-pol2b', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'http://listed.test/p', interval_minutes: 60 }) }));
     expect(mockFetchPinned).not.toHaveBeenCalled();
     expect(recorded()).toContain('The watched page was not read: this instance only reads HTTPS pages (enforce_https). Watch the https:// address instead.');
+    // On a German instance each refusal is a German sentence; the setting names stay as written.
+    Object.assign(engine as unknown as Record<string, unknown>, { config: { language: 'de' } });
+    const last = (): string => String(vi.mocked(taskManager.recordTaskRun).mock.calls.at(-1)?.[1]);
+    await fire(makeTask({ id: 't-de-https', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'http://listed.test/p', interval_minutes: 60 }) }));
+    expect(last()).toBe('Die beobachtete Seite wurde nicht gelesen: diese Instanz liest nur HTTPS-Seiten (enforce_https). Beobachte stattdessen die https://-Adresse.');
+    policy = { ...policy, networkPolicy: 'allow-list', enforceHttps: true };
+    await fire(makeTask({ id: 't-de-both', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'http://other.test/p', interval_minutes: 60 }) }));
+    expect(last()).toBe('Die beobachtete Seite wurde nicht gelesen: ihr Host other.test steht nicht in der Netzwerk-Allow-List dieser Instanz. Der Betreiber kann den Host in die Allow-List aufnehmen (network_policy). Die Adresse muss ausserdem mit https:// beginnen, weil diese Instanz nur HTTPS-Seiten liest (enforce_https).');
+    policy = { ...policy, enforceHttps: false };
+    await fire(makeTask({ id: 't-de-list', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://other.test/p', interval_minutes: 60 }) }));
+    expect(last()).toBe('Die beobachtete Seite wurde nicht gelesen: ihr Host other.test steht nicht in der Netzwerk-Allow-List dieser Instanz. Der Betreiber kann den Host in die Allow-List aufnehmen (network_policy).');
+    policy = { ...policy, networkPolicy: 'deny-all' };
+    await fire(makeTask({ id: 't-de-deny', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://listed.test/p', interval_minutes: 60 }) }));
+    expect(last()).toBe('Die beobachtete Seite wurde nicht gelesen: die network_policy dieser Instanz ist deny-all, darum liest lynox keine Webseite. Nur der Betreiber kann network_policy ändern.');
+    policy = { ...policy, networkPolicy: 'no-such-policy' };
+    await fire(makeTask({ id: 't-de-other', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://listed.test/p', interval_minutes: 60 }) }));
+    // A refusal no setting names: no English words from the host check in the German sentence.
+    expect(last()).toBe('Die beobachtete Seite wurde nicht gelesen: die Netzwerkeinstellungen dieser Instanz lassen die Seite nicht zu.');
+    Object.assign(engine as unknown as Record<string, unknown>, { config: {} });
+    await fire(makeTask({ id: 't-en-other', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://listed.test/p', interval_minutes: 60 }) }));
+    expect(last()).toBe("The watched page was not read: this instance's network settings refuse it: network access denied (unrecognised egress policy).");
+    expect(mockFetchPinned).not.toHaveBeenCalled();
     policy = { ...policy, enforceHttps: false };
     policy = { ...policy, networkPolicy: 'allow-list' };
     // Control: the list's own host is requested (the page answers 500, so the check ends there).
