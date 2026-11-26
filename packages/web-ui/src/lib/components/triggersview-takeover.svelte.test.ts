@@ -184,6 +184,17 @@ describe('a completed plan that keeps its pause (U-275)', () => {
 		expect(mark()?.textContent).toBe('Abgeschlossen · pausiert');
 		expect(hint()?.textContent).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an. Läuft er auf einem Workflow, den die Person mit dem beendeten Zugang angelegt oder zuletzt geändert hat, muss der Inhaber vorher den Workflow übernehmen.');
 	});
+	it('tells the owner the list does not name the way to the workflow\'s takeover, once the session says owner (U-275)', async () => {
+		viewer = 'none';
+		noteSettingsViewer({ viewer: 'owner' });
+		try {
+			rows = [{ ...PAUSED, status: 'completed' }];
+			await render();
+			expect(hint()?.textContent).toContain('übernimm vorher den Workflow unter „Workflows“ mit „Workflow übernehmen“.');
+		} finally {
+			resetSettingsViewer();
+		}
+	});
 	it('an open paused plan keeps the takeover mark, and neither the completed mark nor its line', async () => {
 		await render();
 		expect(target.querySelector('[data-trigger-paused]')).not.toBeNull();
