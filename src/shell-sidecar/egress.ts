@@ -22,9 +22,9 @@ import { isExactHostname } from '../egress-proxy/policy.js';
 export const DEFAULT_EGRESS_PROXY_URL = 'http://proxy:3129';
 export const DEFAULT_EGRESS_SHELL_PROXY = 'proxy:3128';
 /** Each request to the proxy's admin listener; it is on the tenant's internal network. The
- *  limit is the socket's idle time, not a total. The requests take no stop signal on purpose:
- *  `finish` revokes the credential after the command, and it has to do that for a stopped run
- *  too, on its error path as on its success path. */
+ *  limit is the socket's idle time, not a total. The requests take no stop signal on purpose,
+ *  above all `finish`'s: it revokes the credential after the command, and it has to do that for
+ *  a stopped run too, on its error path as on its success path. */
 export const ADMIN_TIMEOUT_MS = 2_000;
 /** The proxy takes at most this many names in a set (`MAX_SET_SIZE` in its policy). */
 export const MAX_SHELL_SET = 256;
