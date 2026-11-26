@@ -5,9 +5,7 @@
  * through `errorText` fails here, so none is added silently.
  *
  * The census is by FORM, not by data flow: it sees the shapes listed in `rawText` and nothing
- * else (a helper that formats the error first, `JSON.stringify(err)`, a body under another
- * name, `const msg = err.message` printed as `msg`, `errorText(err, <expression>)`). And it
- * counts per file: one raw sink removed and another added in the same file passes. The existing sites are frozen per file with their count, NOT judged safe one by one:
+ * else, and only in calls `sinkKind` names; a shape not listed there passes. And it counts per file: one raw sink removed and another added in the same file passes. The existing sites are frozen per file with their count, NOT judged safe one by one:
  * most write internal state errors (SQLite, init, the file system) on paths that carry no
  * provider answer; the ones judged by hand are named in `JUDGED` (whole files) and
  * `JUDGED_SINKS` (single sinks). Neither exempts anything: the counts still hold, and a judgement
@@ -29,6 +27,35 @@ function sinkKind(call: ts.CallExpression): 'stderr' | 'console' | null {
   return null;
 }
 
+/**
+ * The value under wrappers that keep its text: parentheses, `!`, `as`, `satisfies`, `<T>`,
+ * and `String(…)`.
+ */
+function unwrap(node: ts.Expression): ts.Expression {
+  for (;;) {
+    if (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node) || ts.isAsExpression(node)
+      || ts.isSatisfiesExpression(node) || ts.isTypeAssertionExpression(node)) node = node.expression;
+    else if (ts.isCallExpression(node) && node.expression.getText() === 'String' && node.arguments.length === 1 && node.arguments[0]) node = node.arguments[0];
+    else return node;
+  }
+}
+
+/**
+ * Does `node` hold an error or its text under an error-like name: `err`, `f.error`, `res?.reason`,
+ * `f['error']`, either side of `??` or `||`, under the wrappers `unwrap` removes?
+ */
+function errish(node: ts.Expression): boolean {
+  const n = unwrap(node);
+  if (ts.isBinaryExpression(n)) {
+    const op = n.operatorToken.kind;
+    return (op === ts.SyntaxKind.QuestionQuestionToken || op === ts.SyntaxKind.BarBarToken) && (errish(n.left) || errish(n.right));
+  }
+  if (ts.isIdentifier(n)) return ERRISH.test(n.text);
+  if (ts.isPropertyAccessExpression(n)) return ERRISH.test(n.name.text);
+  if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression)) return ERRISH.test(n.argumentExpression.text);
+  return false;
+}
+
 /** The first raw-error form in `node`, or null. `errorText(...)` subtrees are the sanctioned form. */
 function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean): string | null {
   if (ts.isCallExpression(node) && /^(errorText|reducedErrorText|processErrorText)$/.test(node.expression.getText())) {
@@ -43,13 +70,20 @@ function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean
     if (callee === 'String' && arg && ts.isIdentifier(arg) && ERRISH.test(arg.text)) return node.getText();
     if (/(^|\.)getErrorMessage$/.test(callee)) return node.getText();
   }
-  if (ts.isTemplateSpan(node) && ts.isIdentifier(node.expression) && ERRISH.test(node.expression.text)) return `\${${node.expression.text}}`;
-  // The same text kept in a property first: `${f.error}`, `${result.reason}`.
-  if (ts.isTemplateSpan(node) && ts.isPropertyAccessExpression(node.expression) && ERRISH.test(node.expression.name.text)) return `\${${node.expression.getText()}}`;
-  if (kind === 'console' && topLevelArg && ts.isPropertyAccessExpression(node) && ERRISH.test(node.name.text)) return node.getText();
+  // `JSON.stringify(err)`: a string error, or a response object kept as the error, comes out whole.
+  if (ts.isCallExpression(node) && node.expression.getText() === 'JSON.stringify' && node.arguments[0] && errish(node.arguments[0])) return node.getText();
+  // `${err}`, and the same text kept in a property first: `${f.error}`, `${result.reason}`.
+  if (ts.isTemplateSpan(node) && errish(node.expression)) return `\${${node.expression.getText()}}`;
   if (ts.isIdentifier(node) && BODYISH.test(node.text)) return node.text;
-  // A console call formats a whole error object: message and stack.
-  if (kind === 'console' && topLevelArg && ts.isIdentifier(node) && ERRISH.test(node.text)) return node.text;
+  // A console call formats a whole error object: message and stack, also inside an object literal.
+  if (kind === 'console' && topLevelArg && ts.isExpression(node) && errish(node)) return node.getText();
+  const literal = kind === 'console' && topLevelArg && ts.isExpression(node) ? unwrap(node) : null;
+  if (literal && ts.isObjectLiteralExpression(literal)) {
+    for (const p of literal.properties) {
+      if (ts.isShorthandPropertyAssignment(p) && ERRISH.test(p.name.text)) return node.getText();
+      if (ts.isPropertyAssignment(p) && errish(p.initializer)) return node.getText();
+    }
+  }
   let hit: string | null = null;
   node.forEachChild((child) => { hit ??= rawText(child, kind, false); });
   return hit;
@@ -141,7 +175,6 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'prompt drain failed for', count: 1, why: 'a prompt expiry UPDATE by id' },
     { marker: 'prompt detach failed for', count: 1, why: 'a trigger release UPDATE by id' },
     { marker: 'un-park failed for', count: 1, why: 'the end of a trigger wait: SQLite' },
-    { marker: 'recording an escalation start failed', count: 1, why: 'a SQLite write of the trigger id and a timestamp' },
   ],
   'core/wire-capture.ts': [
     { marker: 'wire capture sink refused', count: 1, why: 'reason is built from the env-configured sink path and its file mode' },
@@ -193,8 +226,6 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
   ],
   'core/engine.ts': [
     { marker: 'could not get its source columns and refuses writes until a restart migrates it', count: 1, why: 'the SQLite text of a failed table-info read or ALTER TABLE ADD COLUMN on the store: it names the table, column or constraint, never a row value; the table name in it is the one the same line already prints' },
-    { marker: '[escalation] recording the delivery failed', count: 1, why: 'a SQLite UPDATE binding a fixed delivery summary' },
-    { marker: '[escalation] a hook failed on the delivery', count: 1, why: 'the engine own hook posts a fixed body and swallows its fetch; an embedder hook is its own code' },
     { marker: 'Grant backfill failed', count: 1, why: 'backfillGrants and checkFingerprints read the ledger and the vault, no provider' },
     { marker: 'Grant host recompute failed', count: 1, why: 'recomputeGrantHosts, the same ledger write as above' },
     { marker: '[lynox:vault-bindings] Migration failed', count: 1, why: 'binds vault names to the hosts of stored profiles' },
@@ -281,7 +312,7 @@ const FROZEN: Record<string, number> = {
   'core/config.ts': 1,
   'core/crm.ts': 1,
   'core/engine-init.ts': 1,
-  'core/engine.ts': 31,
+  'core/engine.ts': 29,
   'core/knowledge-layer.ts': 8,
   'core/knowledge-store.ts': 2,
   'core/llm-wire-rules.ts': 1,
@@ -293,7 +324,7 @@ const FROZEN: Record<string, number> = {
   'core/run-history.ts': 1,
   'core/transcribe/mistral-voxtral.ts': 2,
   'core/wire-capture.ts': 2,
-  'core/worker-loop.ts': 11,
+  'core/worker-loop.ts': 10,
   'core/workflow-questions.ts': 4,
   'egress-proxy/main.ts': 1,
   'integrations/google/google-auth.ts': 1,
@@ -351,13 +382,30 @@ it('sees every raw form it claims to see, and lets errorText through', () => {
     'process.stderr.write(`i ${f.error}\\n`);',
     "console.error('j', result.reason);",
     'process.stderr.write(`k ${res?.error}\\n`);',
+    'process.stderr.write(`l ${String(f.error)}\\n`);',
+    'process.stderr.write(`m ${f.error!}\\n`);',
+    'process.stderr.write(`n ${(f.error as string)}\\n`);',
+    "process.stderr.write(`o ${result.error ?? 'unknown'}\\n`);",
+    "process.stderr.write(`p ${f['error']}\\n`);",
+    "console.error('q', { error: err });",
+    "console.error('r', { err });",
+    'process.stderr.write(`s ${JSON.stringify(err)}\\n`);',
+    "console.warn('t', err as Error);",
+    'process.stderr.write(`v ${(f.error satisfies string)}\\n`);',
+    'process.stderr.write(`w ${<string>f.error}\\n`);',
+    "console.error('x', { err } as const);",
+    'process.stderr.write(`u ${note || reason}\\n`);',
     'process.stderr.write(`ok ${f.errorCount}\\n`);',
+    "process.stderr.write(`ok ${f['errorCount']}\\n`);",
+    'process.stderr.write(`ok ${count ?? 0}\\n`);',
+    "console.error('ok', { count: n });",
+    'process.stderr.write(`ok ${JSON.stringify(payload)}\\n`);',
     'process.stderr.write(`ok ${errorText(err, reduce)}\\n`);',
     "console.error('ok', errorText(err, true));",
     "process.stderr.write('ok plain\\n');",
     'process.stderr.write(`ok ${processErrorText(err)}\\n`);',
   ].join('\n');
-  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13']);
+  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26']);
 });
 
 // Parses every source file under src/ with the TypeScript compiler. Under coverage in CI this test

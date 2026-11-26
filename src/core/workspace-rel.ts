@@ -45,8 +45,8 @@ function realOr(path: string): string {
 
 /**
  * Map `input` (as a tool received it) onto the context workspace `ws`. Resolved like
- * `validatePath` resolves it — against the process cwd, legacy workspace paths translated — so a
- * path means what it meant before; only how the file is then reached changes.
+ * `validatePath` resolves it — a relative path against `ws`, legacy workspace paths translated —
+ * so both read a path the same way; only how the file is then reached changes.
  *
  * `inside` when the path lies lexically under `ws` or under its real path (tools have always
  * answered with real paths, and the model reuses them). Nothing is resolved through the
@@ -55,7 +55,7 @@ function realOr(path: string): string {
  */
 export function toWorkspaceRel(input: string, ws: string): WorkspaceRel {
   if (input.includes('\0')) throw new WorkspacePathRefused('the path contains a NUL byte');
-  const abs = translateLegacyWorkspacePath(resolve(input), resolveWorkspaceRoot());
+  const abs = translateLegacyWorkspacePath(resolve(ws, input), resolveWorkspaceRoot());
   if (PROCESS_HANDLE.test(abs)) {
     throw new WorkspacePathRefused(
       `the path ${input} goes through a process handle (/proc/<pid>/fd, /proc/<pid>/root, /dev/fd, …). Name the file by its workspace path instead.`,
