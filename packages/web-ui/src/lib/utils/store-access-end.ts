@@ -48,8 +48,8 @@ export function storeAccessShown(profile: StoreAccessProfile, now: Date, locale:
  * clock alone: a run may have renewed the store meanwhile. An end at or before `askedAt` was
  * already the engine's word and asks nothing. A page with no answer yet asks again: its first
  * question failed (engine down, an error answer, no answer in time), and the page knows no end.
- * A session that is not to be asked (one the server named another's) never gets an answer, so
- * whoever calls this keeps that session from asking.
+ * A session that is not to be asked (one the server did not name the owner's) may have no answer
+ * either; whoever calls this keeps that session from asking.
  */
 export function storeAccessAskAgain(profiles: readonly StoreAccessProfile[], askedAt: number | null, now: Date): boolean {
 	if (askedAt === null) return true;

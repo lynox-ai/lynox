@@ -70,7 +70,7 @@
 		untrack(() => void load());
 		// An end that passes while the page is open: the engine is asked again within a minute, and
 		// the line says what it answers (renewed, or ended). A first question that got no answer is
-		// asked again the same way; `load` asks nothing for a session the server named another's.
+		// asked again the same way; `load` asks nothing for a session the server did not name the owner's.
 		const timer = setInterval(() => {
 			now = new Date();
 			if (storeAccessAskAgain(profiles, askedAt, now)) void load();
