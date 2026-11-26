@@ -36,6 +36,10 @@ describe('watch policy refusal words', () => {
     expect(watchPolicyWordsEn({ kind: 'deny_all' }, true).wayOut).toBe('Only the operator can change network_policy. The address must also be https://, since this instance only reads HTTPS pages (enforce_https).');
     expect(watchPolicyWordsDe({ kind: 'deny_all' }, true).wayOut).toBe('Ändern kann das nur der Betreiber der Instanz. Ausserdem muss die Adresse mit https:// beginnen, weil diese Instanz nur https-Seiten liest (enforce_https).');
     expect(watchPolicyWordsDe({ kind: 'allow_list', host: 'h.example' }, false).wayOut).not.toContain('https://');
+    // Through the notice table, as the poll records it.
+    expect(WORKER_NOTICES.en.watchPolicyRefused({ kind: 'deny_all' }, true)).toBe("The watched page was not read: this instance's network_policy is deny-all, so lynox reads no web page. Only the operator can change network_policy. The address must also be https://, since this instance only reads HTTPS pages (enforce_https).");
+    expect(WORKER_NOTICES.en.watchPolicyRefused({ kind: 'allow_list', host: 'h.example' }, true)).toBe("The watched page was not read: its host h.example is not in this instance's network allow-list. The operator can add the host to the allow-list (network_policy). The address must also be https://, since this instance only reads HTTPS pages (enforce_https).");
+    expect(WORKER_NOTICES.de.watchPolicyRefused({ kind: 'allow_list', host: 'h.example' }, true)).toBe('Die beobachtete Seite wurde nicht gelesen: Der Host h.example steht nicht in der Netzwerk-Liste dieser Instanz (network_policy). Aufnehmen kann ihn der Betreiber der Instanz. Ausserdem muss die Adresse mit https:// beginnen, weil diese Instanz nur https-Seiten liest (enforce_https).');
   });
 
   it('keeps the host check\'s English words out of the German sentence', () => {
