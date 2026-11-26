@@ -11821,6 +11821,27 @@ describe('LynoxHTTPApi', () => {
       expect(mockConfirmTrigger).not.toHaveBeenCalled();
     });
 
+    // The other consents a token does not give: stamping a workflow and taking a plan or a
+    // workflow over. Each route by name, so a check taken off one fails that route's test.
+    describe.each([
+      { route: 'POST /api/workflows/:id/confirm', path: '/api/workflows/wf-token/confirm' },
+      { route: 'POST /api/workflows/:id/takeover', path: '/api/workflows/wf-token/takeover' },
+      { route: 'POST /api/triggers/:id/takeover', path: '/api/triggers/task-1/takeover' },
+    ])('$route is the owner\'s browser session only', ({ path }) => {
+      it('with a token, the owner\'s included, it refuses (403 session_only)', async () => {
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        const res = await jsonFetch(path, { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { code?: string }).code).toBe('session_only');
+      });
+
+      it('control: in the owner\'s browser session the request goes past that check', async () => {
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        const res = await ownerSessionFetch(path, { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+        expect(((await res.json()) as { code?: string }).code).not.toBe('session_only');
+      });
+    });
+
     it('POST /api/tasks/:id/confirm returns 404 for a trigger gone by the time it is stamped', async () => {
       mockConfirmTrigger.mockReturnValueOnce(undefined);
       const res = await ownerSessionFetch('/api/tasks/nope/confirm', { method: 'POST', body: await confirmBody('nope') });
@@ -23519,7 +23540,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           row({ last_run_result: 'Bulk run halted at its approved maximum.' }),
         ] });
         try {
-          const ok = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+          const ok = await ownerSessionFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
           expect(ok.status).toBe(200);
           expect(((await ok.json()) as { stillOff: number }).stillOff).toBe(3);
           expect(setEnabled).not.toHaveBeenCalled();
@@ -23673,18 +23694,18 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         const restore = shaped();
         try {
           mockSetWorkflowConfirmedAt.mockClear();
-          const none = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: '{}' });
+          const none = await ownerSessionFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: '{}' });
           expect(none.status).toBe(400);
           expect(((await none.json()) as { code: string }).code).toBe('expect_required');
           expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
           mockSetWorkflowConfirmedAt.mockReturnValueOnce(false);
-          const stale = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-0' }) });
+          const stale = await ownerSessionFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-0' }) });
           expect(stale.status).toBe(409);
           expect(((await stale.json()) as { code: string }).code).toBe('steps_changed');
-          const ok = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+          const ok = await ownerSessionFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
           expect(ok.status).toBe(200);
           expect(mockSetWorkflowConfirmedAt).toHaveBeenLastCalledWith('wf-sched', expect.any(String), 'digest-1');
-          expect((await jsonFetch('/api/workflows/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) })).status).toBe(404);
+          expect((await ownerSessionFetch('/api/workflows/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) })).status).toBe(404);
         } finally { restore(); }
       });
 
@@ -25375,6 +25396,36 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       sessionRanBy(MANDATE, { repickModel: vi.fn(() => ({ ok: true, tier: 'fast', modelId: 'm' })) });
       asMandate();
       expect((await jsonFetch(`/api/sessions/${OWN}/model`, { method: 'PATCH', body: JSON.stringify({ tier: 'fast' }) })).status).toBe(200);
+    });
+  });
+
+  // Someone else's conversation is refused before the session is looked up, so the answer does
+  // not tell a mandate whether a session is live in it. Each route by name: a lookup moved back
+  // before the check on one of them fails that route's test.
+  describe.each([
+    { route: 'DELETE /api/sessions/:id', method: 'DELETE', suffix: '', body: undefined },
+    { route: 'POST /api/sessions/:id/run', method: 'POST', suffix: '/run', body: { task: 'hi' } },
+    { route: 'POST /api/sessions/:id/changeset/review', method: 'POST', suffix: '/changeset/review', body: { action: 'accept' } },
+    { route: 'POST /api/sessions/:id/compact', method: 'POST', suffix: '/compact', body: {} },
+    { route: 'PATCH /api/sessions/:id/model', method: 'PATCH', suffix: '/model', body: { tier: 'fast' } },
+  ])('$route on another person\'s conversation', ({ method, suffix, body }) => {
+    const call = (id: string): Promise<Response> =>
+      jsonFetch(`/api/sessions/${id}${suffix}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+
+    it('refuses a mandate alike whether a session is live in it or not', async () => {
+      asMandate();
+      sessionRanBy(OWNER_PRINCIPAL);
+      const live = await refusal(await call(FOREIGN));
+      mockSessionGet.mockReturnValue(undefined);
+      const none = await refusal(await call(FOREIGN));
+      expect(none, 'the refusal differs with the session').toBe(live);
+    });
+
+    it('control: the owner, and a mandate in its own conversation, still get the 404 for no session', async () => {
+      mockSessionGet.mockReturnValue(undefined);
+      expect((await call(FOREIGN)).status).toBe(404);
+      asMandate();
+      expect((await call(OWN)).status).toBe(404);
     });
   });
 
