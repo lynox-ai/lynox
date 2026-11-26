@@ -2827,7 +2827,7 @@ ${draftJson}
           }
           // A change to where a credential goes or what it may do, with nobody to accept it: refused.
           if (listsAll) {
-            return `Blocked: connection "${profile.id}" not saved. It is new, but its secrets may already be sent to its addresses, so saving it needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the connection was not saved because it needs their acceptance, name in a few words what it would have been allowed to do (from the list below), and tell them they can save it by asking lynox for it in a chat, since a scheduled or background run cannot ask them. Do not try to save it in another way.\n\nIt would be allowed:\n${grantListed(profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`).join('\n')}`;
+            return `Blocked: connection "${profile.id}" not saved. It is new, but its secrets may already be sent to its addresses, so saving it needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the connection was not saved because it needs their acceptance, name in a few words what it would have been allowed to do (from the list below), and tell them they can save it by asking lynox for it in a chat, since a scheduled or background run cannot ask them. Do not try to save it in another way.\n\nWhat it would have been allowed to do:\n${grantListed(profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`).join('\n')}`;
           }
           if (widens) {
             return `Blocked: profile "${profile.id}" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, name in a few words what the save would have changed (from the list below), and tell them they can save it by asking lynox for it in a chat, since a scheduled or background run cannot ask them. Do not try to save it in another way.\n\nThis save changes:\n${securityChanges(prior, profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`).join('\n')}`;
@@ -2975,7 +2975,7 @@ ${draftJson}
         // secret whose questions overlap meet this too, and the second is saved again with the
         // list: fail-closed on purpose, at the price of one more question.
         if (!listsAll && createsOnBoundSecrets(agent, prior, profile)) {
-          return `Error: API profile "${savedId}" was not saved: a secret it reads was allowed by another save while the question was open, so the answer did not cover everything this new profile may do with it. Nothing was saved. Save it again; the user is asked with the whole list.`;
+          return `Error: connection "${savedId}" was not saved: while the user was being asked, another save allowed one of its secrets to be sent to its addresses, so their answer did not cover everything this new connection may do. Nothing was saved. Save it again; the user is then asked with the whole list.`;
         }
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);

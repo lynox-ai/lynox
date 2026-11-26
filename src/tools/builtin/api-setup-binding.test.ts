@@ -758,7 +758,7 @@ describe('W-Recreate: a profile deleted and saved again under the same id is ask
     const out = await create(store, svc('read admin'), { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'allow'; }, autonomy: 'autonomous' });
     expect(asked).toEqual([]);
     expect(out).toMatch(/^Blocked: connection "svc" not saved\. It is new, but its secrets may already be sent to its addresses, so saving it needs the user's acceptance/);
-    expect(out).toContain('\n\nIt would be allowed:\n- address (base_url): https://api.openai.com/v1\n');
+    expect(out).toContain('\n\nWhat it would have been allowed to do:\n- address (base_url): https://api.openai.com/v1\n');
     expect(out).toContain('\n- scopes: read admin');
     expect(store.storedProfile('svc')).toBeUndefined();
   });
@@ -822,7 +822,7 @@ describe('W-Recreate: a profile deleted and saved again under the same id is ask
     expect(one).not.toMatch(/^(Error|Blocked|Validation)/);
     expect(bindings()?.boundOf('SHARED_KEY')).toContain('https://shared.example');
     release('allow');
-    expect(await two).toBe('Error: API profile "two" was not saved: a secret it reads was allowed by another save while the question was open, so the answer did not cover everything this new profile may do with it. Nothing was saved. Save it again; the user is asked with the whole list.');
+    expect(await two).toBe('Error: connection "two" was not saved: while the user was being asked, another save allowed one of its secrets to be sent to its addresses, so their answer did not cover everything this new connection may do. Nothing was saved. Save it again; the user is then asked with the whole list.');
     expect(store.storedProfile('two')).toBeUndefined();
   });
 
