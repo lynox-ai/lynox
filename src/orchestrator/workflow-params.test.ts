@@ -308,3 +308,23 @@ describe('a pattern that does not compile on its own', () => {
     expect(bindWorkflowParameters(schema, { v: 'ab' }, { constraints: { v: { regex: 'a|b' } } }).ok).toBe(false);
   });
 });
+
+describe('the values the run form shows the owner', () => {
+  it('appear in no refusal of bindWorkflowParameters, on any path', () => {
+    const values = ['ch-value-1', 'de-value-2', '<script>x</script>'];
+    const schema = [param({ name: 'region' }), param({ name: 'count', type: 'number' })];
+    const constraints = { region: { enum: values }, count: { min: 3, max: 9 } };
+    const refusals = [
+      bindWorkflowParameters(schema, { region: 'eu', count: '5' }, { constraints }),
+      bindWorkflowParameters(schema, { region: values[0], count: '1' }, { constraints }),
+      bindWorkflowParameters(schema, { region: values[0], count: '50' }, { constraints }),
+      bindWorkflowParameters([param({ name: 'region', defaultValue: 'eu' })], {}, { constraints }),
+      bindWorkflowParameters(schema, { region: values[0] }, { constraints }),
+    ];
+    for (const r of refusals) {
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      for (const v of values) expect(r.error).not.toContain(v);
+    }
+  });
+});

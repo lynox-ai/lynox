@@ -46,8 +46,8 @@ describe('the shape of a step id', () => {
 
   it('shows a stored id outside the shape by its position, or by the note alone', () => {
     expect(shownStepId('fetch', 1)).toBe('fetch');
-    expect(shownStepId('Fetch Orders', 1)).toBe('#2 (id outside the allowed form)');
-    expect(shownStepId('Fetch Orders')).toBe('(id outside the allowed form)');
+    expect(shownStepId('Fetch Orders', 1)).toBe('#2 (lynox does not show its id)');
+    expect(shownStepId('Fetch Orders')).toBe('(lynox does not show its id)');
   });
 
   it('reads a stored workflow\'s step order, and nothing from a row that does not parse', () => {
@@ -207,7 +207,7 @@ describe('a stored id outside the shape, where the model reads it', () => {
     const out = await diagnoseWorkflowTool.handler({ run_id: 'run-o' }, { toolContext: ctx, principal: OWNER_PRINCIPAL } as unknown as IAgent);
     expect(out).toContain('[completed] fetch (');
     // A run from before run names recorded the stored id: shown by its position, with the name runs use now.
-    expect(out).toContain('[failed] #2 (id outside the allowed form; runs as "step-2") (');
+    expect(out).toContain('[failed] #2 (lynox does not show its id; runs as "step-2") (');
     expect(out).not.toContain('Approve');
   });
 
@@ -221,7 +221,7 @@ describe('a stored id outside the shape, where the model reads it', () => {
     const ctx = createToolContext({});
     ctx.runHistory = history;
     const out = await diagnoseWorkflowTool.handler({ run_id: 'run-n' }, { toolContext: ctx, principal: OWNER_PRINCIPAL } as unknown as IAgent);
-    expect(out).toContain('[failed] #2 (id outside the allowed form; runs as "step-2") (');
+    expect(out).toContain('[failed] #2 (lynox does not show its id; runs as "step-2") (');
     expect(out).not.toContain('Approve');
   });
 
@@ -240,9 +240,9 @@ describe('a stored id outside the shape, where the model reads it', () => {
     ctx.runHistory = history;
     const out = await diagnoseWorkflowTool.handler({ run_id: 'run-g' }, { toolContext: ctx, principal: OWNER_PRINCIPAL } as unknown as IAgent);
     // Quoted is only what update_workflow_steps takes as step_id: the position, the note after it.
-    expect(out).toContain('Gate rejected step "#2" (id outside the allowed form; runs as "step-2"), reason:');
-    expect(out).toContain('Gate rejected step "#2" (id outside the allowed form; runs as "step-2")\n');
-    expect(out).toContain('Gate timed out for step "#3" (id outside the allowed form; runs as "step-3")');
+    expect(out).toContain('Gate rejected step "#2" (lynox does not show its id; runs as "step-2"), reason:');
+    expect(out).toContain('Gate rejected step "#2" (lynox does not show its id; runs as "step-2")\n');
+    expect(out).toContain('Gate timed out for step "#3" (lynox does not show its id; runs as "step-3")');
     expect(out).not.toContain('Approve');
     expect(out).not.toContain('Second Old');
   });
@@ -361,7 +361,7 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
     const stored = storedSteps({ manifest_json: JSON.stringify({ steps: [{ id: 'fetch', task: 'a', input_from: 5 }, { id: OLD, task: 'b', input_from: ['fetch', 3] }] }) })!;
     expect(stored.map(st => st.input_from)).toEqual([undefined, ['fetch']]);
     expect(() => stepRunNames(stored)).not.toThrow();
-    expect(shownRunStepId('step-2', stored)).toBe('#2 (id outside the allowed form; runs as "step-2")');
+    expect(shownRunStepId('step-2', stored)).toBe('#2 (lynox does not show its id; runs as "step-2")');
   });
 
   it('names a hand-damaged row whose id is no text without failing', () => {
@@ -387,11 +387,11 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
 
   it('shows a run name of such a step with its stored position and the bridge, and an old run\'s id by its position', () => {
     const stored = [{ id: 'fetch', task: 'a' }, { id: OLD, task: 'b' }];
-    expect(shownRunStepId('step-2', stored)).toBe('#2 (id outside the allowed form; runs as "step-2")');
-    expect(shownRunStepId(OLD, stored)).toBe('#2 (id outside the allowed form; runs as "step-2")');
+    expect(shownRunStepId('step-2', stored)).toBe('#2 (lynox does not show its id; runs as "step-2")');
+    expect(shownRunStepId(OLD, stored)).toBe('#2 (lynox does not show its id; runs as "step-2")');
     expect(shownRunStepId('fetch', stored)).toBe('fetch');
-    expect(shownRunStepId(OLD, undefined)).toBe('(id outside the allowed form)');
-    expect(shownStepId(OLD, 1)).toBe('#2 (id outside the allowed form)');
+    expect(shownRunStepId(OLD, undefined)).toBe('(lynox does not show its id)');
+    expect(shownStepId(OLD, 1)).toBe('#2 (lynox does not show its id)');
   });
 
   it('gives back a plan with no id outside the shape as it was', () => {
