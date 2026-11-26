@@ -159,6 +159,9 @@ bash "$CORE_DIR/scripts/image-exec-only-probe.sh" "$CONTAINER_ID"
 step "Check that the runtime user cannot change the image's code"
 bash "$CORE_DIR/scripts/image-app-owner-probe.sh" "$CONTAINER_ID"
 
+step "Check that a signal opens no debugger on the engine"
+bash "$CORE_DIR/scripts/image-signal-debugger-probe.sh" "$CONTAINER_ID"
+
 # ─────────────────────────────────────────────────────────────────────
 # Playwright
 # ─────────────────────────────────────────────────────────────────────
