@@ -231,6 +231,8 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   ];
   return {
     principal: OWNER_PRINCIPAL,
+    // Required on `IAgent` and called directly by spawn: a parent without a bound of its own.
+    hasRunCostCeiling: () => false,
     name: 'parent',
     model: 'claude-sonnet-4-6',
     memory: null,
@@ -306,6 +308,18 @@ describe('spawn_agent tool', () => {
       costUSD: 0,
     };
     resetSessionSpawnCost(testCounters);
+  });
+
+  it('a child of a run with a spending bound of its own runs under its share as a run ceiling', async () => {
+    // Kills: a child sent without `runCostCeilingUSD` under a bounded parent (the child would
+    // not count as bounded, and an in-session workflow would start there unseen by any guard).
+    const sendOpts = (): { runCostCeilingUSD?: number } | undefined =>
+      mockSend.mock.calls.at(-1)?.[1] as { runCostCeilingUSD?: number } | undefined;
+    await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A', max_budget_usd: 0.4 }] }, makeAgent({ hasRunCostCeiling: () => true }));
+    expect(sendOpts()?.runCostCeilingUSD).toBe(0.4);
+    // Not bounded: sent as before (positive control).
+    await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A', max_budget_usd: 0.4 }] }, makeAgent({ hasRunCostCeiling: () => false }));
+    expect(sendOpts()).not.toHaveProperty('runCostCeilingUSD');
   });
 
   // Safety-net: the hybrid tests mutate process-global routing resolvers and

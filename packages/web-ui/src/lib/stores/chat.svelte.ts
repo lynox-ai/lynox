@@ -2545,6 +2545,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					'info',
 					8000,
 				);
+			} else if (code === 'run_blocked' && data['reason'] === 'hold_exhausted') {
+				// Refused because nothing of the AI budget is free for this run (another task may hold
+				// it). Shown as a note in the owner's language; the engine's own sentence is the note's
+				// detail line, and `done` does not render it a second time as the reply.
+				const detail = String(data['detail'] ?? '').slice(0, 300);
+				msg.note = { code: 'hold_exhausted', ...(detail ? { detail } : {}) };
 			} else if (code === 'run_blocked') {
 				// A run the engine fail-closed before the LLM (stale managed-credit
 				// status, budget reached). 'info' not 'error' — it's transient and
@@ -2590,7 +2596,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// so the `!msg.content` guard prevents a duplicate render.
 			const streamedText = msg.blocks?.some(b => b.type === 'text' && b.text) ?? false;
 			const result = typeof data['result'] === 'string' ? data['result'] : '';
-			if (!msg.content && !streamedText && result.trim()) {
+			if (!msg.content && !streamedText && result.trim() && msg.note?.code !== 'hold_exhausted') {
 				msg.content = result;
 				msg.blocks = [{ type: 'text', text: result }];
 			}
