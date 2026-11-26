@@ -11,6 +11,7 @@
  * and stripping it would turn a backup without the workspace into one that looks complete. Those
  * backups say the coverage cannot be confirmed instead of saying nothing.
  */
+import type { WayOut } from './stores/integrations/managed.svelte.js';
 
 /** As `GET /api/backups` delivers each backup (`BackupListEntry` in the engine's `backup.ts`). */
 export interface BackupCoverageFields {
@@ -27,6 +28,32 @@ export interface CoverageNotice {
 	tone: 'muted' | 'warning';
 }
 
+/**
+ * The line a notice about left-out workspace files shows, per way out (U-302): the way out the
+ * engine's refusals name too once it is known, the fact alone while it loads, and a reload hint
+ * after a failed read, never the wrong way out.
+ */
+const COVERAGE_OMITTED: Record<WayOut, string> = {
+	managed: 'backups.coverage_omitted_managed',
+	self: 'backups.coverage_omitted_self',
+	loading: 'backups.coverage_omitted_fact',
+	failed: 'backups.coverage_omitted_unknown',
+};
+
+/**
+ * The migration's done step names one way out, lynox support, whatever the source runs as: a done
+ * step follows only a migration the target accepted, and a target accepts one only with a tier set
+ * (its import routes answer 404 otherwise, the same check the engine's refusals switch on), as on every
+ * instance lynox provisions. So the target's own refusals name support too, and its support can copy
+ * what the migration left behind (U-304).
+ */
+const WORKSPACE_OMITTED = 'migration.workspace_omitted_managed';
+
+/** The next step for files the migration could not carry (the same way out, U-304). */
+export function skippedNextKey(count: number): string {
+	return `migration.skipped_next_managed_${count === 1 ? 'one' : 'many'}`;
+}
+
 /** The record the engine writes when it left the workspace out (`OMITTED_SIDECAR`). */
 export const OMITTED_SIDECAR = 'omitted-sidecar';
 
@@ -35,13 +62,13 @@ export const OMITTED_SIDECAR = 'omitted-sidecar';
  * the engine did not call `verified` counts as unverified, including a missing `provenance`, so
  * an engine that does not deliver it never makes a backup look complete.
  */
-export function backupCoverageNotice(backup: BackupCoverageFields, managed: boolean): CoverageNotice | null {
+export function backupCoverageNotice(backup: BackupCoverageFields, wayOut: WayOut): CoverageNotice | null {
 	const provenance = backup.provenance;
 	if (provenance === 'verified') {
 		if (backup.coverage?.workspace !== OMITTED_SIDECAR) return null;
 		return {
 			badge: 'backups.coverage_omitted_badge',
-			lines: [managed ? 'backups.coverage_omitted_managed' : 'backups.coverage_omitted_self'],
+			lines: [COVERAGE_OMITTED[wayOut]],
 			tone: 'muted',
 		};
 	}
@@ -71,11 +98,11 @@ export function visibleSkippedPath(path: string): string {
 }
 
 /** What the migration's done step says, from its `done` event. `null` when the workspace went along. */
-export function migrationWorkspaceNotice(done: { workspace?: unknown }, managed: boolean): { description: string; line: string; toast: string } | null {
+export function migrationWorkspaceNotice(done: { workspace?: unknown }): { description: string; line: string; toast: string } | null {
 	if (done.workspace !== OMITTED_SIDECAR) return null;
 	return {
 		description: 'migration.success_desc_without_workspace',
-		line: managed ? 'migration.workspace_omitted_managed' : 'migration.workspace_omitted_self',
+		line: WORKSPACE_OMITTED,
 		toast: 'migration.success_without_workspace',
 	};
 }

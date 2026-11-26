@@ -23,6 +23,7 @@ vi.mock('./stream.js', () => ({ StreamProcessor: vi.fn() }));
 import { Agent } from './agent.js';
 import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { RunHistory } from './run-history.js';
+import { SecurityAudit } from './security-audit.js';
 import { PromptStore, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 
 type Exec = { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> };
@@ -75,7 +76,7 @@ describe('the rule that decides a hard block marks it', () => {
 
   it('every unattended [BLOCKED return of the guard says which class it is', () => {
     const source = readFileSync(join(__dirname, '..', 'tools', 'permission-guard.ts'), 'utf8').split('\n');
-    const blockedReturns = source.filter((l) => /return\b.*framed`/.test(l) && /\[BLOCKED|blockReason/.test(l));
+    const blockedReturns = source.filter((l) => /return\b.*framed`/.test(l) && /\[BLOCKED|T\.blocked|blockReason/.test(l));
     expect(blockedReturns.length, 'positive control: the guard\'s blocked returns are found').toBe(14);
     expect(blockedReturns.filter((l) => !/return (hardBlock|askable)\(framed`/.test(l))).toEqual([]);
   });
@@ -106,7 +107,7 @@ describe('the agent asks a hard block with meta.blocked, and reports a refusal o
     const metas: Array<PromptMeta | undefined> = [];
     const promptUser = vi.fn(async (_q: unknown, _o?: string[], meta?: PromptMeta) => {
       metas.push(meta);
-      return meta?.blocked === true ? UNATTENDED_BLOCK_ANSWER : 'Allow';
+      return meta?.blocked === true ? UNATTENDED_BLOCK_ANSWER : 'allow';
     });
     const streamed: Array<{ type: string; result?: unknown; isError?: boolean }> = [];
     const onStream = vi.fn(async (e: { type: string; result?: unknown; isError?: boolean }) => { streamed.push(e); });
@@ -177,7 +178,7 @@ describe('a tool from outside the engine that confirms by itself', () => {
 
 describe('the agent asks in the instance\'s language', () => {
   it.each([
-    ['de-CH', '⚠ Befehl: rm -rf / — "rm -rf /tmp/x" [BLOCKED — diese Aktion musst du aus Sicherheitsgründen selbst ausführen]'],
+    ['de-CH', '⚠ Befehl: rm -rf / — "rm -rf /tmp/x" [GESPERRT — diese Aktion musst du aus Sicherheitsgründen selbst ausführen]'],
     ['en', '⚠ Command: rm -rf / — "rm -rf /tmp/x" [BLOCKED — this action needs to be run manually for safety]'],
   ])('configured %s', async (language, question) => {
     const bash = stub('bash');
@@ -187,6 +188,62 @@ describe('the agent asks in the instance\'s language', () => {
     await call(agent, 'bash', { command: 'rm -rf /tmp/x' });
     expect(asked).toEqual([question]);
     expect(bash.calls).toEqual([]);
+  });
+});
+
+describe('a German instance is asked with [GESPERRT; what decides still reads the English warning', () => {
+  it('a hard block is audited as blocked, from the English warning, and the German text never reaches the audit', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'unattended-de-audit-'));
+    const audit = new SecurityAudit(join(dir, 'audit.db'));
+    try {
+      const bash = stub('bash');
+      const asked: string[] = [];
+      const promptUser = vi.fn(async (q: unknown) => { asked.push(flattenPrompt(q as PromptText)); return 'deny'; });
+      const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [bash], autonomy: 'autonomous', promptUser, language: 'de-CH' } as ConstructorParameters<typeof Agent>[0]);
+      await call(agent, 'bash', { command: 'rm -rf /tmp/x' });
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain('[GESPERRT');
+      // The guard's event (other channels, such as the bash autonomy observation, are not about the marker).
+      const events = audit.getRecentEvents(1).filter((e) => e['event_type'] === 'tool_blocked' || e['event_type'] === 'danger_flagged');
+      expect(events.map((e) => [e['event_type'], e['decision'], e['input_preview']])).toEqual([
+        ['tool_blocked', 'blocked', '⚠ Command: rm -rf / — "rm -rf /tmp/x" [BLOCKED — this action needs to be run manually for safety]'],
+      ]);
+      expect(JSON.stringify(audit.getRecentEvents(1))).not.toContain('GESPERRT');
+      expect(bash.calls).toEqual([]);
+    } finally {
+      audit.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a tool that confirms by itself is not let through in German: its [BLOCKED warning still stops it', async () => {
+    const calls: unknown[] = [];
+    const tool = {
+      calls,
+      requiresConfirmation: true,
+      definition: { name: 'Merge', description: 'Merge', input_schema: { type: 'object', properties: {}, additionalProperties: true } },
+      handler: async (input: unknown) => { calls.push(input); return 'done'; },
+      destructive: { mode: 'data', check: () => 'drop everything' },
+    } as unknown as ToolEntry;
+    const asked: string[] = [];
+    const promptUser = vi.fn(async (q: unknown) => { asked.push(flattenPrompt(q as PromptText)); return 'deny'; });
+    const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [tool], autonomy: 'autonomous', promptUser, language: 'de-CH' } as ConstructorParameters<typeof Agent>[0]);
+    const result = await call(agent, 'Merge', {});
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('Externes Werkzeug');
+    expect(asked[0]).toContain('[GESPERRT');
+    expect(result.is_error).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it('only the English warning reaches the readers of the marker: the agent\'s gate and the guard\'s audit event', () => {
+    const agentSrc = readFileSync(join(__dirname, 'agent.ts'), 'utf8');
+    const guardSrc = readFileSync(join(__dirname, '..', 'tools', 'permission-guard.ts'), 'utf8');
+    const auditSrc = readFileSync(join(__dirname, 'security-audit.ts'), 'utf8');
+    expect(agentSrc.match(/\[BLOCKED'/g)?.length, 'positive control: the gate is found').toBe(1);
+    expect(agentSrc).toContain("!signal.warning.includes('[BLOCKED')");
+    expect(auditSrc.match(/event\.warning\?\.includes\('\[BLOCKED'\)/g)?.length).toBe(2);
+    expect(guardSrc).toContain('channels.guardBlock.publish({ toolName, warning, autonomy, runId, contractVersion: contract?.version });');
   });
 });
 

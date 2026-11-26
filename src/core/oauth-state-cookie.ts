@@ -42,7 +42,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { LOGIN_PRINCIPAL_ID_MAX } from '../contract/http.js';
+import { LOGIN_PRINCIPAL_DISPLAY_MAX, LOGIN_PRINCIPAL_ID_MAX } from '../contract/http.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 
 /** Mirrors `PROFILE_ID_PATTERN` in `api-store.ts`. Dot-free, which is what lets
@@ -57,8 +57,32 @@ const STATE_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 
 const PURPOSE = 'lynox-profile-oauth-state';
 
-/** The encoded principal field, as the reader accepts it and so as the signer may write it. */
-const PRINCIPAL_FIELD = /^[A-Za-z0-9_-]{1,800}$/;
+/**
+ * The encoded principal field, as the reader accepts it and so as the signer may write it. Room
+ * for the longest tag, mandate id and name this module admits at three bytes a character. A
+ * value JSON escapes (a lone surrogate takes six) can pass it; the signer then refuses, and the
+ * start signs again without the name.
+ */
+const PRINCIPAL_FIELD = /^[A-Za-z0-9_-]{1,2400}$/;
+
+/** The encoded scope field: base64url of a JSON list, since a scope may carry dots (a URL). */
+const ASKED_FIELD = /^[A-Za-z0-9_-]{1,4000}$/;
+
+/** One scope as a link may ask for it: printable, no space (the separator), bounded. */
+const SCOPE_PATTERN = /^[\x21-\x7e]{1,256}$/;
+const ASKED_MAX = 64;
+
+/** The consent field: the version of the customer text the page showed, or `none` when it showed none. */
+const CONSENT_FIELD = /^(?:[0-9a-f]{16}|none)$/;
+const CONSENT_VERSION = /^[0-9a-f]{16}$/;
+
+/**
+ * The longest signed value this module hands out. A browser keeps a cookie of about 4096 bytes,
+ * name and attributes included, and drops a longer Set-Cookie without a word: the person would
+ * consent at the provider and the callback find no cookie. The fields each have their own cap;
+ * together they could pass this one, so the whole value is checked too.
+ */
+export const PROFILE_OAUTH_STATE_MAX_LEN = 3800;
 
 /** Ten minutes: longer than any human flow, shorter than a stolen cookie is useful. */
 export const PROFILE_OAUTH_STATE_TTL_SEC = 10 * 60;
@@ -77,6 +101,21 @@ export interface ProfileOAuthState {
    * carries dots, so it travels base64url-encoded inside the signed payload.
    */
   readonly by: ConnectingPrincipal;
+  /**
+   * The scopes the authorize link asks for, as the confirmed start computed them: the same list
+   * the consent page showed and the confirmation was checked against. The callback records them
+   * as the grant's `asked_scope`, so what counts as asked is what the person confirmed, not the
+   * profile's scope at a later read: a save can change that without any page. Optional when
+   * signing (none asked), always present when read back.
+   */
+  readonly asked?: readonly string[] | undefined;
+  /**
+   * The version of the customer text the consent page showed and the confirmation was checked
+   * against (`consentNoticeVersion`), when the page showed one. The callback records it as the
+   * grant's `consent_version`: the text the person agreed to, not the one the engine holds at a
+   * later read. Absent when signing (no text shown) and when read back for such a start.
+   */
+  readonly consent?: string | undefined;
 }
 
 /** The principal of a connection's start, as the state cookie carries it. */
@@ -85,13 +124,26 @@ export interface ConnectingPrincipal {
   readonly tag: string;
   /** The mandate's id; required for a mandate, absent for the owner. */
   readonly mandateId?: string | undefined;
+  /**
+   * The name the mandate's session was shown under, so the callback's trail rows carry it like
+   * every other row of that person. Optional for a mandate (a session without one signs none),
+   * absent for the owner.
+   */
+  readonly display?: string | undefined;
 }
 
-/** What a `by` field may hold: the owner, or a mandate tag with its mandate id. */
+/** What a `by` field may hold: the owner, or a mandate tag with its mandate id and, maybe, its name. */
 function validPrincipal(by: ConnectingPrincipal): boolean {
-  if (by.tag === 'owner') return by.mandateId === undefined;
+  if (by.tag === 'owner') return by.mandateId === undefined && by.display === undefined;
   return by.tag.startsWith(MANDATE_TAG_PREFIX) && by.tag.length > MANDATE_TAG_PREFIX.length && by.tag.length <= 320
-    && typeof by.mandateId === 'string' && validMandateId(by.mandateId);
+    && typeof by.mandateId === 'string' && validMandateId(by.mandateId)
+    && (by.display === undefined || validDisplay(by.display));
+}
+
+/** The name as the login contract admits it: one line, trimmed, at most its cap. */
+function validDisplay(display: string): boolean {
+  return display.length > 0 && display.length <= LOGIN_PRINCIPAL_DISPLAY_MAX && display.trim() === display
+    && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(display);
 }
 
 /**
@@ -105,7 +157,30 @@ function validMandateId(id: string): boolean {
 }
 
 function encodePrincipal(by: ConnectingPrincipal): string {
-  return Buffer.from(JSON.stringify(by.mandateId === undefined ? { tag: by.tag } : { tag: by.tag, mandate_id: by.mandateId })).toString('base64url');
+  const fields = by.mandateId === undefined ? { tag: by.tag }
+    : { tag: by.tag, mandate_id: by.mandateId, ...(by.display === undefined ? {} : { display: by.display }) };
+  return Buffer.from(JSON.stringify(fields)).toString('base64url');
+}
+
+function validAsked(asked: readonly string[]): boolean {
+  return asked.length <= ASKED_MAX && asked.every((s) => typeof s === 'string' && SCOPE_PATTERN.test(s));
+}
+
+function encodeAsked(asked: readonly string[]): string {
+  return Buffer.from(JSON.stringify(asked)).toString('base64url');
+}
+
+/** The `asked` field back, or null for anything this module did not encode. */
+function decodeAsked(field: string): string[] | null {
+  if (!ASKED_FIELD.test(field)) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(field, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || !parsed.every((s): s is string => typeof s === 'string')) return null;
+  return validAsked(parsed) ? parsed : null;
 }
 
 /** The `by` field back, or null for anything this module did not encode. */
@@ -118,9 +193,11 @@ function decodePrincipal(field: string): ConnectingPrincipal | null {
     return null;
   }
   if (typeof parsed !== 'object' || parsed === null) return null;
-  const { tag, mandate_id: mandateId } = parsed as { tag?: unknown; mandate_id?: unknown };
+  const { tag, mandate_id: mandateId, display } = parsed as { tag?: unknown; mandate_id?: unknown; display?: unknown };
   if (typeof tag !== 'string' || (mandateId !== undefined && typeof mandateId !== 'string')) return null;
-  const by: ConnectingPrincipal = mandateId === undefined ? { tag } : { tag, mandateId };
+  if (display !== undefined && typeof display !== 'string') return null;
+  const by: ConnectingPrincipal = mandateId === undefined ? { tag, ...(display === undefined ? {} : { display }) }
+    : { tag, mandateId, ...(display === undefined ? {} : { display }) };
   return validPrincipal(by) ? by : null;
 }
 
@@ -146,6 +223,10 @@ export function signProfileOAuthState(
   // The reader caps the field; a principal whose encoding is longer would be signed here and
   // refused there, after the user had already consented at the provider.
   if (!PRINCIPAL_FIELD.test(encodePrincipal(v.by))) return null;
+  const asked = v.asked ?? [];
+  if (!validAsked(asked) || !ASKED_FIELD.test(encodeAsked(asked))) return null;
+  if (v.consent !== undefined && !CONSENT_VERSION.test(v.consent)) return null;
+  const consent = v.consent ?? 'none';
   if (!Number.isInteger(nowSec) || nowSec < 0) return null;
   // The verifier's own charset admits `.` and `~`; the payload is dot-separated,
   // so a verifier carrying a dot would split into the wrong number of fields.
@@ -153,8 +234,9 @@ export function signProfileOAuthState(
   // generator that emits dots is a defect to fix, not input to accommodate.
   if (v.verifier.includes('.')) return null;
 
-  const payload = `${v.state}.${v.profileId}.${v.verifier}.${encodePrincipal(v.by)}.${String(nowSec)}`;
-  return `${payload}.${sign(payload, secret)}`;
+  const payload = `${v.state}.${v.profileId}.${v.verifier}.${encodePrincipal(v.by)}.${encodeAsked(asked)}.${consent}.${String(nowSec)}`;
+  const value = `${payload}.${sign(payload, secret)}`;
+  return value.length <= PROFILE_OAUTH_STATE_MAX_LEN ? value : null;
 }
 
 /**
@@ -176,12 +258,12 @@ export function verifyProfileOAuthState(
 ): ProfileOAuthState | null {
   if (!secret || !raw) return null;
 
-  // Six fields. A cookie from before the principal was carried has five and is refused: it
-  // cannot say whose consent it is, and it lived ten minutes at most.
+  // Eight fields. A cookie from before the customer text's version was carried has seven and is
+  // refused: it cannot say which text the person confirmed, and it lived ten minutes at most.
   const parts = raw.split('.');
-  if (parts.length !== 6) return null;
-  const [state, profileId, verifier, byField, tsStr, sig] = parts;
-  if (!state || !profileId || !verifier || !byField || !tsStr || !sig) return null;
+  if (parts.length !== 8) return null;
+  const [state, profileId, verifier, byField, askedField, consentField, tsStr, sig] = parts;
+  if (!state || !profileId || !verifier || !byField || !askedField || !consentField || !tsStr || !sig) return null;
 
   // `parseInt` accepts leading garbage ("12abc" → 12) and a leading `+`/`-`;
   // the pattern is what makes the timestamp a number this engine wrote.
@@ -194,7 +276,7 @@ export function verifyProfileOAuthState(
   if (nowSec < ts) return null;
   if (nowSec - ts > PROFILE_OAUTH_STATE_TTL_SEC) return null;
 
-  const expected = sign(`${state}.${profileId}.${verifier}.${byField}.${tsStr}`, secret);
+  const expected = sign(`${state}.${profileId}.${verifier}.${byField}.${askedField}.${consentField}.${tsStr}`, secret);
   const sigBuf = Buffer.from(sig, 'hex');
   const expBuf = Buffer.from(expected, 'hex');
   // `Buffer.from(x, 'hex')` truncates at the first non-hex character rather
@@ -208,8 +290,11 @@ export function verifyProfileOAuthState(
   if (!VERIFIER_PATTERN.test(verifier)) return null;
   const by = decodePrincipal(byField);
   if (by === null) return null;
+  const asked = decodeAsked(askedField);
+  if (asked === null) return null;
+  if (!CONSENT_FIELD.test(consentField)) return null;
 
-  return { state, profileId, verifier, by };
+  return { state, profileId, verifier, by, asked, ...(consentField === 'none' ? {} : { consent: consentField }) };
 }
 
 /** States a callback has used, each with the second after which its cookie is refused anyway. */

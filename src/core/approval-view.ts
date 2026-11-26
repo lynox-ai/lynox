@@ -11,6 +11,7 @@
  * does not reach it.
  */
 
+import { originCardMail } from './origin-notices.js';
 import type { ApprovalEntry, ApprovalKind, ApprovalOrigin, ApprovalListScope, ApprovalSource, ApprovalStatus, StoredAddress } from './approval-store.js';
 import { isMandateTag, MANDATE_TAG_PREFIX, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { recipientSpread } from '../integrations/mail/send-core.js';
@@ -249,19 +250,32 @@ export function mandateAddressOf(tag: string | null): string | null {
 /** The name of a mandate that has neither a name it may be shown under nor an address. */
 export const UNNAMED_MANDATE = 'unnamed mandate';
 
+/**
+ * How a mandate is named to another mandate: not by its name, not by its address. A mandate
+ * learns that a mark is not its own, never whose it is (as the workflow library does).
+ */
+export const OTHER_MANDATE = 'other mandate';
+
+/**
+ * How a mark without a grant id is named to a mandate: it cannot be told to be its own or
+ * another's (an older row, or an earlier grant for the same address), so it says neither.
+ */
+export const SOME_MANDATE = 'some mandate';
+
 /** The name a grant was last shown under in the actor trail, or null when it has none. */
 export type DisplayNameOf = (mandateId: string) => string | null;
 
 /**
  * How a scope names a mandate: by the name its grant was shown under, else by the address in
  * its tag, else {@link UNNAMED_MANDATE}, never by the raw grant id. The owner sees every grant's
- * name. A mandate sees its own grant's name, and another grant only by its address: the name a
- * grant is shown under comes from the owner's trail and is not another mandate's to read.
+ * name. A mandate sees its own grant so, another grant as {@link OTHER_MANDATE}, and a tag
+ * without a grant id as {@link SOME_MANDATE}: it cannot be told to be its own or another's.
  */
 export function mandateNamer(scope: ApprovalScope, displayNameOf: DisplayNameOf): MandateNamer {
   return (mandateId, tag) => {
-    const mayShow = mandateId !== null && (scope.viewer === 'owner' || mandateId === scope.mandateId);
-    const display = mayShow ? displayNameOf(mandateId) : null;
+    if (scope.viewer === 'mandate' && mandateId === null) return SOME_MANDATE;
+    if (scope.viewer === 'mandate' && mandateId !== scope.mandateId) return OTHER_MANDATE;
+    const display = mandateId !== null ? displayNameOf(mandateId) : null;
     if (display !== null && display !== '') return display;
     return mandateAddressOf(tag) ?? UNNAMED_MANDATE;
   };
@@ -307,6 +321,9 @@ export interface ApprovalCard {
   afterUntrusted: boolean;
   /** Which sentence the card shows when `afterUntrusted` (U-209); null when it is not. */
   afterUntrustedBy: 'run' | 'instruction' | 'both' | null;
+  /** Where the recipients the owner did not name come from, as the card's line in each language
+   *  (`originCardMail`); null when every recipient was owner-known, or on a record from before. */
+  targetOrigin: { de: string; en: string } | null;
   origin: { source: ApprovalSource; triggerId: string; runId: string; threadId?: string | undefined; eventId?: string | undefined } | null;
   outcome: ApprovalOutcome | null;
   setup: SetupLine[];
@@ -400,6 +417,7 @@ export function approvalCard(entry: ApprovalEntry, src: ApprovalCardSources): Ap
     replyToElsewhere: replyToElsewhere(entry),
     afterUntrusted: o?.afterUntrusted === true,
     afterUntrustedBy: untrustedBy(o),
+    targetOrigin: o?.targetOrigin === undefined ? null : { de: originCardMail(o.targetOrigin.origin, 'de'), en: originCardMail(o.targetOrigin.origin, 'en') },
     origin: o === null ? null : {
       source: o.source, triggerId: o.triggerId, runId: o.runId,
       ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),

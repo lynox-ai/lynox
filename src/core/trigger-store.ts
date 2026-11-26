@@ -1,10 +1,11 @@
 import type Database from 'better-sqlite3';
-import { MANDATE_TAG_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, TRIGGER_AUTHOR_PREFIX, UNKNOWN_RUN_TAG, WORKFLOW_AUTHOR_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
 import type { DeliverySummary } from './notification-router.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
 import { PLAN_PAUSE_SQL_FN, planPauseOn } from './plan-pause.js';
+import { recipientConfirmDigest, recipientsConfirmable, type RecipientConfirmOutcome } from './recipient-confirm.js';
 
 /**
  * The parked status, as a typed constant rather than a SQL literal, so the two
@@ -201,6 +202,7 @@ interface TriggerFullDbRow {
   last_run_at: string | null;
   last_run_result: string | null;
   last_run_status: string | null;
+  last_run_cause: string | null;
   notification_channel: string | null;
   max_retries: number | null;
   retry_count: number;
@@ -241,11 +243,20 @@ const KEEP_MARKER_IF_UNSTAMPED_SQL =
 /** Drops the owner's takeover of the editor mark: written with every new mandate editor mark. */
 export const CLEAR_EDITOR_COVER_SQL = 'covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL';
 
+/**
+ * Whether the trigger's `edited_by` is a run's tag (`isRunTag` in request-principal.ts), as SQL.
+ * The prefixes are the code's own constants, compared exactly (not with LIKE), so the two cannot
+ * read a tag differently.
+ */
+const EDITED_BY_RUN_SQL = `(substr(edited_by, 1, ${TRIGGER_AUTHOR_PREFIX.length}) = '${TRIGGER_AUTHOR_PREFIX}'`
+  + ` OR substr(edited_by, 1, ${WORKFLOW_AUTHOR_PREFIX.length}) = '${WORKFLOW_AUTHOR_PREFIX}'`
+  + ` OR edited_by = '${UNKNOWN_RUN_TAG}')`;
+
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
 const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
-   last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
+   last_run_status, last_run_cause, notification_channel, max_retries, retry_count, created_at, updated_at,
    confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
    created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
    last_escalation_outcome, paused_at, paused_due_at, paused_for,
@@ -291,6 +302,7 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     last_run_at: row.last_run_at ?? undefined,
     last_run_result: row.last_run_result ?? undefined,
     last_run_status: row.last_run_status ?? undefined,
+    last_run_cause: row.last_run_cause ?? undefined,
     waiting_until: row.waiting_until ?? undefined,
     source: row.source as TriggerSource,
     effect: row.effect as TriggerEffect,
@@ -467,6 +479,10 @@ export class TriggerStore {
         last_run_at = excluded.last_run_at,
         last_run_result = excluded.last_run_result,
         last_run_status = excluded.last_run_status,
+        -- The stored cause explains the status and the address it was told for: a re-write that
+        -- changes either clears it, so a cause is never older than its status or its watch.
+        last_run_cause = CASE WHEN excluded.last_run_status IS triggers.last_run_status
+          AND excluded.condition_json IS triggers.condition_json THEN triggers.last_run_cause ELSE NULL END,
         notification_channel = excluded.notification_channel,
         max_retries = excluded.max_retries,
         retry_count = excluded.retry_count,
@@ -747,6 +763,9 @@ export class TriggerStore {
     // A named stamper takes the trigger over: it becomes the last party in `edited_by`,
     // which is what the mandate gate in {@link getDue} reads. Without it, a schedule a
     // mandate set up would be held again by the owner's own later rename, forever.
+    // Except over a run's tag: a stamp agrees to the run, not to an instruction a run rewrote,
+    // so that instruction still does not count as the owner's (`ownerInstructionCounts`). A run's
+    // tag is no mandate, so the mandate gate reads it as the stamper's would.
     const by = confirmedAt === null ? null : (confirmedBy ?? null);
     return this.db.prepare(
       // The reminder marker survives only while a trigger stays unstamped throughout: a write
@@ -759,8 +778,8 @@ export class TriggerStore {
       // a list clears any earlier one. Every other write that moves the stamp leaves the column
       // as it is, and the list stops counting because it names the stamp it was written with
       // (`stampFromRow` in plan-stamp.ts).
-      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, stamp_connections = ?, updated_at = datetime('now') WHERE id = ?`,
-    ).run(confirmedAt, by, by, confirmedAt, confirmedAt === null ? null : (stampConnections ?? null), id).changes > 0;
+      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = CASE WHEN ? IS NULL OR ${EDITED_BY_RUN_SQL} THEN edited_by ELSE ? END, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, stamp_connections = ?, updated_at = datetime('now') WHERE id = ?`,
+    ).run(confirmedAt, by, by, by, confirmedAt, confirmedAt === null ? null : (stampConnections ?? null), id).changes > 0;
   }
 
   /**
@@ -802,6 +821,42 @@ export class TriggerStore {
         ? `UPDATE triggers SET edited_by = ?${mandate}, confirmed_at = NULL, confirmed_by = NULL, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}, updated_at = datetime('now') WHERE id = ?`
         : `UPDATE triggers SET edited_by = ?${mandate}, updated_at = datetime('now') WHERE id = ?`,
     ).run(...params, id).changes > 0;
+  }
+
+  /**
+   * The owner confirms the recipients of a trigger from before its creator was recorded
+   * (`recipient-confirm.ts`): its creator becomes the owner, and nothing else changes. Read, checked
+   * and written in one transaction, so a change between the check and the write cannot slip in:
+   * the trigger must still be confirmable and its instruction must still be the one the owner was
+   * shown (`expect`).
+   */
+  confirmOwnerCreator(id: string, expect: string): RecipientConfirmOutcome {
+    return this.db.transaction((): RecipientConfirmOutcome => {
+      const t = this.getById(id);
+      if (t === undefined) return 'not_found';
+      if (!recipientsConfirmable(t)) return 'not_confirmable';
+      if (recipientConfirmDigest(t) !== expect) return 'changed';
+      const changed = this.db.prepare(
+        `UPDATE triggers SET created_by = ? WHERE id = ? AND COALESCE(created_by, '') = ''`,
+      ).run(principalTag({ kind: 'owner' }), t.id).changes;
+      return changed > 0 ? 'confirmed' : 'not_confirmable';
+    })();
+  }
+
+  /**
+   * A run's change of a trigger under the owner's principal (a trigger's or a workflow's run, any
+   * session turn the owner did not write): `edited_by` takes the run's tag, so the trigger's
+   * instruction no longer counts as the owner's (`ownerInstructionCounts`). The stamp stays: the
+   * run acted for the owner, and the schedule keeps running as before.
+   *
+   * A trigger a mandate created or last changed keeps that mark: the hold that waits for the
+   * owner's stamp reads `COALESCE(edited_by, created_by)`, and a run's tag in its place would
+   * release it. Its instruction does not count as the owner's either way.
+   */
+  markEditedByRun(id: string, runTag: string): boolean {
+    return this.db.prepare(
+      `UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ? AND COALESCE(edited_by, created_by, '') NOT LIKE ?`,
+    ).run(runTag, id, MANDATE_TAG_LIKE).changes > 0;
   }
 
   /**
@@ -915,11 +970,13 @@ export class TriggerStore {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
+    /** The cause of a failed run (`RunCause`, as JSON), or null: written on every run end. */
+    lastRunCause: string | null;
     nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   }): void {
-    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?'];
-    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus];
+    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?', 'last_run_cause = ?'];
+    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus, update.lastRunCause];
     if (update.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(update.nextRunAt); }
     if (update.retryCount !== undefined) { sets.push('retry_count = ?'); values.push(update.retryCount); }
     sets.push("updated_at = datetime('now')");
