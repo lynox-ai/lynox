@@ -2750,12 +2750,13 @@ ${draftJson}
       // neither the host check nor the binding question covers them.
       // Worded in the language the person is asked in; `widens` does not depend on the wording.
       // A create on secrets that may already go to its addresses lists everything it may do instead,
-      // and is asked like a widening (`createsOnBoundSecrets`).
+      // and is asked like a widening (`createsOnBoundSecrets`): every line of that list widens, and
+      // it always has one, since a profile has a base_url.
       const listsAll = createsOnBoundSecrets(agent, prior, profile);
       const changes = listsAll ? grantListed(profile, agent.dialogLanguage ?? 'en') : securityChanges(prior, profile, agent.dialogLanguage ?? 'en');
       // Only a change that widens or moves something asks on its own; a save that only takes a
       // scope or a secret away narrows the profile. Every change is still listed when it asks.
-      const widens = listsAll || changes.some((c) => c.widens);
+      const widens = changes.some((c) => c.widens);
       // Two questions, one prompt, and the redirect half is asked even when the
       // host IS vetted. That is not thoroughness: it is what keeps the refusal
       // at connect time followable. If this only ran for non-vetted hosts, a
@@ -2970,9 +2971,11 @@ ${draftJson}
           return `Error: API profile "${savedId}" changed while the question was open (for example, another chat saved it or its token was renewed), so the answer no longer covers this save. Nothing was saved and no stored token was removed. Read the profile again; if the change is still wanted, save it again; if it still needs their acceptance, the user is asked again.`;
         }
         // A secret of this new profile was bound while its questions were open (another save's
-        // answer): none of them listed what this profile may do with it.
+        // answer): none of them listed what this profile may do with it. Two creates on one fresh
+        // secret whose questions overlap meet this too, and the second is saved again with the
+        // list: fail-closed on purpose, at the price of one more question.
         if (!listsAll && createsOnBoundSecrets(agent, prior, profile)) {
-          return `Error: API profile "${savedId}" was not saved: a secret it reads was allowed for another address while the question was open, so the answer did not cover everything this new profile may do with it. Nothing was saved. Save it again; the user is asked with the whole list.`;
+          return `Error: API profile "${savedId}" was not saved: a secret it reads was allowed by another save while the question was open, so the answer did not cover everything this new profile may do with it. Nothing was saved. Save it again; the user is asked with the whole list.`;
         }
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);

@@ -476,7 +476,7 @@ describe('W-Question: the owner is asked with what is stored, and only then does
     expect(sent.map((s) => s.auth)).toEqual([`Bearer ${vault['REPORT_KEY']!}`]);
   });
 
-  it('refuses the save, without asking, when what it would show holds a character nobody can see', async () => {
+  it('refuses the save, without asking where the name may go, when what it would show holds a character nobody can see', async () => {
     const store = boot(reports());
     confirm('ZW_KEY', ['https://zw​.example']);
     vault['ZW_KEY'] = value('zw');
@@ -489,6 +489,8 @@ describe('W-Question: the owner is asked with what is stored, and only then does
     // The save question lists the new profile's grant (the name is bound already); the question
     // where the name may go, which would show the invisible address, is not asked.
     expect(asked.some((q) => /to be sent there/.test(q))).toBe(false);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((q) => !/\p{Cf}/u.test(q))).toBe(true);
   });
 
   it('refuses the save when nobody can be asked', async () => {
@@ -820,7 +822,7 @@ describe('W-Recreate: a profile deleted and saved again under the same id is ask
     expect(one).not.toMatch(/^(Error|Blocked|Validation)/);
     expect(bindings()?.boundOf('SHARED_KEY')).toContain('https://shared.example');
     release('allow');
-    expect(await two).toBe('Error: API profile "two" was not saved: a secret it reads was allowed for another address while the question was open, so the answer did not cover everything this new profile may do with it. Nothing was saved. Save it again; the user is asked with the whole list.');
+    expect(await two).toBe('Error: API profile "two" was not saved: a secret it reads was allowed by another save while the question was open, so the answer did not cover everything this new profile may do with it. Nothing was saved. Save it again; the user is asked with the whole list.');
     expect(store.storedProfile('two')).toBeUndefined();
   });
 
