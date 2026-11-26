@@ -2520,7 +2520,9 @@ export class BulkLedger {
    *  sent to without a confirmed write of which a send got no clear answer (`unknown_sends`), so
    *  it is open whether the change reached the host. A target whose every send the host refused
    *  is in neither: the host said it changed nothing, and the head counts it as failed. The undo
-   *  still reads it (it takes back what {@link undoEligible} names) and finds it unchanged. */
+   *  still reads it (it takes back what {@link undoEligible} names) and finds it unchanged. One an
+   *  external run found holding its planned value after such a refusal is in neither as well,
+   *  but the head counts it as unchanged and the undo does not read it at all. */
   countUndoableParts(runId: string): { written: number; open: number } {
     const run = this.runRow(runId);
     if (!run) return { written: 0, open: 0 };
