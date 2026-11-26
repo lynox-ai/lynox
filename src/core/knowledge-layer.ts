@@ -1666,15 +1666,6 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     return this.subjectGraphEnabled && this.subjectStore === null;
   }
 
-  /**
-   * Whether this layer reads the subject graph (engine.db). Fixed at boot: a config reload that
-   * turns the switch later does not rebuild the layer, so a reader asking which database the
-   * graph came from asks here, not the current config.
-   */
-  get readsSubjectGraph(): boolean {
-    return this.subjectGraphEnabled;
-  }
-
   private _readFallbacks = 0;
 
   private _logReadFallback(method: string, err: unknown): void {

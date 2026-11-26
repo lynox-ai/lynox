@@ -11,6 +11,7 @@ import { SecretStore } from '../core/secret-store.js';
 import { EngineDb } from '../core/engine-db.js';
 import { SubjectStore } from '../core/subject-store.js';
 import { KnowledgeStore } from '../core/knowledge-store.js';
+import Database from 'better-sqlite3';
 
 /**
  * The engine opens its stores at boot and goes on without each one whose open fails. The
@@ -257,10 +258,19 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       expect(legacy.knowledge_graph_may_be_incomplete, 'a text or mention in agent-memory.db is not in the block').toBe(true);
 
       h.engine().knowledgeLayer = stub(() => 0);
-      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('m-held', 'held text', 'knowledge', 'global', 'global')").run();
+      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active) VALUES ('m-held', 'held text', 'knowledge', 'global', 'global', 0)").run();
       const engineHeld = await h.exportBody();
-      expect(engineHeld.knowledge_graph_may_be_incomplete, 'a text in engine.db is not in the block').toBe(true);
+      expect(engineHeld.knowledge_graph_may_be_incomplete, 'a text in engine.db, even one no longer active, is not in the block').toBe(true);
       raw.prepare("DELETE FROM memories WHERE id = 'm-held'").run();
+
+      const getEngineDb = h.engine().getEngineDb;
+      h.engine().getEngineDb = () => null;
+      try {
+        const noEngineDb = await h.exportBody();
+        expect(noEngineDb.knowledge_graph_may_be_incomplete, 'without engine.db its texts cannot be counted').toBe(true);
+      } finally {
+        h.engine().getEngineDb = getEngineDb;
+      }
 
       h.engine().knowledgeLayer = stub(() => { throw new Error('count failed'); });
       const failed = await h.exportBody();
@@ -270,6 +280,22 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       raw.prepare("DELETE FROM memories WHERE id = 'm-held'").run();
       h.engine().knowledgeLayer = saved;
     }
+  }, 60_000);
+
+  it('counts the texts the real layer holds in agent-memory.db', async () => {
+    expect(h.engine().getKnowledgeLayer(), 'fixture: the knowledge graph opened').not.toBeNull();
+    // A second connection on the layer's own file, as another writer would be.
+    const file = new Database(join(h.dir(), 'agent-memory.db'));
+    try {
+      file.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, embedding, created_at, updated_at) VALUES ('m-legacy', 'held text', 'knowledge', 'global', 'global', x'00', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')").run();
+      const held = await h.exportBody();
+      expect(held.knowledge_graph_may_be_incomplete, 'a text the layer holds is not in the block').toBe(true);
+    } finally {
+      file.prepare("DELETE FROM memories WHERE id = 'm-legacy'").run();
+      file.close();
+    }
+    const after = await h.exportBody();
+    expect(after.knowledge_graph_may_be_incomplete, 'with the text gone the block is whole again').toBe(false);
   }, 60_000);
 
   it('lists a secret written to the vault after boot by name, not by value', async () => {
@@ -556,7 +582,7 @@ describe('export after the boot set a corrupt history.db aside (real engine)', (
 describe('export after the boot set a corrupt engine.db aside (real engine)', () => {
   const h = harness((dir) => corrupt(dir, 'engine.db'), true);
 
-  it('names the set-aside file and marks durable knowledge incomplete, not the threads or the legacy knowledge graph', async () => {
+  it('names the set-aside file and marks durable knowledge and the knowledge graph incomplete, not the threads', async () => {
     const setAside = readdirSync(h.dir()).filter((f) => /^engine\.db\.corrupt-\d+$/.test(f));
     expect(setAside, 'fixture: the boot set engine.db aside').toHaveLength(1);
     expect(h.engine().getKnowledgeStore(), 'fixture: an empty knowledge store opened in its place').not.toBeNull();
@@ -566,7 +592,7 @@ describe('export after the boot set a corrupt engine.db aside (real engine)', ()
     expect(body.set_aside_databases).toEqual([{ database: 'engine.db', files: setAside }]);
     expect(body.durable_knowledge.may_be_incomplete, 'the old entries are in the set-aside file').toBe(true);
     expect(body.threads_may_be_incomplete, 'history.db was not set aside').toBe(false);
-    expect(body.knowledge_graph_may_be_incomplete, 'with the subject graph off the graph is not read from engine.db').toBe(false);
+    expect(body.knowledge_graph_may_be_incomplete, 'the set-aside file holds remembered texts, which the block does not carry').toBe(true);
   }, 60_000);
 
   it.skipIf(IS_ROOT)('marks every block of every database when the data directory cannot be listed', async () => {
