@@ -49,7 +49,7 @@ import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 export { INPUT_DEMUXERS } from '../../core/ffmpeg-input.js';
 
 // ── Resource bounds (safe-by-construction ceilings) ──────────────────────────
-const FFMPEG_TIMEOUT_MS = 60_000;               // hard wall-clock kill
+export const FFMPEG_TIMEOUT_MS = 60_000;               // hard wall-clock kill
 const MAX_OUTPUT_DURATION_S = 600;              // always-applied `-t` ceiling
 const MAX_START_S = 86_400;                     // start-offset sanity ceiling (24h)
 const MAX_INPUT_BYTES = 100 * 1024 * 1024;      // reject oversized inputs up front

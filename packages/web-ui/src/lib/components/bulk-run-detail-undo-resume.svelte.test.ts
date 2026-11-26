@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
-import type { BulkRunDetailData } from './bulk-runs.js';
+import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // A halted undo is continued in its own words: it takes targets back, so its page does not say
 // that what is written stays, nor offer to write on (U-335). A halted write keeps its words.
@@ -56,7 +56,14 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer });
-		if (/\/targets\?/.test(u)) return reply({ targets: [] });
+		// Every target of the run, the first one marked with its failure: a run halted on its
+		// failures is loaded whole, and the step to check them stands only where one is marked.
+		if (/\/targets\?/.test(u)) {
+			return reply({ targets: Array.from({ length: run.total }, (_, seq): BulkTarget => ({
+				seq, key: `https://demo.myshopify.com/products/${String(seq)}`, change: 'update', error: seq === 0 ? 'write_failed' : null, deselected: false,
+				diff: seq === 0 ? { kind: 'none' } : { kind: 'fields', fields: [{ field: 'price', before: '12.00', after: '15' }] },
+			})) });
+		}
 		return reply(run);
 	}));
 });
@@ -110,10 +117,17 @@ describe('a halted undo continues in its own words', () => {
 		expect(await render({ applied: 0, resumeTries: 1 })).toContain(t('bulk.resume.kept_undo_none_capped'));
 	});
 
-	it('says what continuing lets fail with "continuing"', async () => {
+	it('says the undo window first and what may fail then right behind it, with the undo\'s word', async () => {
 		const text = await render({ haltKey: 'failureRate', failureLimit: 0 });
-		expect(text).toContain(t('bulk.resume.allows_again_zero_undo'));
+		expect(text).toContain(`${t('bulk.resume.window_undo')} ${t('bulk.resume.allows_again_zero_undo')}`);
 		expect(text).not.toContain(t('bulk.resume.allows_again_zero'));
+		// The window sentence carries the verb; no failure sentence says it a second time, in either language.
+		const undoAllows = ['allows_again', 'allows_again_few', 'allows_again_one', 'allows_again_zero', 'allows_only_consecutive', 'allows_no_failure_stop', 'allows_no_failure_stop_one'];
+		for (const lang of ['de', 'en'] as const) {
+			setLocale(lang);
+			for (const k of undoAllows) expect(t(`bulk.resume.${k}_undo`), `${lang} ${k}_undo`).not.toMatch(/fortsetz|fortf|weiterschreib|continu|resum|go on|writing on/i);
+		}
+		setLocale('de');
 	});
 
 	// One word on the whole page: the halt and the step before continuing say "undo" too.
@@ -182,6 +196,27 @@ describe('a halted undo continuing would not help', () => {
 		expect(buttonByText(t('bulk.resume.none_undo_link'))).toBeUndefined();
 	});
 
+	// U-232: a store's pass refused a request as it is formed. An undo has nothing to take out and
+	// starts again from its run's page; a write takes it out and plans anew. Each says what stays.
+	it('says, under the way on, what stays after a pass refused a request: taken back for an undo, written for a write', async () => {
+		const kept = (): string | undefined => target.querySelector('[data-testid="bulk-resume-kept"]')?.textContent ?? undefined;
+		await render({ haltKey: 'storeRequestRefused' });
+		expect(none()).toBe(sentence('bulk.resume.none_undo'));
+		expect(kept()).toBe(t('bulk.halt.storeRequestRefused_kept_undo'));
+		expect(target.textContent).not.toContain(t('bulk.halt.storeRequestRefused_before'));
+		unmount(component!);
+		component = undefined;
+		await render({ kind: 'apply', sourceRunId: null, haltKey: 'storeRequestRefused' });
+		expect(none()).toBe(t('bulk.resume.none'));
+		expect(kept()).toBe(t('bulk.halt.storeRequestRefused_kept'));
+		expect(target.textContent).toContain(t('bulk.halt.storeRequestRefused_before'));
+		unmount(component!);
+		component = undefined;
+		// Another halt no writing on gets past says nothing of what stays.
+		await render({ kind: 'apply', sourceRunId: null, haltKey: 'contract' });
+		expect(kept()).toBeUndefined();
+	});
+
 	it('control: a halted write still says to plan it again in a chat', async () => {
 		await render({ kind: 'apply', sourceRunId: null, haltKey: 'consentOutdated' });
 		expect(none()).toBe(t('bulk.resume.none'));
@@ -211,6 +246,7 @@ describe('a halted undo names its halt as taking back', () => {
 		['a connection that does not cover the field, nothing undone', { haltKey: 'consentOutdated', applied: 0, consentFields: ['seo_title'] }, () => tf('bulk.halt.consentOutdated_undo', consent), () => tf('bulk.halt.consentOutdated', consent)],
 		['a connection that does not cover the field, some undone', { haltKey: 'consentOutdated', consentFields: ['seo_title'] }, () => tf('bulk.halt.consentOutdated_more_undo', consent), () => tf('bulk.halt.consentOutdated_more', consent)],
 		['a discarded undo', { phase: 'aborted', haltKey: 'discarded' }, () => t('bulk.halt.discarded_undo'), () => t('bulk.halt.discarded')],
+		['a request the store\'s pass refused', { haltKey: 'storeRequestRefused' }, () => t('bulk.halt.storeRequestRefused_undo'), () => t('bulk.halt.storeRequestRefused')],
 	];
 	for (const [name, o, undo, write] of undoCases) {
 		it(`words ${name} in undo words, and a write in its own`, async () => {
@@ -258,5 +294,68 @@ describe('a halted undo names its halt as taking back', () => {
 		component = undefined;
 		expect(await render({ phase: 'aborted', haltKey: 'atomicTimeRolledBack', atomic: true, sourceRunId: null })).toContain(sentence);
 		expect(buttonByText(t('bulk.resume.none_undo_link'))).toBeUndefined();
+	});
+});
+
+describe('an undo with a send left unclear', () => {
+	const box = (): string => target.querySelector('[data-testid="bulk-sent-unknown"]')?.textContent ?? '';
+
+	it('says to start the undo again from the page of the run it undoes, linked, never to plan it in a chat', async () => {
+		await render({ phase: 'done', haltKey: null, haltReason: null, sentUnknown: 1 });
+		const sentence = t('bulk.sent_unknown.one_undo').replace('{link}', t('bulk.resume.none_undo_link'));
+		expect(box()).toBe(sentence);
+		expect(box()).not.toMatch(/Chat/);
+		[...target.querySelectorAll<HTMLButtonElement>('[data-testid="bulk-sent-unknown"] button')].find((b) => b.textContent === t('bulk.resume.none_undo_link'))!.click();
+		expect(opened).toEqual(['src1']);
+	});
+
+	it('counts several unclear sends in the same words, on a halted undo too', async () => {
+		await render({ sentUnknown: 3, haltKey: 'unavailable', haltReason: 'engine English' });
+		expect(box()).toBe(tf('bulk.sent_unknown.many_undo', { count: '3', link: t('bulk.resume.none_undo_link') }));
+		expect(box()).toContain('Bei 3 Zielen');
+		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')?.textContent).toBe(t('bulk.resume.none_undo_link'));
+	});
+
+	it('says, while the undo still runs, only that the way on follows once it stops, with no link', async () => {
+		await render({ phase: 'writing', haltKey: null, haltReason: null, sentUnknown: 1 });
+		expect(box()).toBe(t('bulk.sent_unknown.one_undo_running'));
+		expect(box()).not.toContain(t('bulk.resume.none_undo_link'));
+		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')).toBeNull();
+	});
+
+	it('tells a mandate, while the undo still runs, the same as the owner, with no link', async () => {
+		viewer = 'mandate';
+		await render({ phase: 'writing', haltKey: null, haltReason: null, sentUnknown: 1 });
+		// The page reads this session as a mandate's.
+		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
+		expect(box()).toBe(t('bulk.sent_unknown.one_undo_running'));
+		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')).toBeNull();
+	});
+
+	it('tells a mandate that only the owner starts the undo again, linked to the run it undoes', async () => {
+		viewer = 'mandate';
+		await render({ phase: 'done', haltKey: null, haltReason: null, sentUnknown: 1 });
+		expect(box()).toBe(t('bulk.sent_unknown.one_undo_mandate').replace('{link}', t('bulk.resume.none_undo_link')));
+		expect(box()).not.toContain('Starte die Rücknahme neu');
+		[...target.querySelectorAll<HTMLButtonElement>('[data-testid="bulk-sent-unknown"] button')].find((b) => b.textContent === t('bulk.resume.none_undo_link'))!.click();
+		expect(opened).toEqual(['src1']);
+	});
+
+	it('says the same without a link where the undo names no run', async () => {
+		await render({ phase: 'done', haltKey: null, haltReason: null, sentUnknown: 1, sourceRunId: null });
+		expect(box()).toBe(t('bulk.sent_unknown.one_undo').replace('{link}', t('bulk.resume.none_undo_link')));
+		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')).toBeNull();
+	});
+
+	it('control: a write with a send left unclear still says to plan it again in a chat', async () => {
+		await render({ kind: 'apply', sourceRunId: null, phase: 'done', haltKey: null, haltReason: null, sentUnknown: 1 });
+		expect(box()).toBe(t('bulk.sent_unknown.one'));
+		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')).toBeNull();
+	});
+
+	it('reads in English as approved', async () => {
+		setLocale('en');
+		await render({ phase: 'done', haltKey: null, haltReason: null, sentUnknown: 1 });
+		expect(box()).toBe('For one target it is unclear whether the undo reached the provider. The send got no clear answer, and lynox does not send it again, or it could arrive twice. Start the undo again from the page of the bulk run it undoes: lynox then reads each target first and sends only where the run\'s change is still there.');
 	});
 });

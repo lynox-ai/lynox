@@ -1006,7 +1006,10 @@ export class Session {
         const runId = randomUUID();
         // Relative to the workspace the files live in, not to the process: in the image the
         // process runs in /app and every workspace path would start with `../`.
-        runChangeset = workspaceChangeset(runId);
+        // Who made this review and whether this run's client shows it travel with the manager:
+        // the principal set above is this run's, and a later run that fails before it gets
+        // here must not change who may answer this one.
+        runChangeset = workspaceChangeset(runId, { createdBy: principalTag(this._principal), shownForReview: this._runShowsReview });
         this._changesetManager = runChangeset;
         this._recreateAgent();
       } else {
@@ -2739,7 +2742,8 @@ export class Session {
     this._createAgent();
     this.loadMessages(messages);
     if (tainted) this.agent?.restoreConversationTaint();
-    // Likewise a search the provider ran, whose blocks the context window may have dropped.
+    // Likewise a server tool the provider ran (its web search), whose blocks the context window
+    // may have dropped.
     if (searched) this.agent?.restoreProviderSearch();
   }
 
@@ -2999,6 +3003,7 @@ export class Session {
       // the reason the plain read replaced a conditional spread that was doing nothing.
       abortScope: this.agent?.abortScope,
       name: 'lynox',
+      language: this.engine.config.language,
       model,
       // A background slot on another endpoint pins the pair the same way a profile does.
       modelPinnedByProfile: this._profileOverride !== null || (this._backgroundSlot !== null && slotCfg.crossProviderSlot),

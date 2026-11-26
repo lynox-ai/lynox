@@ -57,12 +57,12 @@ beforeEach(() => {
 		if (u.endsWith('/bulk/runs')) return reply({ runs: listRuns });
 		if (u.endsWith('/merges')) return reply({ merges: [] });
 		// The run's targets, page by page: a run whose rollback left targets loads them whole.
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
 		if (page) {
 			const all: BulkTarget[] = Array.from({ length: run.total }, (_, i) => ({
 				seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false,
 			}));
-			return reply({ targets: all.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+			return reply({ targets: (page[3] ? all.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : all).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		}
 		return reply(run);
 	}));

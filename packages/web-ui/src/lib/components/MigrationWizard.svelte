@@ -7,6 +7,7 @@
 		startMigration,
 		cancelMigration,
 		reset,
+		backToInputs,
 		getStep,
 		getPreview,
 		getLoading,
@@ -19,11 +20,15 @@
 		getRetry,
 		getErrorAt,
 		getErrorStep,
-		getErrorFromEngine,
+		getErrorCode,
+		getErrorParams,
+		getErrorReason,
+		getErrorNotStarted,
 		MIGRATION_HOLD_MS,
 	} from '../stores/migration.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { migrationWorkspaceNotice, skippedNextKey, visibleSkippedPath } from '../backup-coverage.js';
+	import { migrationErrorView } from '../migration-error-text.js';
 
 	const step = $derived(getStep());
 	const preview = $derived(getPreview());
@@ -39,7 +44,9 @@
 	const skippedNext = $derived(skippedNextKey(skipped.length));
 	const targetUrl = $derived(getTargetUrl());
 	const retry = $derived(getRetry());
-	const errorFromEngine = $derived(getErrorFromEngine());
+	// The error's sentence in the UI's language, from its code, with the values set apart in boxes.
+	const errorView = $derived(migrationErrorView(getErrorCode(), getErrorParams(), getErrorReason(), retry));
+	const errorNotStarted = $derived(getErrorNotStarted());
 	// With `later` the target may hold its session for 30 minutes from the error; the retry opens then,
 	// without a reload.
 	const retryFrom = $derived(getErrorAt() + MIGRATION_HOLD_MS);
@@ -343,20 +350,29 @@
 	{#if step === 'error'}
 		<div class="rounded-[var(--radius-md)] border border-danger/30 bg-danger/5">
 			<div class="px-4 py-6 text-center space-y-3">
-				<p data-testid="migration-error-title" class="text-sm font-medium text-danger">{t('migration.error_title')}</p>
-				<!-- The engine's sentence (with the target's own words) is English: marked so for a screen reader. -->
-				<p data-testid="migration-error-detail" class="break-words text-xs text-text-muted" lang={errorFromEngine ? 'en' : undefined}>{error}</p>
+				<p data-testid="migration-error-title" class="text-sm font-medium text-danger">{t(errorNotStarted ? 'migration.error_title_not_started' : 'migration.error_title')}</p>
+				<!-- lynox's own sentence in the UI's language. A value in it (a variable name, a path, a folder)
+				     is set apart in its own isolated element, as text, never as markup; it wraps as a whole and
+				     breaks inside only when it is longer than a line. An example address stays on one line. -->
+				<p data-testid="migration-error-detail" class="break-words text-xs text-text-muted">{#each errorView.segments as segment, i (i)}{#if 'value' in segment}<bdi data-foreign-value class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono [overflow-wrap:anywhere]">{segment.value}</bdi>{:else if 'nowrap' in segment}<span class="whitespace-nowrap">{segment.nowrap}</span>{:else}{segment.text}{/if}{/each}</p>
+				{#if errorView.box}
+					<!-- Someone else's words (the target's, or this instance's error text): unchanged, in their own
+					     isolated element with a border, as a value rather than a sentence. They are English. -->
+					<p data-testid="migration-error-reason" class="break-words text-xs text-text-muted">{errorView.box.label} <bdi data-foreign-value lang="en" class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono [overflow-wrap:anywhere]">{errorView.box.value}</bdi></p>
+				{/if}
 				{#if retry === 'check'}
 					<p data-testid="migration-check-target" class="text-xs text-warning">{t('migration.check_target_first')}</p>
 				{:else if held}
 					<p data-testid="migration-retry-from" class="text-xs text-text-muted">{tf('migration.retry_from', { time: retryFromText })}</p>
 				{/if}
 				<div class="flex items-center justify-center gap-3">
+					<!-- Where a retry would change nothing, back leads to the inputs, as they were. -->
 					<button
+						data-testid="migration-back"
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-xs text-text-muted hover:text-text transition-colors"
-						onclick={reset}
+						onclick={retry === 'none' ? backToInputs : reset}
 					>{t('migration.back')}</button>
-					{#if retry !== 'check'}
+					{#if retry !== 'check' && retry !== 'none'}
 						<button
 							data-testid="migration-retry"
 							class="rounded-[var(--radius-sm)] border border-accent/50 bg-accent/15 px-3 py-1.5 text-xs text-accent-text hover:bg-accent/25 disabled:opacity-30 transition-all"

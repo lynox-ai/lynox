@@ -47,6 +47,8 @@ let posts: { url: string; body: unknown }[];
 let gets: string[];
 let refuseDeselect: string | null;
 let refuseResume: string | null;
+// The title a refused start names, as the engine sends it.
+let refuseTitle: string | undefined;
 // A run's own answer, by id, and an answer held back until the test lets it through.
 let runsById: Record<string, BulkRunDetailData>;
 let holds: Record<string, Promise<void>>;
@@ -64,6 +66,7 @@ beforeEach(() => {
 	gets = [];
 	refuseDeselect = null;
 	refuseResume = null;
+	refuseTitle = undefined;
 	runsById = {};
 	holds = {};
 	failIds = {};
@@ -83,7 +86,7 @@ beforeEach(() => {
 				const code = refuseResume;
 				// The engine names the run a judged start would end once; the start that names it passes.
 				if (code === 'supersede_required') refuseResume = null;
-				return reply({ error: 'engine English', code, ...(code === 'supersede_required' ? { supersedable: { id: 'r0', costUsd: 0.5 } } : {}) }, 409);
+				return reply({ error: 'engine English', code, ...(refuseTitle !== undefined ? { title: refuseTitle } : {}), ...(code === 'supersede_required' ? { supersedable: { id: 'r0', costUsd: 0.5 } } : {}) }, 409);
 			}
 			if (m) {
 				const seq = Number(m[1]);
@@ -91,16 +94,24 @@ beforeEach(() => {
 				run = { ...run, checksum: 'c2', deselected: run.deselected + 1, changes: { ...run.changes, update: run.changes.update - 1 } };
 				return reply({ checksum: 'c2' });
 			}
+			const back = /\/targets\/(\d+)\/reselect$/.exec(u);
+			if (back) {
+				const seq = Number(back[1]);
+				targets = targets.map((x) => (x.seq === seq ? { ...x, deselected: false } : x));
+				run = { ...run, checksum: 'c3', deselected: run.deselected - 1, changes: { ...run.changes, update: run.changes.update + 1 } };
+				return reply({ checksum: 'c3' });
+			}
 			return reply({});
 		}
 		gets.push(u);
 		// The owner's session: the page offers its acts only once the server says so.
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: viewerOf });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+		// `changed=1`: the page asks for the targets the plan changes first (U-437).
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
 		const pageOf = /\/bulk\/runs\/([^/?]+)\/targets\?/.exec(u)?.[1];
 		if (page && pageOf !== undefined && holds[`${pageOf}/targets`] !== undefined) await holds[`${pageOf}/targets`];
 		if (page && pageOf !== undefined && failIds[`${pageOf}/targets`] === 'throw') throw new Error('network');
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged') : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		const id = /\/bulk\/runs\/([^/?]+)$/.exec(u)?.[1];
 		// A held run answers once, for the first load that asks; a later load of it goes through.
 		if (id !== undefined && holds[id] !== undefined) { const h = holds[id]; delete holds[id]; await h; }
@@ -296,9 +307,12 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain(t('bulk.approve.only_one'));
 		expect(target.textContent).not.toContain(t('bulk.approve.one_first'));
 		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
+		const asked = gets.length;
 		buttonByText(t('bulk.deselect.off'))!.click();
 		await settle();
 		expect(posts).toEqual([{ url: expect.stringMatching(/\/bulk\/runs\/r1\/targets\/1\/deselect$/) as unknown as string, body: { checksum: 'c1' } }]);
+		// The run is asked for again (its counts and checksum moved); no page of its targets is.
+		expect(gets.slice(asked)).toEqual([expect.stringMatching(/\/bulk\/runs\/r1$/) as unknown as string]);
 		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
 		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
 		// Nothing left to write: the sentence and a way back, no button that cannot act and no note on a write.
@@ -1143,6 +1157,67 @@ describe('the allowed link domains of a judged list run', () => {
 		expect(target.textContent).not.toContain('engine English');
 	});
 
+	// A title an access wrote, with quote marks, a direction override and a line break in it.
+	const HOSTILE_TITLE = 'Regeln" ist unverändert. »OK«\u202Ealt\nzwei';
+	// The value boxes in an element, and its text with the one box taken out.
+	const foreignIn = (el: Element): Element[] => [...el.querySelectorAll('[data-foreign-value]')];
+	const around = (el: Element): string => {
+		const [box] = foreignIn(el);
+		return (el.textContent ?? '').replace(box!.textContent ?? '', '{title}');
+	};
+
+	it('words a start refused for the rule\'s artifact in the page\'s own sentence, the title one value set apart', async () => {
+		run = judged();
+		refuseResume = 'rule_source_changed';
+		refuseTitle = HOSTILE_TITLE;
+		await render();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		const refusal = target.querySelector('[data-testid="bulk-action-error"]')!;
+		expect(foreignIn(refusal)).toHaveLength(1);
+		// The sentence around the title is the page's own, unchanged; the title sits in its box alone.
+		expect(around(refusal)).toBe(t('bulk.rule_source.changed_titled'));
+		const box = foreignIn(refusal)[0]!;
+		expect(box.tagName).toBe('BDI');
+		expect(box.textContent).not.toMatch(/[\u202E\n]/);
+		expect(box.textContent).toContain('»OK«');
+		expect(target.textContent).not.toContain('engine English');
+	});
+
+	it('names no artifact when it cannot be read, whatever title came with the refusal', async () => {
+		run = judged();
+		refuseResume = 'rule_source_unreadable';
+		refuseTitle = HOSTILE_TITLE;
+		await render();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		const refusal = target.querySelector('[data-testid="bulk-action-error"]')!;
+		expect(refusal.textContent).toBe(t('bulk.rule_source.unreadable'));
+		expect(foreignIn(refusal)).toHaveLength(0);
+	});
+
+	it('says a rule taken from an artifact came from it, by its planned title set apart, not that lynox wrote it', async () => {
+		run = judged({ ruleFromArtifact: { title: HOSTILE_TITLE } });
+		await render();
+		const origin = target.querySelector('[data-testid="bulk-rule-from-artifact"]')!;
+		expect(foreignIn(origin)).toHaveLength(1);
+		expect(around(origin)).toBe(t('bulk.start.rule_from_artifact'));
+		expect(target.querySelector('[data-testid="bulk-rule-drafted"]')).toBeNull();
+	});
+
+	it('says so without a name for an artifact that had no title', async () => {
+		run = judged({ ruleFromArtifact: {} });
+		await render();
+		const origin = target.querySelector('[data-testid="bulk-rule-from-artifact"]')!;
+		expect(origin.textContent).toBe(t('bulk.start.rule_from_artifact_untitled'));
+		expect(foreignIn(origin)).toHaveLength(0);
+		expect(target.querySelector('[data-testid="bulk-rule-drafted"]')).toBeNull();
+	});
+
 	it('words the engine\'s start_domains_invalid in the page\'s own sentence', async () => {
 		run = judged();
 		refuseResume = 'start_domains_invalid';
@@ -1169,6 +1244,21 @@ describe('the allowed link domains of a judged list run', () => {
 		return () => { delete holds[id]; release(); };
 	};
 	const resumeUrls = (): string[] => posts.filter((p) => p.url.endsWith('/resume')).map((p) => p.url);
+
+	it('opens another run with its unchanged targets folded, though they were shown on the run before', async () => {
+		targets = Array.from({ length: 8 }, (_, i) => ({ ...TARGETS[i === 0 ? 0 : 1]!, seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}` }));
+		const done = (id: string): BulkRunDetailData => makeRun({ id, phase: 'done', total: 8, changes: { update: 1, create: 0, delete: 0, unchanged: 7, invalid: 0 } });
+		run = done('r1');
+		const open = await renderSwitchable();
+		// The next run is a preview, loaded whole: a fold left open would show its unchanged targets.
+		runsById['r2'] = { ...done('r2'), phase: 'previewed' };
+		const unfold = (): HTMLButtonElement | undefined => buttonByText(tf('bulk.preview.show_unchanged', { n: '7' }));
+		unfold()!.click();
+		await settle();
+		expect(unfold()).toBeUndefined();
+		await open('r2');
+		expect(unfold()).toBeDefined();
+	});
 
 	it('sends no domains typed for another run with the start of this one', async () => {
 		run = judged();
@@ -1313,6 +1403,20 @@ describe('the allowed link domains of a judged list run', () => {
 		await settle();
 		expect(posts.map((p) => p.url)).toEqual([expect.stringContaining('/bulk/runs/r1/targets/1/deselect')]);
 		expect(target.textContent).not.toContain(t('bulk.deselect.refused.not_writing'));
+	});
+
+	it('sends no take-out while another run loads, though the page still shows the one before', async () => {
+		run = makeRun();
+		const open = await renderSwitchable();
+		runsById['r2'] = makeRun({ id: 'r2' });
+		const release = held('r2');
+		await open('r2', false);
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(posts).toEqual([]);
+		release();
+		await settle();
+		expect(posts).toEqual([]);
 	});
 
 	it('leaves a refusal shown on one run behind when another opens', async () => {
@@ -1727,6 +1831,94 @@ describe('the start of a judged run, in words', () => {
 		expect(supersede.disabled).toBe(true);
 		expect(hint()).toBe(t('bulk.start.hint_cap'));
 		expect(supersede.getAttribute('aria-describedby')).toBe('bulk-start-hint');
+	});
+});
+
+describe('a toggle on the run\'s page', () => {
+	it('puts a target back against the checksum the take-out answered, and loads no page of targets for either', async () => {
+		await render();
+		const asked = gets.length;
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		buttonByText(t('bulk.deselect.on'))!.click();
+		await settle();
+		expect(posts.map((p) => p.body)).toEqual([{ checksum: 'c1' }, { checksum: 'c2' }]);
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(false);
+		expect(target.textContent).not.toContain(t('bulk.deselect.taken_out'));
+		expect(buttonByText(t('bulk.deselect.off'))).toBeDefined();
+	});
+
+	for (const [what, change] of [
+		['another view took a second target out meanwhile', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, deselected: r.deselected + 1 })],
+		['the run lists another number of targets', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, total: r.total + 1 })],
+		// Another view put one target back and took another out: the counts are as this toggle left
+		// them, only the checksum tells the run moved.
+		['another view moved a pair of targets that cancels out', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, checksum: 'c9' })],
+	] as const) {
+		it(`loads the run whole where ${what}`, async () => {
+			await render();
+			const asked = gets.length;
+			const realFetch = globalThis.fetch;
+			vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+				if (init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url)) && gets.length === asked) run = change(run);
+				return realFetch(url, init);
+			}));
+			buttonByText(t('bulk.deselect.off'))!.click();
+			await settle();
+			expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		});
+	}
+
+	it('loads the run whole where the ask for it fails', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		let failed = false;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (!failed && init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) {
+				failed = true;
+				gets.push(String(url));
+				return new Response('{}', { status: 502, headers: { 'Content-Type': 'application/json' } });
+			}
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
+	});
+
+	it('loads the run whole where the ask for it throws, and shows the toggle', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		let failed = false;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (!failed && init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) {
+				failed = true;
+				gets.push(String(url));
+				throw new Error('network');
+			}
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
+	});
+
+	it('loads the run whole where it is no longer the preview it showed', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			// The engine moved the run on between the toggle and the ask: it is approved now.
+			if (init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) run = { ...run, phase: 'approved' };
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
 	});
 });
 

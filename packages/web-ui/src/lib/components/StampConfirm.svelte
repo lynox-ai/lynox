@@ -9,6 +9,9 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
 	import MarkedLine from './MarkedLine.svelte';
+	import WatchAddress from './WatchAddress.svelte';
+	import WholeValue from './WholeValue.svelte';
+	import { setApart } from '../utils/plan-takeover.js';
 	import { confirmable, connectionsParts, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
@@ -127,7 +130,8 @@
 		{@const as = shownAs(preview)}
 		{#if as === 'workflow'}
 			<div data-stamp-workflow>
-				<span class="font-medium">{t('stamp.workflow')}:</span> {markHidden(preview.workflow?.name ?? s.pipeline_id ?? '')}
+				<!-- The workflow's name is someone else's value: set apart, marked as `hiddenIn` checks it. -->
+				<span class="font-medium">{t('stamp.workflow')}:</span> <MarkedLine text={setApart(markHidden(preview.workflow?.name ?? s.pipeline_id ?? ''))} />
 				{#if paramsOf(s.pipeline_params).length > 0}
 					<p class="mt-0.5"><span class="font-medium">{t('stamp.params')}:</span> {paramsOf(s.pipeline_params).join(' · ')}</p>
 				{/if}
@@ -137,12 +141,12 @@
 				<span class="font-medium">{t('triggers.watch_url')}:</span>
 				{#if storedUrl !== null}
 					<div class="mt-0.5 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">
-						<p class="font-medium text-text break-all" data-stamp-watch-host>{watch.host}</p>
+						<p data-stamp-watch-host><WholeValue value={watch.host} kind="url" class="font-medium text-text" testid="stamp-watch-host" /></p>
 						<p class="mt-0.5 text-warning" data-stamp-watch-stored-hint>{t('stamp.watch_stored')}</p>
 						<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere]" data-stamp-watch-stored>{storedUrl}</p>
 					</div>
 				{:else}
-					<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watch.host}</span>{watch.rest}</p>
+					<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><WatchAddress host={watch.host} rest={watch.rest} testid="stamp-watch-address" /></p>
 				{/if}
 				{#if watch.intervalMinutes}<p class="mt-0.5">{tf('triggers.watch_every', { minutes: String(watch.intervalMinutes) })}</p>{/if}
 				{#if selector}<p class="mt-0.5"><span class="font-medium">{t('stamp.watch_selector')}:</span> {selector}</p>{/if}

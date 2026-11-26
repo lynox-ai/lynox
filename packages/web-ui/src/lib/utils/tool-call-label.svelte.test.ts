@@ -8,8 +8,8 @@ describe('toolCallLabel with the real translator', () => {
   afterEach(() => setLocale(before));
 
   it.each([
-    ['de', 'API-Profile'],
-    ['en', 'API profiles'],
+    ['de', 'API-Verbindungen'],
+    ['en', 'API connections'],
   ] as const)('labels api_setup in %s as %s', (locale, label) => {
     setLocale(locale);
     const out = toolCallLabel('api_setup', { action: 'view', id: 'bexio' }, t);

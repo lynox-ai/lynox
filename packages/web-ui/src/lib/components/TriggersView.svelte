@@ -8,14 +8,20 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
+	import WatchAddress from './WatchAddress.svelte';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
-	import { endedNotices, pausedTitleLine, planTitle, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { endedNotices, pausedTitleLine, pausedWhoText, planTitle, refusalText, takeoverLines, writtenByMember, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
+	import { blockedReasonParts, holdsNextRun, hostLabels, type BlockedReason } from '../utils/blocked-reason.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
 	import MarkedLine from './MarkedLine.svelte';
+	import { FoldGroup } from '../utils/fold-group.svelte.js';
 	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { approvalSetupKind, approvalSetupName, type ApprovalSetupLine } from './approvals.js';
+	import { visibleText } from '../visible-text.js';
+	import { monthDay } from '../utils/cron-human.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -46,6 +52,11 @@
 		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
 		created_by?: string;
 		edited_by?: string;
+		// The same, as the lines shown under the title: a helper that set it up or changed it
+		// last, named as the session may read it — by name, or to a helper another helper's mark
+		// as "another person with delegated access" (`GET /api/triggers`). Only the marks on the trigger itself, not on the workflow it
+		// runs. Empty for the owner's own.
+		setup?: ApprovalSetupLine[];
 		// The last mandate that changed the trigger, kept after the owner changes it again.
 		mandate_editor?: string;
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
@@ -71,6 +82,9 @@
 		// The workflow's name, where the plan's title is that name as the engine wrote it
 		// (`GET /api/triggers`): the list puts lynox's words before it (`planTitle`).
 		title_workflow?: string;
+		// Why its run does not do its work, as a cause the view says in its own language
+		// (`GET /api/triggers`; a watch the instance's network_policy keeps from its page, U-392).
+		blocked_reason?: BlockedReason;
 		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
 		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
 		recipients_unconfirmed?: boolean;
@@ -249,7 +263,7 @@
 				// to answer it — a sentence they never saw while this branch showed one
 				// fixed string and never read the body.
 				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
-				const who = trigger.paused_who?.join(', ') ?? '';
+				const who = pausedWhoText(trigger.paused_who);
 				addToast(code === 'awaiting_answer' ? t('triggers.run_awaiting_answer')
 					: code === 'paused' ? (who !== '' ? tf('triggers.run_paused', { who }) : t('triggers.run_paused_anon'))
 					: t('triggers.run_already'), 'info');
@@ -335,6 +349,8 @@
 
 	let takeoverFor = $state<Trigger | null>(null);
 	let takeoverPreview = $state<TakeoverPreview | null>(null);
+	// The lists of plans the open preview has unfolded: a new preview starts folded.
+	const takeoverFolds = $derived(takeoverPreview === null ? undefined : new FoldGroup());
 	// A line above the preview: why it was fetched again, or why the takeover was refused.
 	let takeoverNote = $state('');
 	let takeoverBusy = $state(false);
@@ -511,7 +527,7 @@
 		const day = m[3];
 		const weekday = m[4];
 		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
-		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${local}`;
+		if (day !== '*') return tf('tasks.monthly_on_day', { day: monthDay(Number(day), getLocale()), time: local });
 		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${local}`;
 		return `${t('tasks.daily_at')} ${local}`;
 	}
@@ -620,9 +636,10 @@
 							<!-- Wrapping, so the badges move to their own line on a narrow card instead
 							     of squeezing the title: the badges are `shrink-0` and the title clamps. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-								<!-- A plan to take over: its title is someone else's value, as in the notice above (`pausedTitleLine`).
-								     A bulk run's trigger is named by its stage and host instead (`shownTitle`); it offers no takeover. -->
-								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{#if shownHost(trigger) !== null}{HOST_SEP}<BulkHost value={shownHost(trigger) ?? ''} testid="trigger-bulk-host" />{/if}{/if}</p>
+								<!-- A plan to take over, or, in the owner's view, one a person with access set up or changed:
+								     its title is someone else's value, as in the notice above (`pausedTitleLine`). A bulk run's trigger is named by its
+								     stage and host instead (`shownTitle`); it offers no takeover. -->
+								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if (pausedOpen(trigger) || (ownerActs && writtenByMember(trigger))) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{#if shownHost(trigger) !== null}{HOST_SEP}<BulkHost value={shownHost(trigger) ?? ''} testid="trigger-bulk-host" />{/if}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
@@ -637,9 +654,19 @@
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
 							</div>
+							<!-- Who set it up or changed it last, when that was a helper, worded as on an
+							     approval card (U-202). The owner's own trigger has none. -->
+							{#each trigger.setup ?? [] as line, i (i)}
+								<p class="mt-0.5 text-xs text-text-muted break-words" data-trigger-setup={line.kind}>{tf(`approvals.setup.${approvalSetupKind(line, viewer)}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
+							{/each}
+							<!-- A helper has no takeover button: who lets the plan run again is said here,
+							     visibly. A bulk run never reaches this pause (it has no helper's mark). -->
+							{#if viewer === 'mandate' && pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}
+								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-owner>{t('triggers.paused_owner_takes_over')}</p>
+							{/if}
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
-									<span class="flex items-center gap-1">
+									<span class="flex items-center gap-1" data-trigger-schedule>
 										<Icon name="clock" size="xs" />
 										{cronToHuman(trigger.schedule_cron)}
 									</span>
@@ -668,12 +695,22 @@
 									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
+							<!-- Why its run does not do its work, with the way out: a watch the policy keeps from its
+							     page, or the cause its last failed run stored. Only causes lynox itself knows, said in
+							     lynox's own sentences; the run's result text is never shown here. The host is set
+							     apart as a value, as the plan views set apart what someone else wrote. -->
+							{#if trigger.blocked_reason}
+								{@const parts = blockedReasonParts(trigger.blocked_reason, t)}
+								{#if parts.before !== '' || parts.host !== null}
+								<p class="mt-1 text-xs text-warning break-words" data-blocked-reason={trigger.blocked_reason.kind}>{parts.before}{#if parts.host !== null}<bdi data-foreign-value class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono">{#each hostLabels(parts.host) as label, i (i)}<span class="inline-block max-w-full [overflow-wrap:anywhere]">{label}</span><wbr />{/each}</bdi>{/if}{parts.after}</p>
+								{/if}
+							{/if}
 							<!-- A confirmed watch names its page too: its escalation leaves the address out when
 							     someone the owner let in set it up, and points here (PRD B6). -->
 							{#if showsWatchAddress(trigger) && !held(trigger)}
 								<p class="mt-1 break-words text-xs text-text-muted" data-trigger-watch>
 									<span class="font-medium">{t('triggers.watch_url')}:</span>
-									<span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}
+									<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="trigger-watch-address" />
 								</p>
 							{/if}
 							{#if held(trigger)}
@@ -702,7 +739,7 @@
 									{#if !ownerStamps(trigger) && showsWatchTarget(trigger)}
 										<div class="text-xs text-text-muted" data-consent-watch>
 											<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>
-											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>
+											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="consent-watch-address" /></p>
 											{#if watchOf(trigger)?.intervalMinutes}
 												<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>
 											{/if}
@@ -753,12 +790,20 @@
 								<button onclick={() => stopRun(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.stop_run')} title={t('triggers.stop_run')} class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 disabled:opacity-40" data-trigger-stop>■ {t('triggers.stop_run')}</button>
 							{/if}
 							<!-- Not offered while waiting: the engine refuses the run after the request
-							     has already been answered as started. Not at a completed paused plan
-							     either: it would be refused, and the refusal names no way out there. -->
-							{#if !held(trigger) && !pausedDone(trigger)}
+							     has already been answered as started. Not at a paused plan either: it
+							     would be refused, and the way out is the takeover, which the badge and
+							     the takeover button (or, to a helper, the line under the badge) say. -->
+							<!-- Nor where the policy keeps a watch from its page: the run would read nothing. A
+							     failed run's stored cause keeps it: the next run may read the page. -->
+							{#if !held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !holdsNextRun(trigger.blocked_reason)}
 								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
-							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
+							<!-- Not at a plan that waits for its takeover: next to its badge the switch
+							     read as a second pause, and a helper's is refused. After the takeover it
+							     comes back, and an own pause set before stays. -->
+							{#if !pausedOpen(trigger)}
+								<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} data-trigger-toggle class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
+							{/if}
 							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
 							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
 							{#if offersCheck(trigger)}
@@ -804,7 +849,7 @@
 			{#if takeoverPreview !== null}
 				<ul class="space-y-2 text-xs text-text-muted" data-takeover-lines>
 					{#each takeoverLines(takeoverPreview, dayOf) as line}
-						<li class="break-words" data-takeover-line={line.kind}><MarkedLine text={line.text} /></li>
+						<li class="break-words" data-takeover-line={line.kind}><MarkedLine text={line.text} group={takeoverFolds} /></li>
 					{/each}
 				</ul>
 			{:else if takeoverNote === ''}

@@ -34,6 +34,8 @@ import {
 } from '../provider.js';
 import { currentCallSignal } from '../../../core/call-connection.js';
 import { processErrorText } from '../../../core/error-egress.js';
+import { AUTOMATIC_MAIL_HEADERS, automaticMail } from '../automatic-mail.js';
+import { parseReferenceIds } from '../thread-key.js';
 
 // ── Credentials ────────────────────────────────────────────────────────────
 //
@@ -305,27 +307,13 @@ export function htmlToTextSnippet(html: string): string {
     .replace(/\n{3,}/g, '\n\n');
 }
 
-/**
- * Detect Auto-Submitted header indicating an automated message. Values other
- * than 'no' (the default per RFC 3834) signal auto-generation, so we must
- * never respond to prevent reply loops.
- */
-export function isAutoSubmittedHeader(rawHeader: string | undefined): boolean {
-  if (!rawHeader) return false;
-  const value = rawHeader.toLowerCase().trim();
-  if (value.length === 0) return false;
-  // RFC 3834: Auto-Submitted: no  →  this is NOT automated (a human sent it)
-  if (value.startsWith('no')) return false;
-  // Anything else (auto-generated, auto-replied, auto-notified, ...) is automated
-  return true;
-}
+export { isAutoSubmittedHeader, isAutoRepliedHeader } from '../automatic-mail.js';
 
-/** RFC 3834 `Auto-Submitted: auto-replied` — a reply sent automatically to a message, such as an
- *  out-of-office note. Narrower than {@link isAutoSubmittedHeader}. */
-export function isAutoRepliedHeader(rawHeader: string | undefined): boolean {
-  if (!rawHeader) return false;
-  return /^auto-replied\b/.test(rawHeader.toLowerCase().trim());
-}
+/** The headers fetched with every envelope: the automatic-mail marks, lower-cased for imapflow. */
+const AUTOMATIC_MAIL_FETCH_HEADERS = AUTOMATIC_MAIL_HEADERS.map((h) => h.toLowerCase());
+// What the watcher's list reads: the automatic-mail headers, and References, which tells the inbox
+// the thread of a reply when the server gives no thread id.
+const LIST_FETCH_HEADERS = ['references', ...AUTOMATIC_MAIL_FETCH_HEADERS];
 
 function isAuthError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
@@ -749,8 +737,9 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
-            // The watcher lists new mail; without this header no listed mail is ever automatic.
-            headers: ['auto-submitted'],
+            // The watcher lists new mail; without these headers no listed mail is ever automatic,
+            // and a reply on a server without thread ids never finds its thread.
+            headers: LIST_FETCH_HEADERS,
           },
           { uid: true },
         )) {
@@ -789,7 +778,7 @@ export class ImapSmtpProvider implements MailProvider {
           internalDate: true,
           size: true,
           bodyStructure: true,
-          headers: ['in-reply-to', 'references', 'auto-submitted'],
+          headers: ['in-reply-to', 'references', ...AUTOMATIC_MAIL_FETCH_HEADERS],
         },
         { uid: true },
       ));
@@ -933,8 +922,9 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
-            // The watcher lists new mail; without this header no listed mail is ever automatic.
-            headers: ['auto-submitted'],
+            // The watcher lists new mail; without these headers no listed mail is ever automatic,
+            // and a reply on a server without thread ids never finds its thread.
+            headers: LIST_FETCH_HEADERS,
           },
           { uid: true },
         )) {
@@ -1189,10 +1179,9 @@ export class ImapSmtpProvider implements MailProvider {
       snippetText = snippet(looksHtml ? htmlToTextSnippet(decoded) : decoded, SNIPPET_CHARS);
     }
 
-    // Auto-Submitted header detection — must never auto-reply to these
+    // Automatic-mail detection — must never auto-reply to these
     const headers = msg.headers ? parseHeaders(msg.headers.toString('utf-8')) : new Map<string, string>();
-    const isAutoReply = isAutoSubmittedHeader(headers.get('auto-submitted'));
-    const isAutoReplied = isAutoRepliedHeader(headers.get('auto-submitted'));
+    const { isAutoReply, isAutoReplied } = automaticMail((name) => headers.get(name.toLowerCase()));
 
     return {
       uid: msg.uid,
@@ -1200,6 +1189,7 @@ export class ImapSmtpProvider implements MailProvider {
       folder,
       threadKey: msg.threadId ?? env?.messageId,
       inReplyTo: env?.inReplyTo,
+      references: parseReferenceIds(headers.get('references')),
       from: toAddresses(env?.from),
       to: toAddresses(env?.to),
       cc: toAddresses(env?.cc),
@@ -1258,9 +1248,17 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => { setTimeout(resolve, ms).unref(); });
 }
 
-function parseHeaders(raw: string): Map<string, string> {
+/** Header block → lower-cased name → value. A folded header (RFC 5322 §2.2.3: a line that starts
+ *  with whitespace continues the one before) is read as one value, so a bounce's
+ *  `Content-Type: multipart/report;` with `report-type=…` on the next line keeps both halves. */
+export function parseHeaders(raw: string): Map<string, string> {
   const out = new Map<string, string>();
+  const lines: string[] = [];
   for (const line of raw.split(/\r?\n/)) {
+    if (/^[ \t]/.test(line) && lines.length > 0) lines[lines.length - 1] += ` ${line.trim()}`;
+    else lines.push(line);
+  }
+  for (const line of lines) {
     const idx = line.indexOf(':');
     if (idx <= 0) continue;
     const key = line.slice(0, idx).trim().toLowerCase();

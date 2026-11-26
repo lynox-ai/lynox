@@ -93,7 +93,7 @@ describe('going on by checking', () => {
 		run = makeRun({ haltKey: 'unauthorized', haltReason: 'unauthorized' });
 		await render();
 		const lines = wayOn();
-		const reconnect = `Öffne Einstellungen → APIs und tippe beim Profil für ${HOST} auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.`;
+		const reconnect = `Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für ${HOST} auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.`;
 		expect(lines.indexOf(reconnect)).toBeGreaterThanOrEqual(0);
 		expect(lines.indexOf(CHECK)).toBeGreaterThan(lines.indexOf(reconnect));
 	});

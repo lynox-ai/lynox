@@ -621,6 +621,35 @@ export class InboxStateDb {
     return row ? rowToItem(row) : null;
   }
 
+  /**
+   * The item of this account and tenant that a mail answers, by a Message-ID the mail names as
+   * its parent: the item's own mail or a message the thread store holds for it (a follow-up).
+   * Unlike the two lookups above this one is scoped to the account and tenant: the Message-ID
+   * comes from the sender's headers, and a mail must not join a thread it was not delivered into.
+   * Only called for a server without thread ids, where an item filed from a mail with a
+   * Message-ID has that Message-ID as its thread key; the query seeks the indexed thread key and
+   * also requires the Message-ID, so an item keyed otherwise (a mail without one) is never named.
+   */
+  findItemByParentMessageId(accountId: string, messageId: string, tenantId: string = DEFAULT_TENANT_ID): InboxItem | null {
+    if (!messageId) return null;
+    const own = this.db
+      .prepare<[string, string, string, string], ItemRow>(
+        'SELECT * FROM inbox_items WHERE tenant_id = ? AND account_id = ? AND thread_key = ? AND message_id = ? LIMIT 1',
+      )
+      .get(tenantId, accountId, messageId, messageId);
+    if (own) return rowToItem(own);
+    const inThread = this.db
+      .prepare<[string, string, string], ItemRow>(
+        `SELECT i.* FROM inbox_thread_messages t
+           JOIN inbox_items i
+             ON i.tenant_id = t.tenant_id AND i.account_id = t.account_id AND i.thread_key = t.thread_key
+          WHERE t.tenant_id = ? AND t.account_id = ? AND t.message_id = ?
+          ORDER BY i.classified_at DESC LIMIT 1`,
+      )
+      .get(tenantId, accountId, messageId);
+    return inThread ? rowToItem(inThread) : null;
+  }
+
   /** Whether the thread store already holds this message for this account. */
   hasThreadMessage(tenantId: string, accountId: string, messageId: string): boolean {
     const row = this.db
@@ -1073,8 +1102,8 @@ export class InboxStateDb {
   ): { total: number; reverted: number; skipped: number } {
     const earliest = now.getTime() - withinMs;
     const rows = this.db
-      .prepare<[string, number], { id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null; action: string }>(
-        `SELECT id, item_id, prior_user_action, prior_user_action_at, action
+      .prepare<[string, number], { id: string; tenant_id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null; action: string }>(
+        `SELECT id, tenant_id, item_id, prior_user_action, prior_user_action_at, action
          FROM inbox_user_action_log
          WHERE bulk_id = ? AND undone_at IS NULL AND performed_at >= ?`,
       )
@@ -1100,6 +1129,18 @@ export class InboxStateDb {
           row.action,
         ) as { changes: number };
         reverted += r.changes;
+        // The item's audit says it was put back: the action log is pruned after minutes, and a
+        // later count of the mail since the owner last dealt with the thread reads the audit.
+        if (r.changes > 0) {
+          this.appendAudit({
+            tenantId: row.tenant_id,
+            itemId: row.item_id,
+            action: 'undo',
+            actor: 'user',
+            payloadJson: JSON.stringify({ intent: 'bulk_undo', bulk_id: bulkId, undid: row.action, restored: row.prior_user_action }),
+            createdAt: now,
+          });
+        }
       }
     });
     txn();

@@ -1,9 +1,12 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import StampPreviewBody from './StampPreviewBody.svelte';
 	import MarkedLine from './MarkedLine.svelte';
+	import { FoldGroup } from '../utils/fold-group.svelte.js';
 	import { shownValue } from '../utils/plan-takeover.js';
+	import { stampChanges, type StampChanges } from '../utils/workflow-stamp.js';
 	import {
 		markLine, parseWorkflowTakeoverPreview, refusalNamesSupport, stepConnectionNote, takeoverOutcome, takeoverRefusalText, workflowTakeoverLines,
 		type WorkflowTakeoverPreview,
@@ -21,11 +24,15 @@
 	} = $props();
 
 	let preview = $state<WorkflowTakeoverPreview | null>(null);
+	// The lists of plans this preview has unfolded: a new preview starts folded.
+	const folds = $derived(preview === null ? undefined : new FoldGroup());
 	let loading = $state(true);
 	let sending = $state(false);
 	let error = $state('');
 	// Set once a takeover was refused because something shown moved, and the new state is shown.
 	let changedLine = $state('');
+	// Then: what differs from the version shown before, marked in the stamp part.
+	let changes = $state<StampChanges | null>(null);
 	let generation = 0;
 	let dialog = $state<HTMLElement | null>(null);
 	let heading = $state<HTMLElement | null>(null);
@@ -83,6 +90,10 @@
 		const mine = ++generation;
 		loading = true;
 		preview = null;
+		// What a confirm found changed belongs to the version it was shown: a load starts without it,
+		// and the confirm that loads sets it again once the new version is shown.
+		changes = null;
+		changedLine = '';
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${encodeURIComponent(workflow.id)}/takeover-preview`);
@@ -119,6 +130,8 @@
 		if (shown === null || sending) return;
 		sending = true;
 		error = '';
+		// Set only when this confirm reloaded a moved version: then the focus goes to what changed.
+		let toMark = false;
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${encodeURIComponent(workflow.id)}/takeover`, {
 				method: 'POST',
@@ -132,7 +145,14 @@
 			if (outcome.kind === 'changed') {
 				// The line says the new state is shown below, so it goes up only once it is.
 				changedLine = '';
-				if (await load()) changedLine = outcome.text;
+				if (await load() && preview !== null) {
+					changedLine = outcome.text;
+					// A step's note counts too: a known connection that changed hands changes the step. A step
+					// whose target is set only when it runs has no note; whether it is one is in the step itself
+					// (`targetAtRun`), and its sentence names no person, so no hand can change it.
+					changes = stampChanges(shown, preview, (q, i) => `${JSON.stringify(q.steps[i])}\n${stepConnectionNote(q, q.steps[i]!) ?? ''}`);
+					toMark = true;
+				}
 				return;
 			}
 			error = outcome.text;
@@ -143,8 +163,15 @@
 			sending = false;
 			// The confirm was turned off, or the content it sat in was replaced: focus goes back to the
 			// head of the dialog rather than to the page behind it, unless something outside the
-			// dialog took it meanwhile, such as an overlay above it.
-			if (dialog?.isConnected === true && keyIsOurs()) heading?.focus();
+			// dialog took it meanwhile, such as an overlay above it. After a change it goes to the
+			// first changed part, brought into sight: that is what the owner has to read again. The
+			// line above, which says why, may scroll out of sight then (it carries role=status).
+			await tick();
+			if (dialog?.isConnected === true && keyIsOurs()) {
+				const mark = toMark ? dialog.querySelector<HTMLElement>('[data-stamp-changed]') : null;
+				(mark ?? heading)?.focus();
+				mark?.scrollIntoView?.({ block: 'nearest' });
+			}
 		}
 	}
 </script>
@@ -180,11 +207,11 @@
 			</ul>
 			<p class="text-xs text-text-subtle mb-3" data-takeover-part="intro">{t('workflow_library.takeover.intro')}</p>
 			<div data-takeover-part="stamp">
-				<StampPreviewBody preview={p} stepNote={(i) => stepConnectionNote(p, p.steps[i]!)} />
+				<StampPreviewBody preview={p} stepNote={(i) => stepConnectionNote(p, p.steps[i]!)} {changes} />
 			</div>
 			<div class="mt-3 space-y-2 text-xs">
 				{#each workflowTakeoverLines(p) as line, i (i)}
-					<p data-takeover-part={line.kind} class="break-words"><MarkedLine text={line.text} /></p>
+					<p data-takeover-part={line.kind} class="break-words"><MarkedLine text={line.text} group={folds} /></p>
 				{/each}
 			</div>
 		{/if}

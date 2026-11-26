@@ -150,6 +150,25 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect(db().prepare('SELECT * FROM triggers WHERE id = ?').get(id)).toEqual(before);
   });
 
+  it('without the store of access ends, neither shows the preview nor takes the plan over, and nothing is written', async () => {
+    const id = pausedPlan();
+    const before = db().prepare('SELECT * FROM triggers WHERE id = ?').get(id);
+    // CONTROL: with the store the preview is there.
+    expect((await ask('GET', `/api/triggers/${id}/takeover-preview`, ownerCookie)).status).toBe(200);
+    const saved = engine.getMandateEnds.bind(engine);
+    for (const missing of [null, undefined]) {
+      Object.assign(engine, { getMandateEnds: () => missing });
+      try {
+        // Without it every person would read as ended: a live person's plan would say their access ended.
+        expect((await ask('GET', `/api/triggers/${id}/takeover-preview`, ownerCookie)).status).toBe(503);
+        expect((await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, { expect: 'x' })).status).toBe(503);
+      } finally {
+        Object.assign(engine, { getMandateEnds: saved });
+      }
+    }
+    expect(db().prepare('SELECT * FROM triggers WHERE id = ?').get(id)).toEqual(before);
+  });
+
   it('only the owner takes a plan over or sees its preview', async () => {
     const id = pausedPlan();
     const post = await ask('POST', `/api/triggers/${id}/takeover`, mandateCookie, { expect: 'x' });

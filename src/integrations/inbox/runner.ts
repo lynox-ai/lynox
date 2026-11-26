@@ -74,8 +74,9 @@ export interface InboxQueuePayload {
     masked: boolean;
     redactionCount: number;
   } | undefined;
-  /** The envelope marks the mail as an automatic reply (`Auto-Submitted: auto-replied`, such as an
-   *  out-of-office note); no description rule is checked for it. Other machine-sent mail (a dunning
+  /** The envelope marks the mail as an automatic reply (`Auto-Submitted: auto-replied`, X-Autoreply,
+   *  X-Autorespond or `Precedence: auto_reply`, such as an out-of-office note); no description rule
+   *  is checked for it. Other machine-sent mail (a dunning
    *  letter from an ERP, `auto-generated`) is checked. */
   isAutoReplied?: boolean | undefined;
 }

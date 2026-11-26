@@ -1039,6 +1039,7 @@ export async function spawnViaAgent(
     // reference and read-only; a step's own task adds nothing.
     ...stepOriginConfig(runTaint, parentPrompt),
     name: step.agent,
+    language: config.language,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,
     model: agentModel,
@@ -1555,6 +1556,7 @@ export async function spawnInline(
     // reference and read-only; a step's own task adds nothing.
     ...stepOriginConfig(runTaint, parentPrompt),
     name: step.id,
+    language: config.language,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,
     model: agentModel,

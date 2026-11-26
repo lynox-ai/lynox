@@ -22,7 +22,7 @@ import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-stor
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
 import { currentPlanOf, currentPlanOwnerStarted, currentPlanStamp } from './plan-run-context.js';
-import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
+import { builtInPresetOf, derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, retiredPresetIdOf, type OAuthPreset } from './oauth-presets.js';
 import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
 import { collapseToSingleLine } from './sanitize.js';
@@ -111,7 +111,10 @@ function credentialUrls(profile: ApiProfile): [URL | undefined, URL | undefined]
   if (preset) {
     const derived = derivePresetEndpoints(preset.id, oauth?.preset_params);
     if (!('kind' in derived)) tokenUrl = derived.tokenUrl;
-  } else if (oauth?.token_url) {
+  } else if (oauth?.token_url && retiredPresetIdOf(profile) === undefined) {
+    // Not for a provider this engine once shipped: its profile's `token_url` was display only
+    // while the provider existed, and no exchange runs for it now (fetch_token refuses it), so
+    // no slot of it may reach that address either.
     tokenUrl = oauth.token_url;
   }
   const parse = (u: string | undefined): URL | undefined => {
@@ -727,10 +730,11 @@ function boundOf<T extends object>(table: Readonly<Record<string, FieldBearing>>
 }
 
 /**
- * The `bound` fields of `profile` that are set, by their path, as the owner is shown them when
- * asked for a release. Read from the tables above, as {@link releaseBinding} is, so a field
- * placed there later is shown without a second edit: the question names every field whose
- * change ends the release.
+ * The `bound` fields of `profile` that are set, by their path. The release question counts them
+ * (a mandate's turn wrote their values, so it prints none of them, the scope included). Read from
+ * the tables above, as {@link releaseBinding} is, so a field placed there later
+ * is counted without a second edit: the question accounts for every field whose change ends the
+ * release.
  */
 export function releaseBoundFields(profile: ApiProfile): Array<[string, unknown]> {
   const out: Array<[string, unknown]> = [];
@@ -768,6 +772,16 @@ export function credentialBearing(profile: ApiProfile): string {
 }
 
 /**
+ * The version of a profile's release-bound settings as the owner is shown it: the first 8 hex
+ * digits of {@link bindingOf}. Only a reference for the person; the engine compares the whole
+ * digest (`ApiStore.ownerViewOf`), since a mandate's turn writes both settings it could compare
+ * and a short prefix it could match by trying.
+ */
+export function settingsVersion(profile: ApiProfile): string {
+  return bindingOf(profile).slice(0, 8);
+}
+
+/**
  * The slot in which the engine itself sends `name` for `profile`, or null when it sends it in
  * none. Only a shape the engine attaches has one: the client pair of an OAuth profile, the two
  * halves of a split Basic credential, and the first key of a bearer or header profile. A `query`
@@ -775,18 +789,30 @@ export function credentialBearing(profile: ApiProfile): string {
  * and a mandate's turn resolves none (`agent.ts`), so a release could not reach it.
  */
 export function sendRole(profile: ApiProfile, name: string): string | null {
+  const slots = sendSlots(profile, name);
+  return slots.length > 0 ? slots.map((s) => s.slot).join('+') : null;
+}
+
+/** What a slot of {@link sendRole} is, for the words the owner reads; the engine picks it from the auth shape. */
+export type SendRoleKind = 'client-id' | 'client-secret' | 'basic-username' | 'basic-password' | 'bearer-token' | 'header-key';
+
+/** A slot {@link sendRole} names, with its kind: the slot name is what a release binding stores, the kind is only read. */
+export interface SendSlot { readonly slot: string; readonly kind: SendRoleKind }
+
+/** The slots {@link sendRole} is made of, in the same order; empty when it names none. */
+export function sendSlots(profile: ApiProfile, name: string): readonly SendSlot[] {
   const auth = profile.auth;
-  const roles: string[] = [];
+  const slots: SendSlot[] = [];
   if (auth?.type === 'oauth2') {
-    if (auth.oauth?.client_id_key === name) roles.push('oauth.client_id_key');
-    if (auth.oauth?.client_secret_key === name) roles.push('oauth.client_secret_key');
+    if (auth.oauth?.client_id_key === name) slots.push({ slot: 'oauth.client_id_key', kind: 'client-id' });
+    if (auth.oauth?.client_secret_key === name) slots.push({ slot: 'oauth.client_secret_key', kind: 'client-secret' });
   } else if (auth?.type === 'basic' && auth.basic_format === 'user_pass_split') {
-    if ((auth.username_key ?? auth.vault_keys?.[0]) === name) roles.push('basic.username');
-    if ((auth.password_key ?? auth.vault_keys?.[1]) === name) roles.push('basic.password');
+    if ((auth.username_key ?? auth.vault_keys?.[0]) === name) slots.push({ slot: 'basic.username', kind: 'basic-username' });
+    if ((auth.password_key ?? auth.vault_keys?.[1]) === name) slots.push({ slot: 'basic.password', kind: 'basic-password' });
   } else if (auth?.type === 'bearer' || auth?.type === 'header') {
-    if (auth.vault_keys?.[0] === name) roles.push('vault_keys[0]');
+    if (auth.vault_keys?.[0] === name) slots.push({ slot: 'vault_keys[0]', kind: auth.type === 'bearer' ? 'bearer-token' : 'header-key' });
   }
-  return roles.length > 0 ? roles.join('+') : null;
+  return slots;
 }
 
 /**
@@ -1335,7 +1361,7 @@ export function memberRefusalText(refusal: MemberRefusal): string {
     case 'plan-owner-started':
       return `${lead}. This run of a workflow ${person} set up or changed was not started by a schedule of ${person}'s, so it does not use connections ${person} made with their own login. `
         + `${RUN_REFUSAL_FINAL} In your reply, say so. The person reading your reply is the owner of this instance, not ${person}. `
-        + `Tell them to connect ${provider} themselves under Settings → APIs and then ask lynox in a chat to do this step with that connection. `
+        + `Tell them to connect ${provider} themselves under Settings → API connections and then ask lynox in a chat to do this step with that connection. `
         + `Do not suggest running this workflow again, and do not ask ${person} to do anything. Do not ask for permission to try again.`;
     case 'plan-unlisted': return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
     case 'plan-changed': return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
@@ -1343,7 +1369,7 @@ export function memberRefusalText(refusal: MemberRefusal): string {
     case 'plan-other-member': return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session. ${planRefusalFinalForRun()}`;
     case 'earlier-access': return `This connection (${provider}, profile ${shown}) was set up under an earlier access of ${person}'s, so it is not used now. Connect it again with api_setup action "connect".`;
     case 'not-owner': return `${lead}, so it is not used in this session.`;
-    case 'owner-live': return `${lead}, so lynox does not use it for you. Take it over in the chat once ${person}'s access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects ${person}).`;
+    case 'owner-live': return `${lead}, so lynox does not use it for you. Take it over in the chat once ${person}'s access has ended, or delete this connection under Settings → API connections and connect it yourself (that disconnects ${person}).`;
     case 'owner-ended': return `${lead}. To let lynox use it for you, take it over: in the chat, ask to take over the connection ${shown} and confirm with "Allow".`;
     default: { const never: never = refusal.kind; return never; }
   }
@@ -1395,7 +1421,7 @@ export function memberRefusalOwnerNote(refusal: MemberRefusal, plan: string | un
   const { person, provider, shown, ended } = refusal;
   const named = planNamed(plan);
   const connEn = `${provider} (profile ${shown})`;
-  const connDe = `${provider} (Profil ${shown})`;
+  const connDe = `${provider} (Verbindung ${shown})`;
   // A plan's refusal once the access the connection was made under has ended (`connectionWaits`
   // asks that grant, not the person: they may hold a later access, so the words say which one):
   // the takeover is the owner's way, also
@@ -1425,20 +1451,20 @@ export function memberRefusalOwnerNote(refusal: MemberRefusal, plan: string | un
       const own = refusal.kind === 'plan-own-not-covered';
       return {
         en: `${named.en} did not use ${connEn}. ${person} set it up with their own login${own ? `, and ${person}'s access does not cover this plan` : `, so only ${person}'s own session uses it`}. `
-          + `If the plan should use this service, there are two ways: once ${person}'s access has ended, ask in a chat to take over the connection and confirm with ${ALLOW_EN}; or delete the profile under Settings → APIs and connect the service yourself, which disconnects ${person}. Otherwise the plan cannot run this step.`,
+          + `If the plan should use this service, there are two ways: once ${person}'s access has ended, ask in a chat to take over the connection and confirm with ${ALLOW_EN}; or delete the connection under Settings → API connections and connect the service yourself, which disconnects ${person}. Otherwise the plan cannot run this step.`,
         de: `${named.de} hat ${connDe} nicht genutzt. ${person} hat die Verbindung mit eigenem Login eingerichtet${own ? `, und der Zugang von ${person} deckt diesen Plan nicht` : `, deshalb nutzt sie nur die eigene Sitzung von ${person}`}. `
-          + `Soll der Plan diesen Dienst nutzen, gibt es zwei Wege: Sobald der Zugang von ${person} beendet ist, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit ${ALLOW_DE}. Oder lösche das Profil unter Einstellungen → APIs und verbinde den Dienst selbst; das trennt ${person}. Sonst kann der Plan diesen Schritt nicht ausführen.`,
+          + `Soll der Plan diesen Dienst nutzen, gibt es zwei Wege: Sobald der Zugang von ${person} beendet ist, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit ${ALLOW_DE}. Oder lösche die Verbindung unter Einstellungen → API-Verbindungen und verbinde den Dienst selbst; das trennt ${person}. Sonst kann der Plan diesen Schritt nicht ausführen.`,
       };
     }
     // The owner's own trigger (no plan): the model's words already speak to the owner, so the
     // English stays as it is; the German is the push's.
     case 'owner-live':
       return {
-        de: `${person} hat diese Verbindung (${provider}, Profil ${shown}) mit eigenem Login eingerichtet, deshalb nutzt lynox sie nicht für dich. Übernimm sie im Chat, sobald der Zugang von ${person} beendet ist, oder lösche dieses Profil unter Einstellungen → APIs und verbinde den Dienst selbst (das trennt ${person}).`,
+        de: `${person} hat diese Verbindung (${provider}, ${shown}) mit eigenem Login eingerichtet, deshalb nutzt lynox sie nicht für dich. Übernimm sie im Chat, sobald der Zugang von ${person} beendet ist, oder lösche diese Verbindung unter Einstellungen → API-Verbindungen und verbinde den Dienst selbst (das trennt ${person}).`,
       };
     case 'owner-ended':
       return {
-        de: `${person} hat diese Verbindung (${provider}, Profil ${shown}) mit eigenem Login eingerichtet. Damit lynox sie für dich nutzt, übernimm sie: Bitte im Chat darum, die Verbindung ${shown} zu übernehmen, und bestätige mit ${ALLOW_DE}.`,
+        de: `${person} hat diese Verbindung (${provider}, ${shown}) mit eigenem Login eingerichtet. Damit lynox sie für dich nutzt, übernimm sie: Bitte im Chat darum, die Verbindung ${shown} zu übernehmen, und bestätige mit ${ALLOW_DE}.`,
       };
     case 'plan-owner-started':
     case 'earlier-access':
@@ -1523,9 +1549,10 @@ function planMayUse(profile: ApiProfile): boolean {
 const OWNER_ALLOWS_AT = 'The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
 
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
-  const presetId = profile.auth?.oauth?.preset_id;
   return {
-    provider: singleLine((presetId !== undefined ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? hostLabel(profile.base_url)),
+    // A profile that does not go through its built-in provider is named by its host, a stray
+    // preset_id on a static-credential profile included.
+    provider: singleLine(builtInPresetOf(profile)?.label ?? hostLabel(profile.base_url)),
     // The id too: one the import held back is read from a file, where it can carry a line break.
     shown: `${JSON.stringify(singleLine(profile.name))} (id ${singleLine(profile.id)})`,
   };

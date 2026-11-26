@@ -657,6 +657,9 @@ let _offlineProbeInFlight = false;
 let _userStopEpoch = -1;
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
+/** The queued message the server last held for a review the fetch after it did not show. Held a
+ *  second time in a row without a card, it is not sent again by itself (see `_runTurn`). */
+let _heldWithoutCard: string | null = null;
 /** The changeset fetch in flight, so a drain that starts meanwhile waits for what it says. */
 let _changesetFetch: Promise<boolean> | null = null;
 /** The opening of a thread a drain is due or waiting for. A second drain asked for in the same
@@ -1656,13 +1659,27 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	// A turn that stopped before its run took the message (offline, a signed-out session) leaves
 	// it queued with an id no queue holds: nothing would ever send it. It is failed again, so the
 	// tap and the reconnect can.
-	if (msg.queued === true && msg.queueId === id) {
+	// A message the open review holds is in the queue again and waits there.
+	if (msg.queued === true && msg.queueId === id && !messageQueue.some((q) => q.id === id)) {
 		msg.queued = false;
 		msg.failed = true;
 	}
 }
 
+/** Whether a refused `/run` says the open review holds the message (`code: 'review_pending'`).
+ *  Reads a copy of the body, so the caller can still read the answer itself. */
+async function reviewPendingIn(res: Response): Promise<boolean> {
+	try {
+		const body = (await res.clone().json()) as { code?: unknown } | null;
+		return body?.code === 'review_pending';
+	} catch {
+		return false;
+	}
+}
+
 async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {
+	// The opening of the thread this turn started in: a hold below acts on its list only.
+	const turnGen = _resumeGeneration;
 	chatError = null;
 	retryStatus = null;
 
@@ -1811,6 +1828,69 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	// pauses JS when backgrounded → SSE drops → client thinks idle → user resends
 	// → server says 409). Show the message as queued, not failed, and poll until
 	// the previous run completes.
+	// The server holds the message while the review of the last run is open: a new run would
+	// replace it. The message waits, first in the queue, and the review card is fetched; the
+	// answer to the review sends it. Read before the question fast-fail below and in every poll,
+	// since the review can be what answers there too.
+	const holdForReview = async (): Promise<void> => {
+		if (_queuePollController) {
+			_queuePollController.abort();
+			_queuePollController = null;
+		}
+		// The thread was left or opened again meanwhile: the list belongs to another opening now.
+		if (sessionId !== sid || _resumeGeneration !== turnGen) {
+			endStreaming(turn.assistantMsg);
+			streamingActivity = 'idle';
+			streamingToolName = null;
+			streamingToolPhase = null;
+			return;
+		}
+		const held = messages[userMsgIdx];
+		let id: string | null = null;
+		if (held) {
+			id = held.queueId ?? newQueueId();
+			held.queueId = id;
+			held.queued = true;
+			held.failed = false;
+			if (!messageQueue.some((q) => q.id === id)) {
+				messageQueue.unshift({ id, task, ...(files && files.length > 0 ? { files } : {}), ...(runOptions ? { runOptions } : {}) });
+			}
+			persistChatNow();
+		}
+		if (messages[assistantIdx] && !messages[assistantIdx]!.content) {
+			messages.splice(assistantIdx, 1);
+		}
+		endStreaming(turn.assistantMsg);
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		const answered = await fetchChangeset();
+		if (sessionId !== sid || _resumeGeneration !== turnGen || held === undefined || id === null) return;
+		if (pendingChangeset) { _heldWithoutCard = null; return; }
+		// No card, although the server holds the message. Answered without one, the review is
+		// gone by now (answered elsewhere, its files put back): the message goes once more. Not
+		// answered, or held again right after that try, the card cannot be shown: the message
+		// is failed, for a tap to send again, instead of asking the server again and again.
+		if (answered && _heldWithoutCard !== id) {
+			_heldWithoutCard = id;
+			drainQueueSoon(100);
+			return;
+		}
+		_heldWithoutCard = null;
+		const at = messageQueue.findIndex((q) => q.id === id);
+		if (at >= 0) messageQueue.splice(at, 1);
+		held.queued = false;
+		held.failed = true;
+		persistChatNow();
+		// The messages behind it do not wait on it: each is sent and, held the same way, failed the same way.
+		drainQueueSoon(100);
+	};
+
+	if (res.status === 409 && await reviewPendingIn(res)) {
+		await holdForReview();
+		return;
+	}
+
 	if (res.status === 409) {
 		// Fast-fail when we already know the engine is blocked on a prompt
 		// from this client. Polling for up to 6 min won't unblock anything —
@@ -1849,6 +1929,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		_queuePollController = new AbortController();
 		const signal = _queuePollController.signal;
 		let bailedOut = false;
+		let heldForReview = false;
 		try {
 			for (let attempt = 1; attempt <= MAX_POLLS && res.status === 409; attempt++) {
 				// Stop / thread-switch: drop out of the loop without another fetch.
@@ -1874,10 +1955,16 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 					if (signal.aborted) { bailedOut = true; break; }
 					throw err;
 				}
+				if (res.status === 409 && await reviewPendingIn(res)) { heldForReview = true; break; }
 			}
 		} finally {
 			retryStatus = null;
 			_queuePollController = null;
+		}
+
+		if (heldForReview) {
+			await holdForReview();
+			return;
 		}
 
 		if (bailedOut) {
@@ -2226,8 +2313,10 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 
 	// Process queue: send next queued message. Small delay so the UI updates before the next
-	// run starts; a review this run left open holds it (`drainQueueSoon`).
-	drainQueueSoon(100);
+	// run starts; a review this run left open holds it (`drainQueueSoon`). Only the queue of the
+	// thread this run ran in, as it was opened then: a thread shown since has its own queue and
+	// review, and its opening drains them.
+	if (sessionId === sid && _resumeGeneration === turnGen) drainQueueSoon(100);
 }
 
 /**
@@ -3495,6 +3584,8 @@ async function loadChangeset(): Promise<boolean> {
 		// No time limit of its own: a slow answer that carries a review must still show it, and a
 		// queued turn waits for it. A fetch the network ends lands in the catch and frees the queue.
 		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
+		// No session on the server (restarted, or dropped): it holds no review, which is an answer.
+		if (res.status === 404) return true;
 		if (!res.ok) return false;
 		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
 		if (data.hasChanges && data.files.length > 0) {
@@ -3546,10 +3637,15 @@ export async function submitChangesetReview(
 	if (status >= 200 && status < 300) {
 		// A rollback leaves a file as it is when it was replaced or linked since the review, or
 		// could not be written. Closing the review without a word would read as all restored.
-		const notRestored = await res.json().then(
-			(j: unknown) => (j as { notRestored?: unknown } | null)?.notRestored,
-			() => undefined,
+		const answer = await res.json().then(
+			(j: unknown) => j as { notRestored?: unknown; rolledBack?: unknown } | null,
+			() => null,
 		);
+		const notRestored = answer?.notRestored;
+		// No count (`rolledBack: null`): the server could not read the changes and rolled back
+		// from the backups alone, so it does not know why a file stayed. The usual reason would
+		// be a guess; this answer says the reason is unknown.
+		const reasonUnknown = answer?.rolledBack === null;
 		const names = Array.isArray(notRestored) ? notRestored.filter((f): f is string => typeof f === 'string') : [];
 		if (names.length > 0) {
 			// The person has to act on this list: it stays until they close it, and names at most five.
@@ -3557,9 +3653,20 @@ export async function submitChangesetReview(
 			const files = names.length > NOT_RESTORED_SHOWN
 				? tf('changeset.not_restored_more', { files: shown, n: String(names.length - NOT_RESTORED_SHOWN) })
 				: shown;
-			addToast(tf('changeset.not_restored', { files }), 'error', null);
+			addToast(tf(reasonUnknown ? 'changeset.not_restored_unknown' : 'changeset.not_restored', { files }), 'error', null);
 		}
 		// The turns queued behind the run that opened the review go now.
+		if (!stale()) drainQueueSoon(100);
+		return;
+	}
+	// The rollback stopped partway. The server closed the review, so the card goes; what
+	// happened stays on screen until the person closes it.
+	const failedCode = await res.json().then(
+		(j: unknown) => (j as { code?: unknown } | null)?.code,
+		() => undefined,
+	);
+	if (failedCode === 'rollback_aborted') {
+		addToast(t('changeset.rollback_aborted'), 'error', null);
 		if (!stale()) drainQueueSoon(100);
 		return;
 	}
@@ -4189,6 +4296,17 @@ export async function retryInterruptedRun(): Promise<void> {
  * already-finished run (404 / immediate `done`) or an awaiting-input run (no
  * events until the user answers) never leaves an empty bubble.
  */
+/**
+ * After a re-attach that found its run already ended: the turns queued in this opening go once
+ * the review is asked for. Only an answer from the server says no review holds them; an open one
+ * holds them in the drain. The run a turn was queued behind drains nothing here: the thread was
+ * opened again since.
+ */
+function drainAfterReattach(gen: number): void {
+	if (gen !== _resumeGeneration) return;
+	void fetchChangeset().then((answered) => { if (answered && gen === _resumeGeneration) drainQueueSoon(100); });
+}
+
 async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<void> {
 	// userIdx for handleSSEEvent's error path = the last user message.
 	let userIdx = -1;
@@ -4215,7 +4333,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
-	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); return; }
+	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); drainAfterReattach(gen); return; }
 	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return; }
 
 	const myEpoch = ++streamEpoch;

@@ -30,6 +30,8 @@ export interface WorkflowTakeoverStep extends StampStep {
 	foreignConnection: boolean;
 	/** That profile's id, when the engine could read it off the call. */
 	connectionProfile: string | null;
+	/** The call's target is set only when it runs: it may use a connection someone with access made. */
+	targetAtRun: boolean;
 }
 
 export interface WorkflowTakeoverPreview extends Omit<StampPreview, 'steps'> {
@@ -73,7 +75,11 @@ export function parseWorkflowTakeoverPreview(body: unknown): WorkflowTakeoverPre
 		if (!isRecord(raw) || typeof raw['foreignConnection'] !== 'boolean') return null;
 		const profile = raw['connectionProfile'];
 		if (profile !== undefined && profile !== null && typeof profile !== 'string') return null;
-		steps.push({ ...stamp.steps[i]!, foreignConnection: raw['foreignConnection'], connectionProfile: typeof profile === 'string' ? profile : null });
+		const atRun = raw['targetAtRun'];
+		if (atRun !== undefined && typeof atRun !== 'boolean') return null;
+		// A target set only when it runs is a marked step without a profile, nothing else.
+		if (atRun === true && (!raw['foreignConnection'] || typeof profile === 'string')) return null;
+		steps.push({ ...stamp.steps[i]!, foreignConnection: raw['foreignConnection'], connectionProfile: typeof profile === 'string' ? profile : null, targetAtRun: atRun === true });
 	}
 	if (!Array.isArray(body['marks'])) return null;
 	const marks: WorkflowTakeoverMark[] = [];
@@ -113,16 +119,34 @@ export function markLine(m: WorkflowTakeoverMark): string {
 	return `${who} · ${m.ended ? t('workflow_library.takeover.access_ended') : t('workflow_library.takeover.still_access')}`;
 }
 
+/**
+ * The sentence for the steps whose target is set only when they run: each by its task, the list
+ * folded past five, or none when it is every step of the workflow. It names no person: such a step
+ * may reach anyone's connection, not only those the preview lists, so a name would say too little;
+ * and a sentence that never names one does not change when the person behind a connection does.
+ * Without a sentence on a connection before it, it says where to connect the service.
+ */
+function atRunSentence(p: Pick<WorkflowTakeoverPreview, 'steps'>, steps: readonly WorkflowTakeoverStep[], afterConnection: boolean): string {
+	const all = steps.length === p.steps.length && steps.length > 1;
+	const one = steps.length === 1 || all;
+	const end = afterConnection ? t('workflow_library.takeover.at_run.end') : t(one ? 'workflow_library.takeover.at_run.end_where_one' : 'workflow_library.takeover.at_run.end_where_many');
+	if (all) return tf('workflow_library.takeover.at_run.all', { end });
+	if (steps.length === 1) return tf('workflow_library.takeover.at_run.one', { step: shownValue(steps[0]!.task), end });
+	return tf('workflow_library.takeover.at_run.many', { steps: planList(steps.map((s) => s.task)), end });
+}
+
 /** The note at a step whose call uses a connection someone with access made; named only when that connection is one the preview names. */
 export function stepConnectionNote(p: Pick<WorkflowTakeoverPreview, 'connections'>, step: WorkflowTakeoverStep): string | null {
 	if (!step.foreignConnection) return null;
+	// Which connection it uses shows only when it runs: the sentence below names it, not a note.
+	if (step.targetAtRun) return null;
 	const by = step.connectionProfile === null ? undefined : p.connections.find((c) => c.profileId === step.connectionProfile)?.by;
 	return by === undefined ? t('workflow_library.takeover.step_connection_unnamed') : tf('workflow_library.takeover.step_connection', { name: shownValue(by) });
 }
 
 /** One sentence below the steps; `kind` names the part of the dialog it is. */
 export interface WorkflowTakeoverLine {
-	kind: 'connection' | 'member_change' | 'lapsing' | 'released' | 'paused' | 'afterwards';
+	kind: 'connection' | 'connection_at_run' | 'member_change' | 'lapsing' | 'released' | 'paused' | 'afterwards';
 	text: string;
 }
 
@@ -131,7 +155,8 @@ export interface WorkflowTakeoverLine {
  * used, the plans that then run for someone else, the plans whose allowed connections lapse, the
  * plans that run again, the plans that stay paused, and who may start the workflow afterwards.
  * A connection gets its sentence only where a marked step uses it: the sentence speaks of the
- * marked steps. A plan that stays paused runs for no one, so it is not one that runs for someone
+ * marked steps. Steps whose target is set only when it runs get one sentence of their own,
+ * after those. A plan that stays paused runs for no one, so it is not one that runs for someone
  * else: it gets only its sentence that it stays paused. A plan that runs again and then runs under
  * the owner's name instead of a person's gets one sentence that says both. A plan that runs again
  * and then runs under another person's name is said twice: once among the plans that run again,
@@ -154,6 +179,11 @@ export function workflowTakeoverLines(p: WorkflowTakeoverPreview): WorkflowTakeo
 			}),
 		});
 	}
+	// Steps whose target is set only when it runs: which connection they use shows only then. One
+	// sentence names them all, after the ones above, and only when there is such a step: a step
+	// without a note is either named here or reaches no one's connection.
+	const atRun = p.steps.filter((s) => s.foreignConnection && s.targetAtRun);
+	if (atRun.length > 0) lines.push({ kind: 'connection_at_run', text: atRunSentence(p, atRun, lines.length > 0) });
 	const paused = new Set(p.stillPaused.map((s) => s.id));
 	const released = new Set(p.alsoReleased.map((r) => r.id));
 	// Released and then run under the owner's name instead of a person's: one sentence for both.

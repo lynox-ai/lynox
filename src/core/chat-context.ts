@@ -9,6 +9,7 @@ import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type App
 import { stripHidden, stripHiddenInName } from './hidden-text.js';
 import { isStepIdShape, shownRunStepId, shownStepId, stepRunNames, storedSteps } from '../orchestrator/step-id.js';
 import { detectSensitiveContent } from '../integrations/inbox/sensitive-content.js';
+import { followUpsOf } from '../integrations/inbox/follow-ups.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
@@ -184,25 +185,9 @@ export interface ChatThreadMessage {
  * mail, as before.
  */
 export function followUpToAnswer(reader: ChatInboxReader, item: InboxItem): ChatThreadMessage | null {
-  const messages = reader.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit: 50 });
-  const own = item.messageId !== undefined ? messages.find((m) => m.messageId === item.messageId) : undefined;
-  const since = own?.mailDate?.getTime();
-  const reopenedBy = new Set<string>();
-  for (const a of reader.listAuditForItem(item.id, item.tenantId)) {
-    if (a.action !== 'reopened_on_reply' && a.action !== 'raised_on_sensitive_follow_up') continue;
-    try {
-      const id = (JSON.parse(a.payloadJson) as { message_id?: unknown }).message_id;
-      if (typeof id === 'string') reopenedBy.add(id);
-    } catch {
-      // An unreadable payload names no message.
-    }
-  }
-  return messages.find((m) =>
-    m.messageId !== item.messageId
-    && m.direction === 'inbound'
-    && (m.autoReply === false || (m.autoReply === undefined && reopenedBy.has(m.messageId)))
-    && !(since !== undefined && m.mailDate !== undefined && m.mailDate.getTime() < since),
-  ) ?? null;
+  // The rule the inbox list and reading pane start from (`follow-ups.ts`); they also leave out
+  // mail the owner dealt with since, which the chat needs not: it answers the newest one.
+  return followUpsOf(reader, item)[0] ?? null;
 }
 
 /**
