@@ -662,18 +662,18 @@ function extractDangerPayload(toolName: string, input: unknown, autonomy: Autono
  * this directly to also receive `payload`, so the GO can offer a cheaper tier
  * when `payload.downgradeTo` is set.
  */
-export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract, parentProvider?: ProviderConfigSnapshot | null, language: DialogLanguage = 'en'): DangerSignal | null {
-  const signal = _decideDanger(toolName, input, autonomy, entry, runId, contract, parentProvider, language);
+export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract, parentProvider?: ProviderConfigSnapshot | null, language: DialogLanguage = 'en', writeTarget?: string | null): DangerSignal | null {
+  const signal = _decideDanger(toolName, input, autonomy, entry, runId, contract, parentProvider, language, writeTarget);
   // Observed against the FINAL decision: a call a contract lets
   // through runs without a question, and is recorded as one that does.
   observeBashProof(toolName, input, autonomy, signal?.warning ?? null, runId);
   return signal;
 }
 
-function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined, parentProvider: ProviderConfigSnapshot | null | undefined, language: DialogLanguage): DangerSignal | null {
+function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined, parentProvider: ProviderConfigSnapshot | null | undefined, language: DialogLanguage, writeTarget: string | null | undefined): DangerSignal | null {
   // The rules run in English, whose text is the warning the audit and the `[BLOCKED` checks
   // read, and which decides; the person is asked in `language`, by the same rule.
-  const danger = _detectDanger(toolName, input, autonomy, entry, parentProvider);
+  const danger = _detectDanger(toolName, input, autonomy, entry, parentProvider, asIs, 'en', writeTarget);
   if (!danger) return null;
   const { warning } = danger;
 
@@ -709,7 +709,7 @@ function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel
   let prompt = danger.prompt;
   if (language !== 'en') {
     try {
-      prompt = _detectDanger(toolName, input, autonomy, entry, parentProvider, asIs, language)?.prompt ?? danger.prompt;
+      prompt = _detectDanger(toolName, input, autonomy, entry, parentProvider, asIs, language, writeTarget)?.prompt ?? danger.prompt;
     } catch {
       prompt = danger.prompt;
     }
@@ -2056,7 +2056,7 @@ export function pathFieldsRead(toolName: string, input: unknown, autonomy?: Auto
   return [...fields];
 }
 
-function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, parentProvider?: ProviderConfigSnapshot | null, asPath: AsPath = asIs, language: DialogLanguage = 'en'): Danger | null {
+function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, parentProvider?: ProviderConfigSnapshot | null, asPath: AsPath = asIs, language: DialogLanguage = 'en', writeTarget?: string | null): Danger | null {
   // The dialog's words in `language`: the tool's word, the fixed sentence parts, a rule's label.
   const tool = (name: string): ToolText => ({ toolName: name, language });
   const T = GUARD_TEXT[language];
@@ -2117,7 +2117,9 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // The file the tool writes, as its handler resolves it (`ToolEntry.writeTarget`): without a
     // workspace a path is confined to the data dir's workspace and a link in it is followed, so the
     // file written need not be the path as written. Both are read; null means the tool refuses it.
-    const target = entry?.writeTarget?.(rawPath) ?? null;
+    // The engine resolves it once for the call and hands the same file to the handler, which then
+    // writes exactly it (`ToolCallContext`); a caller that hands none gets it resolved here.
+    const target = writeTarget !== undefined ? writeTarget : entry?.writeTarget?.(rawPath) ?? null;
     for (const judged of target !== null && target !== filePath ? [filePath, target] : [filePath]) {
       if (isSensitivePath(judged)) {
         if (autonomy === 'autonomous') {

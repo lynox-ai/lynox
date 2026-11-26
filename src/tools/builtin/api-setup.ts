@@ -56,6 +56,7 @@ import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder }
 import { isPrivateIP } from '../../core/network-guard.js';
 import { effectiveWriteMethod, graphqlUrlWrites, isGraphqlEndpoint, isReadMethod, isRequestShapingHeaderName } from '../../core/outbound-write.js';
 import { ifEmptiedAny, ifOk, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { wrapHandler } from '../wrap-handler.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -4166,9 +4167,8 @@ ${draftJson}
  * person's decision, not a failure of the call, and stay plain answers.
  */
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
-  ...apiSetupEntry,
-  handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> =>
-    `${await apiSetupEntry.handler(input, agent)}${waitingConnectionsNote(agent)}${releaseRequestsNote(agent)}`,
+  ...wrapHandler(apiSetupEntry, async (_input, agent, run): Promise<string> =>
+    `${await run()}${waitingConnectionsNote(agent)}${releaseRequestsNote(agent)}`),
   failureOf: apiSetupFailure,
 };
 

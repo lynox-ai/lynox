@@ -1673,6 +1673,12 @@ const MIGRATIONS: string[] = [
      generation INTEGER NOT NULL,
      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
    );`,
+  // v75: a Shopify product target's title, as the read in the preview answered it, encrypted like
+  // `before`, so the targets route shows each target by its name. That read writes it (`recordRead`) and an
+  // undo copies it from its source; NULL for every existing target, for an image target and for a
+  // target without a title.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (75);
+   ALTER TABLE bulk_targets ADD COLUMN target_title TEXT;`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */
