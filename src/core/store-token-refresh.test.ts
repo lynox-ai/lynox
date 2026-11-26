@@ -387,7 +387,7 @@ describe('the refresh of an expiring store connection', () => {
     expect(lines().some((l) => l.includes('marked ended') || l.includes('left as it is'))).toBe(false);
   });
 
-  it('a save that throws after it went through reads as renewed: the new tokens and the new binding stay in place', async () => {
+  it('a save that throws after it went through leaves the new binding as it is, and the line says so, not that a mark is missing', async () => {
     const realSave = store.save.bind(store);
     const save = vi.spyOn(store, 'save').mockImplementation((p, dir, opts) => {
       const r = realSave(p, dir, opts);
@@ -395,34 +395,14 @@ describe('the refresh of an expiring store connection', () => {
       return r;
     });
     try {
-      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('renewed');
-    } finally {
-      save.mockRestore();
-    }
-    expect(vault.get(accessTokenKey(ID))).toBe('at-new');
-    expect(vault.get(refreshTokenKey(ID))).toBe('rt-new');
-    expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-new'));
-    expect(profile().oauth_grant?.state).toBe('connected');
-    expect(lines().filter((l) => l.includes('outcome=ok (due): new tokens stored and bound'))).toHaveLength(1);
-    expect(lines().some((l) => l.includes('could not be saved') || l.includes('connect the store again'))).toBe(false);
-  });
-
-  it('a save that throws before it went through is still dead and ends the connection, as a save that failed', async () => {
-    const realSave = store.save.bind(store);
-    const save = vi.spyOn(store, 'save').mockImplementation((p, dir, opts) => {
-      if (opts?.exchange !== undefined) throw new Error('the save failed');
-      return realSave(p, dir, opts);
-    });
-    try {
       expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
     } finally {
       save.mockRestore();
     }
-    expect(vault.get(accessTokenKey(ID))).toBe('at-new');
-    expect(profile().oauth_grant?.store_binding).toBeUndefined();
-    expect(profile().oauth_grant?.state).toBe('refresh-dead');
-    expect(lines().filter((l) => l.includes('outcome=dead (due): the new tokens are in the vault but the profile could not be saved; connect the store again'))).toHaveLength(1);
-    expect(lines().some((l) => l.includes('outcome=ok'))).toBe(false);
+    expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-new'));
+    expect(profile().oauth_grant?.state).not.toBe('refresh-dead');
+    expect(lines().filter((l) => l.includes('could not be saved; connect the store again; the connection was left as it is (changed meanwhile)'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('could not be marked ended'))).toBe(false);
   });
 
   it('a profile removed while an ending refresh was out is left as it is, and the line does not say it was connected again', async () => {

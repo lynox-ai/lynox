@@ -621,9 +621,7 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
       },
     ).ok;
   } catch {
-    // A save can throw after it went through (a follow-up inside it failed). The profile read back
-    // says which: one that carries the new binding is renewed, its tokens and binding in place.
-    saved = savedAfterAll(apiStore, profileId, binding);
+    saved = false;
   }
   if (!saved) {
     // The vault holds the new tokens, the profile the old binding: every request to the store now
@@ -633,15 +631,6 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   }
   outcomeLine(profileId, 'ok', trigger, 'new tokens stored and bound');
   return 'renewed';
-}
-
-/** Whether the profile as saved now carries `binding`, the one this refresh bound its new token to. */
-function savedAfterAll(apiStore: NonNullable<StoreRefreshContext['toolContext']['apiStore']>, profileId: string, binding: string): boolean {
-  try {
-    return apiStore.get(profileId)?.oauth_grant?.store_binding === binding;
-  } catch {
-    return false;
-  }
 }
 
 /** The config module, imported when first needed: it reads the environment at load. */
