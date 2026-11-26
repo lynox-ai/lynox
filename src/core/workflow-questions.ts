@@ -5,8 +5,8 @@ import type { PromptStore } from './prompt-store.js';
 import { promptOriginOf, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ThreadStore } from './thread-store.js';
-import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
-import { inquiryOptions, summarizeDelivery } from './notification-router.js';
+import type { NotificationMessage, NotifyReport, DeliveryDetail, DeliverySummary } from './notification-router.js';
+import { deliveryCase, inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { stripHidden } from './hidden-text.js';
 
@@ -49,7 +49,7 @@ export interface WorkflowQuestionDeps {
   maskOffBox: (text: string) => string;
   notify: (msg: NotificationMessage) => Promise<NotifyReport>;
   /** Starts the delivery record on the schedule and returns the writer of its outcome. */
-  recordDelivery: () => (delivery: DeliverySummary) => void;
+  recordDelivery: () => (delivery: DeliverySummary, detail?: DeliveryDetail) => void;
   /** The owner's stop. */
   ownerStop: AbortSignal;
   /** The task controller: aborted at teardown, and by the owner's stop too. */
@@ -282,7 +282,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       data: { threadId: deps.runId, promptId },
       // The options leave the box too (the mail channel lists them), so they are masked like the body.
       inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => deps.maskOffBox(o)) },
-    }).then((report) => { record(summarizeDelivery(report)); }).catch((err: unknown) => {
+    }).then((report) => { record(summarizeDelivery(report), { case: deliveryCase(report) }); }).catch((err: unknown) => {
       process.stderr.write(`[lynox:worker] recording a workflow question's delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
     });
   }

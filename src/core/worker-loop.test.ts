@@ -819,12 +819,14 @@ describe('WorkerLoop', () => {
     // A previous hash makes this a change, not the baseline run — only a change escalates.
     await fire(makeTask({ id: 't-watch', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60, last_hash: 'old' }) }));
     expect(engine.escalateToUser).toHaveBeenCalledTimes(1);
-    const opts = vi.mocked(engine.escalateToUser).mock.calls[0]![0] as { onReported?: (d: string) => void };
-    // The start is written before the wakeup leaves; the answer goes against that start.
-    expect(taskManager.startEscalation).toHaveBeenCalledWith('t-watch', expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), false);
+    const opts = vi.mocked(engine.escalateToUser).mock.calls[0]![0] as { onReported?: (d: string, detail?: object) => void };
+    // The start is written before the wakeup leaves, with no chat yet (an alert's is named with
+    // the answer); the answer goes against that start, with its case and chat.
+    expect(taskManager.startEscalation).toHaveBeenCalledWith('t-watch', expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), false, undefined);
     const startedAt = vi.mocked(taskManager.startEscalation).mock.calls[0]![1];
-    opts.onReported?.('not_delivered');
-    expect(taskManager.recordEscalationOutcome).toHaveBeenCalledWith('t-watch', 'not_delivered', startedAt);
+    const detail = { case: 'send_failed', chat: { threadId: 'escalation-t-watch', kind: 'alert' } };
+    opts.onReported?.('not_delivered', detail);
+    expect(taskManager.recordEscalationOutcome).toHaveBeenCalledWith('t-watch', 'not_delivered', startedAt, detail);
   });
 
   it('a watch someone the owner let in set up escalates without its address and analysis (PRD B6)', async () => {
@@ -927,7 +929,7 @@ describe('WorkerLoop', () => {
       expect(forFirst).toHaveLength(2);
       // The retry asks the store to land only if no later escalation started meanwhile.
       expect(forFirst[1]![2]).toBe(true);
-      expect(taskManager.recordEscalationOutcome).toHaveBeenCalledWith('t-a', 'not_delivered', first);
+      expect(taskManager.recordEscalationOutcome).toHaveBeenCalledWith('t-a', 'not_delivered', first, undefined);
     });
 
     it('gives two escalations distinct starts, even within one millisecond', async () => {

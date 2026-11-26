@@ -320,18 +320,27 @@ export class WebPushNotificationChannel implements NotificationChannel {
    * `delivered` only when one of the owner's devices took the message. A send reaches the
    * devices of live mandates too, but a notice the owner did not get was not delivered to the
    * person the router reports for: an escalation that reached only a mandate's phone must still
-   * fall back to mail, so that is `reached_others`. `failed` with no subscription too: nobody
-   * was told. A message for the mandates' side (`audience: 'mandates'`) is meant for them, so
-   * reaching one of them is its delivery.
+   * fall back to mail, so that is `reached_others`. When nobody was reached: `failed` if a send
+   * to a device of the side the message is for was tried and did not get through (the push
+   * service refused or could not be reached), `no_recipient` if that side had no live
+   * subscription to try, counting one the push service answered as gone (404/410) — then
+   * setting up a device would help, after `failed` it would not. A mandate's device that failed
+   * does not make an owner's message `failed`. A message for the mandates' side
+   * (`audience: 'mandates'`) is meant for them, so reaching one of them is its delivery.
    */
   async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const result = await this.sendDetailed(msg);
-    if (msg.audience === 'mandates') return result.sent > 0 ? 'delivered' : 'failed';
-    return result.sentToOwner > 0 ? 'delivered' : result.sent > 0 ? 'reached_others' : 'failed';
+    if (msg.audience === 'mandates') {
+      if (result.sent > 0) return 'delivered';
+      return result.failed > 0 ? 'failed' : 'no_recipient';
+    }
+    if (result.sentToOwner > 0) return 'delivered';
+    if (result.sent > 0) return 'reached_others';
+    return result.failedOwner > 0 ? 'failed' : 'no_recipient';
   }
 
   /** With `onlyFor` a mandate, the message goes only to that mandate's own subscriptions. */
-  async sendDetailed(msg: NotificationMessage, onlyFor?: RequestPrincipal): Promise<{ sent: number; sentToOwner: number; failed: number; cleaned: number }> {
+  async sendDetailed(msg: NotificationMessage, onlyFor?: RequestPrincipal): Promise<{ sent: number; sentToOwner: number; failed: number; failedOwner: number; cleaned: number }> {
     // Prune expired subscriptions on each send (lightweight — SQLite handles it fast)
     this.store.prune();
 
@@ -345,7 +354,7 @@ export class WebPushNotificationChannel implements NotificationChannel {
         // One grant's devices; without a named grant, none (a live mandate's row always names its grant).
         ? reachable.filter((row) => isMandateTag(row.created_by) && row.mandate_id === msg.mandateId)
         : reachable;
-    if (subscriptions.length === 0) return { sent: 0, sentToOwner: 0, failed: 0, cleaned: 0 };
+    if (subscriptions.length === 0) return { sent: 0, sentToOwner: 0, failed: 0, failedOwner: 0, cleaned: 0 };
 
     const tag = msg.taskId ?? `lynox-${Date.now()}-${String(++untaggedSends)}`;
     const payload: PushPayload = {
@@ -368,6 +377,9 @@ export class WebPushNotificationChannel implements NotificationChannel {
     let sent = 0;
     let sentToOwner = 0;
     let failed = 0;
+    // Sends to an owner's device that were tried and did not get through; a gone subscription
+    // (404/410) is not one of them.
+    let failedOwner = 0;
 
     await Promise.allSettled(
       subscriptions.map(async (sub) => {
@@ -389,6 +401,7 @@ export class WebPushNotificationChannel implements NotificationChannel {
             staleEndpoints.push(sub.endpoint);
           } else {
             failed++;
+            if (!isMandateTag(sub.created_by)) failedOwner++;
             const detail = err instanceof Error ? err.message : String(err);
             process.stderr.write(
               `[web-push] failed for ${sub.endpoint.slice(0, 50)}…: ${detail}\n`,
@@ -403,6 +416,6 @@ export class WebPushNotificationChannel implements NotificationChannel {
       this.store.remove(ep);
     }
 
-    return { sent, sentToOwner, failed, cleaned: staleEndpoints.length };
+    return { sent, sentToOwner, failed, failedOwner, cleaned: staleEndpoints.length };
   }
 }

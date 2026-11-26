@@ -454,16 +454,22 @@ export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'chang
  * pause on, `paused`, and for the owner only `paused_who`, the emails of the members whose end
  * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
  * the push had to shorten the name.
+ *
+ * `chatExists` decides whether the escalation's chat still stands; without it, or once the chat
+ * is deleted, the trigger links to no chat.
  */
-export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal, chatExists?: (threadId: string) => boolean): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat'> & { last_escalation_kind?: 'question' | 'alert' | undefined; paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
   // The stored run cause leaves only as `blocked_reason`, parsed (`storedRunCause`), never as stored.
-  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_run_cause: _cause, ...stored } = trigger;
-  // Whether a wakeup reached the owner, and the step to take when it did not (their push
-  // subscription), are the owner's: a mandate reading them would be told about the owner's
-  // devices as if they were its own, and could act on neither. An absent value leaves the JSON.
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_escalation_case: escalationCase, last_escalation_chat: escalationChat, last_run_cause: _cause, ...stored } = trigger;
+  // Whether a wakeup reached the owner, why it did not, the step to take then (their push
+  // subscription) and the chat it points to are the owner's: a mandate reading them would be
+  // told about the owner's devices as if they were its own, and could act on neither. An absent
+  // value leaves the JSON.
+  const chat = escalationChat !== undefined && chatExists?.(escalationChat.threadId) === true ? escalationChat : undefined;
   const rest = isOwnerPrincipal(principal)
-    ? { ...stored, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome }
-    : { ...stored, last_escalation_at: undefined, last_escalation_outcome: undefined };
+    // Whether it was a question or an alert stays with the notice when its chat is gone.
+    ? { ...stored, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_escalation_case: escalationCase, last_escalation_chat: chat, last_escalation_kind: escalationChat?.kind }
+    : { ...stored, last_escalation_at: undefined, last_escalation_outcome: undefined, last_escalation_case: undefined, last_escalation_chat: undefined, last_escalation_kind: undefined };
   if (!planPauseOn()) return rest;
   const paused = isPaused(trigger);
   if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
@@ -9851,6 +9857,10 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
+      // A trigger links to its escalation's chat only while that chat stands (a deleted one is gone).
+      // Only the owner is shown the chat, so only the owner's list looks it up.
+      const threadsForList = isOwnerPrincipal(principal) ? engine.getThreadStore() : null;
+      const chatExists = (threadId: string): boolean => threadsForList?.getThread(threadId) !== undefined;
       // Who set each trigger up or changed it last, when that was a mandate: lines as on an
       // approval card, named by the same rule (in these lines a mandate sees another address's
       // grant as another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
@@ -9886,7 +9896,7 @@ export class LynoxHTTPApi {
             try { bulkSystem = bulkLedgerForList?.getRunForApply(trigger.bulk_run_id)?.targetSystem; } catch { bulkSystem = undefined; }
           }
           return {
-            ...triggerForRoute(trigger, principal),
+            ...triggerForRoute(trigger, principal, chatExists),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
             workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',

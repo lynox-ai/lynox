@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { MANDATE_TAG_PREFIX, TRIGGER_AUTHOR_PREFIX, UNKNOWN_RUN_TAG, WORKFLOW_AUTHOR_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
-import type { DeliverySummary } from './notification-router.js';
+import type { DeliveryCase, DeliveryDetail, DeliverySummary } from './notification-router.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
 import { PLAN_PAUSE_SQL_FN, planPauseOn } from './plan-pause.js';
 import { recipientConfirmDigest, recipientsConfirmable, type RecipientConfirmOutcome } from './recipient-confirm.js';
@@ -221,6 +221,9 @@ interface TriggerFullDbRow {
   model_tier: string | null;
   last_escalation_at: string | null;
   last_escalation_outcome: string | null;
+  last_escalation_case: string | null;
+  last_escalation_thread_id: string | null;
+  last_escalation_chat_kind: string | null;
   paused_at: number | null;
   paused_due_at: string | null;
   paused_for: string | null;
@@ -259,7 +262,8 @@ const TRIGGER_READ_COLS =
    last_run_status, last_run_cause, notification_channel, max_retries, retry_count, created_at, updated_at,
    confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
    created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
-   last_escalation_outcome, paused_at, paused_due_at, paused_for,
+   last_escalation_outcome, last_escalation_case, last_escalation_thread_id, last_escalation_chat_kind,
+   paused_at, paused_due_at, paused_for,
    covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at`;
 
 /**
@@ -348,10 +352,24 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
 }
 
 /** A value no writer produces reads as no record, so the surface never shows a guess. */
-function escalationOf(row: TriggerFullDbRow): Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> {
+function escalationOf(row: TriggerFullDbRow): Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat'> {
   const outcome = row.last_escalation_outcome;
   if (row.last_escalation_at === null || !isEscalationOutcome(outcome)) return {};
-  return { last_escalation_at: row.last_escalation_at, last_escalation_outcome: outcome };
+  const escalationCase = outcome === 'not_delivered' && isDeliveryCase(row.last_escalation_case) ? row.last_escalation_case : undefined;
+  const kind = row.last_escalation_chat_kind;
+  const chat: TriggerRecord['last_escalation_chat'] = row.last_escalation_thread_id !== null && row.last_escalation_thread_id !== '' && (kind === 'question' || kind === 'alert')
+    ? { threadId: row.last_escalation_thread_id, kind }
+    : undefined;
+  return {
+    last_escalation_at: row.last_escalation_at,
+    last_escalation_outcome: outcome,
+    ...(escalationCase !== undefined ? { last_escalation_case: escalationCase } : {}),
+    ...(chat !== undefined ? { last_escalation_chat: chat } : {}),
+  };
+}
+
+function isDeliveryCase(v: string | null): v is DeliveryCase {
+  return v === 'no_subscription' || v === 'send_failed';
 }
 
 /** What `last_escalation_outcome` may hold: an answer, or `unconfirmed` until one arrives. */
@@ -1174,15 +1192,20 @@ export class TriggerStore {
    * `at` is an ISO-8601 instant from `toISOString`, which compares correctly as text.
    * False when the trigger is gone, or (`onlyIfLater`) when the recorded start is not older.
    */
-  startEscalation(id: string, at: string = new Date().toISOString(), onlyIfLater = false): boolean {
+  startEscalation(id: string, at: string = new Date().toISOString(), onlyIfLater = false, chat?: DeliveryDetail['chat']): boolean {
+    // A new start forgets the previous escalation's case and chat; a question's chat is known
+    // now, an alert's only once it is written (`recordEscalationOutcome`).
+    const set = "last_escalation_at = ?, last_escalation_outcome = 'unconfirmed', last_escalation_case = NULL, last_escalation_thread_id = ?, last_escalation_chat_kind = ?";
+    const threadId = chat?.threadId ?? null;
+    const kind = chat?.kind ?? null;
     if (onlyIfLater) {
       return this.db.prepare(
-        "UPDATE triggers SET last_escalation_at = ?, last_escalation_outcome = 'unconfirmed' WHERE id = ? AND (last_escalation_at IS NULL OR last_escalation_at < ?)",
-      ).run(at, id, at).changes > 0;
+        `UPDATE triggers SET ${set} WHERE id = ? AND (last_escalation_at IS NULL OR last_escalation_at < ?)`,
+      ).run(at, threadId, kind, id, at).changes > 0;
     }
     return this.db.prepare(
-      "UPDATE triggers SET last_escalation_at = ?, last_escalation_outcome = 'unconfirmed' WHERE id = ?",
-    ).run(at, id).changes > 0;
+      `UPDATE triggers SET ${set} WHERE id = ?`,
+    ).run(at, threadId, kind, id).changes > 0;
   }
 
   /**
@@ -1192,10 +1215,16 @@ export class TriggerStore {
    * them alone), because the record is about its last escalation, not its current shape.
    * False when the trigger is gone or a newer escalation has started.
    */
-  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string): boolean {
+  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string, detail?: DeliveryDetail): boolean {
+    // The case belongs to `not_delivered` only. A chat named here (an alert's) replaces the one
+    // the start wrote; none keeps it.
+    const escalationCase = outcome === 'not_delivered' ? detail?.case ?? null : null;
     return this.db.prepare(
-      'UPDATE triggers SET last_escalation_outcome = ? WHERE id = ? AND last_escalation_at = ?',
-    ).run(outcome, id, startedAt).changes > 0;
+      `UPDATE triggers SET last_escalation_outcome = ?, last_escalation_case = ?,
+         last_escalation_thread_id = COALESCE(?, last_escalation_thread_id),
+         last_escalation_chat_kind = COALESCE(?, last_escalation_chat_kind)
+       WHERE id = ? AND last_escalation_at = ?`,
+    ).run(outcome, escalationCase, detail?.chat?.threadId ?? null, detail?.chat?.kind ?? null, id, startedAt).changes > 0;
   }
 
   /**
