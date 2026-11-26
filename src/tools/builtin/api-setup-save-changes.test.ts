@@ -202,7 +202,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(denied.asked).toHaveLength(1);
     expect(denied.asked[0]).toContain('This save changes:\n- secret read: KP_KEY_A → KP_KEY_B');
     const nobody = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), undefined);
-    expect(nobody.result).toBe('Blocked: profile "kp" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user\'s acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, and that they can save it again by asking lynox in a chat where they can answer. Do not try to save it in another way.\n\nThis save changes:\n- secret read: KP_KEY_A → KP_KEY_B');
+    expect(nobody.result).toBe('Blocked: profile "kp" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user\'s acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, name in a few words what the save would have changed (from the list below), and tell them they can save it by asking lynox for it in a chat, since a scheduled or background run cannot ask them. Do not try to save it in another way.\n\nThis save changes:\n- secret read: KP_KEY_A → KP_KEY_B');
     expect(stored(store, 'kp')?.auth?.vault_keys).toEqual(['KP_KEY_A']);
   });
 
@@ -546,10 +546,24 @@ describe('api_setup: an autonomous run cannot widen a profile, even though it co
     expect(auto.asked).toEqual([]);
     expect(auto.result).toMatch(/^Blocked: profile "kp" egresses to a non-vetted sub-processor/);
     expect(stored(store, 'kp')).toBeUndefined();
-    // control: the same save in a supervised run asks (the host, then the key's new destination), and is stored on a yes
+    // control: the same save in a supervised run asks, and is stored on a yes
     const asked = await save(store, 'create', keyProfile({ base_url: 'https://x.openai.azure.com/v1' }), 'allow', 'supervised');
     expect(asked.asked.length).toBeGreaterThan(0);
+    expect(asked.asked[0]).toContain('x.openai.azure.com');
     expect(stored(store, 'kp')?.base_url).toBe('https://x.openai.azure.com/v1');
+  });
+
+  it('a store sign-in saved in an autonomous run is refused without asking, and keeps its accepted sign-in redirect', async () => {
+    // Every built-in store sign-in sends to a host outside the vetted list, so an autonomous save
+    // of one stops at that half: no run without a person can record an acceptance for it.
+    const store = new ApiStore();
+    await save(store, 'create', shop(), 'allow');
+    expect(stored(store, 'shop')?.custom_endpoint_ack?.redirect_hosts).toEqual(['acme.myshopify.com']);
+    const auto = await save(store, 'update', { ...shop(), description: 'Another text' }, 'allow', 'autonomous');
+    expect(auto.asked).toEqual([]);
+    expect(auto.result).toMatch(/^Blocked: profile "shop" egresses to a non-vetted sub-processor/);
+    expect(stored(store, 'shop')?.description).toBe('The admin API of one store');
+    expect(stored(store, 'shop')?.custom_endpoint_ack?.redirect_hosts).toEqual(['acme.myshopify.com']);
   });
 
   it('control: an autonomous save that changes nothing of the grant, or only narrows it, still saves without a question', async () => {
@@ -558,6 +572,7 @@ describe('api_setup: an autonomous run cannot widen a profile, even though it co
     const same = await save(store, 'update', { ...ownGrant({ scope: 'read write' }), description: 'Another text' }, 'allow', 'autonomous');
     expect(same.asked).toEqual([]);
     expect(same.result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect(stored(store, 'svc')?.description).toBe('Another text');
     const narrower = await save(store, 'update', ownGrant({ scope: 'read' }), 'allow', 'autonomous');
     expect(narrower.asked).toEqual([]);
     expect(narrower.result).not.toMatch(/^(Error|Blocked|Validation)/);
