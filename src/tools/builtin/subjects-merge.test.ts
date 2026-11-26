@@ -441,6 +441,30 @@ describe('subjects_merge tool (PR-C3)', () => {
     expect(res).toContain('subject graph disabled');
   });
 
+  // The stored names can be text extracted from outside content. Each comes back in its own
+  // marked block after a label in lynox's own words; what stands outside the blocks is pinned
+  // whole, so a field added to the answer without a block turns this red.
+  const outsideBlocks = (text: string): string => text.replace(/<untrusted_data[^>]*>[\s\S]*?<\/untrusted_data>/g, '[block]');
+  const blocks = (text: string): string[] => [...text.matchAll(/<untrusted_data[^>]*>\n([\s\S]*?)\n<\/untrusted_data>/g)].map(m => m[1]!);
+
+  it('a merge returns each stored name in its own marked block, after its label, and nothing stored outside them', async () => {
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, makeAgent('Merge'));
+    expect(blocks(res)).toEqual(['Ada', 'Dr. Ada Lovelace']);
+    const outside = outsideBlocks(res);
+    expect(outside.split('\n').slice(0, 3)).toEqual([
+      'Merged the duplicate subject into the kept one — one entry now. Their stored names:',
+      'Duplicate (merged away): [block]',
+      'Kept: [block]',
+    ]);
+    expect(outside).not.toContain('Ada');
+  });
+
+  it('a cancelled merge returns the stored names the same way', async () => {
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, makeAgent('Cancel'));
+    expect(blocks(res)).toEqual(['Ada', 'Dr. Ada Lovelace']);
+    expect(outsideBlocks(res)).toBe('Cancelled — the two entries were left as separate entries. Their stored names:\nDuplicate (not merged): [block]\nKept: [block]');
+  });
+
   it('declares requiresConfirmation (so the permission guard defers to its own prompt)', () => {
     expect(subjectsMergeTool.requiresConfirmation).toBe(true);
   });

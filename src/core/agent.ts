@@ -1376,6 +1376,12 @@ export class Agent implements IAgent {
     // Stored read-back (a prior tainted turn could have seeded these from external input)
     'data_store_query', 'data_store_list', 'contacts_search',
     'task_list', 'artifact_list', 'artifact_history', 'artifact_restore', 'diagnose_workflow_run',
+    // `task_update` returns the same stored row `task_list` does (title, last run's result,
+    // parameters), so it is in the same class.
+    'task_update',
+    // `update_workflow_steps` returns the stored workflow name and every step's stored task text,
+    // the same content `export_workflow` reads back.
+    'update_workflow_steps',
     // `export_workflow` reads back a stored workflow definition that could itself have been
     // `import_workflow`'d from attacker content — the same stored-read-back class as
     // `data_store_query`/`artifact_restore`.

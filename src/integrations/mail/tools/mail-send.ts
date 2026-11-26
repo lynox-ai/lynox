@@ -24,6 +24,7 @@ import type { MailAddress } from '../provider.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { currentCallOwnerKnownFor, currentCallFiling } from '../../../core/call-connection.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
+import { wrapUntrustedData } from '../../../core/data-boundary.js';
 import { approvalFollowup, type StoredAddress } from '../../../core/approval-store.js';
 
 interface MailSendToolInput {
@@ -180,7 +181,8 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
             // in the preview already.
             return 'mail_send cancelled by user.';
           case 'provider_error':
-            return `mail_send error (${result.message})`;
+            // The mail server's own text: marked, since the server (or a relay) chose it.
+            return `mail_send error: the mail provider refused or failed the send. Its message:\n${wrapUntrustedData(result.message, 'mail_send')}`;
         }
       }
 

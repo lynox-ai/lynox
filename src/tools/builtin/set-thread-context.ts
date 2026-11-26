@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { logErrorChain } from '../../core/utils.js';
-import { describeAmbiguity } from '../../core/subject-store.js';
+import type { SubjectStore } from '../../core/subject-store.js';
+import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { ifCreated, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 // Foundation Rework v2 — Context-Hierarchy Scoping, Slice A2.
@@ -28,6 +29,20 @@ interface SetThreadContextInput {
 // resolver both this tool and the extraction path route through, so they converge
 // on one row per project). Composite `(normalized-name, parent)` idempotency lives
 // there; two clients can each have a "Website" project and stay distinct rows.
+
+/**
+ * The answer when the customer name matches more than one entry: the stored names of the matches
+ * (which can be extracted text) in one marked block after the sentence, never inside it.
+ */
+function ambiguityText(store: SubjectStore, candidateIds: readonly string[]): string {
+  const names = candidateIds
+    .map(id => store.getSubject(id)?.name)
+    .filter((n): n is string => typeof n === 'string');
+  const head = 'The customer name matches more than one entry. Use the full name to say which one.';
+  return names.length > 0
+    ? `${head} The stored names of the matches:\n${wrapUntrustedData(names.join('\n'), 'set_thread_context')}`
+    : `${head} (${String(candidateIds.length)} entries)`;
+}
 
 export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
   undo: 'restorable',
@@ -75,12 +90,13 @@ export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
           // Setting a thread's customer is an explicit user act, so an unidentifying name
           // is worth saying out loud rather than binding to whichever one came first.
           const r = w.run('customer', () => subjects.findOrCreate({ kind: 'organization', name: customer }), ifCreated);
-          if (r.ambiguous) return describeAmbiguity(subjects, customer, r.candidateIds);
+          if (r.ambiguous) return ambiguityText(subjects, r.candidateIds);
           customerId = r.id;
         }
 
         let anchorId: string;
         let label: string;
+        let clientNote = '';
         if (project) {
           // The handler names the resolved client back to the user (below), so a
           // client-less project may reuse an existing client-parented row (a guess the
@@ -93,7 +109,9 @@ export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
             // name it so the scope isn't silently attributed to another client.
             const parentId = subjects.getSubject(anchorId)?.parent_id ?? null;
             const parentName = parentId ? subjects.getSubject(parentId)?.name : undefined;
-            label = parentName ? `project "${project}" for client "${parentName}"` : `project "${project}"`;
+            // The client's stored name, in a marked block after the sentence: it can be extracted text.
+            label = `project "${project}"`;
+            if (parentName) clientNote = ` It is filed under a client whose stored name is:\n${wrapUntrustedData(parentName, 'set_thread_context')}`;
           }
         } else {
           // customer-only: customer is set (the both-empty case was rejected above).
@@ -106,7 +124,7 @@ export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
 
         // history.db write last (cross-DB — no shared transaction with the subject writes).
         w.run('thread', () => threads.updateThread(threadId, { primary_subject_id: anchorId }), ifTrue);
-        return `This thread is now scoped to ${label}. Notes saved here and recall will prefer this context.`;
+        return `This thread is now scoped to ${label}. Notes saved here and recall will prefer this context.${clientNote}`;
       });
     } catch (e: unknown) {
       logErrorChain('set_thread_context', e);

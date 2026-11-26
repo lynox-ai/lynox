@@ -5,6 +5,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { ifOk, withInstanceWrite } from '../../core/instance-trail.js';
 import { pv } from '../../core/prompt-value.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
+import { wrapUntrustedData } from '../../core/data-boundary.js';
 import type { SubjectKind } from '../../core/subject-store.js';
 
 // Foundation Rework v2 — subject dedup (PR-C3). The chat-native surface over the
@@ -46,6 +47,11 @@ interface SubjectsMergeInput {
   duplicate: string;
   canonical: string;
   kind?: string | undefined;
+}
+
+/** Two stored subject names, each after its label and in its own marked block. */
+function storedNames(firstLabel: string, first: string, secondLabel: string, second: string): string {
+  return `Their stored names:\n${firstLabel}: ${wrapUntrustedData(first, 'subjects_merge')}\n${secondLabel}: ${wrapUntrustedData(second, 'subjects_merge')}`;
 }
 
 export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
@@ -141,7 +147,10 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       pv`Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. Undoing it needs a command-line rollback — not something you can do from chat.`,
       ['Merge', 'Cancel'],
     );
-    if (answer !== 'Merge') return `Cancelled — "${dup.name}" and "${canon.name}" were left as separate entries.`;
+    // The stored names can differ from the ones given (an alias resolves to its entry) and can be
+    // text extracted from outside content: each is returned in its own marked block, after a label
+    // in lynox's own words, never inside the sentence.
+    if (answer !== 'Merge') return `Cancelled — the two entries were left as separate entries. ${storedNames('Duplicate (not merged)', dup.name, 'Kept', canon.name)}`;
 
     try {
       const dupId = dup.id, canonId = canon.id;
@@ -155,7 +164,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
         // only input `rollbackMergeRun` takes. It IS covered by backup and migration
         // (`data-dir-inventory.ts`), so the honest limit is the access it needs, not
         // the file's survival — the previous wording had that exactly backwards.
-        return `Merged "${r.dupName}" into "${r.canonicalName}" — one entry now${cells}. `
+        return `Merged the duplicate subject into the kept one — one entry now${cells}. ${storedNames('Duplicate (merged away)', r.dupName, 'Kept', r.canonicalName)}\n`
           + `An operator can reverse this from ${r.ledgerPath} — that needs shell access to this machine, not chat. The file is kept in backups and carried across migrations, and is removed after ${String(LEDGER_RETENTION_DAYS)} days.`;
       });
     } catch (err) {
