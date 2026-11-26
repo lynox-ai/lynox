@@ -197,6 +197,13 @@ describe('bindWorkflowParameters', () => {
         delete proto['inherited'];
       }
     });
+
+    it('a contract whose rules are null binds as one without rules, as the preview shows none', () => {
+      const schema = [param({ name: 'env', defaultValue: 'stored' })];
+      const none = { constraints: null as unknown as Record<string, never> };
+      expect(bindWorkflowParameters(schema, { env: 'any' }, none)).toEqual({ ok: true, params: { env: 'any' } });
+      expect(bindWorkflowParameters(schema, {}, none)).toEqual({ ok: true, params: { env: 'stored' } });
+    });
   });
 });
 

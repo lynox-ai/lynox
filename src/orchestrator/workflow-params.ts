@@ -36,7 +36,7 @@ export function bindWorkflowParameters(
   // A rule is the contract's own entry for the parameter, never one an object inherits: the
   // stamp preview shows only own entries (`allowedShown`), and the run enforces what it shows.
   const rules = opts?.constraints;
-  const ruleOf = (name: string): ParamConstraint | undefined => (rules !== undefined && Object.hasOwn(rules, name) ? rules[name] : undefined);
+  const ruleOf = (name: string): ParamConstraint | undefined => (typeof rules === 'object' && rules !== null && Object.hasOwn(rules, name) ? rules[name] : undefined);
   for (const param of schema) {
     const has = Object.prototype.hasOwnProperty.call(given, param.name);
     const raw = has ? given[param.name] : undefined;
