@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.19.2 — 2026-11-26
+
+This release lets the control plane cap a managed instance's new work at the
+AI budget the customer has left.
+
+### Added
+
+- The control plane can now send `overrun_hold` on the usage flush and status
+  responses. While it is set and the control plane reports the AI balance as
+  the spend gate, a new run starts only when some budget is free. Its cost
+  guard is capped at that free amount, and the amount stays reserved until the
+  run ends. While one run holds the budget, any other run on the instance
+  (another chat, a scheduled task, a workflow) is refused until it ends or a
+  top-up reaches the instance. (#2699)
+- While the cap is in force, single model calls (a chat title, memory and
+  knowledge extraction, inbox classification, voice, the bulk-run judge) start
+  only when a fixed per-call allowance is free; for text-to-speech it is the
+  cost of the text. While a run holds the budget they are refused. A chat title
+  and a memory extraction are tried once more when that run ends. A
+  knowledge-graph extraction is skipped and the memory is stored without its
+  entities. An inbox mail is left for manual review, a voice request gets a
+  402, and a bulk run halts. (#2699)
+- While the cap is in force, in-conversation workflows and batch runs are
+  refused. A saved workflow, started by hand or on a schedule, starts only when
+  the free budget covers the session cost ceiling (`max_session_cost_usd`, $50
+  by default); that amount stays reserved until the workflow ends. Knowledge
+  retrieval skips the extra query-expansion call and searches on the question
+  alone. (#2699)
+- A chat message refused this way shows as a note in the user's language, in
+  place of the toast and the raw "Run blocked" reply. A voice request refused
+  this way gets a 402 with its own message. (#2699)
+
+### Changed
+
+- For every run with a cost guard, tool-side helper model calls (API
+  documentation extraction, web-search reranking, planning, workflow
+  annotation) now count against the run's guard, and a spawned child's helper
+  spend counts against its parent. A run can therefore reach its per-run budget
+  slightly earlier than before. Nothing extra is billed. (#2699)
+
+### Upgrade notes
+
+- Without `overrun_hold` from the control plane, runs are admitted as before;
+  the helper-cost change above still applies.
+- An instance without managed billing configured (`LYNOX_BILLING_TIER`) never
+  reads `overrun_hold`, so self-hosted instances are unaffected.
+- There are no database migrations.
+
 ## 2.19.1 — 2026-11-26
 
 This release contains one security fix. Upgrading is recommended for every
