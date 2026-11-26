@@ -56,8 +56,9 @@ export interface HostDisclosure {
  *           default for open models — the opt-in turns prompt LOGGING on).
  *   - Sch.2 SOC 2 Type II, ISO 27001 / 27701 / 42001.
  * §4.3(f) additionally prohibits training or fine-tuning on the data. The customer
- * -facing wording lives in `SUBPROCESSORS.md` and the website's DPA page; both were
- * corrected in the same change, so the screen and the disclosure now agree.
+ * -facing wording lives on the website's sub-processor list and DPA page (`SUBPROCESSORS.md`
+ * only points there); both were corrected in the same change, so the screen and the disclosure
+ * now agree.
  *
  * ⚠️ Do NOT read this flag as "the transfer basis is settled". It gates the
  * RETENTION/SECURITY posture only. `transferBasis` is a separate field, and the

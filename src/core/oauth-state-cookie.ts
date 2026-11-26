@@ -42,7 +42,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { LOGIN_PRINCIPAL_ID_MAX } from '../contract/http.js';
+import { LOGIN_PRINCIPAL_DISPLAY_MAX, LOGIN_PRINCIPAL_ID_MAX } from '../contract/http.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 
 /** Mirrors `PROFILE_ID_PATTERN` in `api-store.ts`. Dot-free, which is what lets
@@ -57,8 +57,13 @@ const STATE_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 
 const PURPOSE = 'lynox-profile-oauth-state';
 
-/** The encoded principal field, as the reader accepts it and so as the signer may write it. */
-const PRINCIPAL_FIELD = /^[A-Za-z0-9_-]{1,800}$/;
+/**
+ * The encoded principal field, as the reader accepts it and so as the signer may write it. Room
+ * for the longest tag, mandate id and name this module admits at three bytes a character. A
+ * value JSON escapes (a lone surrogate takes six) can pass it; the signer then refuses, and the
+ * start signs again without the name.
+ */
+const PRINCIPAL_FIELD = /^[A-Za-z0-9_-]{1,2400}$/;
 
 /** The encoded scope field: base64url of a JSON list, since a scope may carry dots (a URL). */
 const ASKED_FIELD = /^[A-Za-z0-9_-]{1,4000}$/;
@@ -119,13 +124,26 @@ export interface ConnectingPrincipal {
   readonly tag: string;
   /** The mandate's id; required for a mandate, absent for the owner. */
   readonly mandateId?: string | undefined;
+  /**
+   * The name the mandate's session was shown under, so the callback's trail rows carry it like
+   * every other row of that person. Optional for a mandate (a session without one signs none),
+   * absent for the owner.
+   */
+  readonly display?: string | undefined;
 }
 
-/** What a `by` field may hold: the owner, or a mandate tag with its mandate id. */
+/** What a `by` field may hold: the owner, or a mandate tag with its mandate id and, maybe, its name. */
 function validPrincipal(by: ConnectingPrincipal): boolean {
-  if (by.tag === 'owner') return by.mandateId === undefined;
+  if (by.tag === 'owner') return by.mandateId === undefined && by.display === undefined;
   return by.tag.startsWith(MANDATE_TAG_PREFIX) && by.tag.length > MANDATE_TAG_PREFIX.length && by.tag.length <= 320
-    && typeof by.mandateId === 'string' && validMandateId(by.mandateId);
+    && typeof by.mandateId === 'string' && validMandateId(by.mandateId)
+    && (by.display === undefined || validDisplay(by.display));
+}
+
+/** The name as the login contract admits it: one line, trimmed, at most its cap. */
+function validDisplay(display: string): boolean {
+  return display.length > 0 && display.length <= LOGIN_PRINCIPAL_DISPLAY_MAX && display.trim() === display
+    && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(display);
 }
 
 /**
@@ -139,7 +157,9 @@ function validMandateId(id: string): boolean {
 }
 
 function encodePrincipal(by: ConnectingPrincipal): string {
-  return Buffer.from(JSON.stringify(by.mandateId === undefined ? { tag: by.tag } : { tag: by.tag, mandate_id: by.mandateId })).toString('base64url');
+  const fields = by.mandateId === undefined ? { tag: by.tag }
+    : { tag: by.tag, mandate_id: by.mandateId, ...(by.display === undefined ? {} : { display: by.display }) };
+  return Buffer.from(JSON.stringify(fields)).toString('base64url');
 }
 
 function validAsked(asked: readonly string[]): boolean {
@@ -173,9 +193,11 @@ function decodePrincipal(field: string): ConnectingPrincipal | null {
     return null;
   }
   if (typeof parsed !== 'object' || parsed === null) return null;
-  const { tag, mandate_id: mandateId } = parsed as { tag?: unknown; mandate_id?: unknown };
+  const { tag, mandate_id: mandateId, display } = parsed as { tag?: unknown; mandate_id?: unknown; display?: unknown };
   if (typeof tag !== 'string' || (mandateId !== undefined && typeof mandateId !== 'string')) return null;
-  const by: ConnectingPrincipal = mandateId === undefined ? { tag } : { tag, mandateId };
+  if (display !== undefined && typeof display !== 'string') return null;
+  const by: ConnectingPrincipal = mandateId === undefined ? { tag, ...(display === undefined ? {} : { display }) }
+    : { tag, mandateId, ...(display === undefined ? {} : { display }) };
   return validPrincipal(by) ? by : null;
 }
 

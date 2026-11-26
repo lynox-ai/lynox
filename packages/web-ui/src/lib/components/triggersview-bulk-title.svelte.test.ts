@@ -74,6 +74,18 @@ describe('the schedules list names a bulk run\'s trigger by stage and host', () 
 		expect(target.textContent ?? '').not.toContain(RUN_ID);
 	});
 
+	it('boxes the host as code beside the stage, the stage staying text, and boxes nothing else', async () => {
+		rows = [
+			{ ...BASE, id: `bulk-${RUN_ID}`, title: `Bulk run ${RUN_ID}`, effect: 'bulk_apply', bulk_host: 'api.bexio.com' },
+			{ ...BASE, id: 'bulk-u', title: `Bulk undo ${RUN_ID}`, effect: 'bulk_undo', bulk_host: '' },
+			{ ...BASE, id: 'w', title: 'api.bexio.com', effect: 'run_agent', source: 'cron', bulk_host: 'api.bexio.com' },
+		];
+		await render();
+		const titles = [...target.querySelectorAll('[data-trigger-title]')];
+		expect(titles.map((e) => [...e.querySelectorAll('code[data-testid="trigger-bulk-host"]')].map((c) => c.textContent))).toEqual([['api.bexio.com'], [], []]);
+		expect([...titles[0]!.childNodes].filter((n) => !(n instanceof Element)).map((n) => n.textContent).join('')).toBe(`${t('triggers.bulk.apply')} · `);
+	});
+
 	it('words the stages as they are worded, in both languages', async () => {
 		const { readFileSync } = await import('node:fs');
 		const src = readFileSync(join(dirname(new URL(import.meta.url).pathname), '../i18n.svelte.ts'), 'utf8');
@@ -83,5 +95,18 @@ describe('the schedules list names a bulk run\'s trigger by stage and host', () 
 			"'triggers.bulk.apply': { de: 'Massenlauf', en: 'Bulk run' },",
 			"'triggers.bulk.undo': { de: 'Rücknahme', en: 'Undo' },",
 		]) expect(src).toContain(line);
+	});
+
+	it('keeps a paused bulk trigger named by its stage, while a paused plan shows its title set apart', async () => {
+		rows = [
+			{ ...BASE, id: `bulk-${RUN_ID}`, title: `Bulk run ${RUN_ID}`, effect: 'bulk_apply', bulk_host: 'api.bexio.com', paused: true },
+			{ ...BASE, id: 'w', title: 'Wochenreport', effect: 'run_agent', source: 'cron', paused: true },
+		];
+		await render();
+		const [bulk, plan] = [...target.querySelectorAll('[data-trigger-title]')];
+		expect(bulk?.textContent?.trim()).toBe(`${t('triggers.bulk.apply')} · api.bexio.com`);
+		expect(bulk?.querySelector('[data-foreign-value]')).toBeNull();
+		expect(plan?.querySelector('[data-foreign-value]')?.textContent).toBe('Wochenreport');
+		expect(target.textContent ?? '').not.toContain(RUN_ID);
 	});
 });

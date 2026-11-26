@@ -299,7 +299,7 @@ describe('deleting an entry the boot could not read', () => {
     const asked = vi.fn(allow);
     expect(await del(store, vaultOf({}), 'owner', { promptUser: asked })).toBe('Deleted API profile "owner".');
     expect(asked).toHaveBeenCalledOnce();
-    expect(flattenPrompt((asked.mock.calls[0] as unknown[])[0] as never)).toBe('⚠ api_setup: delete the stored API profile owner, which could not be read (file "owner.json")? Every vault name it carries is free for other profiles once it is gone. Delete it?');
+    expect(flattenPrompt((asked.mock.calls[0] as unknown[])[0] as never)).toBe('⚠ API connections: delete the stored API connection owner, which could not be read (file "owner.json")? Every vault name it carries is free for other connections once it is gone. Delete it?');
     expect(existsSync(join(dir, 'owner.json'))).toBe(false);
     expect(store.unreadableHolds('SHOP_ACCESS_TOKEN')).toBe(false);
   });
