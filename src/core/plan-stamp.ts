@@ -295,12 +295,8 @@ export async function planAsks(
   if (task.effect === 'run_workflow') {
     if (task.source === 'webhook' || !task.pipeline_id) return undefined;
     const { getPipeline } = await import('../tools/builtin/pipeline.js');
-    let planned: ReturnType<typeof getPipeline>;
-    try {
-      planned = runHistory ? getPipeline(task.pipeline_id, runHistory) : undefined;
-    } catch {
-      return undefined;
-    }
+    // A workflow that cannot be read throws on: the preview fails instead of saying no one else answers.
+    const planned = runHistory ? getPipeline(task.pipeline_id, runHistory) : undefined;
     if (planned === undefined || !workflowAsksOnSchedule(planned)) return undefined;
   } else if (task.effect !== 'run_agent' || task.source === 'watch') {
     return undefined;

@@ -1333,7 +1333,7 @@ describe('WorkerLoop', () => {
       expect(seen).toEqual([['mandate', ENTRIES], ['mandate', null]]);
     });
 
-    it('runs a workflow plan for the person its stamp says its questions reach, by the same reading', async () => {
+    it('runs a workflow plan for the person the stamp\'s reading says it acts for, by the same reading', async () => {
       // The plan's stamp names whom the run's questions reach (`planActsFor`, under `planAsks`); the
       // run acts for `currentPlanOf`. Both read the plan one way: a tie goes to the schedule, the
       // later mark wins, the owner's plan on a mandate's workflow acts for that mandate, an ended

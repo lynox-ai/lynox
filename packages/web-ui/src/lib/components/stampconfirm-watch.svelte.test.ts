@@ -177,6 +177,13 @@ describe('the stamp of a plan says whom its questions reach besides the owner', 
 		expect([...en!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual(['lena@kanzlei.example']);
 	});
 
+	it('shows an address past the display length whole: its end, the domain, is what says whose it is', async () => {
+		watchUrl = 'https://shop.example/preise';
+		asks = 'k'.repeat(90) + '@kanzlei.example';
+		await open();
+		expect([...target.querySelector('[data-stamp-asks]')!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual([asks]);
+	});
+
 	it('says nothing for a plan that asks only the owner, and the preview stands', async () => {
 		watchUrl = 'https://shop.example/preise';
 		for (const value of [undefined, null]) {

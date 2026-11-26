@@ -395,6 +395,8 @@ vi.mock('../core/engine.js', () => ({
       // The owner's stamp on a workflow (`workflow-stamp.ts`): by default a workflow here is the
       // owner's, and stamped when it carries `confirmedAt`; the stamp tests override these.
       workflowStampState: vi.fn((p: { confirmedAt?: string }) => (p.confirmedAt ? 'holds' : 'unconfirmed')),
+      // No plan runs any workflow here: the workflow stamp names no one its plans ask.
+      getPlansOfWorkflow: vi.fn(() => []),
       workflowMandateShaped: vi.fn().mockReturnValue(false),
       workflowStampDigest: vi.fn().mockReturnValue('digest-1'),
       getWorkflowExact: vi.fn().mockReturnValue(undefined),
@@ -708,6 +710,15 @@ async function confirmBody(id: string): Promise<string> {
  * the comment in the `tasks` describe explains how handing back their spend weakens the
  * `rate limiting` describe.
  */
+/**
+ * {@link repayRateWindow}, and the window opened for the calling test: for a test that reads many
+ * previews in a row, which would otherwise depend on how much the tests before it spent.
+ */
+function freshRateWindow(): void {
+  repayRateWindow();
+  for (const e of (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts.values()) e.count = 0;
+}
+
 function repayRateWindow(): void {
   const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
   const before = new Map([...window].map(([k, v]) => [k, v.count]));
@@ -24677,6 +24688,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     });
 
     it('says whom the questions of a plan and of a workflow reach besides the owner, as the run reads it', async () => {
+      freshRateWindow();
       const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
       const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
       const EVA = 'M-EVA';
@@ -24752,6 +24764,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     });
 
     it('refuses a confirm when the person its questions reach changed since the preview, with nothing else changed', async () => {
+      freshRateWindow();
       const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
       const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
       const asking = { id: 'wf-arno', name: 'W', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, template: true, confirmedAt: '2026-10-07T00:00:00.000Z', mode: 'interactive', steps: [{ id: 's1', task: 'ask', tools: ['ask_user'] }] };
@@ -24771,6 +24784,18 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         expect(((await (await jsonFetch('/api/tasks/p-eva/stamp-preview')).json()) as { asks: unknown }).asks).toBe('eva@kanzlei.example');
         expect((await ownerSessionFetch('/api/tasks/p-eva/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
+        // Eva changes the plan once more while the confirm reads it: it reads the person from the
+        // first read, so the change time it read last decides, and it refuses.
+        const during = await (await jsonFetch('/api/tasks/p-eva/stamp-preview')).json() as { expect: string };
+        let flipped = false;
+        mockGetPipeline.mockImplementation((id: string) => {
+          if (!flipped) { flipped = true; trigger = { ...trigger, mandate_edited_at: '2026-10-08 00:00:01' }; }
+          return id === 'wf-arno' ? asking : undefined;
+        });
+        expect((await ownerSessionFetch('/api/tasks/p-eva/confirm', { method: 'POST', body: JSON.stringify({ expect: during.expect }) })).status).toBe(409);
+        expect(flipped).toBe(true);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
+        mockGetPipeline.mockImplementation((id: string) => (id === 'wf-arno' ? asking : undefined));
         // Confirmed from the preview that names Eva: stamped.
         const again = await (await jsonFetch('/api/tasks/p-eva/stamp-preview')).json() as { expect: string };
         mockConfirmTrigger.mockReturnValueOnce({ ...trigger, confirmed_at: '2026-10-09T00:00:00.000Z' });

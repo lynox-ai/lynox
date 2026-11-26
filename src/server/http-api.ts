@@ -10457,7 +10457,7 @@ export class LynoxHTTPApi {
       // moves its change time, which the subject does not hold, so that refuses as well.
       const now = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!now || (now.mandate_edited_at ?? null) !== (current.mandate_edited_at ?? null) || stampExpect(now, listed?.wf ?? null, listed?.entries ?? [], asks) !== expected) {
-        errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
+        errorResponse(res, 409, 'This schedule changed since you looked: what it runs, its connections, or who besides you answers its questions. Look at it again, then confirm.', 'changed');
         return;
       }
       if (listed !== null && listed.entries.length > 0) connections = listed;

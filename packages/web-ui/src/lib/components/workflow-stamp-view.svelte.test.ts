@@ -892,6 +892,12 @@ describe('the stamp says who else may answer its questions when it runs on a sch
 		} finally { setLocale(was); }
 	});
 
+	it('one person with an address past the display length: names it whole', async () => {
+		const long = 'k'.repeat(90) + '@kanzlei.example';
+		const line = await asksLine({ count: 1, name: long });
+		expect([...line!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual([long]);
+	});
+
 	it('more people: counts them and names no one, pointing to each plan\'s confirmation', async () => {
 		const line = await asksLine({ count: 3, name: null });
 		expect(line?.textContent).toBe('Läuft er geplant, kann je nach Plan auch eine Person mit Zugang seine Fragen beantworten – bei diesem Workflow sind es 3\u00a0Personen. Wer zuerst antwortet, lenkt den Lauf. Wer es bei einem Plan ist, zeigt seine Bestätigung.');
