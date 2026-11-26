@@ -115,9 +115,11 @@ describe('a schedule near midnight names the local day', () => {
 
 	it('a day that moves is said as the local day, with that day\'s English ordinal', async () => {
 		// The ordinal belongs to the day the reader lives, not to the day in the cron: 1 becomes the
-		// 2nd and 10 the 11th forward; 2 becomes the 1st and 23 the 22nd back.
+		// 2nd and 10 the 11th forward; 2 becomes the 1st and 23 the 22nd back. A day that stays in UTC
+		// keeps the cron's day, and its ordinal too.
 		const moved = (): Record<string, unknown>[] => [
 			{ ...BASE, id: 'f1', title: 'Vor', schedule_cron: '0 23 1 * *' },
+			{ ...BASE, id: 'u31', title: 'Einunddreissig UTC', schedule_cron: '0 23 31 * *' },
 			{ ...BASE, id: 'f10', title: 'Vor Zehn', schedule_cron: '0 23 10 * *' },
 			{ ...BASE, id: 'b2', title: 'Zurück', schedule_cron: '0 2 2 * *' },
 			{ ...BASE, id: 'b23', title: 'Zurück Dreiundzwanzig', schedule_cron: '0 2 23 * *' },
@@ -128,6 +130,7 @@ describe('a schedule near midnight names the local day', () => {
 		await render();
 		expect(scheduleOf('Vor')).toBe('Monthly on the 2nd at 00:00');
 		expect(scheduleOf('Vor Zehn')).toBe('Monthly on the 11th at 00:00');
+		expect(scheduleOf('Einunddreissig UTC')).toBe('Monthly on the 31st at 23:00 UTC');
 		unmount(component!);
 		component = undefined;
 		inZone(480);
