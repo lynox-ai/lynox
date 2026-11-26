@@ -313,6 +313,9 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', '  Wetter  ', [], 'D'));
     expect(de.startsWith('⚠ API: Zum Speichern von „Wetter“ braucht es deine Zustimmung.')).toBe(true);
     expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'x'.repeat(500), [], 'D'))).toContain(`von „${'x'.repeat(63)}…“ braucht`);
+    // A name that is not a string still gets its question, shown as its text.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 42 as unknown as string, [], 'D'))).toContain('saving “42” needs');
+    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 42 as unknown as string, [], 'D'))).toContain('von „42“ braucht');
   });
 
   it('names the tiers as the settings do, in the sentence and on the buttons', () => {

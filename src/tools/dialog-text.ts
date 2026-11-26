@@ -52,12 +52,14 @@ const codePoints = (text: string): number => Array.from(text).length;
 
 /** A profile's name as a question quotes it: on one line, composed (so a letter written with a
  *  separate mark is one letter, not a letter and an escaped mark), within both limits, then
- *  escaped. Only a bounded head of the name is segmented, however long the name is. */
+ *  escaped. Only a bounded head of the name is segmented, however long the name is. A name that
+ *  is not a string (a tool's input is not checked for its type) is shown as its text, so the
+ *  question is still asked. */
 function shownName(name: string): string {
   // Composing costs more than linear time on a long run of marks, so only a raw head is composed.
   // Composing joins at most four code units into one code point, so three times the head below
   // (1542 units) still holds more than the limit once composed, or the whole name.
-  const raw = singleLine(name).trimStart();
+  const raw = singleLine(String(name)).trimStart();
   const text = raw.slice(0, 3 * (2 * PROFILE_NAME_CODE_POINTS_MAX + 2)).normalize('NFC').trimEnd();
   // Twice the limit in code units holds more than the limit in code points, or the whole name.
   const head = text.slice(0, 2 * PROFILE_NAME_CODE_POINTS_MAX + 2);
