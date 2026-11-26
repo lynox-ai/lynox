@@ -17,7 +17,7 @@ describe('the person erasure done line', () => {
 		[2, 2, 'Gelöscht: 2 Einträge und 2 Erinnerungen.', 'Erased: 2 entries and 2 memories.'],
 	];
 
-	it.each(cases)('reads %i entries and %i memories with singular forms, leaving out a zero count, in DE and EN', (entries, memories, de, en) => {
+	it.each(cases)('reads %i entries and %i memories in the agreed wording, in DE and EN', (entries, memories, de, en) => {
 		setLocale('de');
 		expect(erasureDoneText(entries, memories)).toBe(de);
 		setLocale('en');
