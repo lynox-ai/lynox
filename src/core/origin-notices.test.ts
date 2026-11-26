@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { originCarriedAsk,
+import { originCarriedAsk, originCarriedDenied, originCarriedMandate, originCarriedUnattended, originTokenUrlRefused,
   originAsk, originAskOnce, originCardMail, originDenied, originLookupFailedMandate, originLookupFailedUnattended, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originRunNotice, originUnreadable,
   isPlainTarget, targetList, TOOLS_WITH_WORDS, type OriginTargets, type SendOrigin,
 } from './origin-notices.js';
@@ -372,5 +372,53 @@ describe('a model text names only a plain target inside its own sentence', () =>
   it('the shape: letters, digits and . _ + - in the local part, starting with a letter or digit', () => {
     for (const v of ['a@x.ch', 'a.b_c+d-e@x.ch', '9@x.ch', 'x.ch', 'xn--bcher-kva.example', '[::1]']) expect(isPlainTarget(v), v).toBe(true);
     for (const v of [odd, 'a;b@x.ch', '.a@x.ch', '-a@x.ch', 'a!@x.ch', 'a%b@x.ch', 'A@x.ch', `${'a'.repeat(65)}@x.ch`, 'a@x.ch\n', 'a@x.ch"', 'a@-x.ch']) expect(isPlainTarget(v), v).toBe(false);
+  });
+});
+
+describe('a target named by position, beyond mail', () => {
+  // A host normalizeHostName passes but the shape does not: a leading hyphen (WHATWG does not
+  // check it, and the ASCII conversion keeps it).
+  const odd = '-a.example';
+  const blockOf = (text: string): string | undefined => /<untrusted_data source="send target">\n([\s\S]*?)\n<\/untrusted_data>$/.exec(text)?.[1];
+
+  it('every read and token-address refusal names such a host by position and gives it in the block', () => {
+    const t = one(odd);
+    for (const [name, text] of [
+      ['carried denied', originCarriedDenied(t)],
+      ['carried unattended', originCarriedUnattended(t)],
+      ['carried mandate', originCarriedMandate(t)],
+      ['token denied', originTokenUrlRefused('denied', t, { kind: 'readContent' })],
+      ['token unattended', originTokenUrlRefused('unattended', t, { kind: 'readContent' })],
+      ['token mandate', originTokenUrlRefused('mandate', t, { kind: 'readContent' })],
+      ['page denied', originDenied(t, { kind: 'readContent' }, 'page')],
+      ['page unattended', originRefusedUnattended(t, { kind: 'readContent' }, 'page')],
+    ] as const) {
+      expect(text.split('\n\nThe address named above')[0], name).not.toContain(odd);
+      expect(text.split('\n\nThe address named above')[0], name).toContain('the address');
+      expect(blockOf(text), name).toBe(`the address: ${odd}`);
+    }
+  });
+
+  it('a page read says "read" in its sentence, and the block after it keeps the value as given', () => {
+    const odd2 = 'not-sent.example';
+    const text = originDenied({ values: [odd, odd2], unreadable: false }, { kind: 'readContent' }, 'page');
+    expect(text.startsWith('Not read: lynox asked the user whether to read from the 1st address and "not-sent.example"')).toBe(true);
+    expect(blockOf(text)).toBe(`the 1st address: ${odd}`);
+  });
+
+  it('without its block, a refusal ends on its own sentence, for a caller that adds one after it', () => {
+    for (const text of [originDenied(one('x;y@evil.example'), { kind: 'readContent' }, 'mail', false), originCarriedDenied(one(odd), false), originTokenUrlRefused('denied', one(odd), { kind: 'readContent' }, false, false, false)]) {
+      expect(text).not.toContain('untrusted_data');
+      expect(text.endsWith('a missing permission.')).toBe(true);
+    }
+  });
+
+  it('ordinals: 1st, 2nd, 3rd, 4th, 11th to 13th, 21st, 22nd, 23rd', () => {
+    const values = Array.from({ length: 23 }, (_, i) => `x${String(i)};y@evil.example`);
+    const block = blockOf(originDenied({ values, unreadable: false }, { kind: 'readContent' }, 'mail'))!;
+    const names = block.split('\n').map((l) => l.split(':')[0]);
+    expect(names.slice(0, 4)).toEqual(['the 1st recipient', 'the 2nd recipient', 'the 3rd recipient', 'the 4th recipient']);
+    expect(names.slice(10, 13)).toEqual(['the 11th recipient', 'the 12th recipient', 'the 13th recipient']);
+    expect(names.slice(20)).toEqual(['the 21st recipient', 'the 22nd recipient', 'the 23rd recipient']);
   });
 });

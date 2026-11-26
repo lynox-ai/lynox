@@ -124,6 +124,18 @@ describe('in the owner\'s chat', () => {
     expect(tool.calls).toHaveLength(1);
   });
 
+  it('a word for an answer: the refusal\'s sentences, then why nothing was allowed, then the block of a target named by position', async () => {
+    const tool = sender();
+    const agent = agentOf({ tools: [tool], promptUser: asker('yes').fn, ownerKnown: owner('nothing named here') });
+    const content = String((await call(agent, 'mail_send', { to: ['x;y@evil.example'] })).content);
+    expect(tool.calls).toEqual([]);
+    const [sentences, ...rest] = content.split('\n\nThe recipient named above by position, as given:\n');
+    expect(rest).toHaveLength(1);
+    expect(sentences).not.toContain('x;y');
+    expect(sentences!.endsWith('a missing permission. The answer was not one of the offered choices, so nothing was allowed. Tell the user to ask again and answer with the buttons; if no buttons were shown, their page is outdated and needs a reload first.')).toBe(true);
+    expect(rest[0]).toBe('<untrusted_data source="send target">\nthe recipient: x;y@evil.example\n</untrusted_data>');
+  });
+
   it('one foreign target among known ones asks, and names only the foreign one', async () => {
     const tool = sender();
     const ask = asker('allow');
