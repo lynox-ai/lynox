@@ -3752,8 +3752,8 @@ export async function submitChangesetReview(
 			rollbackStopped = null;
 			addToast(tf('changeset.not_restored_unknown', { files: namedFiles(left) }), 'error', null);
 		}
-		// Nothing left: the review is over.
-		if (pendingChangeset === null) drainQueueSoon(100);
+		// The drain waits while a card is shown, so this sends only once the review is over.
+		drainQueueSoon(100);
 		return;
 	}
 	// The answer did nothing. Closing the review silently would read as done: say so, and show

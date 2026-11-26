@@ -304,6 +304,15 @@ describe('a rollback the server could not do', () => {
 		expect(runTasks, 'the held message goes').toEqual(['next step', 'next step']);
 	});
 
+	it('a stopped rollback that names nothing sets no sentence, even when the card cannot be fetched', async () => {
+		await openReview();
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: [] } };
+		changesetStatus = 500;
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(store.getRollbackStopped()).toBeNull();
+	});
+
 	it('the sentence is dropped when the server says the review shows no files', async () => {
 		await openReview();
 		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
