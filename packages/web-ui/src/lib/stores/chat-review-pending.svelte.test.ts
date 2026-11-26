@@ -16,7 +16,7 @@ const json = (body: unknown, status = 200): Response =>
 const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)); };
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-type RunAnswer = 'busy' | 'held' | 'ok';
+type RunAnswer = 'busy' | 'held' | 'owner' | 'ok';
 
 let store: Store;
 let saved: Map<string, string>;
@@ -28,6 +28,12 @@ let changesetStatus: number;
 let reviewAnswer: { status: number; body: unknown };
 /** While set, the first run's stream stays open until it resolves. */
 let holdFirstRun: Promise<void> | null;
+/** The review the server holds belongs to a later run (`run-8`). */
+let laterRun: boolean;
+/** The server says the review has changes but lists no file. */
+let cardEmptyButChanged: boolean;
+/** The server has no session any more (404). */
+let changesetGone: boolean;
 
 const notes = [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }];
 
@@ -46,6 +52,7 @@ function serve(): void {
 			const answer = runAnswers.shift() ?? 'ok';
 			if (answer === 'busy') return json({ error: 'A run is already in progress for this session' }, 409);
 			if (answer === 'held') return json({ error: 'The changes of the last run wait for a review', code: 'review_pending', runId: 'run-7' }, 409);
+			if (answer === 'owner') return json({ error: 'This conversation still has changes waiting for the owner\'s review', code: 'review_pending_owner' }, 409);
 			const enc = new TextEncoder();
 			const held = runTasks.length === 1 ? holdFirstRun : null;
 			return new Response(new ReadableStream<Uint8Array>({
@@ -54,7 +61,8 @@ function serve(): void {
 		}
 		if (url.endsWith('/changeset')) {
 			if (changesetStatus !== 200) return json({ error: 'no' }, changesetStatus);
-			return json({ hasChanges: card.length > 0, runId: 'run-7', files: card });
+			if (changesetGone) return json({ error: 'Session not found' }, 404);
+			return json({ hasChanges: card.length > 0 || cardEmptyButChanged, runId: laterRun ? 'run-8' : 'run-7', files: card });
 		}
 		return json({ messages: [], activeRun: null });
 	}));
@@ -82,6 +90,9 @@ beforeEach(async () => {
 	changesetStatus = 200;
 	reviewAnswer = { status: 200, body: { ok: true, accepted: 1, rolledBack: 0, notRestored: [] } };
 	holdFirstRun = null;
+	laterRun = false;
+	cardEmptyButChanged = false;
+	changesetGone = false;
 	serve();
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -239,19 +250,157 @@ describe('a rollback the server could not do', () => {
 		expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
 	};
 
-	it.each([
-		['rollback_aborted', 'changeset.rollback_aborted'],
-	] as const)('%s shows its own message until closed, as an error, and sends the held message', async (code, key) => {
+	it('a rollback that stopped partway shows the card again with what is left, names it there and not in a toast, and the held message keeps waiting', async () => {
 		await openReview();
-		const { t } = await import('../i18n.svelte.js');
-		reviewAnswer = { status: 500, body: { error: 'failed', code } };
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
 		await store.submitChangesetReview('rollback');
 		await settle();
-		expect(t(key), 'positive control: the key has a text').not.toBe(key);
-		expect(toasts).toContainEqual([t(key), 'error', null]);
-		expect(store.getPendingChangeset()).toBeNull();
+		expect(store.getPendingChangeset()?.map((f) => f.file), 'the card is back with what is left').toEqual(['notes.md']);
+		expect(store.getRollbackStopped(), 'the card names what is not restored').toEqual(['notes.md']);
+		expect(toasts, 'no toast over the input').toEqual([]);
 		await wait(200);
 		await settle();
-		expect(runTasks, 'the review is over: the held message goes').toEqual(['next step', 'next step']);
+		expect(runTasks, 'the review is still open: the held message waits').toEqual(['next step']);
+		// Answered again, the review ends, the sentence goes, and the message goes.
+		reviewAnswer = { status: 200, body: { ok: true, accepted: 0, rolledBack: 1, notRestored: [] } };
+		await store.submitChangesetReview('rollback');
+		await wait(200);
+		await settle();
+		expect(store.getRollbackStopped()).toBeNull();
+		expect(runTasks).toEqual(['next step', 'next step']);
+	});
+
+	it('when the card cannot be fetched after a stopped rollback, it still shows what is left, and only the files the server named', async () => {
+		runAnswers = ['held'];
+		card = [...notes, { file: 'prices.csv', status: 'modified', diff: '-1\n+2' }];
+		await store.sendMessage('next step');
+		await settle();
+		expect(store.getPendingChangeset()?.map((f) => f.file), 'positive control: both files shown').toEqual(['notes.md', 'prices.csv']);
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['prices.csv', 'never-shown.md'] } };
+		changesetStatus = 500;
+		await store.submitChangesetReview('rollback');
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset()?.map((f) => f.file), 'the restored file is not claimed, an unshown one is not made up').toEqual(['prices.csv']);
+		expect(store.getRollbackStopped()).toEqual(['prices.csv', 'never-shown.md']);
+		expect(runTasks, 'the held message keeps waiting').toEqual(['next step']);
+	});
+
+	it.each([
+		['no review open any more', (): void => { card = []; }],
+		['no session any more', (): void => { changesetGone = true; }],
+	] as const)('the card shown for the meantime goes when the server answers with %s, names the files left, and the held message is sent', async (_case, serverState) => {
+		await openReview();
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
+		serverState();
+		await store.submitChangesetReview('rollback');
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset(), 'no card the server denied').toBeNull();
+		expect(store.getRollbackStopped()).toBeNull();
+		const { t, tf } = await import('../i18n.svelte.js');
+		expect(t('changeset.not_restored_unknown'), 'positive control: the key has a text').not.toBe('changeset.not_restored_unknown');
+		expect(toasts, 'the files that may still carry the change are named, until closed').toEqual([[tf('changeset.not_restored_unknown', { files: 'notes.md' }), 'error', null]]);
+		expect(runTasks, 'the held message goes').toEqual(['next step', 'next step']);
+	});
+
+	it('a stopped rollback that names nothing sets no sentence, even when the card cannot be fetched', async () => {
+		await openReview();
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: [] } };
+		changesetStatus = 500;
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(store.getRollbackStopped()).toBeNull();
+	});
+
+	it('the sentence is dropped when the server says the review shows no files', async () => {
+		await openReview();
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(store.getRollbackStopped(), 'positive control').toEqual(['notes.md']);
+		card = [];
+		cardEmptyButChanged = true;
+		reviewAnswer = { status: 409, body: { error: 'A run is in progress' } };
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(store.getRollbackStopped()).toBeNull();
+	});
+
+	it('the sentence of a stopped rollback is not shown on the review of a later run', async () => {
+		await openReview();
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(store.getRollbackStopped(), 'positive control: shown for this review').toEqual(['notes.md']);
+		// Meanwhile another tab answered it and a later run opened a review of its own: the next
+		// answer here is refused as one for an earlier run, and the card fetches the later review.
+		laterRun = true;
+		reviewAnswer = { status: 409, body: { error: 'The changes under review belong to an earlier run' } };
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(store.getPendingChangeset(), 'the later review is shown').not.toBeNull();
+		expect(store.getRollbackStopped()).toBeNull();
+	});
+
+	it('a rollback that stopped partway with nothing left ends the review, and the held message goes', async () => {
+		await openReview();
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: [] } };
+		card = [];
+		await store.submitChangesetReview('rollback');
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset()).toBeNull();
+		expect(store.getRollbackStopped(), 'nothing to retry: no "stopped partway" sentence').toBeNull();
+		expect(toasts).toEqual([]);
+		expect(runTasks).toEqual(['next step', 'next step']);
+	});
+});
+
+describe('a run the owner\'s open review keeps from starting', () => {
+	it('fails the message with the way on, at once, and asks no second time', async () => {
+		runAnswers = ['owner'];
+		const { t } = await import('../i18n.svelte.js');
+		await store.sendMessage('next step');
+		await settle();
+		await wait(3_300); // past one busy-poll interval: a poll would have asked again
+		await settle();
+		expect(runTasks, 'asked once').toEqual(['next step']);
+		expect(message('next step')).toMatchObject({ queued: false, failed: true });
+		expect(t('changeset.review_pending_owner'), 'positive control: the key has a text').not.toBe('changeset.review_pending_owner');
+		expect(store.getChatError()).toBe(t('changeset.review_pending_owner'));
+		expect(store.getMessages().some((m) => m.role === 'assistant' && !m.content), 'no empty answer left').toBe(false);
+	});
+
+	it('ends a busy poll the same way when the refusal answers a later poll', async () => {
+		runAnswers = ['busy', 'owner', 'ok'];
+		const { t } = await import('../i18n.svelte.js');
+		void store.sendMessage('next step');
+		await settle();
+		await wait(3_300);
+		await settle();
+		expect(runTasks, 'positive control: the poll asked again').toEqual(['next step', 'next step']);
+		await wait(3_300);
+		await settle();
+		expect(runTasks, 'no poll after the refusal').toEqual(['next step', 'next step']);
+		expect(message('next step')).toMatchObject({ queued: false, failed: true });
+		expect(store.getChatError()).toBe(t('changeset.review_pending_owner'));
+	});
+
+	it('the messages queued behind it are sent, and refused the same way, not left waiting', async () => {
+		let release: () => void = () => {};
+		holdFirstRun = new Promise<void>((r) => { release = r; });
+		runAnswers = ['ok', 'owner', 'owner'];
+		void store.sendMessage('first');
+		await settle();
+		void store.sendMessage('second');
+		void store.sendMessage('third');
+		await settle();
+		release();
+		await wait(600);
+		await settle();
+		expect(runTasks, 'each queued message was sent').toEqual(['first', 'second', 'third']);
+		expect(message('second')).toMatchObject({ queued: false, failed: true });
+		expect(message('third'), 'not left waiting in the queue').toMatchObject({ queued: false, failed: true });
 	});
 });

@@ -8,6 +8,7 @@ import {
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey,
 	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
+	bulkRefusalText, bulkRefusalSentence, BULK_REFUSAL_KINDS,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -1127,6 +1128,43 @@ describe('going on from a run that halted', () => {
 		expect(ap(1, 0, 2, DE)).toBe('Bei einem Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht.');
 	});
 
+	it('says in the undo approval, where no target gets a value back, that the owner took every target out, that only the deletes are left after a take-out, or that the source only created entries', () => {
+		const ap = (update: number, deletes: number, tookOut: boolean, i: BulkI18n, listed = tookOut) =>
+			bulkUndoApproveText({ changes: { update, create: 0, delete: deletes, unchanged: 0, invalid: 0 }, undoOpen: 0 }, i, { tookOut, listed });
+		expect(ap(0, 0, true, DE)).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(ap(0, 0, true, EN)).toBe('You took out every target that would get a value back, so this undo writes nothing. Put one back, or leave it with “Not now”.');
+		expect(ap(0, 1, true, DE)).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(ap(0, 1, true, EN)).toBe('You took out every target that would get a value back; the undo now only deletes the entry below.');
+		expect(ap(0, 3, true, DE)).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; die Rücknahme löscht nur noch die 3\u00a0Einträge unten.');
+		expect(ap(0, 3, true, EN)).toBe('You took out every target that would get a value back; the undo now only deletes the 3\u00a0entries below.');
+		// Nothing taken out and no target listed: the source only created entries, and the sentence does not say the owner took any out.
+		expect(ap(0, 1, false, DE)).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur den Eintrag unten.');
+		expect(ap(0, 1, false, EN)).toBe('This undo writes no value back; it only deletes the entry below.');
+		expect(ap(0, 3, false, DE)).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur die 3\u00a0Einträge unten.');
+		expect(ap(0, 3, false, EN)).toBe('This undo writes no value back; it only deletes the 3\u00a0entries below.');
+		// A target left that gets a value back: the family as before, taken out or not.
+		expect(ap(1, 2, true, DE)).toBe('1\u00a0Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.');
+		// Without options it reads as nothing taken out and nothing listed.
+		expect(bulkUndoApproveText({ changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 }, undoOpen: 0 }, DE)).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur den Eintrag unten.');
+	});
+
+	it('says in the undo approval, where every listed target is refused and none taken out, that nothing comes back and why, not that anyone took a target out', () => {
+		const ap = (deletes: number, i: BulkI18n) =>
+			bulkUndoApproveText({ changes: { update: 0, create: 0, delete: deletes, unchanged: 0, invalid: 2 }, undoOpen: 0 }, i, { tookOut: false, listed: true });
+		expect(ap(0, DE)).toBe('Diese Rücknahme schreibt nichts: Kein Ziel bekommt seinen Wert von vorher zurück. Der Grund steht bei jedem Ziel. Verwirf sie, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(ap(0, EN)).toBe('This undo writes nothing: no target gets its previous value back. The reason is shown by each target. Discard it, or leave it with “Not now”.');
+		// Not listed either (no target at all): still nothing back, never "you took out".
+		expect(bulkUndoApproveText({ changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 }, undoOpen: 0 }, DE)).toBe(ap(0, DE));
+		expect(ap(1, DE)).toBe('Kein Ziel bekommt seinen Wert von vorher zurück; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(ap(1, EN)).toBe('No target gets its previous value back; the undo now only deletes the entry below.');
+		expect(ap(3, DE)).toBe('Kein Ziel bekommt seinen Wert von vorher zurück; die Rücknahme löscht nur noch die 3\u00a0Einträge unten.');
+		expect(ap(3, EN)).toBe('No target gets its previous value back; the undo now only deletes the 3\u00a0entries below.');
+		for (const d of [0, 1, 3]) {
+			expect(ap(d, DE)).not.toContain('Du hast');
+			expect(ap(d, EN)).not.toContain('You took');
+		}
+	});
+
 	it('says what writing on lets fail, by the limit against the open targets', () => {
 		const allows = (o: Partial<BulkRunDetailData>, i: BulkI18n) => bulkResumeText(w('failureRate', o), true, i, true)?.allows;
 		// The limit below the open targets.
@@ -2133,5 +2171,80 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 				expect(table[key], key).not.toMatch(/[„“”"»«]\{title\}|\{title\}[„“”"»«]/);
 			}
 		}
+	});
+});
+
+// An answer the rule refused names the field and the rule it broke: read from the i18n
+// source, both languages, word for word; never a value, which the engine does not keep.
+describe('the sentence for an answer the rule refused', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!.replace(/\\'/g, "'"); en[m[1]!] = m[3]!.replace(/\\'/g, "'"); }
+	}
+	const from = (table: Record<string, string>): BulkI18n => ({
+		t: (k) => table[k] ?? k,
+		tf: (k, vars) => Object.entries(vars).reduce((s, [name, v]) => s.split(`{${name}}`).join(v), table[k] ?? k),
+	});
+	const DE = from({ ...de, 'bulk.field.shopify.seo_title': 'SEO-Titel' });
+	const EN = from({ ...en, 'bulk.field.shopify.seo_title': 'SEO title' });
+	const host = 'acme.myshopify.com';
+	const seo = { field: 'seo_title', kind: 'maxLength', limit: 60 };
+	const ctx = (refusal: unknown, dataStore = false) => ({ field: undefined, host, dataStore, refusal: refusal as never });
+
+	it('names the field and the limit on a Shopify run, in German and English', () => {
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx(seo))).toBe(
+			'Das Modell hat für dieses Produkt keine verwertbare Antwort gegeben. Feld SEO-Titel: Der Text ist länger als 60 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.',
+		);
+		expect(bulkInvalidText('verdict_invalid', true, true, EN, ctx(seo))).toBe(
+			'The model gave no usable answer for this product. Field SEO title: the text is longer than 60 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.',
+		);
+	});
+
+	it('names the field by the rule on any other run', () => {
+		expect(bulkInvalidText('verdict_invalid', false, true, DE, { ...ctx({ field: 'summary', kind: 'minLength', limit: 3 }, true), host: null })).toBe(
+			'Das Modell hat für dieses Ziel keine verwertbare Antwort gegeben. Feld summary: Der Text ist kürzer als 3 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.',
+		);
+		expect(bulkInvalidText('verdict_invalid', false, true, EN, { ...ctx({ field: 'summary', kind: 'minLength', limit: 3 }, true), host: null })).toBe(
+			'The model gave no usable answer for this target. Field summary: the text is shorter than 3 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.',
+		);
+	});
+
+	it('has a sentence for every rule kind in both languages', () => {
+		for (const kind of BULK_REFUSAL_KINDS) {
+			expect(de[`bulk.invalid.refusal.${kind}`], kind).toBeDefined();
+			expect(en[`bulk.invalid.refusal.${kind}`], kind).toBeDefined();
+			expect(bulkRefusalText({ field: 'title', kind, limit: 2 }, false, null, EN), kind).not.toContain('bulk.invalid');
+		}
+	});
+
+	it('words each rule kind as agreed, in German and English', () => {
+		const agreed: Record<string, [string, string]> = {
+			maxLength: ['Der Text ist länger als 2 Zeichen', 'the text is longer than 2 characters'],
+			minLength: ['Der Text ist kürzer als 2 Zeichen', 'the text is shorter than 2 characters'],
+			maximum: ['Der Wert ist grösser als 2', 'the value is greater than 2'],
+			minimum: ['Der Wert ist kleiner als 2', 'the value is less than 2'],
+			maxItems: ['Die Liste hat mehr als 2 Einträge', 'the list has more than 2 entries'],
+			enum: ['Der Wert gehört nicht zu den erlaubten Werten', 'the value is not one of the allowed values'],
+			pattern: ['Der Wert hat nicht die verlangte Form', 'the value is not in the required form'],
+			type: ['Der Wert hat den falschen Typ', 'the value has the wrong type'],
+			required: ['Das Feld fehlt', 'the field is missing'],
+		};
+		expect(Object.keys(agreed).sort()).toEqual([...BULK_REFUSAL_KINDS].sort());
+		for (const [kind, [deRule, enRule]] of Object.entries(agreed)) {
+			expect(bulkRefusalSentence({ field: 'title', kind: kind as never, limit: 2 }, false, DE)?.rule, kind).toBe(deRule);
+			expect(bulkRefusalSentence({ field: 'title', kind: kind as never, limit: 2 }, false, EN)?.rule, kind).toBe(enRule);
+		}
+	});
+
+	it('reads the sentence without a field where none was kept, the kind is unknown or a bound is missing', () => {
+		const plain = bulkInvalidText('verdict_invalid', true, true, DE);
+		expect(plain).toBe(de['bulk.invalid.verdict_invalid']);
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx(undefined))).toBe(plain);
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx({ field: 'seo_title', kind: 'shout' }))).toBe(plain);
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx({ field: 'seo_title', kind: 'maxLength' }))).toBe(plain);
 	});
 });

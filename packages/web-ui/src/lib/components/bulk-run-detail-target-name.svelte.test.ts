@@ -254,6 +254,36 @@ describe('a field name inside a sentence (U-333)', () => {
 		expect(text?.textContent).toBe(tf('bulk.invalid.secret_in_context_field', { field: 'api_notes' }));
 	});
 
+	it('names the field and the limit an answer broke on the run page, word for word in German and English', async () => {
+		const refused = (key: string, field: string): BulkTarget =>
+			({ seq: 1, key, change: 'invalid', diff: { kind: 'none' }, error: 'verdict_invalid', refusalDetail: { field, kind: 'maxLength', limit: 60 }, deselected: false }) as unknown as BulkTarget;
+		const invalidOne = { phase: 'previewed' as const, undone: 0, undoneBy: null, total: 1, applied: 0, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } };
+		const before = getLocale();
+		try {
+			setLocale('de');
+			run = makeRun({ ...invalidOne, targetSystem: SHOP });
+			targets = [refused('gid://shopify/Product/1', 'seo_title')];
+			await render();
+			const shop = target.querySelector('[data-testid="bulk-invalid-text"]');
+			expect(boxes(shop)).toEqual([]);
+			expect(shop?.textContent).toBe('Das Modell hat für dieses Produkt keine verwertbare Antwort gegeben. Feld SEO-Titel: Der Text ist länger als 60 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.');
+			unmount(component!); component = undefined; target.replaceChildren();
+			setLocale('en');
+			await render();
+			expect(target.querySelector('[data-testid="bulk-invalid-text"]')?.textContent).toBe('The model gave no usable answer for this product. Field SEO title: the text is longer than 60 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.');
+			unmount(component!); component = undefined; target.replaceChildren();
+			// Any other list: the rule's own name for the field, set apart in its box.
+			run = makeRun({ ...invalidOne, targetSystem: 'workspace' });
+			targets = [refused('k1', 'summary')];
+			await render();
+			const own = target.querySelector('[data-testid="bulk-invalid-text"]');
+			expect(boxes(own)).toEqual(['summary']);
+			expect(own?.textContent).toBe('The model gave no usable answer for this target. Field summary: the text is longer than 60 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.');
+		} finally {
+			setLocale(before);
+		}
+	});
+
 	it('names a Shopify field that held a credential by its label, without a box', async () => {
 		run = makeRun({ phase: 'previewed', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1, applied: 0,
 			changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });

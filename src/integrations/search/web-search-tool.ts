@@ -219,11 +219,15 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // tool run — account its spend to the local session cap + the tenant
           // balance. No-op when reranking was skipped (no cost) or self-host.
           if (reranked.costUsd !== undefined) {
+            // Charged to this run's cost ceiling too, like the agent's own helper calls.
+            agent.chargeExternalCost?.(reranked.costUsd);
             debitInRunHelperCost(ctx.meteredHost, agent.sessionCounters, reranked.costUsd, 'fast');
           }
           // A rerank aborted at its timeout returned no reply to book. Its upper bound goes to
           // the session cap only — never to the tenant debit (aborted-call.ts).
           if (reranked.abortedCost) {
+            // And to this run's ceiling, as a bound it counts but does not bill.
+            agent.chargeExternalCapOnlyCost?.(reranked.abortedCost.upperBoundUsd);
             recordSessionCost(agent.sessionCounters, reranked.abortedCost.upperBoundUsd);
           }
           results = reranked.results;

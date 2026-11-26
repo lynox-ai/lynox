@@ -525,7 +525,8 @@ export class ChangesetManager {
   rollbackAll(): string[] {
     const notRestored: string[] = [];
     for (const [abs, entry] of this.entries) {
-      if (!this._rollbackOne(abs, entry)) notRestored.push(abs);
+      if (this._rollbackOne(abs, entry)) this._forget(abs);
+      else notRestored.push(abs);
     }
     return notRestored;
   }
@@ -540,10 +541,30 @@ export class ChangesetManager {
       const abs = resolve(file);
       const entry = this.entries.get(abs);
       if (entry) {
-        if (!this._rollbackOne(abs, entry)) notRestored.push(abs);
+        if (this._rollbackOne(abs, entry)) this._forget(abs);
+        else notRestored.push(abs);
       }
     }
     return notRestored;
+  }
+
+  /**
+   * The files still tracked, by the names the review shows. After a rollback that stopped
+   * partway these are the ones it has not restored: each restored file is forgotten as soon
+   * as it is back, so a second rollback finds only what is left, with its backup.
+   */
+  pendingNames(): string[] {
+    return [...this.entries.keys()].map((abs) => relative(this.realCwd, abs));
+  }
+
+  /** One file is done with: its backup copy goes, and the review no longer holds it. */
+  private _forget(abs: string): void {
+    const backupPath = this._backupPathOf(abs);
+    if (backupPath !== null) rmSync(backupPath, { force: true });
+    this.entries.delete(abs);
+    this.originalBytes.delete(abs);
+    this.anchored.delete(abs);
+    this.written.delete(abs);
   }
 
   /**
@@ -591,12 +612,7 @@ export class ChangesetManager {
       // Kept: a tracked file that is gone or unreadable is not "unchanged".
       if (entry.status === 'modified' && !this._isUnchanged(abs)) continue;
       if (entry.status === 'added' && this._readTracked(abs) !== null) continue;
-      const backupPath = this._backupPathOf(abs);
-      if (backupPath !== null) rmSync(backupPath, { force: true });
-      this.entries.delete(abs);
-      this.originalBytes.delete(abs);
-      this.anchored.delete(abs);
-      this.written.delete(abs);
+      this._forget(abs);
     }
     if (this.entries.size === 0) this.cleanup();
   }
