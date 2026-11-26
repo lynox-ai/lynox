@@ -19,9 +19,10 @@ import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 /** An owner's agent; `answer` undefined = no one to ask (a background run). */
-function agentFor(store: ApiStore, asked: string[], answer: string | undefined) {
+function agentFor(store: ApiStore, asked: string[], answer: string | undefined, autonomy?: 'autonomous' | 'supervised') {
   return {
     principal: OWNER_PRINCIPAL,
+    ...(autonomy === undefined ? {} : { autonomy }),
     sessionCounters: { httpRequests: 0 },
     ...(answer === undefined ? {} : {
       promptUser: async (q: unknown): Promise<string> => { asked.push(flattenPrompt(q as string)); return answer; },
@@ -40,9 +41,9 @@ function agentFor(store: ApiStore, asked: string[], answer: string | undefined) 
   } as never;
 }
 
-async function save(store: ApiStore, action: 'create' | 'update', profile: ApiProfile, answer: string | undefined): Promise<{ result: string; asked: string[] }> {
+async function save(store: ApiStore, action: 'create' | 'update', profile: ApiProfile, answer: string | undefined, autonomy?: 'autonomous' | 'supervised'): Promise<{ result: string; asked: string[] }> {
   const asked: string[] = [];
-  const result = await apiSetupTool.handler({ action, profile: structuredClone(profile) }, agentFor(store, asked, answer)) as string;
+  const result = await apiSetupTool.handler({ action, profile: structuredClone(profile) }, agentFor(store, asked, answer, autonomy)) as string;
   return { result, asked };
 }
 
@@ -201,7 +202,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(denied.asked).toHaveLength(1);
     expect(denied.asked[0]).toContain('This save changes:\n- secret read: KP_KEY_A → KP_KEY_B');
     const nobody = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), undefined);
-    expect(nobody.result).toBe('Blocked: profile "kp" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user\'s acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, and that they can save it again by asking lynox in a chat where they can answer. Do not try to save it in another way.');
+    expect(nobody.result).toBe('Blocked: profile "kp" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user\'s acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, and that they can save it again by asking lynox in a chat where they can answer. Do not try to save it in another way.\n\nThis save changes:\n- secret read: KP_KEY_A → KP_KEY_B');
     expect(stored(store, 'kp')?.auth?.vault_keys).toEqual(['KP_KEY_A']);
   });
 
@@ -500,5 +501,66 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(result).toMatch(/^Error: API profile "kp" changed while the question was open/);
     expect(stored(store, 'kp')?.oauth_grant?.state).toBe('revoked');
     expect(stored(store, 'kp')?.auth?.vault_keys).toEqual(['KP_KEY_A']);
+  });
+});
+
+describe('api_setup: an autonomous run cannot widen a profile, even though it could park a question', () => {
+  // A trigger or worker run carries a `promptUser` that only files the question as a notification
+  // for later. A change to where a credential goes or what it may do is refused there, as it is
+  // with no prompt at all, and the refusal names the change.
+  beforeEach(() => { lynoxDir = mkdtempSync(join(tmpdir(), 'lynox-save-auto-')); });
+  afterEach(() => { rmSync(lynoxDir, { recursive: true, force: true }); });
+
+  it('refuses a widening save in an autonomous run without asking, names the change, and stores nothing', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant(), 'allow');
+    const auto = await save(store, 'update', ownGrant({ scope: 'read write' }), 'allow', 'autonomous');
+    expect(auto.asked).toEqual([]);
+    expect(auto.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
+    expect(auto.result).toContain('This save changes:\n- scopes added: write');
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
+  });
+
+  it('refuses a key swap in an autonomous run without asking, and names the secret it would read', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', keyProfile(), 'allow');
+    const auto = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), 'allow', 'autonomous');
+    expect(auto.asked).toEqual([]);
+    expect(auto.result).toContain('This save changes:\n- secret read: KP_KEY_A → KP_KEY_B');
+    expect(stored(store, 'kp')?.auth?.vault_keys).toEqual(['KP_KEY_A']);
+  });
+
+  it('control: the same widening save in a supervised run is asked about, and stored on a yes', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant(), 'allow');
+    const asked = await save(store, 'update', ownGrant({ scope: 'read write' }), 'allow', 'supervised');
+    expect(asked.asked).toHaveLength(1);
+    expect(asked.asked[0]).toContain('- scopes added: write');
+    expect(asked.result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read write');
+  });
+
+  it('refuses a save to a host outside the vetted list in an autonomous run without asking, and stores nothing', async () => {
+    const store = new ApiStore();
+    const auto = await save(store, 'create', keyProfile({ base_url: 'https://x.openai.azure.com/v1' }), 'allow', 'autonomous');
+    expect(auto.asked).toEqual([]);
+    expect(auto.result).toMatch(/^Blocked: profile "kp" egresses to a non-vetted sub-processor/);
+    expect(stored(store, 'kp')).toBeUndefined();
+    // control: the same save in a supervised run asks (the host, then the key's new destination), and is stored on a yes
+    const asked = await save(store, 'create', keyProfile({ base_url: 'https://x.openai.azure.com/v1' }), 'allow', 'supervised');
+    expect(asked.asked.length).toBeGreaterThan(0);
+    expect(stored(store, 'kp')?.base_url).toBe('https://x.openai.azure.com/v1');
+  });
+
+  it('control: an autonomous save that changes nothing of the grant, or only narrows it, still saves without a question', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant({ scope: 'read write' }), 'allow');
+    const same = await save(store, 'update', { ...ownGrant({ scope: 'read write' }), description: 'Another text' }, 'allow', 'autonomous');
+    expect(same.asked).toEqual([]);
+    expect(same.result).not.toMatch(/^(Error|Blocked|Validation)/);
+    const narrower = await save(store, 'update', ownGrant({ scope: 'read' }), 'allow', 'autonomous');
+    expect(narrower.asked).toEqual([]);
+    expect(narrower.result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
   });
 });
