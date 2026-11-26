@@ -7,20 +7,26 @@ instance.
 
 ### Security
 
-- Every node process in the image starts with Node's signal debugger off
-  (`--disable-sigusr1`): the engine and the two `node -e` calls of the
-  entrypoint in their argv, every other node through the image's
-  `NODE_OPTIONS`. The engine started from the image, the egress proxy and the
-  shell sidecar's exec daemon refuse to start when the flag is not in force,
-  and the refusal says how to start. (#2822)
+- The node processes the image itself starts run with Node's signal debugger
+  off (`--disable-sigusr1`): the engine and the two `node -e` calls of the
+  entrypoint in their argv, the egress proxy and the shell sidecar's exec
+  daemon through the image's `NODE_OPTIONS`. The engine started from the
+  image, the egress proxy and the exec daemon refuse to start when the flag is
+  not in force or an option opens a debugger, and the refusal says how to
+  start. (#2822)
 
 ### Upgrade notes
 
-- The image's own entrypoint always passes the new start check. A setup that
-  starts the engine with its own command, bypassing the entrypoint, needs
-  `--disable-sigusr1` in that command, or a plain `NODE_OPTIONS` that contains
-  it; otherwise the engine does not start and says why. `npx` and a source
-  checkout are not checked.
+- The image's own entrypoint passes the new start check, unless your
+  `NODE_OPTIONS` holds an `--inspect` option (other than `--inspect-port`) or
+  another spelling of `--disable-sigusr1`; then the engine refuses to start.
+  Remove it from `NODE_OPTIONS`.
+- A setup that starts the engine with its own command, bypassing the
+  entrypoint, needs `--disable-sigusr1` in that command, or a plain
+  `NODE_OPTIONS` that contains it; otherwise the engine does not start and
+  says why. `npx` and a source checkout are not checked.
+- The egress proxy and the shell sidecar refuse to start if a `NODE_OPTIONS`
+  you set for them replaces the image's and lacks `--disable-sigusr1`.
 - Apart from this fix, the code is the same as 2.19.0. There are no database
   migrations.
 
