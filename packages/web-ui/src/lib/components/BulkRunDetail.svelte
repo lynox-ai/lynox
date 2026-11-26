@@ -477,8 +477,9 @@
 			if (refusal !== null) {
 				await load();
 				if (runId !== id) return null;
-				// A refusal that names a value is drawn below the run, not in its place: the page says
-				// loading failed rather than show that sentence without its value set apart.
+				// A refusal that names a value is not put in the run's place, where it would be drawn
+				// without its value set apart: the page says loading failed, and the refusal shows
+				// below the run once it loads.
 				if (error && !refusal.includes(VALUE_OPEN)) error = refusal;
 			} else {
 				// A started run that halts on its limit later offers an empty field, not this one.
@@ -522,8 +523,9 @@
 			if (refusal !== null) {
 				await load();
 				if (runId !== id) return null;
-				// A refusal that names a value is drawn below the run, not in its place: the page says
-				// loading failed rather than show that sentence without its value set apart.
+				// A refusal that names a value is not put in the run's place, where it would be drawn
+				// without its value set apart: the page says loading failed, and the refusal shows
+				// below the run once it loads.
 				if (error && !refusal.includes(VALUE_OPEN)) error = refusal;
 			} else {
 				capInput = '';
