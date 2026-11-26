@@ -248,7 +248,7 @@ describe('a rollback the server could not do', () => {
 		await settle();
 		expect(t('changeset.rollback_aborted'), 'positive control: the key has a text').not.toBe('changeset.rollback_aborted');
 		expect(toasts).toContainEqual([tf('changeset.rollback_aborted', { files: 'notes.md' }), 'error', null]);
-		expect(store.getPendingChangeset(), 'the card is back with what is left').not.toBeNull();
+		expect(store.getPendingChangeset()?.map((f) => f.file), 'the card is back with what is left').toEqual(['notes.md']);
 		await wait(200);
 		await settle();
 		expect(runTasks, 'the review is still open: the held message waits').toEqual(['next step']);
@@ -268,6 +268,8 @@ describe('a rollback the server could not do', () => {
 		await wait(200);
 		await settle();
 		expect(store.getPendingChangeset()).toBeNull();
+		expect(toasts.some((a) => String(a[0]).includes(': .')), 'no message with an empty list').toBe(false);
+		expect(toasts, 'nothing to retry: no "stopped partway" message').toEqual([]);
 		expect(runTasks).toEqual(['next step', 'next step']);
 	});
 });
@@ -300,5 +302,22 @@ describe('a run the owner\'s open review keeps from starting', () => {
 		expect(runTasks, 'no poll after the refusal').toEqual(['next step', 'next step']);
 		expect(message('next step')).toMatchObject({ queued: false, failed: true });
 		expect(store.getChatError()).toBe(t('changeset.review_pending_owner'));
+	});
+
+	it('the messages queued behind it are sent, and refused the same way, not left waiting', async () => {
+		let release: () => void = () => {};
+		holdFirstRun = new Promise<void>((r) => { release = r; });
+		runAnswers = ['ok', 'owner', 'owner'];
+		void store.sendMessage('first');
+		await settle();
+		void store.sendMessage('second');
+		void store.sendMessage('third');
+		await settle();
+		release();
+		await wait(600);
+		await settle();
+		expect(runTasks, 'each queued message was sent').toEqual(['first', 'second', 'third']);
+		expect(message('second')).toMatchObject({ queued: false, failed: true });
+		expect(message('third'), 'not left waiting in the queue').toMatchObject({ queued: false, failed: true });
 	});
 });

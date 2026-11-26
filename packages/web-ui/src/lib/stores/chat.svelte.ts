@@ -1905,8 +1905,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 
 	// Polling would not help: only the owner's answer, or a new chat, lets a run start here.
 	const refusedForOwnerReview = (): void => {
-		// The messages and the error belong to this thread; after a switch they are another's.
-		if (sessionId === sid) {
+		// The messages and the error belong to this opening of this thread; after a switch (or a
+		// reopen) they are another list.
+		if (sessionId === sid && _resumeGeneration === turnGen) {
 			if (messages[userMsgIdx]) {
 				messages[userMsgIdx]!.queued = false;
 				messages[userMsgIdx]!.failed = true;
@@ -1921,6 +1922,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		streamingActivity = 'idle';
 		streamingToolName = null;
 		streamingToolPhase = null;
+		// The messages behind it do not wait on it: each is sent and, refused the same way,
+		// failed the same way.
+		if (sessionId === sid && _resumeGeneration === turnGen) drainQueueSoon(100);
 	};
 	if (res.status === 409 && await ownerReviewPendingIn(res)) {
 		refusedForOwnerReview();
@@ -3714,7 +3718,8 @@ export async function submitChangesetReview(
 		// backups: the card comes back with those files, so the person can try again or accept
 		// them, and the held messages keep waiting on it. What is left stays on screen until closed.
 		const left = Array.isArray(failed.notRestored) ? failed.notRestored.filter((f): f is string => typeof f === 'string') : [];
-		addToast(tf('changeset.rollback_aborted', { files: namedFiles(left) }), 'error', null);
+		// Nothing named: the throw came after the last file was back, and there is nothing to retry.
+		if (left.length > 0) addToast(tf('changeset.rollback_aborted', { files: namedFiles(left) }), 'error', null);
 		if (stale()) return;
 		// Nothing left (the throw came after the last file was back): the review is over.
 		if (await fetchChangeset() && !stale() && pendingChangeset === null) drainQueueSoon(100);

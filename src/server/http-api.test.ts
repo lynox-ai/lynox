@@ -25775,6 +25775,26 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(await outcome(await send())).toEqual(RAN);
     });
 
+    it('a partial rollback whose second chosen restore throws keeps that file\'s backup and forgets the first', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      const other = join(dirname(file), 'b.txt');
+      writeFileSync(other, 'b before', 'utf-8');
+      csm.backupBeforeWrite(other);
+      writeFileSync(other, 'b after', 'utf-8');
+      const inner = csm as unknown as { _rollbackOne: (abs: string, entry: unknown) => boolean };
+      const real = inner._rollbackOne.bind(csm);
+      vi.spyOn(inner, '_rollbackOne').mockImplementation((abs, entry) => {
+        if (abs === other) throw new Error('disk full');
+        return real(abs, entry);
+      });
+      const res = await jsonFetch(`/api/sessions/${OWN}/changeset/review`, { method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run-held', rolledBackFiles: ['a.txt', 'b.txt'] }) });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['b.txt'] });
+      expect(readFileSync(file, 'utf-8'), 'the first chosen file is restored').toBe('before');
+      expect(csm.hasOriginal(file), 'and no longer held').toBe(false);
+      expect(csm.hasOriginal(other), 'the second keeps its backup').toBe(true);
+    });
+
     it('a partial rollback that stops partway names only the chosen files it has not restored', async () => {
       const { csm, file } = review(OWNER_PRINCIPAL);
       const other = join(dirname(file), 'b.txt');
