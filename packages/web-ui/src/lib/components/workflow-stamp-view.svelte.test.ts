@@ -147,11 +147,8 @@ describe('the owner stamps what the preview showed', () => {
 		await click(q('stamp-confirm'));
 		expect(q('stamp-dialog')).not.toBeNull();
 		expect(q('stamp-line')?.textContent).toContain('Die Schritte haben sich geändert');
-		// The line stays in the view's head, outside the part that scrolls, so it stays in sight
-		// while the marked step is brought into view below it.
-		const line = q('stamp-line')!;
-		expect(line.closest('[data-dialog-head]')).not.toBeNull();
-		expect(line.closest('[data-dialog-body]')).toBeNull();
+		// The line is at the head of the view, the button at its foot: it is scrolled into sight.
+		expect(scrolled).toContain(q('stamp-line'));
 		expect(q('stamp-step')?.textContent).toContain('Send it somewhere else');
 		expect(posts('/api/workflows/wf-1/confirm')).toHaveLength(1);
 		await click(q('stamp-confirm'));
@@ -800,42 +797,6 @@ describe('what the contract allows, and a contract that grants nothing (U-451)',
 			await openPlan({ ...GRANT, hostPatterns: ['h\u202E.example'] });
 			expect(target.textContent).toContain('POST https://h<U+202E>.example/p');
 		});
-	});
-});
-
-describe('the view keeps its head and its buttons in sight while the steps scroll', () => {
-	it('the title, the line and the buttons sit outside the one part that scrolls, which holds the steps', async () => {
-		await open('owner', WF, {
-			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }, { status: 200, body: preview('d2', 'Send it somewhere else') }],
-			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
-		});
-		await click(q('stamp-review'));
-		await click(q('stamp-confirm'));
-		const dialog = q('stamp-dialog')!;
-		const frame = dialog.querySelector<HTMLElement>('[data-dialog-frame]')!;
-		const head = frame.querySelector<HTMLElement>(':scope > [data-dialog-head]');
-		const body = frame.querySelector<HTMLElement>(':scope > [data-dialog-body]');
-		const foot = frame.querySelector<HTMLElement>(':scope > [data-dialog-foot]');
-		expect(head && body && foot, 'head, body and foot are the frame\'s own parts').toBeTruthy();
-		// The frame is a column of a bounded height that does not scroll itself; only the body does.
-		for (const c of ['flex', 'flex-col', 'max-h-[85vh]']) expect(frame.classList, c).toContain(c);
-		expect(frame.classList).not.toContain('overflow-y-auto');
-		for (const c of ['min-h-0', 'flex-1', 'overflow-y-auto']) expect(body!.classList, c).toContain(c);
-		expect(head!.classList).toContain('shrink-0');
-		expect(foot!.classList).toContain('shrink-0');
-		expect(head!.contains(target.querySelector('[data-stamp-review-title]'))).toBe(true);
-		expect(head!.contains(q('stamp-line'))).toBe(true);
-		expect(body!.contains(q('stamp-step'))).toBe(true);
-		expect(foot!.contains(q('stamp-confirm'))).toBe(true);
-		expect(foot!.contains(byText('Abbrechen'))).toBe(true);
-	});
-
-	it('focuses its heading when it opens, so the confirm is not one Enter away', async () => {
-		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
-		await click(q('stamp-review'));
-		const title = target.querySelector<HTMLElement>('[data-stamp-review-title]');
-		expect(title).not.toBeNull();
-		expect(document.activeElement).toBe(title);
 	});
 });
 

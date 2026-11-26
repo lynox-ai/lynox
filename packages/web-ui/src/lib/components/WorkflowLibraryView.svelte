@@ -442,11 +442,11 @@
 	let stampOpening = 0;
 	// After a stamp: plans the wait switched off, which stay off. Kept until the next review.
 	let stampOnceLine = $state('');
-	// Focus on the heading when the view opens, as the takeover's dialog does: a reader hears what it
-	// is, and the confirm, which consents to the steps, is not one Enter away.
-	let stampHeading = $state<HTMLElement | null>(null);
+	// The confirm button sits at the foot of the view, the line at its head: on a phone the line
+	// that says the steps changed would be out of sight, so it is brought into view when it appears.
+	let stampChangedLine = $state<HTMLElement | null>(null);
 	$effect(() => {
-		stampHeading?.focus();
+		stampChangedLine?.scrollIntoView?.({ block: 'nearest' });
 	});
 
 	/** Loads the preview; true only when this load's preview is now the one on screen. */
@@ -515,7 +515,7 @@
 					stampLine = 'steps_changed';
 					stampChangesShown = stampChanges(shown, stampPreview);
 					// Brought into sight and focused: the changed part is what the owner has to read again.
-					// The line that says why stays in view above it, in the view's head.
+					// The line above, which says why, may scroll out of sight then (it carries role=status).
 					await tick();
 					const mark = stampDialog?.querySelector<HTMLElement>('[data-stamp-changed]');
 					mark?.focus();
@@ -1181,15 +1181,11 @@
 		data-testid="stamp-dialog"
 		bind:this={stampDialog}
 	>
-		<!-- The head (title, the line that says why it is open, an error) and the buttons stay in view;
-		     only the steps scroll between them, so after "changed" the line and the marked step are
-		     both in sight, and the buttons too. -->
-		<div data-dialog-frame class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] flex flex-col">
-			<div data-dialog-head class="shrink-0">
+		<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 			<!-- Where the owner approves the steps: a name a person with access gave is set apart, whole. -->
-			<h2 bind:this={stampHeading} tabindex="-1" class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
+			<h2 class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
 			{#if stampLine === 'steps_changed'}
-				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
+				<p bind:this={stampChangedLine} role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
 			{:else if stampLine === 'awaits_at_schedule' && stampPreview}
 				<!-- Worded by who changed it, which only the preview says: the line waits for it. -->
 				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t(awaitsLineKey(stampPreview.changedBy))}</p>
@@ -1201,9 +1197,6 @@
 			{#if error && !(stampLine === 'awaits_at_schedule' && !stampPreview && !stampLoading)}
 				<p class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3"><MarkedLine text={error} /></p>
 			{/if}
-			</div>
-
-			<div data-dialog-body class="min-h-0 flex-1 overflow-y-auto">
 			<!-- "This is what runs" only above something that runs: without a preview it introduces nothing. -->
 			{#if stampPreview}
 				<p class="text-xs text-text-subtle mb-3">{t('workflow_library.stamp.intro')}</p>
@@ -1214,9 +1207,8 @@
 			{:else if stampPreview}
 				<StampPreviewBody preview={stampPreview} changes={stampChangesShown} />
 			{/if}
-			</div>
 
-			<div data-dialog-foot class="shrink-0 flex items-center justify-end gap-2 mt-5">
+			<div class="flex items-center justify-end gap-2 mt-5">
 				<button
 					onclick={closeStamp}
 					class="min-h-11 md:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg-muted px-3 py-1 text-xs text-text-muted hover:bg-bg transition-colors"

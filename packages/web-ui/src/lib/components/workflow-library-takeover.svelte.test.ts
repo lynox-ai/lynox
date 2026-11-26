@@ -399,29 +399,6 @@ describe('the dialog', () => {
 		expect(served.posts).toEqual([{ expect: 'digest-1' }, { expect: 'digest-2' }]);
 	});
 
-	it('keeps the title, the changed line and the buttons outside the one part that scrolls, which holds what is shown', async () => {
-		const moved = FULL();
-		moved['expect'] = 'digest-2';
-		await open([ENDED], [FULL(), moved], { status: 409, body: { code: 'changed' } });
-		const d = await openDialog();
-		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
-		await settle();
-		const frame = d.querySelector<HTMLElement>('[data-dialog-frame]')!;
-		const head = frame.querySelector<HTMLElement>(':scope > [data-dialog-head]');
-		const body = frame.querySelector<HTMLElement>(':scope > [data-dialog-body]');
-		const foot = frame.querySelector<HTMLElement>(':scope > [data-dialog-foot]');
-		expect(head && body && foot, 'head, body and foot are the frame\'s own parts').toBeTruthy();
-		for (const c of ['flex', 'flex-col', 'max-h-[85vh]']) expect(frame.classList, c).toContain(c);
-		expect(frame.classList).not.toContain('overflow-y-auto');
-		for (const c of ['min-h-0', 'flex-1', 'overflow-y-auto']) expect(body!.classList, c).toContain(c);
-		expect(head!.classList).toContain('shrink-0');
-		expect(foot!.classList).toContain('shrink-0');
-		expect(head!.contains(d.querySelector('#workflow-takeover-title'))).toBe(true);
-		expect(head!.contains(d.querySelector('[data-testid="takeover-changed"]'))).toBe(true);
-		expect(body!.contains(d.querySelector('[data-takeover-part="stamp"]'))).toBe(true);
-		expect(foot!.contains(d.querySelector('[data-testid="takeover-confirm"]'))).toBe(true);
-	});
-
 	it('after a change, exactly the step that changed is marked and takes the focus', async () => {
 		const moved = FULL();
 		moved['expect'] = 'digest-2';

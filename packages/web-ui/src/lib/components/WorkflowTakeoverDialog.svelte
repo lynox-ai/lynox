@@ -36,11 +36,20 @@
 	let generation = 0;
 	let dialog = $state<HTMLElement | null>(null);
 	let heading = $state<HTMLElement | null>(null);
+	let errorLine = $state<HTMLElement | null>(null);
+	let changedEl = $state<HTMLElement | null>(null);
 
 	// Focus on the heading when the dialog opens: a reader hears what it is, and the confirm, which
 	// consents to something, is not one Enter away.
 	$effect(() => {
 		heading?.focus();
+	});
+	// The buttons sit at the foot, these lines at the head: on a phone they would be out of sight.
+	$effect(() => {
+		errorLine?.scrollIntoView?.({ block: 'nearest' });
+	});
+	$effect(() => {
+		changedEl?.scrollIntoView?.({ block: 'nearest' });
 	});
 
 	// A key is the dialog's when focus is in it, or nowhere (a reload, or a button turned off, can
@@ -178,20 +187,15 @@
 	tabindex="-1"
 	data-testid="takeover-dialog"
 >
-	<!-- The head (title, the line that says what moved, an error) and the buttons stay in view; only
-	     what is shown scrolls between them, so on a phone neither the line nor the buttons leave. -->
-	<div data-dialog-frame class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] flex flex-col">
-		<div data-dialog-head class="shrink-0">
+	<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words"><MarkedLine text={tf('workflow_library.takeover.title', { name: shownValue(preview?.workflow.name ?? workflow.name) })} mono={false} /></h2>
 		{#if changedLine}
-			<p role="status" data-testid="takeover-changed" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{changedLine}</p>
+			<p bind:this={changedEl} role="status" data-testid="takeover-changed" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{changedLine}</p>
 		{/if}
 		{#if error}
-			<p role="alert" data-testid="takeover-error" class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
+			<p bind:this={errorLine} role="alert" data-testid="takeover-error" class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
 		{/if}
-		</div>
 
-		<div data-dialog-body class="min-h-0 flex-1 overflow-y-auto">
 		{#if loading}
 			<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 		{:else if preview}
@@ -211,9 +215,8 @@
 				{/each}
 			</div>
 		{/if}
-		</div>
 
-		<div data-dialog-foot class="shrink-0 flex items-center justify-end gap-2 mt-5">
+		<div class="flex items-center justify-end gap-2 mt-5">
 			<button
 				onclick={onclose}
 				class="min-h-11 md:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg-muted px-3 py-1 text-xs text-text-muted hover:bg-bg transition-colors"
