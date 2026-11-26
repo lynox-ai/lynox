@@ -609,8 +609,8 @@
 	// judge is fixed at planning, and approved and writing are both the write. An interrupted run
 	// that resumes later says so in its own line and gets no working line.
 	const workingStep = $derived(run && !run.resumesAt ? bulkWorkingStep(run) : null);
-	// A run whose list is not read yet names that in its title; its head has nothing to count yet.
-	const listUnread = $derived(run !== null && bulkListUnread(run));
+	// A run whose list was not read names that in its title; its head has nothing to count.
+	const listUnread = $derived(run !== null ? bulkListUnread(run) : null);
 	const workingLine = $derived(run && workingStep !== null ? bulkWorkingLine(workingStep, run) : null);
 	// The probe's target by its title where the loaded targets hold its before-image.
 	const probeLabel = $derived(run?.probe ? bulkTargetLabel(run.targetSystem, { key: run.probe.key }, i18n) : '');
@@ -848,7 +848,7 @@
 			<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
 				<dd>{#if host !== null}{@render hostBox()}{:else}{provider}{/if}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
-				{#if !listUnread}
+				{#if listUnread === null}
 				<dt class="text-text-subtle">{t('bulk.head.status')}</dt>
 				<dd data-testid="bulk-counts">{bulkHeadCounts(workingStep, run, i18n)}</dd>
 				{/if}

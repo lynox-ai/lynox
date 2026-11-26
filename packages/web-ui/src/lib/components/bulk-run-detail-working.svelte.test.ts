@@ -399,6 +399,22 @@ describe('a run whose list is not read yet', () => {
 		expect(shown()).toContain('Der Lauf kam nicht weiter.');
 	});
 
+	it('says the list was not read, without „yet“, when the run halted on a cause it has to be planned again for, in DE and EN', async () => {
+		run = makeRun({ total: 0, list: LIST, haltKey: 'listTooLarge', haltReason: 'engine English' });
+		await render();
+		expect(title()).toBe(`Liste nicht gelesen · ${HOST}`);
+		expect(counts()).toBeNull();
+		expect(shown()).toContain('Angehalten');
+		unmount(component!);
+		component = undefined;
+		const before = getLocale();
+		setLocale('en');
+		onTestFinished(() => setLocale(before));
+		await render();
+		expect(title()).toBe(`List not read · ${HOST}`);
+		expect(counts()).toBeNull();
+	});
+
 	it('counts the targets of a read that halted part-way, shows the dash while the list is read, and counts a run that ended before it read its list', async () => {
 		run = makeRun({ total: 40, changes: UPDATES(40), list: LIST, haltKey: 'unavailable', haltReason: 'engine English' });
 		await render();

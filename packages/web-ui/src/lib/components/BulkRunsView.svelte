@@ -172,7 +172,7 @@
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>
 										{/if}
 									</td>
-									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{bulkReadsList(run) ? t('bulk.head.counts_pending') : bulkListUnread(run) ? '' : `${run.applied}/${run.total}`}</td>
+									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{bulkReadsList(run) ? t('bulk.head.counts_pending') : bulkListUnread(run) !== null ? '' : `${run.applied}/${run.total}`}</td>
 									<td class="py-2 hidden sm:table-cell font-mono text-xs">{formatCost(run.costUsd)}</td>
 								</tr>
 							{/each}

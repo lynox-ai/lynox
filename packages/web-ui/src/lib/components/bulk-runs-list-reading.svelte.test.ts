@@ -106,19 +106,25 @@ describe('the runs list for a run whose list is not read yet', () => {
 		runs = [
 			makeRun({ id: 'waits', list: { state: 'pending' }, haltKey: 'awaitingStart', haltReason: 'awaitingStart' }),
 			makeRun({ id: 'halted', list: { state: 'pending' }, haltKey: 'unavailable', haltReason: 'engine English' }),
+			// Halted on a cause it has to be planned again for: its list is not read, without „yet“.
+			makeRun({ id: 'replan', list: { state: 'pending' }, haltKey: 'listTooLarge', haltReason: 'engine English' }),
 			// Ended before its list was read: it never reads it, so it only counts.
 			makeRun({ id: 'ended', phase: 'aborted', list: { state: 'pending' }, haltKey: 'mandateEnded', haltReason: 'mandateEnded' }),
 		];
 		expect(await rows()).toEqual([
 			{ title: 'Liste noch nicht gelesen · demo.myshopify.com', count: '' },
 			{ title: 'Liste noch nicht gelesen · demo.myshopify.com', count: '' },
+			{ title: 'Liste nicht gelesen · demo.myshopify.com', count: '' },
 			{ title: '0 Ziele · demo.myshopify.com', count: '0/0' },
 		]);
 	});
 
 	it('says it in English too', async () => {
 		setLocale('en');
-		runs = [makeRun({ id: 'waits', list: { state: 'pending' }, haltKey: 'awaitingStart', haltReason: 'awaitingStart' })];
-		expect(await rows()).toEqual([{ title: 'List not read yet · demo.myshopify.com', count: '' }]);
+		runs = [
+			makeRun({ id: 'waits', list: { state: 'pending' }, haltKey: 'awaitingStart', haltReason: 'awaitingStart' }),
+			makeRun({ id: 'replan', list: { state: 'pending' }, haltKey: 'listNotAList', haltReason: 'engine English' }),
+		];
+		expect(await rows()).toEqual([{ title: 'List not read yet · demo.myshopify.com', count: '' }, { title: 'List not read · demo.myshopify.com', count: '' }]);
 	});
 });
