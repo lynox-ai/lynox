@@ -10,7 +10,7 @@ import {
 	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
 	bulkRefusalText, bulkRefusalSentence, BULK_REFUSAL_KINDS,
 } from './bulk-runs.js';
-import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
 import { BULK_HALT_REASONS } from '../../../../../src/core/bulk-ledger.js';
 import { MERGE_REFUSAL_CODES } from '../../../../../src/core/subject-merge-runner.js';
@@ -301,9 +301,10 @@ describe('the approved unchecked-change texts', () => {
 	});
 
 
-	it('holds the note', () => {
+	it('holds the note, without what is written first: the approval says that in its own line', () => {
+		expect(BULK_UNMEASURED_NOTE).toBe('lynox has not checked this kind of change with this provider. It can trigger something else there, such as emails to your customers, a payment or an invoice.');
 		expect(line('bulk.approve.unmeasured_note')).toBe(entry('bulk.approve.unmeasured_note',
-			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung. Deshalb schreibt lynox zuerst nur ein Ziel. Schau es dir dort an, bevor du den Rest freigibst.',
+			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung.',
 			BULK_UNMEASURED_NOTE));
 	});
 
@@ -317,6 +318,8 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.shopify_visible')).toBe(entry('bulk.approve.shopify_visible',
 			'Bei veröffentlichten Produkten ist alles, was dieser Lauf schreibt, sofort live in deinem Shop.',
 			'For published products, everything this run writes is live in your shop right away.'));
+		// It names no field: an image-alt run gets it as well, and is not told about titles.
+		expect(line('bulk.approve.shopify_visible')).not.toMatch(/Titel|SEO|title/);
 		for (const [key, de, en] of [['title', 'Titel', 'Title'], ['descriptionHtml', 'Beschreibung', 'Description'], ['seo_title', 'SEO-Titel', 'SEO title'], ['seo_description', 'SEO-Beschreibung', 'SEO description']] as const) {
 			expect(line(`bulk.field.shopify.${key}`)).toBe(entry(`bulk.field.shopify.${key}`, de, en));
 		}
@@ -335,15 +338,6 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.only_one')).toBe(entry('bulk.approve.only_one',
 			'Es gibt nur dieses eine Ziel, deshalb kommt vorher keine Probe: Du gibst gleich den ganzen Lauf frei.', 'There is only this one target, so there is no probe first: you approve the whole run now.'));
 		expect(line('bulk.approve.write_only')).toBe(entry('bulk.approve.write_only', 'Das Ziel schreiben', 'Write the target'));
-	});
-
-	it('holds the note of a run with one target to write: the first two sentences, approved word for word', () => {
-		const approved = 'lynox has not checked this kind of change with this provider. It can trigger something else there, such as emails to your customers, a payment or an invoice.';
-		expect(BULK_UNMEASURED_NOTE_ONE).toBe(approved);
-		expect(BULK_UNMEASURED_NOTE.startsWith(`${BULK_UNMEASURED_NOTE_ONE} `)).toBe(true);
-		expect(line('bulk.approve.unmeasured_note_one')).toBe(entry('bulk.approve.unmeasured_note_one',
-			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung.',
-			BULK_UNMEASURED_NOTE_ONE));
 	});
 
 	it('gives the marked-before sentence the date and the session\'s wording', () => {

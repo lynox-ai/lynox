@@ -615,10 +615,8 @@
 	// The probe's admin link: its target is often not among the targets the page shows.
 	const probeName = $derived(run?.probe ? bulkTargetName(run.targetSystem, { key: run.probe.key }) : null);
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
-	// With one target to write the note keeps its first two sentences, here and in the engine's own (EN).
-	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote
-		? t(run !== null && bulkWriting(run) === 1 ? 'bulk.approve.unmeasured_note_one' : 'bulk.approve.unmeasured_note')
-		: run.writeFormNote);
+	// What is written first, the line below it says (`one_first` / `only_one`), not the note.
+	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote ? t('bulk.approve.unmeasured_note') : run.writeFormNote);
 	const unmeasuredConfirmation = $derived(getLocale() === 'de' || !run?.writeFormConfirmation ? t('bulk.approve.unmeasured_confirm') : run.writeFormConfirmation);
 	const canUndo = $derived(run !== null && bulkCanUndo(run));
 	const startKind = $derived(run ? bulkStartKind(run) : null);
