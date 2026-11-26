@@ -167,15 +167,58 @@ describe('a completed plan that keeps its pause', () => {
 	});
 });
 
-describe('Run now at a paused plan (ux U-179)', () => {
-	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
-	it('is not offered at a completed plan that keeps its pause, which keeps its switch', async () => {
+describe('a completed plan that keeps its pause (U-275)', () => {
+	const mark = (): Element | null => target.querySelector('[data-trigger-paused-done]');
+	const hint = (): Element | null => target.querySelector('[data-trigger-paused-done-hint]');
+	it('is marked completed and paused, and its line names the way there is: a new plan, after the workflow\'s takeover where it needs one', async () => {
 		rows = [{ ...PAUSED, status: 'completed' }];
 		await render();
-		// The row is there, so the button is missing at it, not with an empty list.
+		expect(mark()?.textContent).toBe('Abgeschlossen · pausiert');
+		expect(hint()?.textContent).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an. Läuft er auf einem Workflow, den die Person mit dem beendeten Zugang angelegt oder zuletzt geändert hat, übernimm vorher den Workflow unter „Workflows“ mit „Workflow übernehmen“.');
+		expect(target.querySelector('[data-trigger-paused]')).toBeNull();
+	});
+	it('tells a helper that the workflow\'s takeover is the owner\'s, as its button is (U-275)', async () => {
+		viewer = 'mandate';
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		expect(mark()?.textContent).toBe('Abgeschlossen · pausiert');
+		expect(hint()?.textContent).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an. Läuft er auf einem Workflow, den die Person mit dem beendeten Zugang angelegt oder zuletzt geändert hat, muss der Inhaber vorher den Workflow übernehmen.');
+	});
+	it('tells the owner the list does not name the way to the workflow\'s takeover, once the session says owner (U-275)', async () => {
+		viewer = 'none';
+		noteSettingsViewer({ viewer: 'owner' });
+		try {
+			rows = [{ ...PAUSED, status: 'completed' }];
+			await render();
+			expect(hint()?.textContent).toContain('übernimm vorher den Workflow unter „Workflows“ mit „Workflow übernehmen“.');
+		} finally {
+			resetSettingsViewer();
+		}
+	});
+	it('an open paused plan keeps the takeover mark, and neither the completed mark nor its line', async () => {
+		await render();
+		expect(target.querySelector('[data-trigger-paused]')).not.toBeNull();
+		expect(mark()).toBeNull();
+		expect(hint()).toBeNull();
+	});
+	it('a completed plan without a pause has neither', async () => {
+		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await render();
+		expect(target.textContent).toContain('Wochenreport');
+		expect(mark()).toBeNull();
+		expect(hint()).toBeNull();
+	});
+});
+
+describe('Run now at a paused plan (ux U-179)', () => {
+	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
+	it('is not offered at a completed plan that keeps its pause, nor is its switch (U-275)', async () => {
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		// The row is there, so the buttons are missing at it, not with an empty list.
 		expect(target.textContent).toContain('Wochenreport');
 		expect(runNow()).toBeNull();
-		expect(target.querySelector('[data-trigger-toggle]')?.textContent?.trim()).toBe('Pausieren');
+		expect(target.querySelector('[data-trigger-toggle]')).toBeNull();
 	});
 	it('is not offered to a helper there either, who is told the pause without the names', async () => {
 		viewer = 'mandate';
@@ -268,19 +311,37 @@ describe('Delete and the switch at a paused plan, which the route refuses to a h
 		expect(target.textContent).toContain('Wochenreport');
 		expect([del(), toggle()]).toEqual([null, null]);
 	});
-	it('keeps both for the owner at a completed paused plan, and Delete at an open one', async () => {
+	it('keeps Delete for the owner at a paused plan, open or completed, and offers no switch there', async () => {
 		await render();
-		expect(del()?.textContent?.trim()).toBe('Löschen');
+		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
+		// Completed, the plan never runs again, as its line says (U-275): a switch would say otherwise.
 		rows = [{ ...PAUSED, status: 'completed' }];
 		await remount();
-		expect([del()?.textContent?.trim(), toggle()?.textContent?.trim()]).toEqual(['Löschen', 'Pausieren']);
+		expect(target.querySelector('[data-trigger-paused-done-hint]')).not.toBeNull();
+		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
+		// Nor a Resume where the owner had also switched it off before: it still never runs again.
+		rows = [{ ...PAUSED, status: 'completed', enabled: 0 }];
+		await remount();
+		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
+		// CONTROL: the same plan completed without a pause keeps its switch.
+		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await remount();
+		expect(toggle()?.textContent?.trim()).toBe('Pausieren');
 	});
-	it('keeps both for the owner the list does not name, once the session says owner', async () => {
+	it('keeps the switch at a plan the owner paused, which no ended access paused', async () => {
+		// `enabled: 0` is the owner's own pause; `paused` is the one an ended access set.
+		for (const status of ['open', 'completed']) {
+			rows = [{ ...PAUSED, status, enabled: 0, paused: false, paused_who: undefined, paused_ended: undefined }];
+			if (component) await remount(); else await render();
+			expect(toggle()?.textContent?.trim()).toBe('Fortsetzen');
+		}
+	});
+	it('keeps Delete for the owner the list does not name, once the session says owner', async () => {
 		viewer = 'none';
 		noteSettingsViewer({ viewer: 'owner' });
 		rows = [{ ...PAUSED, status: 'completed' }];
 		await render();
-		expect([del()?.textContent?.trim(), toggle()?.textContent?.trim()]).toEqual(['Löschen', 'Pausieren']);
+		expect(del()?.textContent?.trim()).toBe('Löschen');
 	});
 	it('gives a helper both at a plan that is not paused', async () => {
 		viewer = 'mandate';

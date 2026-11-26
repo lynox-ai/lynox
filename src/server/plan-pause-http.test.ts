@@ -204,6 +204,26 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect([res.status, res.json['code'], res.json['error']]).toEqual([409, 'paused', 'paused because an access ended; it needs to be taken over']);
   });
 
+  it('a completed plan that keeps its pause is refused with its own sentence, without the takeover; an open one keeps it (U-275)', async () => {
+    const DONE = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again. If it runs a workflow that the person whose access ended created or last changed, the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+    const OPEN = 'paused because an access ended; it needs to be taken over';
+    const donePlan = (): string => {
+      const id = pausedPlan();
+      db().prepare("UPDATE triggers SET status = 'completed' WHERE id = ?").run(id);
+      return id;
+    };
+    const run = await ask('POST', `/api/triggers/${donePlan()}/run`, ownerCookie);
+    expect([run.status, run.json['code'], run.json['error']]).toEqual([409, 'paused', DONE]);
+    const edit = await ask('PATCH', `/api/tasks/${donePlan()}`, ownerCookie, { title: 'Renamed' });
+    expect([edit.status, edit.json['code'], edit.json['error']]).toEqual([409, 'paused', DONE]);
+    const helper = await ask('PATCH', `/api/tasks/${donePlan()}`, mandateCookie, { title: 'Renamed' });
+    expect([helper.status, helper.json['error']]).toEqual([409, DONE]);
+    const sw = await ask('PATCH', `/api/tasks/${donePlan()}`, ownerCookie, { enabled: true });
+    expect([sw.status, sw.json['paused'], sw.json['note']]).toEqual([200, true, DONE]);
+    const open = await ask('POST', `/api/triggers/${pausedPlan()}/run`, ownerCookie);
+    expect([open.status, open.json['error']], 'control: an open paused plan still names the takeover').toEqual([409, OPEN]);
+  });
+
   it("a mandate's change, completion and delete are refused before anything marks the plan", async () => {
     for (const [method, path, body] of [
       ['PATCH', '', { title: 'Renamed' }], ['PATCH', '', { enabled: false }], ['POST', '/complete', undefined], ['DELETE', '', undefined],

@@ -159,7 +159,7 @@ import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './webhook-receiver.js';
 import { requestLogUrl } from './request-log-url.js';
-import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
+import { PAUSED_DONE_WORKFLOW_FIRST, isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
@@ -2064,6 +2064,11 @@ const ERASURE_IN_PROGRESS = 'All data is being erased; start the run again once 
 const ERASED_DURING_REQUEST = 'All data was erased while this message was being prepared; start a new conversation';
 /** A paused plan's refusal (`plan-pause.ts`); `code: 'paused'` is what the view switches on. */
 const PAUSED_REFUSAL = 'paused because an access ended; it needs to be taken over';
+/** The same for a completed plan that keeps its pause: nothing takes it over or reopens it. */
+const PAUSED_DONE_REFUSAL = `completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again. ${PAUSED_DONE_WORKFLOW_FIRST}`;
+/** The refusal for this paused plan: its own sentence once it is completed. */
+const pausedRefusal = (t: { readonly status?: string | undefined } | undefined): string =>
+  t?.status === 'completed' ? PAUSED_DONE_REFUSAL : PAUSED_REFUSAL;
 /**
  * How long `DELETE /api/data` waits for the chat runs it stopped to release their
  * slots. Stopping is the same `takeover` the stale-run reclaim uses: a run parked on
@@ -3415,7 +3420,8 @@ export class LynoxHTTPApi {
   /**
    * Refuses a change to a paused plan (`plan-pause.ts`), before anything marks it: a mandate
    * changes nothing on one, the owner may switch it, complete it or delete it but not edit or
-   * stamp it, since only the takeover lets it run again. True when it answered the request.
+   * stamp it, since only the takeover lets it run again; a completed one nothing lets run again.
+   * True when it answered the request.
    */
   private _refusePaused(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string, action: 'edit' | 'enable' | 'complete' | 'delete' | 'confirm'): boolean {
     // Off, nothing is read for it: the routes are main's.
@@ -3424,7 +3430,7 @@ export class LynoxHTTPApi {
     if (trigger === undefined || !isPaused(trigger)) return false;
     const ownerMay = action === 'enable' || action === 'complete' || action === 'delete';
     if (isOwnerPrincipal(this._principalOf(req)) && ownerMay) return false;
-    errorResponse(res, 409, PAUSED_REFUSAL, 'paused');
+    errorResponse(res, 409, pausedRefusal(trigger), 'paused');
     return true;
   }
 
@@ -10162,7 +10168,7 @@ export class LynoxHTTPApi {
         // would always miss, dropping the response to the {id, enabled} stub.
         const updated = engine.getRunHistory()?.getTrigger(params['id']!);
         // Switching a paused plan on starts nothing until it is taken over, and the answer says so.
-        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: PAUSED_REFUSAL } : {};
+        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: pausedRefusal(updated) } : {};
         jsonResponse(res, 200, { ...(updated !== undefined ? triggerForRoute(updated, this._principalOf(_req)) : { id: params['id'], enabled: b['enabled'] ? 1 : 0 }), ...pausedNote });
         return;
       }
@@ -10581,7 +10587,7 @@ export class LynoxHTTPApi {
           return;
         }
         if (outcome.reason === 'paused') {
-          errorResponse(res, 409, PAUSED_REFUSAL, 'paused');
+          errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!)), 'paused');
           return;
         }
         errorResponse(res, 404, 'Trigger not found'); return;

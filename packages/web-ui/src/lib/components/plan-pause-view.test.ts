@@ -21,8 +21,22 @@ const both = (key: string): void => {
 };
 
 describe('a paused plan in the Triggers view', () => {
+  it('a completed paused plan names the workflow\'s takeover in all four places: the model, task_update, the API and the view (U-275)', () => {
+    const CORE = readFileSync(`${HERE}../../../../../src/core/plan-pause.ts`, 'utf8');
+    const WAY = 'If it runs a workflow that the person whose access ended created or last changed';
+    expect(CORE).toContain(`export const PAUSED_DONE_WORKFLOW_FIRST = '${WAY}, the owner first takes over that workflow, under "Workflows" with "Take over workflow".';`);
+    expect(CORE).toMatch(/PAUSED_DONE_MODEL_TEXT = `[^`]*\$\{PAUSED_DONE_WORKFLOW_FIRST\}`;/);
+    expect(CORE).toMatch(/PAUSED_DONE_UPDATE_REFUSAL = `[^`]*\$\{PAUSED_DONE_WORKFLOW_FIRST\}`;/);
+    expect(ROUTE).toMatch(/const PAUSED_DONE_REFUSAL = `[^`]*\$\{PAUSED_DONE_WORKFLOW_FIRST\}`;/);
+    expect(I18N).toContain(`en: 'An access ended. If the plan should run again, create a new one. ${WAY}, first take over that workflow under “{tab}” with “{button}”.'`);
+    expect(I18N).toContain(`en: 'An access ended. If the plan should run again, create a new one. ${WAY}, the owner has to take over that workflow first.'`);
+    // The button is the owner's (`ownerActs` in the workflow library), so a helper reads who does it.
+    expect(VIEW).toContain("{ownerActs ? tf('triggers.paused_done_hint', { tab: t('hub.automation.workflows'), button: t('workflow_library.takeover.button') }) : t('triggers.paused_done_hint_helper')}");
+  });
+
   it('Run now: the engine sends `paused`, the view switches on it, and both languages have the line', () => {
-    expect(ROUTE).toMatch(/errorResponse\(res, 409, PAUSED_REFUSAL, 'paused'\)/);
+    expect(ROUTE).toContain("errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!)), 'paused');");
+    expect(ROUTE).toContain("errorResponse(res, 409, pausedRefusal(trigger), 'paused');");
     expect(VIEW).toMatch(/code === 'paused'\s*\?\s*\(who !== '' \? tf\('triggers\.run_paused', \{ who \}\) : t\('triggers\.run_paused_anon'\)\)/);
     both('triggers.run_paused_anon');
   });

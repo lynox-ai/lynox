@@ -335,21 +335,21 @@
 	}
 
 	// A completed plan keeps its pause (reopened, it would need the takeover still), but nothing is
-	// due on it: no label, no button, not in the notices, as the badge's count leaves it out too.
+	// due on it: no takeover label or button, not in the notices, as the badge's count leaves it out
+	// too. It has its own mark and line instead (`pausedDone`, U-275).
 	function pausedOpen(trigger: Trigger): boolean {
 		return trigger.paused === true && trigger.status !== 'completed';
 	}
 
-	// Run now on a completed plan that keeps its pause is refused with the paused sentence, which
-	// sends the owner to a takeover this plan does not offer, and nothing reopens a paused plan. So
-	// the button is not offered there (ux U-179).
+	// Run now on a completed plan that keeps its pause is refused: nothing takes it over and nothing
+	// reopens a paused plan, so it never runs again. So the button is not offered there (U-179).
 	function pausedDone(trigger: Trigger): boolean {
 		return trigger.paused === true && trigger.status === 'completed';
 	}
 
-	// At a paused plan, open or completed, Delete and the switch are the owner's: the route refuses
-	// both to a helper (`paused`), so a helper is not offered them there. It waits for a known owner,
-	// as the confirm does.
+	// At a paused plan, open or completed, Delete is the owner's: the route refuses it to a helper
+	// (`paused`), so a helper is not offered it there. It waits for a known owner, as the confirm does.
+	// The switch is offered to nobody at a paused plan (see the row's buttons).
 	function ownerOnlyHere(trigger: Trigger): boolean {
 		return trigger.paused === true && !ownerActs;
 	}
@@ -651,6 +651,9 @@
 								{#if pausedOpen(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
+								{#if pausedDone(trigger)}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-trigger-paused-done>{t('triggers.paused_done')}</span>
+								{/if}
 							</div>
 							<!-- Who set it up or changed it last, when that was a helper, worded as on an
 							     approval card (U-202). The owner's own trigger has none. -->
@@ -693,6 +696,11 @@
 									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
+							<!-- A completed plan that keeps its pause has no way back at the plan: nothing takes it
+							     over or reopens it. The line names the way there is (U-275). -->
+							{#if pausedDone(trigger)}
+								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-done-hint>{ownerActs ? tf('triggers.paused_done_hint', { tab: t('hub.automation.workflows'), button: t('workflow_library.takeover.button') }) : t('triggers.paused_done_hint_helper')}</p>
+							{/if}
 							<!-- Why its run does not do its work, with the way out: a watch the policy keeps from its
 							     page, or the cause its last failed run stored. Only causes lynox itself knows, said in
 							     lynox's own sentences; the run's result text is never shown here. The host is set
@@ -797,10 +805,11 @@
 							{#if !held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !holdsNextRun(trigger.blocked_reason)}
 								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
-							<!-- Not at a plan that waits for its takeover: next to its badge the switch
-							     read as a second pause, and a helper's is refused. After the takeover it
-							     comes back, and an own pause set before stays. -->
-							{#if !pausedOpen(trigger) && !ownerOnlyHere(trigger)}
+							<!-- Not at a paused plan. Open, it waits for its takeover: next to its badge the switch
+							     read as a second pause, and a helper's is refused. After the takeover it comes
+							     back, and an own pause set before stays. Completed, it never runs again, whatever
+							     the switch says, as its line tells (U-275). -->
+							{#if trigger.paused !== true}
 								<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} data-trigger-toggle class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
 							{/if}
 							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
