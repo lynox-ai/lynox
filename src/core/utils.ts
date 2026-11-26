@@ -10,6 +10,12 @@ export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/** A USD amount for a sentence, rounded to the cent: "$50" when it is whole dollars, else "$12.50". */
+export function formatUsdAmount(usd: number): string {
+  const cents = Math.round(usd * 100);
+  return cents % 100 === 0 ? `$${cents / 100}` : `$${(cents / 100).toFixed(2)}`;
+}
+
 export function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

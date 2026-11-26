@@ -2,7 +2,7 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 import type { PromptMeta, PromptText, PromptUserFn } from '../types/index.js';
 import type { AbortScope } from '../types/config.js';
 import type { PromptStore } from './prompt-store.js';
-import { promptOriginOf } from './prompt-store.js';
+import { promptOriginOf, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
@@ -142,8 +142,17 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       promptId = store.insertQuestion({ blocked: meta?.blocked === true, attended: false }, deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
         principal: deps.principal,
         handRun: deps.handRun,
-      });
+      }, meta?.consent);
     } catch (err: unknown) {
+      // A blocked question (where a send target comes from, a guard's hard block) is refused before
+      // it is stored. The run ends there, visibly, as a question it could not ask: a step that
+      // went on without the answer could end the run succeeded with the owner told nothing. The
+      // asker still gets the unattended answer, so a send check reports where its target came
+      // from (`onOriginRefused`), which the run's result then names.
+      if (err instanceof UnattendedBlockError) {
+        this.#endUnanswered('not_asked');
+        return UNATTENDED_BLOCK_ANSWER;
+      }
       // A database the engine already closed is the teardown, as after the wait.
       if (!store.isOpen()) return neverSettles();
       // Otherwise the question could not be put to the owner — e.g. a question of the owner's

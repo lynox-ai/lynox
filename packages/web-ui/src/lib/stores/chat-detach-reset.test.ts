@@ -36,7 +36,7 @@ const SRC = readFileSync(
 const THREAD_SCOPED = [
 	'messages', 'sessionId', 'isStreaming', 'streamingActivity',
 	'streamingToolName', 'streamingToolPhase', 'pendingPermission', 'pendingTabsPrompt',
-	'pendingSecretPrompt', 'pendingMailConnect', 'pendingChangeset', 'changesetLoading',
+	'pendingSecretPrompt', 'pendingMailConnect', 'pendingChangeset', 'rollbackStopped', 'changesetLoading',
 	'skipExtraction', 'threadContained', 'threadContainedUnknown', 'threadReadRefusal', 'chatError', 'runInterrupted', 'messageQueue', 'runStartedAt',
 	'runPromptCount', 'contextBudget', 'compactionOffer', 'retryStatus',
 	// A count of what is waiting in the PREVIOUS conversation is exactly the wrong thing to

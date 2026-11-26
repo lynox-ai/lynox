@@ -178,6 +178,32 @@ describe('bindWorkflowParameters', () => {
       });
       expect(ok).toEqual({ ok: true, params: { n: 16 } });
     });
+
+    it('applies only the contract\'s own rule for a parameter, never one every object inherits', () => {
+      // An entry on Object.prototype is what a polluted prototype would carry. The stamp preview does
+      // not show it (it reads own entries only), so the run must not enforce it either.
+      const proto = Object.prototype as Record<string, unknown>;
+      proto['inherited'] = { enum: ['only-this'] };
+      try {
+        const schema = [param({ name: 'inherited', defaultValue: 'stored' })];
+        expect(bindWorkflowParameters(schema, { inherited: 'other' }, { constraints: {} })).toEqual({ ok: true, params: { inherited: 'other' } });
+        // The stored default is not held to it either.
+        expect(bindWorkflowParameters(schema, {}, { constraints: {} })).toEqual({ ok: true, params: { inherited: 'stored' } });
+        // CONTROL: the same rule as the contract's own entry is enforced, for a value and for the default.
+        const own = { constraints: { inherited: { enum: ['only-this'] } } };
+        expect(bindWorkflowParameters(schema, { inherited: 'other' }, own).ok).toBe(false);
+        expect(bindWorkflowParameters(schema, {}, own).ok).toBe(false);
+      } finally {
+        delete proto['inherited'];
+      }
+    });
+
+    it('a contract whose rules are null binds as one without rules, as the preview shows none', () => {
+      const schema = [param({ name: 'env', defaultValue: 'stored' })];
+      const none = { constraints: null as unknown as Record<string, never> };
+      expect(bindWorkflowParameters(schema, { env: 'any' }, none)).toEqual({ ok: true, params: { env: 'any' } });
+      expect(bindWorkflowParameters(schema, {}, none)).toEqual({ ok: true, params: { env: 'stored' } });
+    });
   });
 });
 
@@ -228,6 +254,11 @@ describe('a stored parameter name in a refusal', () => {
     expect(run({ type: 'date' }, 'soon')).toEqual({ ok: false, error: `Parameter ${at} must be an ISO date (YYYY-MM-DD).` });
   });
 
+  it('names it by its place when its pattern compiles only inside the run\'s anchors', () => {
+    const r = bindWorkflowParameters([param({ name: 'client' }), param({ name: SENT })], { client: 'Acme', [SENT]: 'anything' }, { constraints: { [SENT]: { regex: 'a)|(.*' } } });
+    expect(r).toEqual({ ok: false, error: 'Parameter 2 (lynox does not show its name) has an invalid constraint pattern.' });
+  });
+
   it('CONTROL: a name in the form is still quoted in the same refusals', () => {
     const schema = [param({ name: 'client' }), param({ name: 'count', type: 'number' })];
     expect(bindWorkflowParameters(schema, { client: 'Acme' })).toEqual({ ok: false, error: 'Missing required parameter "count".' });
@@ -260,6 +291,21 @@ describe('a contract\'s stored values in a refusal', () => {
       .toEqual({ ok: false, error: "Parameter \"n\" must be <= the maximum this workflow sets." });
     expect(bindWorkflowParameters(n, { n: '5' }, { constraints: { n: { min: 10 } } })).toEqual({ ok: false, error: 'Parameter "n" must be >= 10.' });
     expect(bindWorkflowParameters(n, { n: '50' }, { constraints: { n: { max: 10 } } })).toEqual({ ok: false, error: 'Parameter "n" must be <= 10.' });
+  });
+});
+
+describe('a pattern that does not compile on its own', () => {
+  const schema: ProcessParameter[] = [{ name: 'v', description: '', type: 'string', source: 'user_input' } as ProcessParameter];
+
+  it('is refused, though inside the run\'s anchors it compiles and would admit any value', () => {
+    const r = bindWorkflowParameters(schema, { v: 'anything at all' }, { constraints: { v: { regex: 'a)|(.*' } } });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('Parameter "v" has an invalid constraint pattern.');
+  });
+
+  it('CONTROL: a pattern that compiles on its own still holds in full', () => {
+    expect(bindWorkflowParameters(schema, { v: 'b' }, { constraints: { v: { regex: 'a|b' } } }).ok).toBe(true);
+    expect(bindWorkflowParameters(schema, { v: 'ab' }, { constraints: { v: { regex: 'a|b' } } }).ok).toBe(false);
   });
 });
 

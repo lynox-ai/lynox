@@ -153,9 +153,10 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
   }
 
   if (existing.template) {
+    // The stored name is left out: it can be text a prior turn brought in from outside, and the
+    // caller already holds the id it passed.
     return JSON.stringify({
       workflow_id: existing.id,
-      name: existing.name,
       steps: existing.steps.length,
       already_reusable: true,
       next: `Workflow "${existing.id}" is already a reusable template. Call run_workflow with this workflow_id to run it.`,
@@ -290,6 +291,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       // Account the annotation's pool-key spend to the local session cap +
       // the tenant balance (no-op on self-host / BYOK).
       meteredHost: agent.toolContext.meteredHost,
+      chargeRun: (usd: number) => { agent.chargeExternalCost?.(usd); },
       sessionCounters: agent.sessionCounters,
       // A stop of the run, or the tool's time limit, ends the extraction call.
       signal: currentCallSignal(),

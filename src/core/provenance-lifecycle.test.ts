@@ -207,6 +207,8 @@ describe('AgentMemoryDb v5 — sourceType capture (AC4)', () => {
         confirmation_count INTEGER NOT NULL DEFAULT 0, last_retrieved_at TEXT,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source_thread_id TEXT
       );
+      -- Baseline v1 has it; v8 follows the chains of replaced memories through it.
+      CREATE TABLE relations (id TEXT PRIMARY KEY, source_memory_id TEXT);
       INSERT INTO memories (id, text, namespace, scope_type, scope_id, created_at, updated_at)
       VALUES ('legacy-1', 'fact from before v5', 'knowledge', 'context', 'c1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
     `);

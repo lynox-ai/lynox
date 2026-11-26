@@ -84,12 +84,21 @@ function addCreated(into: KnowledgeCreatedCounts, made: Partial<KnowledgeCreated
   into.subjects += made.subjects ?? 0;
 }
 
+/** The `metrics` row name for an entity extraction refused only because a run held the balance. */
+export const KG_EXTRACTION_REFUSED_METRIC = 'kg_extraction_refused_within_balance';
+
 /**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
  *
  * Integrates: AgentMemoryDb (SQLite) + EntityResolver + RetrievalEngine +
  * ContradictionDetector + KpiEngine + RunHistory (for insights).
  */
+/**
+ * How many relations of one entity the data export reads, newest first. An entity that returns
+ * this many may hold more, so the export marks its graph block as possibly incomplete.
+ */
+export const EXPORT_RELATIONS_PER_ENTITY = 50;
+
 export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly db: AgentMemoryDb;
   private readonly embeddingProvider: EmbeddingProvider;
@@ -562,6 +571,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // stub now would leave one no purge can reach — purges find stubs through legacy ids.
     if (options?.cancelled?.()) return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false, created: noneCreated() };
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;
+    if (extractGate?.refusedWithinBalance === true) this.noteExtractionRefusedWithinBalance(memoryId);
 
     // Slice B (Context-Hierarchy Scoping): if this memory's source thread is anchored
     // to a subject (project/client via set_thread_context), that anchor becomes the
@@ -1602,7 +1612,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * stored belongs in the export until the reap removes it. Same store choice and cap.
    */
   async getEntityRelationsForExport(entityId: string): Promise<Array<RelationRecord & { sourceDeleted: boolean }>> {
-    const limit = 50;
+    const limit = EXPORT_RELATIONS_PER_ENTITY;
     if (this.subjectGraphEnabled && this.relationshipStore) {
       try {
         return this.relationshipStore.getRelationshipsForSubjectForExport(entityId, limit)
@@ -1630,7 +1640,36 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * degrades to "not found" (subject ids don't resolve legacy rows) rather than
    * returning wrong data.
    */
+  /**
+   * How many subject-graph reads fell back to the legacy store since boot. A reader that needs
+   * the whole set (the data export) compares it before and after: a fallback read answers from
+   * another store, by-id reads degrade to "not found", so the result may be partial.
+   */
+  get readFallbackCount(): number {
+    return this._readFallbacks;
+  }
+
+  /**
+   * How many remembered texts and mentions the legacy store holds ({@link AgentMemoryDb.countMemoryTextRows}).
+   * The data export does not carry them, so it marks its graph block incomplete while this is above zero.
+   */
+  countHeldMemoryTexts(): number {
+    return this.db.countMemoryTextRows();
+  }
+
+  /**
+   * The subject graph is switched on but its store is missing (engine.db did not open at boot).
+   * Every read then answers from the legacy store alone, without a fallback being logged, and
+   * what only engine.db holds is not in it.
+   */
+  get subjectGraphUnavailable(): boolean {
+    return this.subjectGraphEnabled && this.subjectStore === null;
+  }
+
+  private _readFallbacks = 0;
+
   private _logReadFallback(method: string, err: unknown): void {
+    this._readFallbacks += 1;
     process.stderr.write(
       `[lynox:subject-graph] read ${method} fell back to legacy: ${err instanceof Error ? err.message : String(err)}\n`,
     );
@@ -1800,8 +1839,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   markMoved(ids: string[], successorId: string): void {
     this.db.markReplaced(ids, successorId);
     if (this.memoryGraphStore) {
+      const memoryGraph = this.memoryGraphStore;
       try {
-        this.memoryGraphStore.markReplaced(ids, successorId);
+        this.engineDb!.getDb().transaction(() => {
+          // The copy may have no stub (the subject graph was off, or its mirror failed); the
+          // originals' edges need one to move to, so it is carried from the legacy row first.
+          if (!memoryGraph.getStub(successorId) && ids.some(id => memoryGraph.getStub(id) !== null)) {
+            const copy = this.db.getMemory(successorId);
+            if (copy) memoryGraph.ensureStubFrom(copy);
+          }
+          memoryGraph.markReplaced(ids, successorId);
+        })();
       } catch (err: unknown) {
         this._reportMirrorParityLoss('supersede', `${ids.length} id(s) for a move`, err);
         throw err;
@@ -1846,6 +1894,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       }
     }
     return ids.length;
+  }
+
+  /**
+   * Records that the entity extraction for `memoryId` was refused only because a run held the
+   * balance: the memory is stored, its graph entities are not, and nothing extracts them later
+   * unless the memory is edited. One `metrics` row per memory (`metric_name` =
+   * {@link KG_EXTRACTION_REFUSED_METRIC}, `scope_type` 'memory', `scope_id` the memory id,
+   * `value` how often), so the gap can be counted and found again. No text is written.
+   * Best-effort: a failed write never affects the memory write.
+   */
+  noteExtractionRefusedWithinBalance(memoryId: string): void {
+    if (!memoryId) return;
+    try {
+      const prior = this.db.getMetric(KG_EXTRACTION_REFUSED_METRIC, 'memory', memoryId);
+      const count = (prior?.value ?? 0) + 1;
+      this.db.upsertMetric({ metricName: KG_EXTRACTION_REFUSED_METRIC, value: count, sampleCount: count, scopeType: 'memory', scopeId: memoryId });
+    } catch { /* best-effort record */ }
   }
 
   /**
@@ -1959,6 +2024,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;
+    if (extractGate?.refusedWithinBalance === true) this.noteExtractionRefusedWithinBalance(id);
     if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
       const createdAt = this.db.getMemoryCreatedAt(id);
       // Slice B: keep the memory's project/client anchor across a text edit — resolve
@@ -2210,6 +2276,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // short-circuits (`existing && incoming`) when either row is missing, so retiring
         // first would make it silently pass. Order is load-bearing, not stylistic.
         if (!this.db.supersedMemory(candidate.id, id, { trustGate: true })) throw TIER_RAISE_REFUSED;
+        this.db.repointRelations(candidate.id, id);
         this.db.createSupersedes(id, candidate.id, 'tier-raise');
         this.db.addConfirmations(id, candidate.confirmation_count);
         return id;
@@ -2268,6 +2335,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           confirmationCount: candidate.confirmation_count,
         });
         if (oldMentions.length > 0) memoryGraph.linkSubjects(newId, oldMentions);
+        // After the new stub exists: the relationships' source is a foreign key to it.
+        memoryGraph.repointRelationships(candidate.id, newId);
       })();
       this._emitMirrorDivergences(diverged, namespace);
     } catch (err: unknown) {
@@ -2308,9 +2377,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       const memoryGraph = this.memoryGraphStore;
       try {
         this.engineDb!.getDb().transaction(() => {
+          // A keeper written before the subject graph has no stub; the duplicate's edges need one
+          // to move to. It is carried from the legacy row, whose confirmation count already holds
+          // every transfer of this run, so a stub written here takes no further additions.
+          const written = new Set<string>();
           for (const p of pairs) {
-            memoryGraph.markSuperseded(p.victimId, p.keeperId);
-            memoryGraph.addConfirmations(p.keeperId, p.victimConfirmations);
+            if (memoryGraph.getStub(p.victimId) && !memoryGraph.getStub(p.keeperId)) {
+              const keeper = this.db.getMemory(p.keeperId);
+              if (keeper && memoryGraph.ensureStubFrom(keeper)) written.add(p.keeperId);
+            }
+            memoryGraph.markSuperseded(p.victimId, p.keeperId, { carryRelationships: true });
+            if (!written.has(p.keeperId)) memoryGraph.addConfirmations(p.keeperId, p.victimConfirmations);
           }
         })();
       } catch (err: unknown) {

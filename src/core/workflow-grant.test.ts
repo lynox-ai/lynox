@@ -77,6 +77,18 @@ describe('the shape of a reviewed grant on a saved workflow', () => {
     expect(validateContractAgainstSteps({ capabilityContract: bad, steps: [STEP_WITH_PARAM] })).toMatch(/^Capability-contract is invalid/);
   });
 
+  it('refuses a parameter named like a property every object has, when the grant does not bind it', () => {
+    // The run binds only the grant's own entries, so `toString` here would flow into the call unbound.
+    const step = { ...STEP_WITH_PARAM, input_template: { url: 'https://api.example.com/v1/reports', body: '{{params.toString}}' } } as InlinePipelineStep;
+    const ok = buildReviewedContract(ENTRY, [STEP_WITH_PARAM], { month: '2026-09' });
+    if (!('contract' in ok)) throw new Error(ok.error);
+    const unbound = { ...ok.contract, paramConstraints: {} } as CapabilityContract;
+    expect(reviewedContractShapeError(unbound, [step])).toBe('parameter "toString" flows into a tool call and is not bound to a value.');
+    // CONTROL: bound by its own entry, the same parameter passes.
+    const bound = { ...ok.contract, paramConstraints: { toString: { enum: ['x'] } } } as CapabilityContract;
+    expect(reviewedContractShapeError(bound, [step])).toBeNull();
+  });
+
   it.each([
     ['a port', 'api.example.com:8443'],
     ['a path', 'api.example.com/v1'],

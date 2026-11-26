@@ -17,12 +17,16 @@
 	import BulkRunDetail from './BulkRunDetail.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
-	import { bulkHaltSuffixKey, bulkLabel, bulkPhaseHasSuffix, bulkPhaseKey, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
+	import BulkHost from './BulkHost.svelte';
+	import { bulkHaltSuffixKey, bulkHostOf, bulkLabelParts, bulkLoadErrorKey, bulkReadsList, bulkPhaseHasSuffix, bulkPhaseKey, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
 	let merges = $state<BulkMerge[]>([]);
 	let loading = $state(true);
 	let error = $state('');
+	// Whether the last load read the run list. Only then does an empty list mean "no runs": a list
+	// that could not be read shows its error alone.
+	let runsRead = $state(false);
 	let mergeAnswer = $state<{ text: string; ok: boolean; goTo: string | null } | null>(null);
 	// The merge a refusal sent the owner to, marked in the list until the next action.
 	let markedMerge = $state<string | null>(null);
@@ -46,21 +50,32 @@
 	async function load(): Promise<void> {
 		loading = true;
 		error = '';
+		// Whether this load read the run list; written once, after its answers, like the rest.
+		let read = false;
 		try {
 			const [runRes, mergeRes] = await Promise.all([
 				fetch(`${getApiBase()}/bulk/runs`),
 				fetch(`${getApiBase()}/merges`),
 			]);
-			// Bulk runs ship off; a 404 here means the feature is off, not a failure.
-			runs = runRes.ok ? ((await runRes.json()) as { runs: BulkRun[] }).runs : [];
+			// Bulk runs ship off; a 404 here means the feature is off, not a failure. Any other
+			// failure keeps the list as it was, as for the merges below.
+			if (runRes.ok) {
+				runs = ((await runRes.json()) as { runs: BulkRun[] }).runs;
+				read = true;
+			} else if (runRes.status === 404) {
+				runs = [];
+				read = true;
+			}
 			// No subject store answers 404: no merges. Any other failure keeps the list as it was
 			// and says so, so an answer read against it is not read against an empty list.
 			if (mergeRes.ok) merges = ((await mergeRes.json()) as { merges: BulkMerge[] }).merges;
 			else if (mergeRes.status === 404) merges = [];
-			if ((!runRes.ok && runRes.status !== 404) || (!mergeRes.ok && mergeRes.status !== 404)) error = t('common.load_failed');
+			const failed = [runRes, mergeRes].filter((r) => !r.ok && r.status !== 404).map((r) => r.status);
+			if (failed.length > 0) error = t(bulkLoadErrorKey(failed));
 		} catch {
-			error = t('common.load_failed');
+			error = t(bulkLoadErrorKey([null]));
 		}
+		runsRead = read;
 		loading = false;
 	}
 
@@ -103,7 +118,12 @@
 
 	const i18n = { t, tf };
 	const chipClass = 'inline-block rounded-full px-2 py-0.5 text-[11px]';
+	// Between a run's date and where it writes, on a narrow list.
+	const SYSTEM_SEP = ' · ';
 </script>
+
+<!-- Where a run writes: the host of an external run boxed as code, a system lynox names as text. -->
+{#snippet system(run: BulkRun)}{#if bulkHostOf(run.targetSystem)}<BulkHost value={bulkHostOf(run.targetSystem) ?? ''} />{:else}{bulkSystemName(run.targetSystem, i18n)}{/if}{/snippet}
 
 {#if selectedRun !== null}
 	<BulkRunDetail runId={selectedRun} onBack={() => openRun(null)} onOpen={(id) => openRun(id)} />
@@ -120,8 +140,10 @@
 
 			{#if loading}
 				<p class="text-text-subtle text-sm">{t('common.loading')}</p>
-			{:else if runs.length === 0}
+			{:else if runs.length === 0 && runsRead}
 				<p class="text-sm text-text-subtle py-6 text-center">{t('bulk.empty')}</p>
+			{:else if runs.length === 0}
+				<!-- The list could not be read: the error above stands alone. -->
 			{:else}
 				<div class="overflow-x-auto">
 					<table class="w-full text-sm">
@@ -138,10 +160,10 @@
 							{#each runs as run (run.id)}
 								<tr class="border-b border-border hover:bg-bg-muted cursor-pointer" onclick={() => openRun(run.id)}>
 									<td class="py-2 pr-3">
-										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkLabel(run, i18n)}</button>
-										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden">{` · ${bulkSystemName(run.targetSystem, i18n)}`}</span></div>
+										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{#each bulkLabelParts(run, i18n, bulkReadsList(run)) as part, i (i)}{#if 'slot' in part}{@render system(run)}{:else}{part.text}{/if}{/each}</button>
+										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden">{SYSTEM_SEP}{@render system(run)}</span></div>
 									</td>
-									<td class="py-2 pr-3 hidden sm:table-cell">{bulkSystemName(run.targetSystem, i18n)}</td>
+									<td class="py-2 pr-3 hidden sm:table-cell">{@render system(run)}</td>
 									<td class="py-2 pr-3">
 										<span class="{chipClass} whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && !bulkWaitsForStart(run) ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">
 											{t(bulkPhaseKey(run))}{bulkPhaseHasSuffix(run) && !bulkWaitsForStart(run) ? ` ${t(bulkHaltSuffixKey(run))}` : ''}
@@ -150,7 +172,7 @@
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>
 										{/if}
 									</td>
-									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs">{run.applied}/{run.total}</td>
+									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{bulkReadsList(run) ? t('bulk.head.counts_pending') : `${run.applied}/${run.total}`}</td>
 									<td class="py-2 hidden sm:table-cell font-mono text-xs">{formatCost(run.costUsd)}</td>
 								</tr>
 							{/each}
