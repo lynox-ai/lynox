@@ -174,7 +174,7 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     expect(body.datastore_may_be_incomplete, 'the store itself was read in full').toBe(false);
   }, 60_000);
 
-  it('leaves the knowledge graph and the secret names unmarked when both were read, and says values are not exported', async () => {
+  it('leaves the knowledge graph and the secret names unmarked when both were read, and says values are not exported; durable memory off does not touch the graph', async () => {
     expect(h.engine().getSecretStore(), 'fixture: the secret store opened').not.toBeNull();
     expect(h.engine().getKnowledgeLayer(), 'fixture: the knowledge graph opened').not.toBeNull();
     const body = await h.exportBody();
@@ -182,6 +182,9 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     expect(body.secrets_note).toBe('Names of the stored secrets only. Their values are not exported.');
     expect(body.knowledge_graph_may_be_incomplete, 'the graph was read in full').toBe(false);
     expect(body.knowledge_graph.enabled, 'on: no off marker').toBe(true);
+    // Graph on, durable memory off: each block follows its own setting.
+    expect(body.durable_knowledge.enabled, 'durable memory is off').toBe(false);
+    expect(body.durable_knowledge.may_be_incomplete, 'nothing durable is held, read in full').toBe(false);
   }, 60_000);
 
   it('marks the knowledge graph incomplete when reading it throws', async () => {
@@ -341,6 +344,30 @@ describe('export with the knowledge graph switched off (real engine)', () => {
     const body = await h.exportBody();
     expect(body.knowledge_graph).toEqual({ entities: [], relationships: [], enabled: false });
     expect(body.knowledge_graph_may_be_incomplete, 'off: what it held may still be stored and was not read').toBe(true);
+    expect(body.durable_knowledge.enabled, 'durable memory is off too').toBe(false);
+  }, 60_000);
+});
+
+describe('export with the knowledge graph switched off and durable memory on (real engine)', () => {
+  const h = harness((dir) => {
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ knowledge_graph_enabled: false }));
+    const db = new EngineDb(join(dir, 'engine.db'));
+    new KnowledgeStore(db, new SubjectStore(db), null).write({ text: 'Quotes are valid for 30 days', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    db.close();
+  }, true);
+
+  it('marks only the graph: durable knowledge is read in full under its own setting', async () => {
+    expect(h.engine().getUserConfig().knowledge_graph_enabled, 'fixture: graph off').toBe(false);
+    expect(h.engine().getUserConfig().durable_memory_enabled, 'fixture: durable memory on').toBe(true);
+    expect(h.engine().getKnowledgeLayer(), 'fixture: no graph layer').toBeNull();
+    expect(h.engine().getKnowledgeStore(), 'fixture: the durable store opened').not.toBeNull();
+
+    const body = await h.exportBody();
+    expect(body.knowledge_graph).toEqual({ entities: [], relationships: [], enabled: false });
+    expect(body.knowledge_graph_may_be_incomplete, 'graph off: not read').toBe(true);
+    expect(body.durable_knowledge.enabled, 'durable memory on').toBe(true);
+    expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['Quotes are valid for 30 days']);
+    expect(body.durable_knowledge.may_be_incomplete, 'the graph being off does not mark durable knowledge').toBe(false);
   }, 60_000);
 });
 
