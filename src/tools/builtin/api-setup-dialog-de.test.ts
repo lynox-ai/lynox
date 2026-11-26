@@ -144,7 +144,7 @@ describe('the save question in German', () => {
     for (const l of ['en', 'de'] as DialogLanguage[]) {
       const changes = securityChanges(grant({ scope: 'read' }), grant({ scope: 'read write' }), l).map((c) => c.text);
       const q = API_SETUP_DIALOG[l].save(toolWordFrame('api_setup', l), 'Shop "x"', changes, '');
-      expect(values(q)).toEqual(['Shop "x"', 'write']);
+      expect(values(q)).toEqual(['Shop \\"x\\"', 'write']);
     }
   });
 });
