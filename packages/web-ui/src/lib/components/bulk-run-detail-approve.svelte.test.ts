@@ -329,18 +329,18 @@ describe('approving a preview', () => {
 		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
 		expect(block.querySelector('#bulk-approve-nothing')).not.toBeNull();
 		expect(block.querySelectorAll('input')).toHaveLength(0);
-		for (const key of ['bulk.approve.unmeasured_note', 'bulk.approve.unmeasured_note_one', 'bulk.approve.unmeasured_confirm']) expect(block.textContent).not.toContain(t(key));
+		for (const key of ['bulk.approve.unmeasured_note', 'bulk.approve.unmeasured_confirm']) expect(block.textContent).not.toContain(t(key));
 		expect(block.textContent).not.toContain('Tee');
 	});
 
-	it('cuts the unchecked note to its first two sentences at one target to write, and keeps it whole at two', async () => {
+	it('shows one note at one target and at two, and says what is written first only in the line below it', async () => {
 		const unchecked = (update: number): BulkRunDetailData => makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', changes: { update, create: 0, delete: 0, unchanged: 0, invalid: 3 - update } });
 		run = unchecked(1);
 		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
 		await render();
-		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note_one'));
-		expect(target.textContent).not.toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
 		expect(target.textContent).toContain(t('bulk.approve.only_one'));
+		expect(target.textContent).not.toContain('Deshalb schreibt lynox zuerst nur ein Ziel');
 		unmount(component!);
 		component = undefined;
 		run = unchecked(2);
@@ -348,6 +348,8 @@ describe('approving a preview', () => {
 		await render();
 		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
 		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+		// The first target is said once, in the line below the note, not in the note as well.
+		expect(target.textContent).not.toContain('Deshalb schreibt lynox zuerst nur ein Ziel');
 		// Every kind of write counts, as the write counts it: one update and one create are two.
 		unmount(component!);
 		component = undefined;
@@ -428,6 +430,16 @@ describe('approving a preview', () => {
 		buttonByText(t('bulk.deselect.off'))!.click();
 		await settle();
 		expect(target.textContent).toContain('engine English');
+	});
+
+	it('tells an image-alt run on a store that its new values are live at once, and names no title or SEO text', async () => {
+		const alt = (seq: number): BulkTarget => ({ seq, key: `gid://shopify/MediaImage/${String(seq)}`, change: 'update', diff: { kind: 'fields', fields: [{ field: 'alt', before: null, after: `Bild ${String(seq)}` }] } as BulkTarget['diff'], error: null, deselected: false });
+		run = makeRun({ total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [alt(1), alt(2)];
+		await render();
+		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
+		expect(block.textContent).toContain(t('bulk.approve.shopify_visible'));
+		expect(t('bulk.approve.shopify_visible')).not.toMatch(/Titel|SEO|title/i);
 	});
 });
 
