@@ -439,6 +439,50 @@ describe('the shell banner in a tab that stays open past an end', () => {
 		expect(questions).toBe(3);
 	});
 
+	it('a first question that fails or gets no answer is asked again the next minute, and the line shows once the engine answers', async () => {
+		answers = [500, [A(RENEWED)]];
+		await open();
+		expect(questions).toBe(1);
+		expect(shown()).toEqual([]);
+		await minutes(1);
+		expect(questions).toBe(2);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Februar 2099')]);
+		await minutes(3);
+		expect(questions).toBe(2);
+		unmount(component!);
+		component = undefined;
+		// No answer in time: the question is given up after 15 s, and the next minute asks again.
+		questions = 0;
+		answers = ['hang', [A(RENEWED)]];
+		await open();
+		expect(questions).toBe(1);
+		await vi.advanceTimersByTimeAsync(15_000);
+		await settle();
+		expect(shown()).toEqual([]);
+		await minutes(1);
+		expect(questions).toBe(2);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Februar 2099')]);
+	});
+
+	it('first questions that keep failing ask once a minute, never more', async () => {
+		answers = [500, 500, 500, 500];
+		await open();
+		expect(questions).toBe(1);
+		await minutes(3);
+		expect(questions).toBe(4);
+		expect(shown()).toEqual([]);
+	});
+
+	it('a session the server named a mandate is not asked for its profiles in a later minute either', async () => {
+		configs = [{ viewer: 'mandate' }];
+		answers = [[A(END_A)]];
+		await open();
+		await minutes(3);
+		expect(questions).toBe(0);
+		expect(configAsks).toBe(1);
+		expect(shown()).toEqual([]);
+	});
+
 	it('a line the engine already called ended stays ended when a later question fails', async () => {
 		// A ended for the engine a day ago; B's end comes at 12:00:30, and the question at 12:01 fails.
 		answers = [[A('2099-01-19T12:00:00.000Z', true), B], 500];

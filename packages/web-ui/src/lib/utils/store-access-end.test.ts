@@ -1,6 +1,22 @@
 import { describe, it, expect } from 'vitest';
-import { longDay } from './store-access-end.js';
+import { longDay, storeAccessAskAgain } from './store-access-end.js';
 import { placeholderParts, valueSegments } from './value-breaks.js';
+
+describe('whether the store banner asks the engine again', () => {
+	const end = (at: string) => ({ id: 'a', store_access_ends: { host: 'acme.myshopify.com', ended: false, at } });
+	const askedAt = Date.parse('2099-01-20T11:58:00.000Z');
+	const now = new Date('2099-01-20T12:00:00.000Z');
+	it('asks again while no question has been answered, with or without a store it knows', () => {
+		expect(storeAccessAskAgain([], null, now)).toBe(true);
+		expect(storeAccessAskAgain([end('2099-02-20T12:00:00.000Z')], null, now)).toBe(true);
+	});
+	it('after an answer, asks only for an end that came since that question', () => {
+		expect(storeAccessAskAgain([], askedAt, now)).toBe(false);
+		expect(storeAccessAskAgain([end('2099-01-20T11:59:00.000Z')], askedAt, now)).toBe(true);
+		expect(storeAccessAskAgain([end('2099-01-20T11:57:00.000Z')], askedAt, now)).toBe(false);
+		expect(storeAccessAskAgain([end('2099-01-20T12:01:00.000Z')], askedAt, now)).toBe(false);
+	});
+});
 
 describe('a host or URL in a sentence', () => {
 	it('splits the sentence at its placeholder, and keeps a sentence without one whole', () => {

@@ -45,10 +45,11 @@ export function storeAccessShown(profile: StoreAccessProfile, now: Date, locale:
  * has come since the last question that was answered was sent (`askedAt`). Until an answer to a newer one the page shows what the
  * engine said then, so an end that passes in an open tab is never called ended on the browser's
  * clock alone: a run may have renewed the store meanwhile. An end at or before `askedAt` was
- * already the engine's word and asks nothing; neither does a page that has no answer yet.
+ * already the engine's word and asks nothing. A page with no answer yet asks again: its first
+ * question failed (engine down, an error answer, no answer in time), and the page knows no end.
  */
 export function storeAccessAskAgain(profiles: readonly StoreAccessProfile[], askedAt: number | null, now: Date): boolean {
-	if (askedAt === null) return false;
+	if (askedAt === null) return true;
 	return profiles.some((p) => {
 		const iso = p.store_access_ends?.at;
 		const at = typeof iso === 'string' ? Date.parse(iso) : Number.NaN;
