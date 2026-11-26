@@ -18,6 +18,8 @@ const { setLocale } = await import('../i18n.svelte.js');
 // jsdom does no layout. Each value line is LINE px high and stacked from the field's top; the field
 // shows FIELD px of it and is scrolled by its own scrollTop, as a browser would lay it out.
 const LINE = 23;
+/** Where the field starts on the screen: not at 0, so a step measured from the screen's top and not the field's is caught. */
+const FIELD_TOP = 40;
 let fieldBottom = 100;
 /** Screen lines each value line takes (1 unless the test wraps it). */
 let wraps: number[] = [];
@@ -74,12 +76,12 @@ beforeEach(() => {
 	window.getComputedStyle = ((el: Element) => ({ lineHeight: el.hasAttribute('data-prompt-field') ? `${LINE}px` : '' })) as unknown as typeof window.getComputedStyle;
 	tooLow = false;
 	Element.prototype.getBoundingClientRect = function (this: Element) {
-		if (this.hasAttribute('data-prompt-field')) return rect(0, fieldBottom);
+		if (this.hasAttribute('data-prompt-field')) return rect(FIELD_TOP, FIELD_TOP + fieldBottom);
 		if (this.hasAttribute('data-prompt-line')) {
 			const f = this.closest<HTMLElement>('[data-prompt-field]')!;
 			const i = [...f.children].indexOf(this);
 			const top = wraps.slice(0, i).reduce((a, w) => a + w * LINE, 0) + Math.max(0, i - wraps.length) * LINE;
-			return rect(top - f.scrollTop, top + (wraps[i] ?? 1) * LINE - f.scrollTop);
+			return rect(FIELD_TOP + top - f.scrollTop, FIELD_TOP + top + (wraps[i] ?? 1) * LINE - f.scrollTop);
 		}
 		return rect(0, 0);
 	};
