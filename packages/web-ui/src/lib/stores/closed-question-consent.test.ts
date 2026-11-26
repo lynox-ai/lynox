@@ -8,7 +8,7 @@ describe('isConsentCard', () => {
 	});
 
 	it('is never read from option texts: a model\'s "Allow" / "Deny" is an ordinary question', () => {
-		for (const v of [['Allow', 'Deny'], ['Run on balanced', 'Cancel'], ['allow', 'deny'], undefined, null, '', 'Allow', 'permission']) {
+		for (const v of [['Allow', 'Deny'], ['Run on Balanced', 'Cancel'], ['allow', 'deny'], undefined, null, '', 'Allow', 'permission']) {
 			expect(isConsentCard(v), JSON.stringify(v)).toBe(false);
 		}
 	});
