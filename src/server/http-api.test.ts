@@ -434,6 +434,10 @@ vi.mock('../core/engine.js', () => ({
     // `not.toBe(403)`, so a route that threw read as a route that answered.
     this.getEngineDb = vi.fn().mockReturnValue(null);
     this.getDataStore = vi.fn().mockReturnValue(null);
+    // The owner sessions' generation: the auth gate asks it on every cookie, and a stub without it
+    // throws, which the gate takes as "cannot be read" and refuses every owner session.
+    this.getOwnerSessions = vi.fn().mockReturnValue(null);
+    this.liveOwnerGeneration = vi.fn().mockReturnValue(0);
     this.getApiStore = mockGetApiStore;
     // R2b subject-graph surface — null by default (flag off); route tests swap in.
     // getSubjectStore is also read by GET /api/config (has_subject_graph capability).
@@ -25976,10 +25980,11 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   describe('the positive list (PRD cp-admin-line §3.1)', () => {
     type Row = { method: string; path: string; scope: 'admin' | 'user'; stance: unknown; cpAdmin: boolean };
     const table = (): Row[] => (api as unknown as { routeStancesForTesting: () => Row[] }).routeStancesForTesting();
-    // The five calls the control plane makes with its admin bearer.
-    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke', 'GET /api/admin/workspace/status'];
+    // The six calls the control plane makes with its admin bearer; the sixth ends the owner's
+    // sessions, or re-asserts their generation after a restore.
+    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke', 'GET /api/admin/workspace/status', 'POST /api/admin/owner-sessions/end'];
 
-    it('names exactly the five routes the control plane calls, all admin routes without a stance', () => {
+    it('names exactly the six routes the control plane calls, all admin routes without a stance', () => {
       const marked = table().filter((r) => r.cpAdmin);
       expect(marked.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...CP_ROUTES].sort());
       for (const r of marked) expect([r.path, r.scope, r.stance]).toEqual([r.path, 'admin', undefined]);

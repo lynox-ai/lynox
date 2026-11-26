@@ -2653,7 +2653,15 @@ export class LynoxHTTPApi {
   private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
   private static readonly SESSION_COOKIE_NAME = 'lynox_session';
   /** The owner's principal part of a session cookie; the Web UI mints the same bytes (`ownerSession`). */
-  private static readonly OWNER_PRINCIPAL_PART = Buffer.from(JSON.stringify({ v: 1, kind: 'owner' }), 'utf8').toString('base64url');
+  /**
+   * The owner's principal part of a session cookie minted in `generation` (owner-sessions.ts): the
+   * bytes of today's `{v:1,kind:'owner'}` in generation 0, `{v:1,kind:'owner',gen:n}` after the
+   * first end. The web UI mints the same bytes (`ownerSessionPrincipal`).
+   */
+  private static _ownerPrincipalPart(generation: number): string {
+    const principal = generation === 0 ? { v: 1, kind: 'owner' } : { v: 1, kind: 'owner', gen: generation };
+    return Buffer.from(JSON.stringify(principal), 'utf8').toString('base64url');
+  }
   /** A principal cookie stamped further than this in the future is refused (D4). */
   private static readonly SESSION_FUTURE_SKEW_S = 60;
 
@@ -3460,11 +3468,12 @@ export class LynoxHTTPApi {
       return null;
     }
 
-    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() ? null : { iat: timestamp, principal: null };
+    // A cookie without a principal was minted before generations existed: generation 0.
+    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() || this._ownerSessionEnded(0) ? null : { iat: timestamp, principal: null };
     const session = LynoxHTTPApi._parseSessionPrincipal(parts[1]!);
     if (session === null) return null;
     if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
-    if (session.kind === 'owner') return { iat: timestamp, principal: null };
+    if (session.kind === 'owner') return this._ownerSessionEnded(session.gen) ? null : { iat: timestamp, principal: null };
     if (nowS >= session.exp) return null;
     return {
       iat: timestamp,
@@ -3473,6 +3482,21 @@ export class LynoxHTTPApi {
         ...(session.mandateExp !== undefined ? { mandateExp: session.mandateExp } : {}),
       },
     };
+  }
+
+  /**
+   * Whether an owner cookie of this generation is refused: any generation but the live one
+   * (owner-sessions.ts, `Engine.liveOwnerGeneration`, which has one of its own when engine.db did not
+   * open); a store that cannot be read refuses. A mandate's session is not touched: it ends with its
+   * mandate (`_mandateLive`).
+   */
+  private _ownerSessionEnded(generation: number): boolean {
+    if (!this.engine) return generation !== 0;
+    try {
+      return generation !== this.engine.liveOwnerGeneration();
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -3485,7 +3509,7 @@ export class LynoxHTTPApi {
   }
 
   /** The signed principal part of a session cookie; null for anything this engine does not know. */
-  private static _parseSessionPrincipal(part: string): { kind: 'owner' } | { kind: 'mandate'; email: string; display: string; mandateId: string; exp: number; mandateExp?: number } | null {
+  private static _parseSessionPrincipal(part: string): { kind: 'owner'; gen: number } | { kind: 'mandate'; email: string; display: string; mandateId: string; exp: number; mandateExp?: number } | null {
     let raw: unknown;
     try {
       raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
@@ -3495,8 +3519,14 @@ export class LynoxHTTPApi {
     if (raw === null || typeof raw !== 'object') return null;
     const p = raw as Record<string, unknown>;
     if (p['v'] !== 1) return null;
-    // Exactly `{v:1,kind:'owner'}`: any other field beside it is refused, never read as the owner.
-    if (p['kind'] === 'owner') return Object.keys(p).length === 2 ? { kind: 'owner' } : null;
+    // Exactly `{v:1,kind:'owner'}` (generation 0) or `{v:1,kind:'owner',gen:n}` with n a whole number
+    // from 1: any other field, or another `gen`, is refused, never read as the owner.
+    if (p['kind'] === 'owner') {
+      const keys = Object.keys(p).length;
+      if (keys === 2) return { kind: 'owner', gen: 0 };
+      const gen = p['gen'];
+      return keys === 3 && typeof gen === 'number' && Number.isSafeInteger(gen) && gen >= 1 ? { kind: 'owner', gen } : null;
+    }
     if (p['kind'] !== 'mandate') return null;
     const { email, display, mandate_id: mandateId, exp } = p;
     if (typeof email !== 'string' || email.length === 0) return null;
@@ -3550,11 +3580,23 @@ export class LynoxHTTPApi {
   ): void {
     const ageSec = Math.floor(Date.now() / 1000) - cookieIssuedAt;
     if (ageSec < LynoxHTTPApi.SESSION_REFRESH_AFTER_S) return;
+    // In the live generation: the cookie being refreshed was just let in, so it is of that one; a
+    // cookie of another was refused before this and is never refreshed into the live one.
+    LynoxHTTPApi._setOwnerSessionCookie(req, res, secret, this.engine ? this.engine.liveOwnerGeneration() : 0, trustProxy);
+  }
 
+  /** Mint the owner's session cookie in `generation`, signed now, and set it on the response. */
+  private static _setOwnerSessionCookie(
+    req: IncomingMessage,
+    res: ServerResponse,
+    secret: string,
+    generation: number,
+    trustProxy: boolean,
+  ): void {
     const key = createHmac('sha256', 'lynox-session').update(secret).digest();
     const nonce = randomBytes(8).toString('hex');
     const ts = Math.floor(Date.now() / 1000).toString();
-    const payload = `${nonce}.${LynoxHTTPApi.OWNER_PRINCIPAL_PART}.${ts}`;
+    const payload = `${nonce}.${LynoxHTTPApi._ownerPrincipalPart(generation)}.${ts}`;
     const hmac = createHmac('sha256', key).update(payload).digest('hex');
     const token = `${payload}.${hmac}`;
 
@@ -12525,6 +12567,64 @@ export class LynoxHTTPApi {
       const out: MandateRevocationResponse = { newly_revoked: newly };
       jsonResponse(res, 200, out);
     });
+
+    // End every owner session of this instance, from the control plane (owner-sessions.ts): the
+    // operator's way when the owner asks for it or a cookie left the owner's hands. Same auth as the
+    // mandate revocation above, and the same end as the owner's route. The instance secret stays, so
+    // usage reports and secret delivery go on. With `{ generation }` it ends nothing by itself and
+    // re-asserts the generation the control plane recorded, raised to, never lowered: an instance
+    // restored from an older backup is healed by that call.
+    this.addCpAdminRoute('POST /api/admin/owner-sessions/end', async (req, res, _params, body) => {
+      const sessions = engine.getOwnerSessions();
+      if (!sessions) {
+        errorResponse(res, 503, 'The store of owner sessions is not available, so no session was ended. Restart the instance and try again.', 'owner_sessions_unavailable');
+        return;
+      }
+      const asserted = body !== null && typeof body === 'object' ? (body as Record<string, unknown>)['generation'] : undefined;
+      if (asserted !== undefined) {
+        // The control plane's alone: on a self-hosted instance this route is the owner's admin
+        // scope, and a raise far ahead would leave every later session past what a cookie can carry.
+        if (!this._cpAdminRequests.has(req)) {
+          errorResponse(res, 403, 'Only the control plane re-asserts a generation. To end the owner sessions, send the call without generation.', 'owner_sessions_assert_cp_only');
+          return;
+        }
+        // Never past the clock in milliseconds, which is where a recreated engine.db starts: no
+        // generation an end reaches is higher, and the counter stays far inside a safe integer.
+        if (typeof asserted !== 'number' || !Number.isSafeInteger(asserted) || asserted < 0 || asserted > Date.now()) {
+          errorResponse(res, 400, 'Expected { generation?: a whole number of milliseconds from 0, not later than now }.', 'invalid_owner_sessions_end');
+          return;
+        }
+        jsonResponse(res, 200, { generation: sessions.raiseTo(asserted), ended: false });
+        return;
+      }
+      jsonResponse(res, 200, { generation: sessions.endAll(), ended: true });
+    });
+
+    // The owner ends every other session of theirs: each owner cookie minted until now is refused
+    // from here on, and a caller signed in by cookie gets one of the new generation, so this device
+    // stays signed in. A route of the owner's, never an agent tool: no model can be talked into
+    // signing the owner out. It ends sessions only: a passkey, a mandate or a bearer token stays.
+    this.addStatic('user', 'POST /api/auth/owner-sessions/end', async (req, res) => {
+      const sessions = engine.getOwnerSessions();
+      if (!sessions) {
+        errorResponse(res, 503, 'The store of owner sessions is not available, so no session was ended. Restart the instance and try again.', 'owner_sessions_unavailable');
+        return;
+      }
+      const secret = process.env['LYNOX_HTTP_SECRET'];
+      const byCookie = (this._authOrigin.get(req) ?? '').startsWith('cookie:');
+      // Checked again here, with nothing awaited before the end: the cookie was checked when the
+      // headers came, and a body held back past another end must not end that end's sessions and
+      // walk away with a cookie of the new generation.
+      if (byCookie && (!secret || this._verifySessionCookie(req, secret)?.principal !== null)) {
+        errorResponse(res, 401, 'Unauthorized');
+        return;
+      }
+      const generation = sessions.endAll();
+      if (secret && byCookie) {
+        LynoxHTTPApi._setOwnerSessionCookie(req, res, secret, generation, process.env['LYNOX_TRUST_PROXY'] === 'true');
+      }
+      jsonResponse(res, 200, { generation, ended: true });
+    }, ownerOnly('end the owner sessions'));
 
     // Drop the local grant WITHOUT revoking it at Google — the switch-back
     // path (D12). Separate from `/revoke` on purpose: the two differ only in
