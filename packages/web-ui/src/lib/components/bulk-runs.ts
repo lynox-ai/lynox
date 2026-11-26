@@ -742,9 +742,9 @@ export function bulkRuleSourceKey(code: string | undefined, titled: boolean): st
 }
 
 /** The key of the sentence under a rule taken word for word from a saved artifact, in place of
- *  "lynox wrote this rule": at the start of judging or at the approval, named by its planned title
- *  when it had one. */
-export function bulkRuleFromArtifactKey(step: 'start' | 'approve', titled: boolean): string {
+ *  "lynox wrote this rule": at the start of judging, where judging goes on after a halt, or at the
+ *  approval, named by its planned title when it had one. */
+export function bulkRuleFromArtifactKey(step: 'start' | 'restart' | 'approve', titled: boolean): string {
 	return `bulk.${step}.rule_from_artifact${titled ? '' : '_untitled'}`;
 }
 

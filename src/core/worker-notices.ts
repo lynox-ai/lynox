@@ -15,6 +15,7 @@
  */
 import type { NoticeLanguage } from './notice-language.js';
 import type { WatchFetchCause } from './watch-fetch-cause.js';
+import { watchPolicyWordsDe, watchPolicyWordsEn, type WatchPolicyReason, type WatchPolicyWords } from './watch-policy-reason.js';
 import type { ShownMandate } from './request-principal.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { isProvisionedInstance } from './wire-capture.js';
@@ -281,6 +282,8 @@ export interface WorkerNotices {
   watchFetchFailed(url: string, cause: WatchFetchCause): string;
   /** The same reason and what happens next, without the lead that names the page (the trigger card shows the page). */
   watchFetchReason(cause: WatchFetchCause): string;
+  /** A watch the network policy keeps from its page, at the poll: why, and what the owner or the operator can do. */
+  watchPolicyRefused(reason: WatchPolicyReason, alsoHttps: boolean): string;
 }
 
 /**
@@ -389,6 +392,7 @@ const EN: WorkerNotices = Object.freeze({
   watchChanged: (url: string, analysis: string) => `${url} changed.\n\n${analysis}`,
   watchFetchFailed: (url: string, cause: WatchFetchCause) => `The watched page ${url} could not be read: ${watchFetchReasonEn(cause)}`,
   watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonEn(cause),
+  watchPolicyRefused: (reason: WatchPolicyReason, alsoHttps: boolean) => withWayOut('The watched page was not read:', watchPolicyWordsEn(reason, alsoHttps)),
 });
 
 /** A resumed run whose new chat could not be contained, in English (ux U-089). */
@@ -531,6 +535,7 @@ const DE: WorkerNotices = Object.freeze({
   watchChanged: (url: string, analysis: string) => `${url} hat sich geändert.\n\n${analysis}`,
   watchFetchFailed: (url: string, cause: WatchFetchCause) => `Die beobachtete Seite ${url} liess sich nicht lesen: ${watchFetchReasonDe(cause)}`,
   watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonDe(cause),
+  watchPolicyRefused: (reason: WatchPolicyReason, alsoHttps: boolean) => withWayOut('Die beobachtete Seite wurde nicht gelesen:', watchPolicyWordsDe(reason, alsoHttps)),
 });
 
 /** A cause no new attempt changes: the owner has to change the watch's address or delete it. */
@@ -559,6 +564,11 @@ function httpStatusWord(status: number, language: NoticeLanguage): string | unde
   };
   const pair = words[status] ?? (status >= 500 && status <= 599 ? ['server error', 'Fehler beim Server'] as const : undefined);
   return pair === undefined ? undefined : pair[language === 'de' ? 1 : 0];
+}
+
+/** A lead, the reason, and the way out when there is one. */
+function withWayOut(lead: string, words: WatchPolicyWords): string {
+  return `${lead} ${words.why}${words.wayOut === '' ? '' : ` ${words.wayOut}`}`;
 }
 
 /** Why a watched page could not be read, in English: one sentence per cause, then what happens next. */

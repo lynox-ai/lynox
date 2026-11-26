@@ -2085,7 +2085,7 @@ describe('bulkSecretInContextKey', () => {
 describe('the sentences about a rule taken from a saved artifact', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const Q = String.raw`'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"`;
-	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.(?:rule_source\.[a-z_]+|(?:start|approve)\.rule_from_artifact[a-z_]*))': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
+	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.(?:rule_source\.[a-z_]+|(?:start|restart|approve)\.rule_from_artifact[a-z_]*))': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
 	const de: Record<string, string> = {};
 	const en: Record<string, string> = {};
 	for (const l of source.split('\n')) {
@@ -2101,8 +2101,21 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 		]);
 		expect(bulkRuleSourceKey('checksum', true)).toBeNull();
 		expect(bulkRuleSourceKey(undefined, false)).toBeNull();
-		expect([bulkRuleFromArtifactKey('start', true), bulkRuleFromArtifactKey('approve', false)])
-			.toEqual(['bulk.start.rule_from_artifact', 'bulk.approve.rule_from_artifact_untitled']);
+		expect([bulkRuleFromArtifactKey('start', true), bulkRuleFromArtifactKey('restart', false), bulkRuleFromArtifactKey('approve', false)])
+			.toEqual(['bulk.start.rule_from_artifact', 'bulk.restart.rule_from_artifact_untitled', 'bulk.approve.rule_from_artifact_untitled']);
+	});
+
+	// After the start the artifact may have changed or gone: where judging goes on and at the approval
+	// the sentence says the rule was taken when the run was planned, with no pointer to Artifacts (U-461).
+	it('says at a restart and at the approval that the rule was taken when the run was planned, word for word', () => {
+		const fr = 'Prüf, ob sie sagt, was du willst, bevor du die Beurteilung fortsetzt.';
+		const fe = 'Check that it says what you want before you continue the judging.';
+		const ar = 'Prüf, ob sie sagt, was du willst, bevor du freigibst.';
+		const ae = 'Check that it says what you want before you approve.';
+		expect([de['bulk.restart.rule_from_artifact'], en['bulk.restart.rule_from_artifact']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus {title} übernommen. ${fr}`, `This rule was taken word for word from {title} when the run was planned. ${fe}`]);
+		expect([de['bulk.restart.rule_from_artifact_untitled'], en['bulk.restart.rule_from_artifact_untitled']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus einem gespeicherten Artefakt übernommen. ${fr}`, `This rule was taken word for word from a saved artifact when the run was planned. ${fe}`]);
+		expect([de['bulk.approve.rule_from_artifact'], en['bulk.approve.rule_from_artifact']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus {title} übernommen. ${ar}`, `This rule was taken word for word from {title} when the run was planned. ${ae}`]);
+		expect([de['bulk.approve.rule_from_artifact_untitled'], en['bulk.approve.rule_from_artifact_untitled']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus einem gespeicherten Artefakt übernommen. ${ar}`, `This rule was taken word for word from a saved artifact when the run was planned. ${ae}`]);
 	});
 
 	it('takes a title only when it is text with more than spaces', () => {
@@ -2112,7 +2125,7 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 
 	it('has each sentence in both languages; a named one has its title slot and no quote marks of its own around it', () => {
 		const keys = [...BULK_RULE_SOURCE_CODES.flatMap((c) => [bulkRuleSourceKey(c, true)!, bulkRuleSourceKey(c, false)!]),
-			...(['start', 'approve'] as const).flatMap((s) => [bulkRuleFromArtifactKey(s, true), bulkRuleFromArtifactKey(s, false)])];
+			...(['start', 'restart', 'approve'] as const).flatMap((s) => [bulkRuleFromArtifactKey(s, true), bulkRuleFromArtifactKey(s, false)])];
 		for (const key of new Set(keys)) {
 			for (const table of [de, en]) {
 				expect(table[key], key).toBeDefined();

@@ -3239,7 +3239,10 @@ export class LynoxHTTPApi {
    * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
-   * answers its own 404.
+   * answers its own 404, but only in the request's own conversation: in another person's it is
+   * refused as when a question is open, so the answer does not say whether one is. A question
+   * named by id that belongs to another session is no candidate: the route answers it as one,
+   * and it says nothing about this conversation.
    */
   private _refuseUnlessOwnsPrompt(
     req: IncomingMessage,
@@ -3250,9 +3253,10 @@ export class LynoxHTTPApi {
   ): boolean {
     const principal = this._principalOf(req);
     if (isOwnerPrincipal(principal)) return false;
-    const candidates = [promptId ? ps.getById(promptId) : undefined, ps.getPending(sessionId)]
+    const named = promptId ? ps.getById(promptId) : undefined;
+    const candidates = [named?.session_id === sessionId ? named : undefined, ps.getPending(sessionId)]
       .filter((row): row is PendingPromptRow => row !== undefined);
-    if (candidates.length === 0) return false;
+    if (candidates.length === 0) return this._refuseUnlessOwns(req, res, 'answer this question', () => [this._threadRow(sessionId)]);
     // A question names the grant it was asked under (v60). A later grant for the same address is
     // another grant (§3.13 B4): it does not answer what the earlier one left open.
     if (principal.kind === 'mandate' && candidates.some((row) => row.mandate_id !== null && row.mandate_id !== principal.mandateId)) {
@@ -5051,6 +5055,10 @@ export class LynoxHTTPApi {
     }, OWN);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/sessions/:id', async (_req, res, params) => {
+      // The conversation first, before the lookup: the thread row is there with or without a live
+      // session, so someone else's conversation is refused alike in both states, and the 404 does
+      // not tell a mandate whether a session is live in it.
+      if (this._refuseUnlessOwns(_req, res, 'end this session', () => [this._threadRow(params['id']!)])) return;
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // Ending a session stops its run (§3.13 B6, E7): the conversation and the run must
@@ -5068,11 +5076,12 @@ export class LynoxHTTPApi {
     // ── Runs (SSE) ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/run', async (req, res, params, body) => {
       const sessionId = params['id']!;
+      // A mandate runs only in a conversation it started (§3.13 E1, N2). Read on the thread
+      // row, not on the session object: the session's principal is whoever ran last. Before the
+      // lookup, so the 404 does not tell a mandate whether a session is live in another's.
+      if (this._refuseUnlessOwns(req, res, 'run this conversation', () => [this._threadRow(sessionId)])) return;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
-      // A mandate runs only in a conversation it started (§3.13 E1, N2). Read on the thread
-      // row, not on the session object: the session's principal is whoever ran last.
-      if (this._refuseUnlessOwns(req, res, 'run this conversation', () => [this._threadRow(sessionId)])) return;
       // A mandate's helper takes no key in this chat: a message that reads as carrying one is
       // refused here, before the thread, the run history, the title, a log or the model see any of
       // it, and before a busy or full queue (409, 429) or a takeover could answer instead — those
@@ -6643,6 +6652,9 @@ export class LynoxHTTPApi {
     }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
+      // The conversation before the lookup, as on the other session routes: the 404 below then
+      // says nothing about another person's conversation.
+      if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => [this._threadRow(params['id']!)])) return;
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // The changeset is the last run's work and outlives it: only that run's principal (or
@@ -6763,6 +6775,9 @@ export class LynoxHTTPApi {
     // ── Compact (context management) ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/compact', async (_req, res, params, body) => {
       const sessionId = params['id']!;
+      // The conversation before the lookup, as on the other session routes: the 404 below then
+      // says nothing about another person's conversation.
+      if (this._refuseUnlessOwns(_req, res, 'compact this conversation', () => [this._threadRow(sessionId)])) return;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // Compacting rewrites the conversation the last run left: the conversation and that
@@ -6800,9 +6815,11 @@ export class LynoxHTTPApi {
     // renders as actionable copy (U1).
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/sessions/:id/model', async (_req, res, params, body) => {
       const sessionId = params['id']!;
+      // Before the lookup: the thread row is there with or without a live session, so another
+      // person's conversation is refused alike, and the 404 tells a mandate nothing about it.
+      if (this._refuseUnlessOwns(_req, res, 'change this conversation\'s model', () => [this._threadRow(sessionId)])) return;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
-      if (this._refuseUnlessOwns(_req, res, 'change this conversation\'s model', () => [this._threadRow(sessionId)])) return;
       if (this.runningSessions.has(sessionId)) {
         errorResponse(res, 409, 'Cannot change the model while a run is in progress');
         return;
@@ -9662,6 +9679,12 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what stamping a workflow would confirm')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/confirm', async (_req, res, params, body) => {
+      // Only in the owner's browser session, as a schedule is confirmed: a token, the owner's
+      // included, goes to scripts and integrations, which stamp nothing on the owner's behalf.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A workflow is stamped only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
@@ -9708,6 +9731,12 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what taking over a workflow would do')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/takeover', async (_req, res, params, body) => {
+      // Only in the owner's browser session, as the stamp: the takeover lets a workflow run as the
+      // owner, which a script or an integration holding a token does not decide.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A workflow is taken over only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       // The digest from the preview is required: the takeover is the owner's consent to what the
       // preview showed, and nothing else.
       const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
@@ -10370,6 +10399,12 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what taking over a plan would do')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/takeover', async (_req, res, params, body) => {
+      // Only in the owner's browser session: the takeover releases a plan that was paused for a
+      // reason, the same consent a schedule's confirmation is.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A plan is taken over only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       if (!planPauseOn()) { errorResponse(res, 409, TAKEOVER_REFUSALS.not_available.message, 'not_available'); return; }
       // The digest from the preview is required: the takeover is the owner's consent to what the
       // preview showed, and nothing else.
