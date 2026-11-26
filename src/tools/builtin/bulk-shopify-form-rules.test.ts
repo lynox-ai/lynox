@@ -455,18 +455,21 @@ describe('an image plan on a store connection that may not write image alt texts
       const revoked = connection(preset({ ...full, state: 'revoked' }, fullScope));
       const expired = connection(preset({ ...full, store_binding: undefined, state: 'refresh-dead' }, fullScope));
       const DEAD = [
-        ['unbound', unbound, `the connection for ${HOST} is not tied to this store, and this instance cannot tie it`],
-        ['revoked', revoked, `Shopify ended the authorization of the connection for ${HOST}, and this instance cannot tie a new connection to this store`],
-        ['expired', expired, `lynox could not renew the connection for ${HOST}, and this instance cannot tie a new connection to this store`],
+        // The case, its connection, how the refusal starts, and the note on the product form, word for word.
+        ['unbound', unbound, `the connection for ${HOST} is not tied to this store, and this instance cannot tie it`,
+          `The connection for ${HOST} is not tied to this store, and this instance cannot tie it, so a bulk run cannot write to this store.`],
+        ['revoked', revoked, `Shopify ended the authorization of the connection for ${HOST}, and this instance cannot tie a new connection to this store`,
+          `Shopify ended the authorization of the connection for ${HOST}, and this instance cannot tie a new connection to this store, so a bulk run cannot write to it.`],
+        ['expired', expired, `lynox could not renew the connection for ${HOST}, and this instance cannot tie a new connection to this store`,
+          `lynox could not renew the connection for ${HOST}, and this instance cannot tie a new connection to this store, so a bulk run cannot write to it.`],
       ] as const;
       const woo = { source_list: { form: 'woocommerce', path: '/admin/api/2025-01/products.json', after: { title: 'x' } } };
       // The two ways a new link is offered: the refusal's offer and the hint's note.
       const LINK_OFFERS = ['run api_setup connect and show the link it returns', 'show only the link that api_setup connect returns'];
       afterEach(() => { bindingDigest = () => 'digest'; });
 
-      describe.each(DEAD)('%s', (_name, store, cause) => {
+      describe.each(DEAD)('%s', (_name, store, cause, NOTE) => {
         const START = `${cause}: ${WHY}`;
-        const NOTE = `${cause.charAt(0).toUpperCase()}${cause.slice(1)}, so a bulk run cannot write to this store.`;
 
         it.each([
           ['a digest that gives none (no vault key)', () => null],
