@@ -88,7 +88,7 @@ describe('the German delegation sentence puts its verb last', () => {
   it('for one child on a model of unknown band', () => {
     const d = SPAWN_DIALOG.de;
     expect(d.sentence('Delegation', d.children(1), d.tierUnknownBand, '0.40', 'Anthropic', d.tailDowngrade))
-      .toBe(`⚠ Delegation: Eine Teilaufgabe würde auf ${d.tierUnknownBand} laufen. Geschätzte Kosten ~$0.40 für diese Sitzung. Anbieter: Anthropic. ${d.tailDowngrade}`);
+      .toBe(`⚠ Delegation: Eine Teilaufgabe würde auf ${d.tierUnknownBand} laufen. Geschätzte Modellkosten für diese Sitzung: etwa $0.40. Anbieter: Anthropic. ${d.tailDowngrade}`);
   });
 });
 
@@ -193,6 +193,6 @@ describe('every place a question is posed hands it the language', () => {
     expect(warnings.length).toBeGreaterThanOrEqual(2);
     for (const w of warnings) expect(exfilWarning(w, 'de'), w).not.toBe(w);
     expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(2), SPAWN_DIALOG.de.tierDeep, '1.20', 'Anthropic', SPAWN_DIALOG.de.tailPinned))
-      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe Tief (ein stärkeres Denkmodell, leistungsfähiger, aber teurer) laufen. Geschätzte Kosten ~$1.20 für diese Sitzung. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
+      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe Tief (ein stärkeres Denkmodell, leistungsfähiger, aber teurer) laufen. Geschätzte Modellkosten für diese Sitzung: etwa $1.20. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
   });
 });
