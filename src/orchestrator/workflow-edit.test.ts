@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { applyModifications, type StepModification } from './workflow-edit.js';
 import { runStepIds } from './step-id.js';
+import { templateRefIssue } from './template-refs.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
 
 function steps(): InlinePipelineStep[] {
@@ -39,6 +40,8 @@ describe('applyModifications (shared workflow-step mutation)', () => {
     expect(s[1]!.input_from).toEqual(['fetch']);
     // The placeholder names the step whole, as a run of the stored plan reads it (`step-id.test.ts`).
     expect(s[1]!.task).toBe('Send {{fetch}}');
+    // The check a save runs on the plan as a run names it finds nothing to refuse.
+    expect(templateRefIssue(runStepIds(s))).toBeNull();
   });
 
   it('renaming step a beside a stored a.result still moves {{a.result}} with a (CONTROL)', () => {
