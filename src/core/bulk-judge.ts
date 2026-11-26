@@ -74,8 +74,9 @@ export interface BulkJudgeDeps {
   readTargets?: (() => Promise<BulkPreviewOutcome>) | undefined;
   /** The run's tier to a model the operator allows, or null when there is none. */
   resolveModel: (tier: ModelTier) => JudgeModel | null;
-  /** The managed gate, per call (`fireBeforeRunGate`). */
-  gate: (tier: ModelTier) => Promise<MeteredGateResult>;
+  /** The managed gate, per call (`fireBeforeRunGate`), told the call's worst case in cents
+   *  (undefined when it is no finite amount: the gate's default then holds). */
+  gate: (tier: ModelTier, maxCostCents: number | undefined) => Promise<MeteredGateResult>;
   /** The managed debit, per answered call, under its gate's run id (`reportMeteredCost`). */
   report: (gateRunId: string, costUsd: number, tier: ModelTier) => void;
   /** The day's spend in history.db (`RunHistory.recordBulkJudgeCost`): a call's provisional row,
@@ -754,7 +755,9 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       ledger.releaseJudgeClaim(runId, seq, token);
       return halt(BULK_HALT_REASONS.spendLimit);
     }
-    const gate = await deps.gate(model.tier);
+    // The gate is told this call's own worst case, in cents rounded up; without a finite amount
+    // above zero it is told nothing and keeps its default.
+    const gate = await deps.gate(model.tier, Number.isFinite(worst) && worst > 0 ? Math.ceil(worst * 100) : undefined);
     if (gate.blockedReason !== null) {
       // Both causes of a blocked gate — no credit, or a control plane out of reach — are one
       // fixed reason: the hook tells them apart only as text.

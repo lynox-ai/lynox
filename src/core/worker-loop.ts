@@ -2667,7 +2667,7 @@ export class WorkerLoop {
           notices: this.#bulkNotices(),
         }),
         resolveModel: (tier) => resolveJudgeModel(this.engine.getUserConfig(), tier, this.engine.client, getActiveProvider()),
-        gate: (tier) => fireBeforeRunGate(this.engine, tier),
+        gate: (tier, maxCostCents) => fireBeforeRunGate(this.engine, tier, { maxCostCents }),
         report: (gateRunId, usd, tier) => reportMeteredCost(this.engine, gateRunId, usd, tier),
         bookSpend: (entry) => history?.recordBulkJudgeCost(entry),
         settleSpend: (row, entry) => history?.settleBulkJudgeCost(row, entry),
