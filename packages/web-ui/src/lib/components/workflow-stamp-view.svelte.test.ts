@@ -898,9 +898,9 @@ describe('the stamp says who else may answer its questions when it runs on a sch
 		expect([...line!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual([long]);
 	});
 
-	it('more people: counts them and names no one, pointing to each plan\'s confirmation', async () => {
+	it('more people: counts them and names no one', async () => {
 		const line = await asksLine({ count: 3, name: null });
-		expect(line?.textContent).toBe('Läuft er geplant, kann je nach Plan auch eine Person mit Zugang seine Fragen beantworten – bei diesem Workflow sind es 3\u00a0Personen. Wer zuerst antwortet, lenkt den Lauf. Wer es bei einem Plan ist, zeigt seine Bestätigung.');
+		expect(line?.textContent).toBe('Läuft er geplant, kann je nach Plan auch eine von 3\u00a0Personen mit Zugang seine Fragen beantworten. Wer zuerst antwortet, lenkt den Lauf.');
 		expect(line!.querySelector('[data-foreign-value]')).toBeNull();
 	});
 
