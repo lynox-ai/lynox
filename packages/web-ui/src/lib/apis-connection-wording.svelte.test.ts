@@ -36,6 +36,9 @@ const WORDING: Array<[string, string, string]> = [
 	["apis.delete_confirm_host", "Die API-Verbindung für {host} wirklich löschen?", "Really delete the API connection for {host}?"],
 	["secrets.retired_preset_client", "Dieser Name gehört zu einer eingebauten Verbindung, die lynox nicht mehr anbietet, und lässt sich hier nicht speichern. Wähl für eine eigene Verbindung einen anderen Namen.", "This name belongs to a built-in provider lynox no longer offers, so it can't be saved here. For a connection of your own, choose another name."],
 	["workflow_library.takeover.connection", "{name} hat {provider} mit einem eigenen Konto verbunden{account}. Nach dem Übernehmen nutzt der Workflow diese Verbindung nicht mehr. Braucht er sie, verbinde das Programm selbst mit deinem Konto: in den Einstellungen unter „API-Verbindungen“ über „Neue Verbindung“. Sonst scheitern die markierten Schritte.", "{name} connected {provider} with an account of their own{account}. After you take over, the workflow no longer uses this connection. If it needs it, connect the service yourself with your own account: in Settings under “API connections”, via “New connection”. Otherwise the marked steps fail."],
+	["bulk.halt.storeClientMisnamed", "In der Verbindung für {provider} stehen die Zugangsdaten der App unter anderen Namen, als lynox zum Erneuern erwartet.", "In the connection for {provider}, the app credentials are stored under other names than lynox expects for renewing."],
+	["bulk.halt.storeClientMisnamed_before", "Bitte lynox im Chat, die Verbindung für {provider} anzupassen. Danach kannst du den Lauf hier fortsetzen.", "Ask lynox in the chat to fix the connection for {provider}. Then you can continue the run here."],
+	["bulk.halt.storeClientMisnamed_before_check", "Bitte lynox im Chat, die Verbindung für {provider} anzupassen. Danach kannst du nachprüfen.", "Ask lynox in the chat to fix the connection for {provider}. Then you can check again."],
 ];
 
 /**

@@ -279,6 +279,8 @@ export interface WorkerNotices {
   watchChanged(url: string, analysis: string): string;
   /** A watched page that could not be read, with the cause in lynox's own words: the run's failed result and its notice. */
   watchFetchFailed(url: string, cause: WatchFetchCause): string;
+  /** The same reason and what happens next, without the lead that names the page (the trigger card shows the page). */
+  watchFetchReason(cause: WatchFetchCause): string;
 }
 
 /**
@@ -386,6 +388,7 @@ const EN: WorkerNotices = Object.freeze({
     : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`,
   watchChanged: (url: string, analysis: string) => `${url} changed.\n\n${analysis}`,
   watchFetchFailed: (url: string, cause: WatchFetchCause) => `The watched page ${url} could not be read: ${watchFetchReasonEn(cause)}`,
+  watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonEn(cause),
 });
 
 /** A resumed run whose new chat could not be contained, in English (ux U-089). */
@@ -527,6 +530,7 @@ const DE: WorkerNotices = Object.freeze({
     : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das Instanz-Protokoll den Grund.`,
   watchChanged: (url: string, analysis: string) => `${url} hat sich geändert.\n\n${analysis}`,
   watchFetchFailed: (url: string, cause: WatchFetchCause) => `Die beobachtete Seite ${url} liess sich nicht lesen: ${watchFetchReasonDe(cause)}`,
+  watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonDe(cause),
 });
 
 /** A cause no new attempt changes: the owner has to change the watch's address or delete it. */

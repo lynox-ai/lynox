@@ -214,6 +214,59 @@ describe('T-2: plans that then run for someone else', () => {
 			'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2, P3, P4, P5 und 1 weiterer.',
 		]);
 	});
+	describe('after F2 lists the plans that run again', () => {
+		const wf = { id: 'w', name: 'Rechnungen', takenOver: true };
+		const released = [{ id: '1', title: 'P1' }, { id: '2', title: 'P2' }];
+		const lines = (memberChanges: ReturnType<typeof change>[], over: Partial<TakeoverPreview> = {}) =>
+			takeoverLines(preview({ members: [wfMember(['workflow-edited'])], workflow: wf, alsoReleased: released, memberChanges, ...over }), fmt)
+				.filter((l) => l.kind === 'f2' || l.kind === 'member_change').map((l) => l.text);
+		const f2 = 'Dieser Plan nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow. Dann laufen auch diese Pläne wieder: P1, P2.';
+		it('the same plans to the owner: one sentence with the list, then one that points back to it, in DE and EN', () => {
+			// In another order than F2's: the same plans are the same list.
+			const same = [change('2', 'mandate:ida@x.ch', null), change('1', 'mandate:ida@x.ch', null)];
+			expect(lines(same)).toEqual([f2, 'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch.']);
+			setLocale('en');
+			expect(lines(same)).toEqual([
+				'This plan uses the workflow “Rechnungen”, which ida@x.ch changed. If you take over the plan, you also take over the workflow. These plans then run again too: P1, P2.',
+				"These plans then run under your name instead of ida@x.ch's.",
+			]);
+		});
+		it('other plans than F2 lists keep their own list: one more, one other, part of it', () => {
+			const own = (ids: string[]) => lines(ids.map((id) => change(id, 'mandate:ida@x.ch', null)));
+			expect(own(['1', '2', '3'])).toEqual([f2, 'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2, P3.']);
+			expect(own(['1', '3'])).toEqual([f2, 'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P3.']);
+			// Part of F2's list: F2 names three plans, two of them then run under the owner's name.
+			const three = [...released, { id: '3', title: 'P3' }];
+			expect(lines([change('1', 'mandate:ida@x.ch', null), change('2', 'mandate:ida@x.ch', null)], { alsoReleased: three })).toEqual([
+				'Dieser Plan nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow. Dann laufen auch diese Pläne wieder: P1, P2, P3.',
+				'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2.',
+			]);
+		});
+		it('points back only right below F2: after another sentence, the list stays', () => {
+			// Another member's plans come first: "these plans" right below that sentence would read as its plans.
+			expect(lines([change('3', 'mandate:ida@x.ch', 'mandate:bo@x.ch'), change('4', 'mandate:ida@x.ch', 'mandate:bo@x.ch'), change('1', 'mandate:ida@x.ch', null), change('2', 'mandate:ida@x.ch', null)])).toEqual([
+				f2,
+				'Diese Pläne laufen danach unter dem Namen von bo@x.ch statt unter dem von ida@x.ch: P3, P4.',
+				'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2.',
+			]);
+			// Two groups to the owner, from different people: the second one is not right below F2 either.
+			expect(lines([change('5', 'mandate:bo@x.ch', null), change('6', 'mandate:bo@x.ch', null), change('1', 'mandate:ida@x.ch', null), change('2', 'mandate:ida@x.ch', null)])).toEqual([
+				f2,
+				'Diese Pläne laufen danach unter deinem Namen statt unter dem von bo@x.ch: P5, P6.',
+				'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2.',
+			]);
+		});
+		it('only the sentence to the owner points back; to another member, or without F2\'s list, the list stays', () => {
+			expect(lines([change('1', 'mandate:ida@x.ch', 'mandate:bo@x.ch'), change('2', 'mandate:ida@x.ch', 'mandate:bo@x.ch')]))
+				.toEqual([f2, 'Diese Pläne laufen danach unter dem Namen von bo@x.ch statt unter dem von ida@x.ch: P1, P2.']);
+			// F2 without plans that run again lists none, so this one does.
+			expect(lines([change('1', 'mandate:ida@x.ch', null), change('2', 'mandate:ida@x.ch', null)], { alsoReleased: [] }))
+				.toEqual([f2.replace(' Dann laufen auch diese Pläne wieder: P1, P2.', ''), 'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2.']);
+			// The workflow is not taken over: no F2 sentence lists the plans, so this one does.
+			expect(lines([change('1', 'mandate:ida@x.ch', null), change('2', 'mandate:ida@x.ch', null)], { workflow: { ...wf, takenOver: false } }))
+				.toEqual(['Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2.']);
+		});
+	});
 	it('says nothing where whom the plan runs for does not change (N3), or it runs for the owner already', () => {
 		const p = preview({ memberChanges: [change('1', 'mandate:ida@x.ch', 'mandate:ida@x.ch'), change('2', null, null), change('3', 'mandate:ida@x.ch', null, true)] });
 		expect(kinds(p)).not.toContain('member_change');

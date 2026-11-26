@@ -135,9 +135,9 @@ describe('the save question in German', () => {
 
   it('lists the changes before the disclosure, and leaves out what is empty', () => {
     const changes = securityChanges(grant({ scope: 'read' }), grant({ scope: 'read write' }), 'de').map((c) => c.text);
-    expect(flattenPrompt(ask(changes, 'Hinweis.'))).toBe('⚠ API-Profile: Zum Speichern von „Shop“ braucht es deine Zustimmung.\n\nDas Speichern ändert:\n- Scopes hinzugefügt: write\n\nHinweis.\n\nDieses Profil annehmen und speichern?');
-    expect(flattenPrompt(ask([], 'Hinweis.'))).toBe('⚠ API-Profile: Zum Speichern von „Shop“ braucht es deine Zustimmung.\n\nHinweis.\n\nDieses Profil annehmen und speichern?');
-    expect(flattenPrompt(ask(changes, ''))).toBe('⚠ API-Profile: Zum Speichern von „Shop“ braucht es deine Zustimmung.\n\nDas Speichern ändert:\n- Scopes hinzugefügt: write\n\nDieses Profil annehmen und speichern?');
+    expect(flattenPrompt(ask(changes, 'Hinweis.'))).toBe('⚠ API-Verbindungen: Zum Speichern von „Shop“ braucht es deine Zustimmung.\n\nDas Speichern ändert:\n- Scopes hinzugefügt: write\n\nHinweis.\n\nDiese Verbindung annehmen und speichern?');
+    expect(flattenPrompt(ask([], 'Hinweis.'))).toBe('⚠ API-Verbindungen: Zum Speichern von „Shop“ braucht es deine Zustimmung.\n\nHinweis.\n\nDiese Verbindung annehmen und speichern?');
+    expect(flattenPrompt(ask(changes, ''))).toBe('⚠ API-Verbindungen: Zum Speichern von „Shop“ braucht es deine Zustimmung.\n\nDas Speichern ändert:\n- Scopes hinzugefügt: write\n\nDiese Verbindung annehmen und speichern?');
   });
 
   it('asks in the same form as the English, the profile name and every change value as values', () => {
@@ -154,15 +154,15 @@ describe('the vault-key release question in German', () => {
 
   it('reads as German, with the same parts as the English', () => {
     expect(flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), p))).toBe(
-      '⚠ API-Profile: Den Vault-Schlüssel "CRM_KEY" für das API-Profil apf_1 freigeben? Es wurde in der Sitzung von mandate:abc eingerichtet. Wenn du zustimmst, sendet lynox den Wert von "CRM_KEY" als Bearer-Token (vault_keys[0]) an api.example, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst. Unter diesem Namen liegt im Vault ein Wert. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?');
+      '⚠ API-Verbindungen: Den Vault-Schlüssel "CRM_KEY" für die API-Verbindung apf_1 freigeben? Sie wurde in der Sitzung von mandate:abc eingerichtet. Wenn du zustimmst, sendet lynox den Wert von "CRM_KEY" als Bearer-Token (vault_keys[0]) an api.example, bei jeder Anfrage und jedem Lauf über diese Verbindung, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst. Unter diesem Namen liegt im Vault ein Wert. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?');
     const full = flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), { ...p, more: 2, viewed: { clock: '09:30', unchanged: false }, clientId: true, held: false }));
-    expect(full).toContain(' 2 weitere Einstellungen dieses Profils (etwa Anmeldeart, Scopes, Pfad oder Query) gehören ebenfalls zur Freigabe');
-    expect(full).toContain('bitte hier darum, das API-Profil apf_1 anzuzeigen, und bitte dann erneut darum, "CRM_KEY" freizugeben.');
-    expect(full).toContain(' Diese Einstellungen haben sich geändert, nachdem sie zuletzt um 09:30 in einem deiner Chats gelesen wurden; lehne ab und sieh dir das Profil erneut an, bevor du zustimmst (Version v1).');
+    expect(full).toContain(' 2 weitere Einstellungen dieser Verbindung (etwa Anmeldeart, Scopes, Pfad oder Query) gehören ebenfalls zur Freigabe');
+    expect(full).toContain('bitte hier darum, die API-Verbindung apf_1 anzuzeigen, und bitte dann erneut darum, "CRM_KEY" freizugeben.');
+    expect(full).toContain(' Diese Einstellungen haben sich geändert, nachdem sie zuletzt um 09:30 in einem deiner Chats gelesen wurden; lehne ab und sieh dir die Verbindung erneut an, bevor du zustimmst (Version v1).');
     expect(full).toContain(' Eine Client-ID steht ausserdem im Anmeldelink');
     expect(full).toContain('liegt im Vault noch kein Wert');
     expect(flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), { ...p, more: 1, viewed: { clock: '09:30', unchanged: true } })))
-      .toContain(' 1 weitere Einstellung dieses Profils (etwa Anmeldeart, Scopes, Pfad oder Query) gehört ebenfalls zur Freigabe; eine Änderung daran beendet sie.');
+      .toContain(' 1 weitere Einstellung dieser Verbindung (etwa Anmeldeart, Scopes, Pfad oder Query) gehört ebenfalls zur Freigabe; eine Änderung daran beendet sie.');
   });
 
   it('carries no text a mandate\'s turn wrote as frame, in either language: the name, id, author, role, hosts, clock and version are values', () => {
@@ -186,7 +186,7 @@ describe('the vault-key release question in German', () => {
   it('counts the settings it does not print, in both languages, and names none of them', () => {
     for (const l of ['en', 'de'] as DialogLanguage[]) {
       const q = flattenPrompt(API_SETUP_DIALOG[l].release(toolWordFrame('api_setup', l), { ...p, more: 3 }));
-      expect(q).toMatch(l === 'en' ? / 3 more settings of this profile/ : / 3 weitere Einstellungen dieses Profils/);
+      expect(q).toMatch(l === 'en' ? / 3 more settings of this connection/ : / 3 weitere Einstellungen dieser Verbindung/);
     }
   });
 });
@@ -227,7 +227,7 @@ describe('the language comes from the session', () => {
     const de = (await run('de')).filter((q) => q.includes('Speichern'));
     expect(de).toHaveLength(1);
     expect(de[0]).toContain('Das Speichern ändert:\n- Scopes hinzugefügt: write');
-    expect(de[0]).toMatch(/^⚠ API-Profile: Zum Speichern von „Service“/);
+    expect(de[0]).toMatch(/^⚠ API-Verbindungen: Zum Speichern von „Service“/);
     rmSync(dir, { recursive: true, force: true });
     dir = mkdtempSync(join(tmpdir(), 'api-setup-de-'));
     store = new ApiStore(join(dir, 'apis'));

@@ -97,7 +97,7 @@ import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
-import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
+import { approvalCard, approvalScopeOf, listScopeOf, mandateNamer, setupLines, type DisplayNameOf, type SetupMarks } from '../core/approval-view.js';
 import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
@@ -159,7 +159,7 @@ import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager, watchRefusedNow, type BlockedReason } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager, watchRefusedNow, storedRunCause, type BlockedReason } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -174,6 +174,7 @@ import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
 import { ArtifactFileRefusedError, ArtifactPlaceholderError } from '../core/artifact-store.js';
 import { findHiddenChar } from '../core/hidden-text.js';
+import { ToolSilenceClock } from '../core/tool-silence.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -450,8 +451,9 @@ export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'chang
  * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
  * the push had to shorten the name.
  */
-export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
-  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, ...stored } = trigger;
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
+  // The stored run cause leaves only as `blocked_reason`, parsed (`storedRunCause`), never as stored.
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_run_cause: _cause, ...stored } = trigger;
   // Whether a wakeup reached the owner, and the step to take when it did not (their push
   // subscription), are the owner's: a mandate reading them would be told about the owner's
   // devices as if they were its own, and could act on neither. An absent value leaves the JSON.
@@ -469,6 +471,18 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
     paused_ended: entries.map((e) => ({ email: e.email, reason: e.reason, ends_at: new Date(e.endsAt * 1000).toISOString(), warned: e.warned === true })),
   };
 }
+
+/** A trigger's setup marks from its stored columns, as an approval card and the trigger list read them. */
+export function triggerSetupMarks(trigger: TriggerRecord): SetupMarks {
+  return {
+    createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
+    mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
+    creatorCovered: creatorCovered(planAuthorshipOf(trigger)), editorCovered: editorCovered(planAuthorshipOf(trigger)),
+  };
+}
+
+/** No approval entry: the trigger list names only the marks on the trigger itself. */
+const NO_APPROVAL_ENTRY = { mandateId: null, createdBy: null } as const;
 
 /** One ended access behind a paused plan, as the owner's view reads it. */
 export interface PausedEnded {
@@ -2070,9 +2084,10 @@ export class LynoxHTTPApi {
   // run waits on its own question (that one waits for its answer, a stop, or its TTL).
   /** `parked` says whether the run waits on a question it asked itself. The thread's one open
    *  question can be a scheduled run's instead, asked beside a working chat run. `streamGone`
-   *  says whether the run's own stream has dropped. A slot without them is read as not parked,
-   *  with `streamAlive` as its stream. */
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; streamGone?: () => boolean }>();
+   *  says whether the run's own stream has dropped. `toolWorking` says whether one of its tool
+   *  calls is still within its own limit (`ToolSilenceClock`). A slot without them is read as
+   *  not parked and not working a tool, with `streamAlive` as its stream. */
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; streamGone?: () => boolean; toolWorking?: () => boolean }>();
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -2817,6 +2832,23 @@ export class LynoxHTTPApi {
       listed: { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) },
       by: plan.of.email,
       workflow,
+    };
+  }
+
+  /**
+   * The name each grant was last shown under in the actor trail, read once per grant for one
+   * request. Null where the trail has none or cannot be read: the address stands in. Who may see
+   * which name is the caller's to decide (`mandateNamer`).
+   */
+  #displayNameReader(): DisplayNameOf {
+    const log = this.engine?.getAuditLog() ?? null;
+    const names = new Map<string, string | null>();
+    return (id) => {
+      if (names.has(id)) return names.get(id) ?? null;
+      let display: string | null = null;
+      if (log !== null) { try { display = log.displayNameOf(id); } catch { /* the address stands in */ } }
+      names.set(id, display);
+      return display;
     };
   }
 
@@ -5062,12 +5094,16 @@ export class LynoxHTTPApi {
       // from the client's perspective — every /run retry gets 409 until the 30-min
       // streamTimeout fires server-side. A run waiting on its OWN question is not taken over:
       // it is silent by design, its question waits for an answer (or a stop, or its TTL), and
-      // a new message gets the 409 the chat shows as blocked by that question.
+      // a new message gets the 409 the chat shows as blocked by that question. Nor is a run
+      // one of whose tools is still within its own limit: a shell command can work silently for
+      // up to fifteen minutes, and the run taken over in the middle of it was lost.
       const STALE_RUN_SILENCE_MS = 60_000;
       const existingSlot = this.runningSessions.get(sessionId);
       if (existingSlot && (!existingSlot.streamAlive || existingSlot.streamGone?.() === true)) {
         // A scheduled run's question in this thread is not the run's: it does not hold it back.
-        const stale = existingSlot.parked?.() !== true && Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
+        const stale = existingSlot.parked?.() !== true
+          && existingSlot.toolWorking?.() !== true
+          && Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
         if (stale) {
           // Taking over ends the run: only that run's principal (or the owner) may, even in the
           // mandate's own conversation (§3.13 E7).
@@ -5588,6 +5624,9 @@ export class LynoxHTTPApi {
       // and a reconnecting client can replay-then-tail (Tier 2).
       const runId = randomUUID();
       const runBuffer = this.engine?.getRunBufferManager()?.create(runId) ?? null;
+      // The run's open tool calls, each until its own limit: what keeps a tool that works
+      // silently from reading as a stuck run (the takeover above).
+      const toolClock = new ToolSilenceClock();
 
       // Wire streaming. Every rendered event is appended to the buffer (which
       // assigns a monotonic seq) and emitted with an `id:` line so a client can
@@ -5600,6 +5639,7 @@ export class LynoxHTTPApi {
       // used 20 lines below — would have dropped `fatal` from every error on the
       // wire without a single test or type failing.
       session.onStream = async (event: EmittedStreamEvent) => {
+        toolClock.note(event);
         const seq = runBuffer?.append(event);
         // Every engine event counts as activity, also once the stream is gone: a run that
         // keeps working headless is not stale. Only an engine silent for the stale window is.
@@ -5944,6 +5984,7 @@ export class LynoxHTTPApi {
       // far. Idempotent — with no live timer it is a no-op, so a defensive
       // double-pause can never double-subtract the budget.
       const pauseWallClock = (): void => {
+        toolClock.pause();
         if (streamTimeout === undefined) return;
         clearTimeout(streamTimeout);
         streamTimeout = undefined;
@@ -5954,6 +5995,7 @@ export class LynoxHTTPApi {
       // works on headless and keeps its ceiling. Skips once the wall-clock itself
       // has fired, and if a timer is somehow already live so it never stacks two.
       const resumeWallClock = (): void => {
+        toolClock.resume();
         // The answer is activity too: a run that waited long for it is not silent from here on,
         // and a new message must not take it over before its next engine event.
         const live = this.runningSessions.get(sessionId);
@@ -6020,7 +6062,7 @@ export class LynoxHTTPApi {
         const pending = promptStore?.getPending(sessionId);
         if (pending) promptStore?.expirePrompt(pending.id, reason);
       };
-      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt, streamGone: () => aborted });
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt, streamGone: () => aborted, toolWorking: () => toolClock.holds() });
       // A client that left while this request was still being set up (a file being read, a
       // takeover draining) closed the response before anyone listened: its close is past, so
       // the drop is taken now, once the slot it marks exists.
@@ -9682,14 +9724,21 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
+      // Who set each trigger up or changed it last, when that was a mandate: lines as on an
+      // approval card, named by the same rule (in these lines a mandate sees another grant as
+      // another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
+      // from the marks on the trigger itself — the card also reads its workflow's. The owner's
+      // own setup has no line. No session, no lines.
+      const setupScope = approvalScopeOf(principal);
+      const setupNameOf = setupScope === null ? null : mandateNamer(setupScope, this.#displayNameReader());
       const policyContext = engine.getToolContext();
-      const refusedWatch = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
-        try {
-          const refused = watchRefusedNow(trigger, policyContext);
-          return refused === null ? null : { blocked_reason: refused };
-        } catch {
-          return null;
-        }
+      // Why the run does not do its work: a watch the policy refuses now holds the next run and is
+      // told first; otherwise the cause the last failed run stored, read through its closed parser.
+      const blockedReasonOf = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
+        let refused: BlockedReason | null = null;
+        try { refused = watchRefusedNow(trigger, policyContext); } catch { refused = null; }
+        const reason = refused ?? storedRunCause(trigger);
+        return reason === null ? null : { blocked_reason: reason };
       };
       const triggers = rows
         .map((trigger) => {
@@ -9720,14 +9769,15 @@ export class LynoxHTTPApi {
             recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
               && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
             ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
+            setup: setupNameOf === null ? [] : setupLines(NO_APPROVAL_ENTRY, triggerSetupMarks(trigger), undefined, setupNameOf),
             // The workflow's name where the title is that name as the engine wrote it (scheduled
             // without a title): the view says "Scheduled: " itself, in the reader's language, and
             // sets the name apart as a value. Any other title stays whole, the prefix included; so
             // does the title of a plan with no schedule, and one whose workflow was renamed since.
             ...(workflow !== undefined && (trigger.schedule_cron ?? '') !== '' && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
-            // A watch the instance's network_policy keeps from its page, and why, as the poll would
-            // refuse it now: the view says so, with the way out (U-392).
-            ...(refusedWatch(trigger) ?? {}),
+            // Why the run does not do its work: a watch the instance's network_policy keeps from its
+            // page now, or the cause its last failed run stored. The view says it, with the way out.
+            ...(blockedReasonOf(trigger) ?? {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -10773,16 +10823,8 @@ export class LynoxHTTPApi {
       const engineDb = this.engine?.getEngineDb() ?? null;
       const triggers = engineDb === null ? null : new TriggerStore(engineDb);
       const workflows = engineDb === null ? null : new WorkflowStore(engineDb);
-      const log = this.engine?.getAuditLog() ?? null;
-      // Read once per grant. Which grants a card may name this way is the card's to decide.
-      const names = new Map<string, string | null>();
-      const displayNameOf = (id: string): string | null => {
-        if (names.has(id)) return names.get(id) ?? null;
-        let display: string | null = null;
-        if (log !== null) { try { display = log.displayNameOf(id); } catch { /* the address stands in */ } }
-        names.set(id, display);
-        return display;
-      };
+      // Which grants a card may name this way is the card's to decide.
+      const displayNameOf = this.#displayNameReader();
       const threads = this.engine?.getThreadStore() ?? null;
       const containment = this.engine?.getToolContext().containment ?? null;
       const threadOf = (threadId: string): { createdBy: string | null; contained: boolean } | undefined => {
@@ -10797,11 +10839,7 @@ export class LynoxHTTPApi {
         const w = trigger?.pipeline_id === undefined ? undefined : workflows?.authorship(trigger.pipeline_id);
         return approvalCard(entry, {
           scope, now, displayNameOf, threadOf,
-          trigger: trigger === undefined ? undefined : {
-            createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
-            mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
-            creatorCovered: creatorCovered(planAuthorshipOf(trigger)), editorCovered: editorCovered(planAuthorshipOf(trigger)),
-          },
+          trigger: trigger === undefined ? undefined : triggerSetupMarks(trigger),
           workflow: w === undefined ? undefined : {
             createdBy: w.createdBy, createdMandateId: w.createdMandateId, mandateEditor: w.mandateEditor, mandateEditorId: w.mandateEditorId,
             creatorCovered: creatorCovered(planAuthorshipOfWorkflow(w)), editorCovered: editorCovered(planAuthorshipOfWorkflow(w)),
@@ -14685,8 +14723,12 @@ export class LynoxHTTPApi {
         exportData['contained_unknown_threads'] = threadsWithMessages.filter((t) => t.contained_unknown !== undefined).length;
         exportData['threads'] = threadsWithMessages;
       } else {
+        // The engine opens the thread store at boot whenever it can (its history database
+        // first, then the store on it), so none here means one of those opens failed. The
+        // threads were not read, which is not the same as there being none.
         exportData['threads'] = [];
-        exportData['threads_may_be_incomplete'] = false;
+        exportData['threads_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: thread store unavailable — threads exported empty and marked incomplete\n');
         exportData['contained_threads'] = 0;
         exportData['contained_unknown_threads'] = 0;
       }
@@ -14816,7 +14858,14 @@ export class LynoxHTTPApi {
         } catch {
           exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
         }
+      } else if (engine.getUserConfig().durable_memory_enabled === true) {
+        // Switched on, yet no store: the engine opens it at boot when the setting is on, so
+        // that open failed (or its database did). Not read, so not known to be empty.
+        exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+        process.stderr.write('⚠ /api/export: durable knowledge store unavailable — exported empty and marked incomplete\n');
       } else {
+        // Switched off: no store was opened, so nothing is read and nothing failed. Entries
+        // written while it was on stay in engine.db and are not in this block.
         exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
       }
 
@@ -14872,10 +14921,14 @@ export class LynoxHTTPApi {
         crmWalked.set('contacts', contacts);
         crmWalked.set('deals', deals);
       } else {
+        // The engine always opens the CRM at boot, so no CRM here means that open
+        // failed. The lists are empty because they could not be read, not because the
+        // owner has no contacts or deals, and the copy says so.
         exportData['contacts'] = [];
-        exportData['contacts_may_be_incomplete'] = false;
+        exportData['contacts_may_be_incomplete'] = true;
         exportData['deals'] = [];
-        exportData['deals_may_be_incomplete'] = false;
+        exportData['deals_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: CRM unavailable — contacts and deals exported empty and marked incomplete\n');
       }
 
       const ds = engine.getDataStore();
@@ -14903,8 +14956,11 @@ export class LynoxHTTPApi {
         exportData['datastore'] = datastoreExport;
         exportData['datastore_may_be_incomplete'] = incomplete.length > 0;
       } else {
+        // Same reason as the CRM above: the DataStore is opened at boot, and a null one
+        // failed to open. An empty block here is unread, not empty.
         exportData['datastore'] = {};
-        exportData['datastore_may_be_incomplete'] = false;
+        exportData['datastore_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: DataStore unavailable — datastore exported empty and marked incomplete\n');
       }
 
       // Secret names (never values — GDPR export must not leak secrets)

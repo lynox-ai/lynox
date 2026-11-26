@@ -811,8 +811,8 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('storeAccessEnded'))).toBe('write');
 		expect(bulkResumeText(w('storeAccessEnded'), true, DE, true)?.before).toBe('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du den Lauf hier fortsetzen.');
 		expect(bulkResumeText(w('storeAccessEnded'), true, EN, true)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can continue the run here.');
-		expect(bulkResumeText(w('storeClientMisnamed'), true, DE, true)?.before).toBe('Bitte lynox im Chat, das Profil für shop.example.invalid anzupassen. Danach kannst du den Lauf hier fortsetzen.');
-		expect(bulkResumeText(w('storeClientMisnamed'), true, EN, true)?.before).toBe('Ask lynox in the chat to fix the profile for shop.example.invalid. Then you can continue the run here.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, DE, true)?.before).toBe('Bitte lynox im Chat, die Verbindung für shop.example.invalid anzupassen. Danach kannst du den Lauf hier fortsetzen.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, EN, true)?.before).toBe('Ask lynox in the chat to fix the connection for shop.example.invalid. Then you can continue the run here.');
 	});
 
 	it('names the step first, then checking, for a store whose access ended or whose profile is misnamed, when the run goes on by checking', () => {
@@ -821,8 +821,8 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('storeAccessEnded', unclear))).toBe('check');
 		expect(bulkResumeText(w('storeAccessEnded', unclear), true, DE, true)?.before).toBe('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du nachprüfen.');
 		expect(bulkResumeText(w('storeAccessEnded', unclear), true, EN, true)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can check again.');
-		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, DE, true)?.before).toBe('Bitte lynox im Chat, das Profil für shop.example.invalid anzupassen. Danach kannst du nachprüfen.');
-		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, EN, true)?.before).toBe('Ask lynox in the chat to fix the profile for shop.example.invalid. Then you can check again.');
+		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, DE, true)?.before).toBe('Bitte lynox im Chat, die Verbindung für shop.example.invalid anzupassen. Danach kannst du nachprüfen.');
+		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, EN, true)?.before).toBe('Ask lynox in the chat to fix the connection for shop.example.invalid. Then you can check again.');
 		for (const key of ['storeAccessEnded', 'storeClientMisnamed']) {
 			// The step comes first, the check sentence after it, and nothing follows the check.
 			expect(bulkResumeText(w(key, unclear), true, DE, true)?.check, key).toBe(DE.tf('bulk.resume.check_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
