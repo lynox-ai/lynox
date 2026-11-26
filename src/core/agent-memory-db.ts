@@ -16,7 +16,10 @@ import { channels } from './observability.js';
 import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 import { canSupersede, provenanceRank } from './provenance.js';
-import { sourceDeletedSql, sourceKeptSql } from './relation-source.js';
+import {
+  chainEndCountsSql, logChainEndCounts, reapRetiredSourceSql, repointRelationsSql, repointToChainEndSql,
+  sourceDeletedSql, sourceKeptSql,
+} from './relation-source.js';
 
 /** Row cap for an `exhaustive` similarity scan (dedup). 50× the old dedup floor
  *  of 100 so an older duplicate past the newest window is caught, but still a
@@ -319,7 +322,23 @@ const MIGRATIONS: string[] = [
   // gone. NULL means the chat still exists or the memory never had one. Mirrors engine.db v28.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (7);
    ALTER TABLE memories ADD COLUMN source_thread_deleted_at TEXT;`,
+
+  // v8: relations follow the memory that carries their fact. Before, a consolidation retired the
+  // duplicate and left its relations on it; the GC then deleted the memory and the relations kept
+  // a source nothing resolves. `origin_memory_id` names the memory whose text a relation came from
+  // and is never moved, so a hard deletion of that memory still takes the relation with it; it is
+  // filled from the source first. Then each relation of a replaced memory moves to the end of its
+  // chain of successors (relation-source.ts › repointToChainEndSql). Counted and logged before it
+  // runs (`_migrate`). Mirrors engine.db v72.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (8);
+   ALTER TABLE relations ADD COLUMN origin_memory_id TEXT;
+   UPDATE relations SET origin_memory_id = source_memory_id WHERE origin_memory_id IS NULL;
+   ${repointToChainEndSql('relations')}
+   CREATE INDEX IF NOT EXISTS idx_relations_origin ON relations(origin_memory_id);`,
 ];
+
+/** The migration index (0-based) of v8, which moves relations to the end of their chain. */
+const REPOINT_MIGRATION_INDEX = 7;
 
 // ── Database Class ──────────────────────────────────────────────
 
@@ -395,6 +414,10 @@ export class AgentMemoryDb {
       // and every query hits the missing table/column: the DB is bricked. The
       // wrapping transaction makes the stamp + DDL all-or-nothing, so a failure
       // rolls the stamp back and the migration retries cleanly on next boot.
+      if (i === REPOINT_MIGRATION_INDEX) {
+        logChainEndCounts('agent-memory.db', this.db.prepare(chainEndCountsSql('relations')).get() as
+          { to_active: number; to_deleted: number; without_end: number } | undefined);
+      }
       this.db.transaction(() => { this.db.exec(MIGRATIONS[i]!); })();
     }
   }
@@ -636,8 +659,9 @@ export class AgentMemoryDb {
       // 2. Delete mentions for these memories
       this.db.prepare(`DELETE FROM mentions WHERE memory_id IN (${memSub})`).run(threadId);
 
-      // 3. Delete relations sourced from these memories
-      this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub})`).run(threadId);
+      // 3. Delete relations sourced from these memories, or written from them and moved since
+      //    to the memory that carries the fact now (`origin_memory_id`, never moved).
+      this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub}) OR origin_memory_id IN (${memSub})`).run(threadId, threadId);
 
       // 4. Clean supersedes: clear superseded_by pointers, then delete records
       this.db.prepare(`UPDATE memories SET superseded_by = NULL WHERE superseded_by IN (${memSub})`).run(threadId);
@@ -703,8 +727,9 @@ export class AgentMemoryDb {
 
         // 2. Mentions of the erased memories.
         this.db.prepare(`DELETE FROM mentions WHERE memory_id IN (${memSub})`).run();
-        // 3. Relations sourced from the erased memories.
-        this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub})`).run();
+        // 3. Relations sourced from the erased memories, or written from them and moved since to
+        //    the memory that carries the fact now (`origin_memory_id`, never moved).
+        this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub}) OR origin_memory_id IN (${memSub})`).run();
         // 4. Supersedes: clear dangling pointers, then drop the lineage records.
         this.db.prepare(`UPDATE memories SET superseded_by = NULL WHERE superseded_by IN (${memSub})`).run();
         this.db.prepare(`DELETE FROM supersedes WHERE new_memory_id IN (${memSub}) OR old_memory_id IN (${memSub})`).run();
@@ -955,9 +980,25 @@ export class AgentMemoryDb {
   markReplaced(ids: string[], successorId: string): number {
     if (ids.length === 0) return 0;
     const placeholders = ids.map(() => '?').join(',');
-    return this.db.prepare(
-      `UPDATE memories SET superseded_by = ?, updated_at = ? WHERE id IN (${placeholders}) AND is_active = 0 AND superseded_by IS NULL AND id <> ?`,
-    ).run(successorId, new Date().toISOString(), ...ids, successorId).changes;
+    return this.db.transaction(() => {
+      const changed = this.db.prepare(
+        `UPDATE memories SET superseded_by = ?, updated_at = ? WHERE id IN (${placeholders}) AND is_active = 0 AND superseded_by IS NULL AND id <> ?`,
+      ).run(successorId, new Date().toISOString(), ...ids, successorId).changes;
+      // The moved fact's relations go with it, only from the rows this move names as replaced.
+      this.db.prepare(
+        `UPDATE relations SET source_memory_id = ? WHERE source_memory_id IN (SELECT id FROM memories WHERE id IN (${placeholders}) AND superseded_by = ?)`,
+      ).run(successorId, ...ids, successorId);
+      return changed;
+    })();
+  }
+
+  /**
+   * Move the relations of `fromId` onto `toId`, which carries the same fact now (a
+   * consolidation's keeper, a tier raise's new row). Not for a contradiction: there the
+   * relations belong to the outdated fact and stay on it. Returns the relations moved.
+   */
+  repointRelations(fromId: string, toId: string): number {
+    return this.db.prepare(repointRelationsSql('relations')).run(toId, fromId).changes;
   }
 
   /**
@@ -1236,9 +1277,9 @@ export class AgentMemoryDb {
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO relations (id, from_entity_id, to_entity_id, relation_type,
-        description, confidence, source_memory_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, fromEntityId, toEntityId, relationType, description, confidence, sourceMemoryId, now);
+        description, confidence, source_memory_id, origin_memory_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, fromEntityId, toEntityId, relationType, description, confidence, sourceMemoryId, sourceMemoryId, now);
   }
 
   createSupersedes(newMemoryId: string, oldMemoryId: string, reason: string): void {
@@ -1335,8 +1376,9 @@ export class AgentMemoryDb {
   }
 
   /**
-   * The same relations for the data export, those of a deleted source included and
-   * marked: what is still stored belongs in the export until the reap removes it.
+   * The same relations for the data export, those of a retired source (deleted, or
+   * replaced by a contradiction) included and marked: what is still stored belongs in
+   * the export until the reap removes it.
    */
   getEntityRelationsForExport(entityId: string, limit = 50): Array<RelationRow & { source_deleted: 0 | 1 }> {
     const safeLimit = Math.max(1, Math.min(limit, 200));
@@ -1567,13 +1609,13 @@ export class AgentMemoryDb {
       return { supersededRemoved: supersededCount, orphanEntitiesRemoved: orphanRows.length, staleMemoriesRemoved: 0 };
     }
 
-    // Relations sourced from a DELETED memory go in the same step, before it, as
+    // Relations sourced from a RETIRED memory go in the same step, before it, as
     // `purgeMemoriesByIds` does: `relations.source_memory_id` has no foreign key, so a relation
-    // left behind keeps its `description` (text derived from the deleted memory) with a source
-    // nothing resolves. A deleted memory is one deactivated without a successor; a superseded
-    // one names its successor in `superseded_by`, and its relations stay as they did before.
+    // left behind keeps its `description` (text derived from the memory) with a source nothing
+    // resolves. A memory replaced by the same fact handed its relations to the successor when it
+    // was replaced; what a retired memory still holds belongs to a deleted or a contradicted fact.
     this.transaction(() => {
-      this.db.prepare('DELETE FROM relations WHERE source_memory_id IN (SELECT id FROM memories WHERE is_active = 0 AND superseded_by IS NULL)').run();
+      this.db.prepare(reapRetiredSourceSql('relations')).run();
       this.db.prepare('DELETE FROM mentions WHERE memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
       this.db.prepare('DELETE FROM supersedes WHERE old_memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
       this.db.prepare('DELETE FROM memories WHERE is_active = 0').run();
@@ -1710,6 +1752,7 @@ export class AgentMemoryDb {
       for (let k = 1; k < cluster.length; k++) {
         const victim = rows[cluster[k]!]!;
         this.supersedMemory(victim.id, keeper.id);
+        this.repointRelations(victim.id, keeper.id);
         this.createSupersedes(keeper.id, victim.id, 'consolidation');
         if (transferConfirmations && victim.confirmation_count > 0) {
           this.db.prepare(`
