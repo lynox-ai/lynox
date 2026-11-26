@@ -555,7 +555,7 @@ describe('graphHoldsRowsNotExported', () => {
     expect(held(true), 'all removed again').toBe(false);
   });
 
-  it('finds the agent-memory.db tables no block carries, on either setting: supersedes and co-occurrences', () => {
+  it('finds the agent-memory.db tables no block carries, with the subject graph off where nothing else counts: supersedes and co-occurrences', () => {
     const db = new AgentMemoryDb(file);
     db.setEmbeddingDimensions(3);
     const { alice, acme } = seedGraph(db);
