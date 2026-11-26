@@ -695,6 +695,8 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (!external && cols === null) return halt(BULK_HALT_REASONS.unavailable);
 
   let bookingFailed = false;
+  // The refusals this pass told the tracker, by path and rule: one event each, not one per target.
+  const told = new Set<string>();
   for (const seq of ledger.listUnjudged(runId)) {
     if (bookingFailed) return halt(BULK_HALT_REASONS.unavailable);
     if (deps.signal?.aborted) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge paused.');
@@ -850,7 +852,13 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
         // same (path and rule, never the value), so a refusal can be told from a provider fault.
         const refusal = failure.reason === 'verdict_invalid' ? judgeRefusalDetail(err, run.rule) : undefined;
         if (!afterPaid(() => { record({ invalid: failure.reason, ...(refusal !== undefined ? { refusal } : {}) }); })) return halt(BULK_HALT_REASONS.unavailable);
-        if (failure.reason === 'verdict_invalid') deps.captureError?.(judgeErrorForTracker(err, 'bulk_judge verdict'));
+        if (failure.reason === 'verdict_invalid') {
+          const shown = judgeErrorForTracker(err, 'bulk_judge verdict');
+          if (!told.has(shown.message)) {
+            told.add(shown.message);
+            deps.captureError?.(shown);
+          }
+        }
         continue;
       }
       ledger.releaseJudgeClaim(runId, seq, token);

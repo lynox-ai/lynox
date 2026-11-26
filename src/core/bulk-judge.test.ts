@@ -569,35 +569,38 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.phase).toBe('previewed');
   });
 
-  it('an answer the rule refuses keeps the field, the rule and its bound, never the value, and the tracker reads the same', async () => {
-    const id = await plan(['A', 'B']);
+  it('an answer the rule refuses keeps the field, the rule and its bound, never the value, and the tracker reads the same once per refusal', async () => {
+    const id = await plan(['A', 'B', 'C']);
     expect(start(id).ok).toBe(true);
     // A credential-shaped value over the rule's bound: refused by the real validator, as the call would be.
     const refusedValue = `sk-live-${'Q'.repeat(60)}`;
     const schema = judgeCallSchema(ledger.getJudgeRun(id)!.rule);
     const h = harness((_u, n) => {
       let e: Error = new ExtractShapeError('no tool call');
-      if (n === 1) {
+      if (n <= 2) {
         try { validateAgainstSchema(change({ title: refusedValue }), schema); } catch (err: unknown) { e = err as Error; }
       }
       attachExtractionSpend(e, { costUsd: 0.01, tier: 'fast', inputTokens: 700, outputTokens: 30 });
       throw e;
     });
     await runBulkJudge(id, h.deps);
-    const [a, b] = ledger.getPreview(id);
-    expect(a!.error).toBe('verdict_invalid');
-    expect(a!.refusalDetail).toEqual({ field: 'title', kind: 'maxLength', limit: 40 });
+    const [a, b, c] = ledger.getPreview(id);
+    for (const refused of [a, b]) {
+      expect(refused!.error).toBe('verdict_invalid');
+      expect(refused!.refusalDetail).toEqual({ field: 'title', kind: 'maxLength', limit: 40 });
+    }
     // An answer refused without a field of the rule keeps none.
-    expect(b!.error).toBe('verdict_invalid');
-    expect(b!.refusalDetail).toBeUndefined();
+    expect(c!.error).toBe('verdict_invalid');
+    expect(c!.refusalDetail).toBeUndefined();
     const cells = engineDb.getDb().prepare('SELECT refusal_detail FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(id) as { refusal_detail: string | null }[];
-    expect(cells[1]!.refusal_detail).toBeNull();
+    expect(cells[2]!.refusal_detail).toBeNull();
     const kept = cells[0]!.refusal_detail!;
     expect(JSON.parse(engineDb.dec(kept))).toEqual({ field: 'title', kind: 'maxLength', limit: 40 });
     for (const text of [kept, engineDb.dec(kept)]) {
       expect(text).not.toContain('sk-live');
       expect(text).not.toContain('QQQQ');
     }
+    // Two targets refused the same way are one event; a different refusal is its own.
     expect(h.captured.map((e) => e.message)).toEqual([
       'bulk_judge verdict failed: SchemaValueError at after.title (maxLength 40)',
       'bulk_judge verdict failed: ExtractShapeError',

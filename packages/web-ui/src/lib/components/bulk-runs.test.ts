@@ -2170,6 +2170,8 @@ describe('the sentence for an answer the rule refused', () => {
 	it('names the field by the rule on any other run', () => {
 		expect(bulkInvalidText('verdict_invalid', false, true, DE, { ...ctx({ field: 'summary', kind: 'minLength', limit: 3 }, true), host: null })).toBe(
 			'Das Modell hat für dieses Ziel keine verwertbare Antwort gegeben. Feld summary: Der Text ist kürzer als 3 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.',
+		);		expect(bulkInvalidText('verdict_invalid', false, true, EN, { ...ctx({ field: 'summary', kind: 'minLength', limit: 3 }, true), host: null })).toBe(
+			'The model gave no usable answer for this target. Field summary: the text is shorter than 3 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.',
 		);
 	});
 

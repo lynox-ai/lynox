@@ -1683,20 +1683,26 @@ export const BULK_REFUSAL_KINDS: readonly string[] = ['required', 'type', 'enum'
 const BULK_REFUSAL_BOUNDED: ReadonlySet<string> = new Set(['maxLength', 'minLength', 'minimum', 'maximum', 'maxItems']);
 
 /**
- * The sentence for an answer the rule refused, naming the field and the rule it broke (and the
- * bound), or null where the engine kept no such detail or its kind is not one the page words:
- * the caller then reads the sentence without a field. The field is named as the run names it
- * elsewhere (Shopify's readable name; the rule's own name on any other list).
+ * The sentence for an answer the rule refused, with the rule it broke (and the bound) filled in
+ * and `{field}` left for the field, or null where the engine kept no such detail or its kind is
+ * not one the page words: the caller then reads the sentence without a field. The page puts the
+ * field in as it names fields elsewhere (a readable name, or the rule's own name set apart).
  */
-export function bulkRefusalText(
-	detail: BulkRefusalDetail | undefined, shopify: boolean, host: string | null, i18n: BulkI18n,
-): string | null {
+export function bulkRefusalSentence(detail: BulkRefusalDetail | undefined, shopify: boolean, i18n: BulkI18n): string | null {
 	if (detail === undefined || !BULK_REFUSAL_KINDS.includes(detail.kind)) return null;
 	const bounded = BULK_REFUSAL_BOUNDED.has(detail.kind);
 	if (bounded && (detail.limit === undefined || !Number.isFinite(detail.limit))) return null;
-	const field = shopify ? bulkFieldNamesText(host, [detail.field], (k) => i18n.t(k)) : bulkVisibleText(detail.field);
 	const rule = bounded ? i18n.tf(`bulk.invalid.refusal.${detail.kind}`, { n: String(detail.limit) }) : i18n.t(`bulk.invalid.refusal.${detail.kind}`);
-	return i18n.tf(shopify ? 'bulk.invalid.verdict_refused' : 'bulk.invalid.verdict_refused_target', { field, rule });
+	return i18n.tf(shopify ? 'bulk.invalid.verdict_refused' : 'bulk.invalid.verdict_refused_target', { field: '{field}', rule });
+}
+
+/** {@link bulkRefusalSentence} as text: the field by its readable name, or the rule's own name. */
+export function bulkRefusalText(
+	detail: BulkRefusalDetail | undefined, shopify: boolean, host: string | null, i18n: BulkI18n,
+): string | null {
+	const sentence = bulkRefusalSentence(detail, shopify, i18n);
+	if (sentence === null || detail === undefined) return null;
+	return fillTemplate(sentence, { field: bulkFieldNamesText(host, [detail.field], (k) => i18n.t(k)) });
 }
 
 /** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals

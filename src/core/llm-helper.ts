@@ -327,8 +327,10 @@ export class ExtractShapeError extends Error {
   }
 }
 
+/** The rules of the schema a value can break, as a refusal names them. */
+export const SCHEMA_REFUSAL_KINDS = ['required', 'type', 'enum', 'pattern', 'maxLength', 'minLength', 'minimum', 'maximum', 'maxItems'] as const;
 /** The rule of the schema a value broke. */
-export type SchemaRefusalKind = 'required' | 'type' | 'enum' | 'pattern' | 'maxLength' | 'minLength' | 'minimum' | 'maximum' | 'maxItems';
+export type SchemaRefusalKind = typeof SCHEMA_REFUSAL_KINDS[number];
 
 /**
  * A refusal as a caller may keep or show it: the field's path, the rule and, for a bounded

@@ -39,6 +39,7 @@ import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 import type { ContainmentMirror } from './history-markers.js';
 import { isSharedSuffix } from './public-suffix.js';
+import { SCHEMA_REFUSAL_KINDS, type SchemaRefusalKind } from './llm-helper.js';
 
 /** A target's stored `read_*` or `write_*` pair (engine.db v43). */
 interface ConnectionColumns {
@@ -78,30 +79,6 @@ export type PlannedTarget =
  * reason is what the model is told, and a free-text reason would carry the target's
  * own (possibly externally authored) strings into the model's context.
  */
-/** The rule kinds a schema refusal names (`SchemaRefusalKind` in llm-helper.ts). */
-const BULK_REFUSAL_KINDS: ReadonlySet<string> = new Set(['required', 'type', 'enum', 'pattern', 'maxLength', 'minLength', 'minimum', 'maximum', 'maxItems']);
-
-/**
- * With `verdict_invalid`: the field of the run's rule the judge's answer broke, the rule's kind
- * and its bound. Every part comes from the rule's schema, never from the value the model
- * wrote; the target keeps it so the owner and support can tell a refusal from a provider fault.
- */
-export interface BulkRefusalDetail {
-  field: string;
-  kind: 'required' | 'type' | 'enum' | 'pattern' | 'maxLength' | 'minLength' | 'minimum' | 'maximum' | 'maxItems';
-  limit?: number;
-}
-
-/** `value` as a {@link BulkRefusalDetail}, or null: a field name of at most 80 characters, a known kind, a finite bound. */
-function refusalDetailShape(value: unknown): BulkRefusalDetail | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const { field, kind, limit } = value as Record<string, unknown>;
-  if (typeof field !== 'string' || field === '' || field.length > 80) return null;
-  if (typeof kind !== 'string' || !BULK_REFUSAL_KINDS.has(kind)) return null;
-  if (limit !== undefined && (typeof limit !== 'number' || !Number.isFinite(limit))) return null;
-  return { field, kind: kind as BulkRefusalDetail['kind'], ...(typeof limit === 'number' ? { limit } : {}) };
-}
-
 export type BulkInvalidReason =
   | 'path_outside_workspace'
   /** exists but is not a readable regular file (a directory, a device, no permission) */
@@ -215,6 +192,30 @@ export type BulkInvalidReason =
   | 'markup_dropped_before'
   /** an HTML value holds a shortcode whose text the canonical form the run sends would change */
   | 'shortcode_changed';
+
+/** The rule kinds a schema refusal names. */
+const BULK_REFUSAL_KINDS: ReadonlySet<string> = new Set(SCHEMA_REFUSAL_KINDS);
+
+/**
+ * With `verdict_invalid`: the field of the run's rule the judge's answer broke, the rule's kind
+ * and its bound. Every part comes from the rule's schema, never from the value the model
+ * wrote; the target keeps it so the owner and support can tell a refusal from a provider fault.
+ */
+export interface BulkRefusalDetail {
+  field: string;
+  kind: SchemaRefusalKind;
+  limit?: number;
+}
+
+/** `value` as a {@link BulkRefusalDetail}, or null: a field name of at most 80 characters, a known kind, a finite bound. */
+function refusalDetailShape(value: unknown): BulkRefusalDetail | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const { field, kind, limit } = value as Record<string, unknown>;
+  if (typeof field !== 'string' || field === '' || field.length > 80) return null;
+  if (typeof kind !== 'string' || !BULK_REFUSAL_KINDS.has(kind)) return null;
+  if (limit !== undefined && (typeof limit !== 'number' || !Number.isFinite(limit))) return null;
+  return { field, kind: kind as BulkRefusalDetail['kind'], ...(typeof limit === 'number' ? { limit } : {}) };
+}
 
 /** Every markup refusal is a reason a target can record. */
 const _markupRefusalsAreReasons: MarkupRefusal extends BulkInvalidReason ? true : never = true;
