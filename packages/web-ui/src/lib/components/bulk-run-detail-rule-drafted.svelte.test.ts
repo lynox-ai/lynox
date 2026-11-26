@@ -202,7 +202,7 @@ describe('a judged run that judges again shows its rule as at the start', () => 
 	it('reads in English as approved where judging goes on', async () => {
 		setLocale('en');
 		await render(halted('unavailable'));
-		expect(drafted()).toEqual(['lynox wrote this rule. Check that it says what you want before you continue judging.']);
+		expect(drafted()).toEqual(['lynox wrote this rule. Check that it says what you want before you continue the judging.']);
 	});
 
 	it('without an artifact keeps the very element it had, under the rule', async () => {
@@ -232,12 +232,12 @@ describe('a judged run that judges again shows its rule as at the start', () => 
 		component = undefined;
 		setLocale('en');
 		await render({ ...halted('unavailable'), ruleFromArtifact: {} });
-		expect(origin()).toBe('This rule is taken word for word from a saved artifact. Check that it says what you want before you continue the judging.');
+		expect(origin()).toBe('This rule was taken word for word from a saved artifact when the run was planned. Check that it says what you want before you continue the judging.');
 		unmount(component!);
 		component = undefined;
 		await render({ ...halted('unavailable'), ruleFromArtifact: { title: 'Shop rules' } });
 		const box = target.querySelector('[data-testid="bulk-restart-rule"] [data-testid="bulk-rule-from-artifact"] [data-foreign-value]')!;
-		expect(origin().replace(box.textContent ?? '', '{title}')).toBe('This rule is taken word for word from {title} under Artifacts. Check that it says what you want before you continue the judging.');
+		expect(origin().replace(box.textContent ?? '', '{title}')).toBe('This rule was taken word for word from {title} when the run was planned. Check that it says what you want before you continue the judging.');
 	});
 
 	it('control: a judged run whose rule did not reach the page shows no empty box', async () => {
