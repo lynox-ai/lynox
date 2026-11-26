@@ -115,6 +115,15 @@ describe('a judged run says lynox wrote its rule', () => {
 		expect(box!.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
+	it('says where the owner approves that a rule taken from an artifact came from it, its title set apart', async () => {
+		await render({ ...judged, ruleFromArtifact: { title: 'Regeln » Shop' } });
+		const origin = target.querySelector('[data-testid="bulk-approve-rule"] [data-testid="bulk-rule-from-artifact"]')!;
+		const boxes = [...origin.querySelectorAll('[data-foreign-value]')];
+		expect(boxes).toHaveLength(1);
+		expect((origin.textContent ?? '').replace(boxes[0]!.textContent ?? '', '{title}')).toBe(t('bulk.approve.rule_from_artifact'));
+		expect(drafted()).toEqual([]);
+	});
+
 	it('reads in English as approved', async () => {
 		setLocale('en');
 		await render(judged);

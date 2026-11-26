@@ -16,7 +16,7 @@
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import BulkHost from './BulkHost.svelte';
 	import MarkedLine from './MarkedLine.svelte';
-	import { shownValue } from '../utils/plan-takeover.js';
+	import { shownValue, VALUE_OPEN } from '../utils/plan-takeover.js';
 	import {
 		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkShowsFailure,
@@ -34,10 +34,9 @@
 	let creates = $state<BulkTarget[]>([]);
 	let loading = $state(true);
 	let error = $state('');
+	// A refusal may name a value someone else wrote (an artifact's title), between the marks
+	// `shownValue` sets: the line is then drawn by `MarkedLine`, which sets the value apart.
 	let actionError = $state('');
-	// A refusal that names a value someone else wrote (an artifact's title): drawn by `MarkedLine`,
-	// which sets the value apart, never as part of lynox's sentence.
-	let actionMarked = $state('');
 	// A start check that can never pass refused approving or writing on this run (its id and the
 	// engine's code): both stay off for it, with the cause by the button, until the page shows
 	// another run, is opened again, or is loaded by the owner's own act.
@@ -235,7 +234,7 @@
 			if (left()) return false;
 			// Another run's domains are never sent with this one, and its wrong line never holds
 			// this one's start.
-			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; actionMarked = ''; showUnchanged = false; hopeless = null; }
+			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; showUnchanged = false; hopeless = null; }
 			run = r.body;
 			targets = shown;
 			changedOnly = firstChanged;
@@ -288,7 +287,6 @@
 		const id = runId;
 		busy = true;
 		actionError = '';
-		actionMarked = '';
 		try {
 			const refusal = await fn(id);
 			if (runId === id) {
@@ -318,10 +316,7 @@
 		const code = r.body.code;
 		const title = code === 'rule_source_unreadable' ? null : bulkArtifactTitle(r.body.title);
 		const ruleSourceKey = bulkRuleSourceKey(code, title !== null);
-		if (ruleSourceKey !== null) {
-			actionMarked = title !== null ? tf(ruleSourceKey, { title: shownValue(title) }) : t(ruleSourceKey);
-			return '';
-		}
+		if (ruleSourceKey !== null) return title !== null ? tf(ruleSourceKey, { title: shownValue(title) }) : t(ruleSourceKey);
 		const key = code !== undefined && Object.hasOwn(REFUSAL_KEYS, code) ? REFUSAL_KEYS[code] : code !== undefined ? bulkReachRefusalKey(code) ?? undefined : undefined;
 		return key !== undefined ? t(key) : (r.body.error ?? t('common.load_failed'));
 	};
@@ -372,7 +367,6 @@
 		const id = runId;
 		busy = true;
 		actionError = '';
-		actionMarked = '';
 		try {
 			if (!run.checksum) {
 				actionError = t('common.load_failed');
@@ -483,7 +477,9 @@
 			if (refusal !== null) {
 				await load();
 				if (runId !== id) return null;
-				if (error) error = refusal;
+				// A refusal that names a value is drawn below the run, not in its place: the page says
+				// loading failed rather than show that sentence without its value set apart.
+				if (error && !refusal.includes(VALUE_OPEN)) error = refusal;
 			} else {
 				// A started run that halts on its limit later offers an empty field, not this one.
 				capInput = '';
@@ -526,7 +522,9 @@
 			if (refusal !== null) {
 				await load();
 				if (runId !== id) return null;
-				if (error) error = refusal;
+				// A refusal that names a value is drawn below the run, not in its place: the page says
+				// loading failed rather than show that sentence without its value set apart.
+				if (error && !refusal.includes(VALUE_OPEN)) error = refusal;
 			} else {
 				capInput = '';
 			}
@@ -1347,10 +1345,7 @@
 				</div>
 			{/if}
 			{#if actionError}
-				<p class="text-sm text-danger">{actionError}</p>
-			{/if}
-			{#if actionMarked}
-				<p class="text-sm text-danger" data-testid="bulk-rule-source-refusal"><MarkedLine text={actionMarked} mono={false} /></p>
+				<p class="text-sm text-danger" data-testid="bulk-action-error">{#if actionError.includes(VALUE_OPEN)}<MarkedLine text={actionError} mono={false} />{:else}{actionError}{/if}</p>
 			{/if}
 		</section>
 	{/if}

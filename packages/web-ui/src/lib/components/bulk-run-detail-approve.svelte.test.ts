@@ -1175,7 +1175,7 @@ describe('the allowed link domains of a judged list run', () => {
 		type(capField(), '5');
 		startButton()!.click();
 		await settle();
-		const refusal = target.querySelector('[data-testid="bulk-rule-source-refusal"]')!;
+		const refusal = target.querySelector('[data-testid="bulk-action-error"]')!;
 		expect(foreignIn(refusal)).toHaveLength(1);
 		// The sentence around the title is the page's own, unchanged; the title sits in its box alone.
 		expect(around(refusal)).toBe(t('bulk.rule_source.changed_titled'));
@@ -1195,7 +1195,7 @@ describe('the allowed link domains of a judged list run', () => {
 		type(capField(), '5');
 		startButton()!.click();
 		await settle();
-		const refusal = target.querySelector('[data-testid="bulk-rule-source-refusal"]')!;
+		const refusal = target.querySelector('[data-testid="bulk-action-error"]')!;
 		expect(refusal.textContent).toBe(t('bulk.rule_source.unreadable'));
 		expect(foreignIn(refusal)).toHaveLength(0);
 	});
