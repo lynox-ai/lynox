@@ -3,10 +3,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
 	bulkHiddenSegments, bulkHiddenCountText, bulkRawText, bulkUncheckedCountText, bulkHiddenUnchecked,
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, bulkLabelParts, bulkUndoApproveText, bulkUndoExplainText,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey,
+	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
+	bulkRefusalText, bulkRefusalSentence, BULK_REFUSAL_KINDS,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -19,6 +21,7 @@ const TABLE: Record<string, string> = {
 	'bulk.label_one': '1 Ziel · {target}',
 	'bulk.label_undo_one': 'Rücknahme · 1 Ziel · {target}',
 	'bulk.system.data_store': 'Datenspeicher',
+	'bulk.head.counts_pending': '–',
 };
 const i18n: BulkI18n = {
 	t: (k) => TABLE[k] ?? k,
@@ -39,6 +42,11 @@ describe('bulk run helpers', () => {
 		// One target is named in the singular.
 		expect(bulkLabel({ kind: 'apply', total: 1, targetSystem: 'http:shop.example.invalid' }, i18n)).toBe('1 Ziel · shop.example.invalid');
 		expect(bulkLabel({ kind: 'undo', total: 1, targetSystem: 'data_store' }, i18n)).toBe('Rücknahme · 1 Ziel · Datenspeicher');
+		// While the counts are still pending the size reads "–", never the singular, as text and in parts.
+		expect(bulkLabel({ kind: 'apply', total: 3, targetSystem: 'data_store' }, i18n, true)).toBe('– Ziele · Datenspeicher');
+		expect(bulkLabel({ kind: 'undo', total: 1, targetSystem: 'data_store' }, i18n, true)).toBe('Rücknahme · – Ziele · Datenspeicher');
+		expect(bulkLabelParts({ kind: 'apply', total: 1, targetSystem: 'data_store' }, i18n, true)).toEqual([{ text: '– Ziele · Datenspeicher' }]);
+		expect(bulkLabelParts({ kind: 'apply', total: 1, targetSystem: 'http:shop.example.invalid' }, i18n, true)[0]).toEqual({ text: '– Ziele · ' });
 	});
 
 	it('shows the host of an external run and the raw name of a system it has no word for', () => {
@@ -272,6 +280,27 @@ describe('the approved unchecked-change texts', () => {
 	};
 	const entry = (key: string, de: string, en: string): string => `'${key}': { de: ${JSON.stringify(de).replace(/^"|"$/g, "'")}, en: ${JSON.stringify(en).replace(/^"|"$/g, "'")} },`;
 
+	it('holds the five check-case sentences word for word', () => {
+		expect(line('bulk.halt.unauthorized_before_check')).toBe(entry('bulk.halt.unauthorized_before_check',
+			'Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für {provider} auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.',
+			'Open Settings → API connections and tap the chat icon next to the connection for {provider} to reconnect the access. Then you can check again.'));
+		expect(line('bulk.halt.blocked_before_check_managed')).toBe(entry('bulk.halt.blocked_before_check_managed',
+			'Soll lynox {host} erreichen, schreib an support@lynox.ai. Danach kannst du nachprüfen.',
+			'If lynox should reach {host}, write to support@lynox.ai. Then you can check again.'));
+		// The English sentence holds an escaped apostrophe, which `entry` would escape twice.
+		expect(line('bulk.halt.blocked_before_check_selfhost')).toBe(`'bulk.halt.blocked_before_check_selfhost': { de: 'Trag {host} in der Konfiguration deiner Instanz ein. Danach kannst du nachprüfen.', en: 'Add {host} to your instance\\'s configuration. Then you can check again.' },`);
+		expect(line('bulk.halt.unavailable_before_check')).toBe(entry('bulk.halt.unavailable_before_check',
+			'Hält das Nachprüfen gleich wieder an, ist {provider} noch nicht erreichbar; versuch es später noch einmal.',
+			'If checking halts again right away, {provider} is not reachable yet; try again later.'));
+		expect(line('bulk.halt.shopifyWriteOff_check')).toBe(entry('bulk.halt.shopifyWriteOff_check',
+			'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten.',
+			'Bulk changes to Shopify stores are not enabled on this instance. The run is stopped.'));
+		expect(line('bulk.halt.shopifyWriteOff_before_check_managed')).toBe(entry('bulk.halt.shopifyWriteOff_before_check_managed',
+			'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald Bulk-Änderungen freigeschaltet sind, kannst du nachprüfen.',
+			'If lynox should check and write in Shopify stores, write to support@lynox.ai. Once bulk changes are enabled, you can check again.'));
+	});
+
+
 	it('holds the note', () => {
 		expect(line('bulk.approve.unmeasured_note')).toBe(entry('bulk.approve.unmeasured_note',
 			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung. Deshalb schreibt lynox zuerst nur ein Ziel. Schau es dir dort an, bevor du den Rest freigibst.',
@@ -297,7 +326,8 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.confirm_first')).toBe(entry('bulk.approve.confirm_first',
 			'Setz zuerst das Häkchen oben, dann kannst du freigeben.', 'Tick the box above first, then you can approve.'));
 		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
-		expect(page).toContain(`aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
+		// A start check that can never pass names its cause first: ticking the box would not help.
+		expect(page).toContain(`aria-describedby={hopelessReason !== null ? 'bulk-approve-hopeless' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
 		expect(page).toContain(`<p id="bulk-approve-confirm-first" `);
 	});
 
@@ -392,7 +422,9 @@ describe('going on from a run that halted', () => {
 	const en: Record<string, string> = {};
 	for (const l of source.split('\n')) {
 		const m = ENTRY.exec(l);
-		if (m) { de[m[1]!] = m[2]!.replace(/\\'/g, "'"); en[m[1]!] = m[3]!.replace(/\\'/g, "'"); }
+		// The source's escapes as the page reads them: a no-break space is one character, not six.
+		const read = (v: string): string => v.replace(/\\'/g, "'").replace(/\\u([0-9a-fA-F]{4})/g, (_, x: string) => String.fromCharCode(parseInt(x, 16)));
+		if (m) { de[m[1]!] = read(m[2]!); en[m[1]!] = read(m[3]!); }
 	}
 	const from = (table: Record<string, string>): BulkI18n => ({
 		t: (k) => table[k] ?? k,
@@ -400,6 +432,16 @@ describe('going on from a run that halted', () => {
 	});
 	const DE = from({ ...de, 'bulk.system.data_store': 'Datenspeicher' });
 	const EN = from(en);
+
+	// A run no restart moves on is to be planned again, except where that does not help either
+	// (U-232): a self-hosted instance gets its own note, a missing setting none at all.
+	it('notes beside a run no restart moves on what does help, by its halt', () => {
+		expect(bulkRestartNoneNote('shopifySelfHosted')).toBe('bulk.restart.none_self_hosted');
+		expect(bulkRestartNoneNote('shopifyNoApiVersion')).toBeNull();
+		for (const k of ['contract', 'listOrder', 'formCost', 'shopifyReadOff', null]) expect(bulkRestartNoneNote(k), String(k)).toBe('bulk.restart.none');
+		expect([DE.t('bulk.restart.none_self_hosted'), EN.t('bulk.restart.none_self_hosted')])
+			.toEqual(['Weder neu starten noch neu planen hilft hier.', 'Neither restarting nor planning the run again helps here.']);
+	});
 
 	// Over the engine's own set, not a list: every halt an atomic run ends in has its sentence.
 	const ATOMIC = Object.keys(BULK_HALT_REASONS).filter((k) => k.startsWith('atomic'));
@@ -459,6 +501,54 @@ describe('going on from a run that halted', () => {
 		expect(ATOMIC.filter((haltKey) => bulkRollbackIncomplete({ phase: 'aborted', haltKey }))).toEqual(ATOMIC.filter((k) => k.endsWith('Incomplete')));
 	});
 
+	it('says an undo\'s unclear sends in its own words, the start again from the run it undoes, never the chat', () => {
+		// A stopped undo: halted, or finished.
+		const halted = { phase: 'writing', haltKey: 'unavailable', haltReason: 'unavailable', kind: 'undo' } as const;
+		const done = { phase: 'done', haltKey: null, haltReason: null, kind: 'undo' } as const;
+		const running = { phase: 'writing', haltKey: null, haltReason: null, kind: 'undo' } as const;
+		const one = 'Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Starte die Rücknahme neu, auf der Seite des Massenlaufs, den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.';
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 1 }, DE)).toBe(one);
+		expect(bulkSentUnknownText({ ...done, sentUnknown: 1 }, DE)).toBe(one);
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 3 }, DE)).toBe('Bei 3 Zielen ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendungen blieben ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnten sie doppelt ankommen. Starte die Rücknahme neu, auf der Seite des Massenlaufs, den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.');
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 3 }, EN)).toBe('For 3 targets it is unclear whether the undo reached the provider. The sends got no clear answer, and lynox does not send them again, or they could arrive twice. Start the undo again from the page of the bulk run it undoes: lynox then reads each target first and sends only where the run\'s change is still there.');
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 0 }, DE)).toBeNull();
+		// A mandate reads that only the owner starts it again, and where.
+		const mandate = bulkMandateI18n(DE);
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 1 }, mandate)).toBe('Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Neu starten kann die Rücknahme nur der Inhaber dieser Instanz, auf der Seite des Massenlaufs, den sie zurücknimmt; bitte den Inhaber darum. lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.');
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 3 }, bulkMandateI18n(EN))).toBe('For 3 targets it is unclear whether the undo reached the provider. The sends got no clear answer, and lynox does not send them again, or they could arrive twice. Only the owner of this instance can start the undo again, from the page of the bulk run it undoes; ask the owner to do so. lynox then reads each target first and sends only where the run\'s change is still there.');
+		// An undo that still runs cannot be started again: its sentence says the way on follows, for owner and mandate alike.
+		const runningOne = 'Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Sobald diese Rücknahme angehalten oder fertig ist, steht hier, wie es weitergeht.';
+		expect(bulkSentUnknownText({ ...running, sentUnknown: 1 }, DE)).toBe(runningOne);
+		expect(bulkSentUnknownText({ ...running, sentUnknown: 1 }, mandate)).toBe(runningOne);
+		expect(bulkSentUnknownText({ ...running, phase: 'approved', sentUnknown: 1 }, DE)).toBe(runningOne);
+		expect(bulkSentUnknownText({ ...running, sentUnknown: 3 }, EN)).toBe('For 3 targets it is unclear whether the undo reached the provider. The sends got no clear answer, and lynox does not send them again, or they could arrive twice. Once this undo has stopped or finished, this box says how to go on.');
+		// The page links the words to the run the undo takes back, split around them.
+		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 1, sourceRunId: 'src' }, DE)).toEqual({
+			before: 'Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Starte die Rücknahme neu, auf der ',
+			link: 'Seite des Massenlaufs',
+			after: ', den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.',
+		});
+		expect(bulkSentUnknownParts({ ...done, sentUnknown: 3, sourceRunId: 'src' }, DE)?.before).toMatch(/^Bei 3 Zielen /);
+		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 1, sourceRunId: 'src' }, mandate)?.before).toMatch(/nur der Inhaber dieser Instanz, auf der $/);
+		// No parts for a write, for no unclear send, for an undo that still runs, or for one that names no run.
+		expect(bulkSentUnknownParts({ ...done, kind: 'apply', sentUnknown: 1, sourceRunId: null }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ ...done, kind: 'apply', sentUnknown: 1, sourceRunId: 'src' }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 0, sourceRunId: 'src' }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ ...running, sentUnknown: 1, sourceRunId: 'src' }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 1, sourceRunId: null }, DE)).toBeNull();
+		// The plural forms in German, for a mandate and while the undo runs.
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 3 }, mandate)).toBe('Bei 3 Zielen ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendungen blieben ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnten sie doppelt ankommen. Neu starten kann die Rücknahme nur der Inhaber dieser Instanz, auf der Seite des Massenlaufs, den sie zurücknimmt; bitte den Inhaber darum. lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.');
+		expect(bulkSentUnknownText({ ...running, sentUnknown: 3 }, DE)).toBe('Bei 3 Zielen ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendungen blieben ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnten sie doppelt ankommen. Sobald diese Rücknahme angehalten oder fertig ist, steht hier, wie es weitergeht.');
+		expect(bulkSentUnknownText({ ...running, sentUnknown: 3 }, mandate)).toBe(bulkSentUnknownText({ ...running, sentUnknown: 3 }, DE));
+		// A mandate reads a write's sentence as the owner does.
+		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 1 }, mandate)).toBe(DE.t('bulk.sent_unknown.one'));
+		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 3 }, mandate)).toBe(DE.tf('bulk.sent_unknown.many', { count: '3' }));
+		// A write keeps its words, with the chat, and so does a run whose kind is not given.
+		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 1 }, DE)).toBe(DE.t('bulk.sent_unknown.one'));
+		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 1 }, DE)).toMatch(/im Chat/);
+		expect(bulkSentUnknownText({ phase: 'done', haltKey: null, haltReason: null, sentUnknown: 1 }, DE)).toBe(DE.t('bulk.sent_unknown.one'));
+	});
+
 	it('says the same about targets an earlier send left unclear on every halt, a finished run and every size', () => {
 		const one = 'Bei einem Ziel ist offen, ob die Änderung beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort. lynox sendet sie nicht noch einmal, sonst könnte die Änderung doppelt ankommen. Sieh beim Anbieter nach. Fehlt die Änderung dort, bitte lynox im Chat, den Lauf neu zu planen.';
 		const states = [
@@ -466,18 +556,64 @@ describe('going on from a run that halted', () => {
 			{ phase: 'writing', haltKey: 'consecutiveFailures', total: 20 }, { phase: 'writing', haltKey: 'maxTargets', total: 19 },
 			{ phase: 'writing', haltKey: 'timeBudget', total: 200 }, { phase: 'done', haltKey: null, total: 5 },
 		];
-		for (const s of states) {
-			expect(bulkSentUnknownText({ ...s, sentUnknown: 1 } as Pick<BulkRunDetailData, 'sentUnknown'>, DE), JSON.stringify(s)).toBe(one);
-			expect(bulkSentUnknownText({ ...s, sentUnknown: 3 } as Pick<BulkRunDetailData, 'sentUnknown'>, EN), JSON.stringify(s))
+		for (const s0 of states) {
+			const s = { ...s0, haltReason: s0.haltKey };
+			expect(bulkSentUnknownText({ ...s, sentUnknown: 1 } as Pick<BulkRunDetailData, 'sentUnknown' | 'phase' | 'haltKey' | 'haltReason'>, DE), JSON.stringify(s)).toBe(one);
+			expect(bulkSentUnknownText({ ...s, sentUnknown: 3 } as Pick<BulkRunDetailData, 'sentUnknown' | 'phase' | 'haltKey' | 'haltReason'>, EN), JSON.stringify(s))
 				.toBe('For 3 targets it is unclear whether the change reached the provider. The sends got no clear answer. lynox does not send them again, or changes could arrive twice. Check at the provider. If a change is missing there, ask lynox in the chat to plan the run again.');
-			expect(bulkSentUnknownText({ ...s, sentUnknown: 0 } as Pick<BulkRunDetailData, 'sentUnknown'>, DE), JSON.stringify(s)).toBeNull();
+			expect(bulkSentUnknownText({ ...s, sentUnknown: 0 } as Pick<BulkRunDetailData, 'sentUnknown' | 'phase' | 'haltKey' | 'haltReason'>, DE), JSON.stringify(s)).toBeNull();
 		}
 	});
 
-	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded', 'listReadFailed', 'shopInactive'];
+	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded', 'listReadFailed', 'shopInactive', 'storeAccessEnded', 'storeClientMisnamed'];
 	const NONE = ['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff'];
 	const base = { phase: 'planned' as const, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
 	const judged = { judge: { tier: 'fast', unjudged: 3 }, judgeServedBy: { provider: 'mistral', label: 'Mistral Medium' } } as unknown as Pick<BulkRunDetailData, 'judge' | 'judgeServedBy'>;
+
+	// U-232: a store's pass refused a request as it is formed. Its own cause in every phase, the
+	// content case before planning anew where the owner can take something out, and for a write or
+	// an undo what stays as it is. Planning anew itself is the note no restart moves on (`none`).
+	it('words a pass\'s refusal of a request: its cause, what to take out first, and what stays', () => {
+		const planned = { ...base, haltKey: 'storeRequestRefused', targetSystem: 'http:shop.example.invalid', costUsd: 0, costCapUsd: null };
+		expect(bulkRestartKind(planned)).toBe('none');
+		expect(bulkRestartNoneNote('storeRequestRefused')).toBe('bulk.restart.none');
+		expect(bulkHaltText(planned, true, DE, false)).toEqual({
+			cause: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch.',
+			before: 'Steht in der Regel oder einem Wert etwas wie ein Zugangsschlüssel oder Token, nimm es heraus, bevor lynox den Lauf neu plant.',
+		});
+		expect(bulkResumeKind(w('storeRequestRefused'))).toBe('none');
+		expect(bulkResumeText(w('storeRequestRefused'), true, DE, false)).toEqual({
+			cause: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch.',
+			before: 'Steht in der Regel oder einem Wert etwas wie ein Zugangsschlüssel oder Token, nimm es heraus, bevor lynox den Lauf neu plant.',
+			check: null, after: null,
+			kept: 'Was lynox vor dem Halt geschrieben hat, bleibt geschrieben. Ab dieser Anfrage hat lynox nichts mehr gesendet.',
+			soFar: null, allows: null,
+		});
+		// An undo writes back what the store held: nothing to take out, and what it took back stays.
+		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo' }), true, EN, false)).toEqual({
+			cause: 'lynox did not send a request of this undo to the store: lynox does not let a request of this form through to Shopify.',
+			before: null, check: null, after: null,
+			kept: 'What lynox took back before the halt stays taken back. From this request on, lynox sent nothing more.',
+			soFar: null, allows: null,
+		});
+		// Nothing written yet: nothing is said to stay. Another way to no write on says nothing of it either.
+		expect(bulkResumeText(w('storeRequestRefused', { applied: 0 }), true, DE, false)?.kept).toBeNull();
+		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo', applied: 0 }), true, EN, false)?.kept).toBeNull();
+		expect(bulkResumeText(w('contract'), true, DE, false)?.kept).toBeNull();
+		// The refused request records no error on its own target, but earlier targets can carry one
+		// (this fixture has failed ones), so both values are checked. Whether one is marked does not
+		// change any of these sentences: they name no failed target.
+		expect(bulkHaltText(planned, true, DE, true)).toEqual(bulkHaltText(planned, true, DE, false));
+		for (const run of [w('storeRequestRefused'), w('storeRequestRefused', { kind: 'undo' }), w('storeRequestRefused', { applied: 0 })]) {
+			expect(bulkResumeText(run, true, DE, true)).toEqual(bulkResumeText(run, true, DE, false));
+		}
+		for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
+			for (const run of [w('storeRequestRefused'), w('storeRequestRefused', { kind: 'undo' })]) {
+				for (const [part, text] of Object.entries(bulkResumeText(run, true, i, false)!)) if (text !== null) expect(text, `${lang} ${part}`).not.toMatch(/bulk\.|\{/);
+			}
+			for (const text of Object.values(bulkHaltText(planned, true, i, false)!)) if (text !== null) expect(text, lang).not.toMatch(/bulk\.|\{/);
+		}
+	});
 
 	it('moves a run on by what it does next, and refuses where a restart would halt again', () => {
 		for (const haltKey of AS_IS) expect(bulkRestartKind({ ...base, haltKey }), haltKey).toBe('read');
@@ -529,24 +665,24 @@ describe('going on from a run that halted', () => {
 			expect(en[`bulk.restart.${key}`], key).toBeTruthy();
 		}
 		for (const key of [...AS_IS, 'costCap', ...NONE]) {
-			expect(bulkHaltText(at(key), true, DE)?.cause, key).not.toMatch(/^bulk\./);
-			expect(bulkHaltText(at(key), false, EN)?.cause, key).not.toMatch(/^bulk\./);
+			expect(bulkHaltText(at(key), true, DE, true)?.cause, key).not.toMatch(/^bulk\./);
+			expect(bulkHaltText(at(key), false, EN, true)?.cause, key).not.toMatch(/^bulk\./);
 		}
 	});
 
 	it('words the halt with the run\'s provider, host and amounts', () => {
 		// The way on: continue, and if it halts again right away the host is not reachable yet (ux U-105).
 		const tryLater = 'Du kannst fortsetzen. Hält der Lauf gleich wieder an, ist shop.example.invalid noch nicht erreichbar; versuch es später noch einmal.';
-		expect(bulkHaltText(at('unavailable'), true, DE)).toEqual({ cause: 'Der Lauf kam nicht weiter. shop.example.invalid hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', before: tryLater });
+		expect(bulkHaltText(at('unavailable'), true, DE, true)).toEqual({ cause: 'Der Lauf kam nicht weiter. shop.example.invalid hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', before: tryLater });
 		// A judged run may also have stopped on its model, and its way on names both (ux U-105 M1).
-		expect(bulkHaltText(at('unavailable', judged), true, DE)).toEqual({
+		expect(bulkHaltText(at('unavailable', judged), true, DE, true)).toEqual({
 			cause: 'Der Lauf kam nicht weiter. shop.example.invalid oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.',
 			before: 'Du kannst fortsetzen. Hält der Lauf gleich wieder an, antworten shop.example.invalid oder das KI-Modell noch nicht; versuch es später noch einmal.',
 		});
-		expect(bulkHaltText(at('unavailable', judged), true, EN)?.before)
+		expect(bulkHaltText(at('unavailable', judged), true, EN, true)?.before)
 			.toBe('You can continue. If the run halts again right away, shop.example.invalid or the AI model is not answering yet; try again later.');
-		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
-		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
+		expect(bulkHaltText(at('unrecorded'), true, EN, true)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
+		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE, true)?.cause)
 			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, angerechnet sind 0.0034 USD.');
 		// What counts toward the limit, not what was paid: a judge call without an answer counts at
 		// its worst case (ux U-174).
@@ -556,17 +692,17 @@ describe('going on from a run that halted', () => {
 			'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap} USD, angerechnet sind {spent} USD.',
 			'The run reached the AI cost limit the owner set at its start: {cap} USD, with {spent} USD counted toward it.',
 		]);
-		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
+		expect(bulkHaltText(at('blocked'), true, DE, true)).toEqual({
 			cause: 'Deine Instanz darf shop.example.invalid nicht erreichen.',
 			before: 'Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
 		});
-		expect(bulkHaltText(at('consecutiveFailures', { targetSystem: 'data_store' }), true, DE)?.cause)
+		expect(bulkHaltText(at('consecutiveFailures', { targetSystem: 'data_store' }), true, DE, true)?.cause)
 			.toBe('Dreimal hintereinander liess sich ein Ziel oder eine Seite der Liste nicht lesen.');
 	});
 
 	it('keeps the engine\'s reason on a run past its plan, which halts on the same keys for writes', () => {
 		for (const phase of ['writing', 'aborted', 'approved'] as const) {
-			expect(bulkHaltText(at('consecutiveFailures', { phase }), true, DE), phase).toBeNull();
+			expect(bulkHaltText(at('consecutiveFailures', { phase }), true, DE, true), phase).toBeNull();
 		}
 	});
 
@@ -582,11 +718,11 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('names the next step by where the instance runs, managed when unknown', () => {
-		expect(bulkHaltText(at('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
-		expect(bulkHaltText(at('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);
-		expect(bulkHaltText(at('spendLimit'), true, DE)?.before).not.toMatch(/Limits/);
-		expect(bulkHaltText(at('spendLimit'), false, DE)?.before).toMatch(/oder wenn du es unter Einstellungen → Limits anhebst\.$/);
-		expect(bulkHaltText(at('spendLimit'), false, EN)?.before).toMatch(/or once you raise it under Settings → Limits\.$/);
+		expect(bulkHaltText(at('blocked'), false, DE, true)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
+		expect(bulkHaltText(at('blocked'), null, DE, true)?.before).toBe(bulkHaltText(at('blocked'), true, DE, true)?.before);
+		expect(bulkHaltText(at('spendLimit'), true, DE, true)?.before).not.toMatch(/Limits/);
+		expect(bulkHaltText(at('spendLimit'), false, DE, true)?.before).toMatch(/oder wenn du es unter Einstellungen → Limits anhebst\.$/);
+		expect(bulkHaltText(at('spendLimit'), false, EN, true)?.before).toMatch(/or once you raise it under Settings → Limits\.$/);
 	});
 
 	it('promises going on only where the page offers to go on (ux U-105 L1)', () => {
@@ -599,24 +735,24 @@ describe('going on from a run that halted', () => {
 		];
 		for (const [key, managed, o] of cases) {
 			// With a button: the step stands.
-			expect([key, managed, bulkRestartKind(at(key, o)), bulkHaltText(at(key, o), managed, DE)?.before]).toEqual([key, managed, expect.stringMatching(/^(read|judge)$/), expect.any(String)]);
+			expect([key, managed, bulkRestartKind(at(key, o)), bulkHaltText(at(key, o), managed, DE, true)?.before]).toEqual([key, managed, expect.stringMatching(/^(read|judge)$/), expect.any(String)]);
 			// Without one: a judged run with no model, or one on its own key, gets no promise.
 			for (const without of [{ ...o, ...noModel }, { ...o, ...ownKey }]) {
-				expect([key, managed, without.judgeOwnKey === true, bulkHaltText(at(key, without), managed, DE)?.before]).toEqual([key, managed, without.judgeOwnKey === true, null]);
+				expect([key, managed, without.judgeOwnKey === true, bulkHaltText(at(key, without), managed, DE, true)?.before]).toEqual([key, managed, without.judgeOwnKey === true, null]);
 			}
 		}
 		// A step that does not promise going on still stands without a button.
-		expect(bulkHaltText(at('credential', noModel), true, DE)?.before).toContain('Einstellungen → APIs');
+		expect(bulkHaltText(at('credential', noModel), true, DE, true)?.before).toContain('Einstellungen → API-Verbindungen');
 	});
 
 	it('gives a refused access the step to reconnect it, and a missing model the start\'s own sentence', () => {
-		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden.';
-		expect(bulkHaltText(at('credential'), true, DE)?.before).toBe(`${reconnect} Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.`);
+		const reconnect = 'Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden.';
+		expect(bulkHaltText(at('credential'), true, DE, true)?.before).toBe(`${reconnect} Gibt es dort keine, bitte lynox im Chat, den Zugang einzurichten.`);
 		// A refused access has a stored one, so no "no profile" clause, and the run continues after (ux U-105).
-		expect(bulkHaltText(at('unauthorized'), true, DE)?.before).toBe(`${reconnect} Danach kannst du fortsetzen.`);
-		expect(bulkHaltText(at('judgeModel'), true, DE)).toEqual({ cause: de['bulk.start.no_judge_model'], before: null });
-		expect(bulkHaltText(at('expired'), true, DE)).toBeNull();
-		expect(bulkHaltText(at('awaitingStart'), true, DE)).toBeNull();
+		expect(bulkHaltText(at('unauthorized'), true, DE, true)?.before).toBe(`${reconnect} Danach kannst du fortsetzen.`);
+		expect(bulkHaltText(at('judgeModel'), true, DE, true)).toEqual({ cause: de['bulk.start.no_judge_model'], before: null });
+		expect(bulkHaltText(at('expired'), true, DE, true)).toBeNull();
+		expect(bulkHaltText(at('awaitingStart'), true, DE, true)).toBeNull();
 	});
 
 	it('shows a small spend, not nothing', () => {
@@ -644,6 +780,16 @@ describe('going on from a run that halted', () => {
 	});
 	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff'];
 
+	// The failed and unclear targets of this pass are counted in a write's cause only: an undo keeps
+	// its own words, whatever the pass left unclear (U-335).
+	it('keeps an undo\'s failure-rate cause when its pass left sends unclear', () => {
+		const heads = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 1, failed: 1, settled: 0, open: 2 };
+		expect(bulkResumeText(w('failureRate', { kind: 'undo', failureLimit: 0, heads, passUnclear: 1 }), true, DE, true)?.cause).toBe(DE.t('bulk.halt.failureRate_undo0'));
+		expect(bulkResumeText(w('failureRate', { kind: 'undo', failureLimit: 2, heads, passUnclear: 1 }), true, DE, true)?.cause).toBe(DE.tf('bulk.halt.failureRate_undo', { limit: '2' }));
+		// Control: the same pass of a write names its failed and unclear targets.
+		expect(bulkResumeText(w('failureRate', { failureLimit: 0, heads, passUnclear: 1 }), true, DE, true)?.cause).toBe(DE.tf('bulk.halt.failureRate_mixed_f1_u1', { f: '1', u: '1' }));
+	});
+
 	it('sorts the halts of a write run into writing on, writing on under a higher maximum, and no way on', () => {
 		for (const k of WRITE_ON) expect(bulkResumeKind(w(k)), k).toBe('write');
 		expect(bulkResumeKind(w('maxTargets'))).toBe('max');
@@ -661,13 +807,41 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('unavailable', { haltKey: null }))).toBeNull();
 	});
 
+	it('names the step before writing on for a store whose access lynox could not renew', () => {
+		// Writing on alone would meet the same refusal: the page names the step first, in both languages.
+		expect(bulkResumeKind(w('storeAccessEnded'))).toBe('write');
+		expect(bulkResumeText(w('storeAccessEnded'), true, DE, true)?.before).toBe('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du den Lauf hier fortsetzen.');
+		expect(bulkResumeText(w('storeAccessEnded'), true, EN, true)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can continue the run here.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, DE, true)?.before).toBe('Bitte lynox im Chat, die Verbindung für shop.example.invalid anzupassen. Danach kannst du den Lauf hier fortsetzen.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, EN, true)?.before).toBe('Ask lynox in the chat to fix the connection for shop.example.invalid. Then you can continue the run here.');
+	});
+
+	it('names the step first, then checking, for a store whose access ended or whose profile is misnamed, when the run goes on by checking', () => {
+		// Without the access the check cannot read the store either: the step comes first and ends with checking.
+		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
+		expect(bulkResumeKind(w('storeAccessEnded', unclear))).toBe('check');
+		expect(bulkResumeText(w('storeAccessEnded', unclear), true, DE, true)?.before).toBe('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du nachprüfen.');
+		expect(bulkResumeText(w('storeAccessEnded', unclear), true, EN, true)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can check again.');
+		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, DE, true)?.before).toBe('Bitte lynox im Chat, die Verbindung für shop.example.invalid anzupassen. Danach kannst du nachprüfen.');
+		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, EN, true)?.before).toBe('Ask lynox in the chat to fix the connection for shop.example.invalid. Then you can check again.');
+		for (const key of ['storeAccessEnded', 'storeClientMisnamed']) {
+			// The step comes first, the check sentence after it, and nothing follows the check.
+			expect(bulkResumeText(w(key, unclear), true, DE, true)?.check, key).toBe(DE.tf('bulk.resume.check_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+			expect(bulkResumeText(w(key, unclear), true, DE, true)?.after, key).toBeNull();
+		}
+		// A step that follows the check stays where it was.
+		const markup = bulkResumeText(w('markupAddedByShop', unclear), true, DE, true);
+		expect(markup?.before).toBeNull();
+		expect(markup?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+	});
+
 	it('offers no way on that the engine refuses for want of a probe', () => {
 		// Without a probe a run writes on only under a maximum of one: a higher one is refused.
 		expect(bulkResumeKind(w('maxTargets', { probeConfirmed: false, maxTargets: 1 }))).toBeNull();
 		// Nor does it write on under a maximum above one, or under none at all.
 		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: 2 }))).toBeNull();
 		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: null }))).toBeNull();
-		expect(bulkResumeText(w('failureRate', { probeConfirmed: false }), true, DE)).toBeNull();
+		expect(bulkResumeText(w('failureRate', { probeConfirmed: false }), true, DE, true)).toBeNull();
 		// Under a maximum of one it writes on; with a probe, at any maximum.
 		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: 1 }))).toBe('write');
 		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: null, changes: { update: 1, create: 0, delete: 0, unchanged: 4, invalid: 0 } }))).toBe('write');
@@ -681,20 +855,20 @@ describe('going on from a run that halted', () => {
 		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
 		expect(bulkResumeKind(w('failureRate', unclear))).toBe('check');
 		const one = 'Nachprüfen liest bei shop.example.invalid nach, ob die Änderung da ist; geschickt wird dabei nichts.';
-		const text = bulkResumeText(w('failureRate', unclear), true, DE);
+		const text = bulkResumeText(w('failureRate', unclear), true, DE, true);
 		// Checking sends nothing: no "before you continue writing", nothing said to be tried.
 		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([one, null, null, null, null]);
 		// After a check that did not find it, the run is at its maximum and still only checks.
 		expect(bulkResumeKind(w('maxTargets', unclear))).toBe('check');
-		expect(bulkResumeText(w('maxTargets', unclear), true, DE)?.check).toBe(one);
-		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN)?.check).toBe('Check again looks in shop.example.invalid whether the changes are there; nothing is sent.');
+		expect(bulkResumeText(w('maxTargets', unclear), true, DE, true)?.check).toBe(one);
+		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN, true)?.check).toBe('Check again looks in shop.example.invalid whether the changes are there; nothing is sent.');
 		// A halt's own step still comes first.
-		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.';
-		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(reconnect);
+		const reconnect = 'Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort keine, bitte lynox im Chat, den Zugang einzurichten.';
+		expect(bulkResumeText(w('credential', unclear), true, DE, true)?.before).toBe(reconnect);
 		// Anything left to send: writing on, as before.
 		expect(bulkResumeKind(w('failureRate', { ...unclear, resumeSends: 1 }))).toBe('write');
 		expect(bulkResumeKind(w('failureRate', { ...unclear, sentUnknown: 0 }))).toBe('write');
-		expect(bulkResumeText(w('failureRate', { ...unclear, resumeSends: 1 }), true, DE)?.check).toBeNull();
+		expect(bulkResumeText(w('failureRate', { ...unclear, resumeSends: 1 }), true, DE, true)?.check).toBeNull();
 		// With a probe, a run at its maximum is offered a higher one, which checks them too.
 		expect(bulkResumeKind(w('maxTargets', { ...unclear, probeConfirmed: true }))).toBe('max');
 		expect(bulkResumeKind(w('unavailable', { ...unclear, probeConfirmed: true, maxTargets: 10 }))).toBe('check');
@@ -703,6 +877,49 @@ describe('going on from a run that halted', () => {
 		// A halt the page cannot write on from, and a changed run, stay as they were.
 		expect(bulkResumeKind(w('superseded', unclear))).toBeNull();
 		expect(bulkResumeKind(w('checksum', unclear))).toBe('none');
+	});
+
+	it('puts the step to check first where an earlier send is unclear, and says nowhere to continue', () => {
+		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
+		const check = 'Nachprüfen liest bei shop.example.invalid nach, ob die Änderung da ist; geschickt wird dabei nichts.';
+		// (a) Not reachable: the check comes first, the hint about another halt after it.
+		const a = bulkResumeText(w('unavailable', unclear), true, DE, true);
+		expect([a?.before, a?.check, a?.after]).toEqual([null, check, 'Hält das Nachprüfen gleich wieder an, ist shop.example.invalid noch nicht erreichbar; versuch es später noch einmal.']);
+		// (b) No access: reconnecting comes first, as the check needs it too, and ends with checking.
+		const b = bulkResumeText(w('unauthorized', unclear), true, DE, true);
+		expect([b?.before, b?.check, b?.after]).toEqual(['Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.', check, null]);
+		// (c) A blocked host: allowing it comes first, managed and self-hosted.
+		expect(bulkResumeText(w('blocked', unclear), true, DE, true)?.before).toBe('Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du nachprüfen.');
+		expect(bulkResumeText(w('blocked', unclear), false, DE, true)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du nachprüfen.');
+		// Writing switched off stops the check too: enabling it comes first, managed and self-hosted.
+		const off = bulkResumeText(w('shopifyWriteOff', unclear), true, DE, true);
+		expect([off?.before, off?.after]).toEqual(['Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald Bulk-Änderungen freigeschaltet sind, kannst du nachprüfen.', null]);
+		const offSelf = bulkResumeText(w('shopifyWriteOff', unclear), false, DE, true);
+		expect([offSelf?.before, offSelf?.after]).toEqual(['Du schaltest Bulk-Änderungen in der Konfiguration deiner Instanz frei (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Danach kannst du nachprüfen.', null]);
+		expect(bulkResumeText(w('shopifyWriteOff', unclear), false, EN, true)?.before).toBe('You enable bulk changes in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Then you can check again.');
+		expect(bulkResumeText(w('markupAddedByShop', unclear), true, DE, true)?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		// An undo that reaches the check after markup the store added reads the undo's words, cause and step after.
+		const undoMarkup = bulkResumeText(w('markupAddedByShop', { ...unclear, kind: 'undo' }), true, DE, true);
+		expect(undoMarkup?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before_undo', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		expect(undoMarkup?.cause).toBe(DE.tf('bulk.halt.markupAddedByShop_undo', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		expect(undoMarkup?.check).toBe(check);
+		// A lost access stays first, as before.
+		expect(bulkResumeText(w('credential', unclear), true, DE, true)?.before).toBe(DE.tf('bulk.halt.credential_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		// No sentence around the check names continuing as the next step, for any halt that can come
+		// to it; a way to write on later (Shopify markup) may follow the check.
+		for (const key of ['unavailable', 'unauthorized', 'blocked', 'shopifyWriteOff', 'markupAddedByShop', 'credential', 'failureRate', 'consecutiveFailures', 'maxTargets', 'storeAccessEnded', 'storeClientMisnamed']) {
+			for (const managed of [true, false]) {
+				const text = bulkResumeText(w(key, unclear), managed, DE, true);
+				expect(bulkResumeKind(w(key, unclear)), key).toBe('check');
+				expect([text?.cause, text?.before, text?.check, text?.after].join(' '), `${key} ${String(managed)}`).not.toMatch(/fortsetzen/);
+				const en = bulkResumeText(w(key, unclear), managed, EN, true);
+				expect([en?.cause, en?.before, en?.check, en?.after].join(' '), `${key} ${String(managed)} en`).not.toMatch(/can continue\.|continue it/);
+				expect(text?.check, key).toBe(check);
+			}
+		}
+		// Written on without an unclear send, the sentences stay as they were.
+		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 0 }), true, DE, true)?.before).toBe(DE.tf('bulk.halt.unavailable_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 0 }), true, DE, true)?.after).toBeNull();
 	});
 
 	it('says a conflict looked different than expected at the last read, one or several, and nothing at none', () => {
@@ -722,10 +939,10 @@ describe('going on from a run that halted', () => {
 		// The check found a third value: a conflict, never sent again, and no longer unclear.
 		const changed = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 0, conflicts: 1, resumeOpen: 1, resumeTries: 1, resumeSends: 0 };
 		expect(bulkResumeKind(w('failureRate', changed))).toBe('nothing');
-		const text = bulkResumeText(w('blocked', changed), true, DE);
+		const text = bulkResumeText(w('blocked', changed), true, DE, true);
 		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([
 			'Dieser Lauf schickt nichts mehr. Für Ziele, die sich bei shop.example.invalid inzwischen geändert hatten, bitte lynox im Chat, einen neuen Lauf zu planen; er liest den aktuellen Stand.', null, null, null, null]);
-		expect(bulkResumeText(w('failureRate', changed), true, EN)?.check).toBe('This run sends nothing more. For targets that had changed in shop.example.invalid in the meantime, ask lynox in a chat to plan a new run; it reads the current state.');
+		expect(bulkResumeText(w('failureRate', changed), true, EN, true)?.check).toBe('This run sends nothing more. For targets that had changed in shop.example.invalid in the meantime, ask lynox in a chat to plan a new run; it reads the current state.');
 		// No support link without the halt's own sentence.
 		expect(bulkSupportMailto({ ...w('blocked', changed), id: 'run-7', listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }, true, DE)).toBeNull();
 		// Each part of the rule holds it: something left to send, no conflict, nothing left at all,
@@ -745,7 +962,10 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('places every halt the engine names for a write run', () => {
-		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
+		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel',
+			// Neither clears by going on, so a write run halted on one is offered no resume: an
+			// instance that lost its control plane after approval is not set up again by resuming.
+			'shopifySelfHosted', 'shopifyNoApiVersion'];
 		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'discarded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete'];
 		const left = [...PLANNING_ONLY, ...NO_WRITE_ON];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
@@ -758,7 +978,7 @@ describe('going on from a run that halted', () => {
 	it('has every sentence in both languages for every halt it writes on from or refuses', () => {
 		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract', 'consentOutdated']) {
 			for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
-				const said = bulkResumeText(w(k), true, i)!;
+				const said = bulkResumeText(w(k), true, i, true)!;
 				for (const [part, text] of Object.entries(said)) if (text !== null) expect(text, `${lang} ${k} ${part}`).not.toMatch(/bulk\.|\{/);
 			}
 		}
@@ -767,103 +987,205 @@ describe('going on from a run that halted', () => {
 	// U-281: the fields with their article, the way on, and "wrote nothing" only where it is true.
 	it('words a halt for a connection that does not cover the run\'s fields', () => {
 		const none = { applied: 0, sentUnknown: 0 };
-		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, DE)).toEqual({
-			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Verbinde Shopify neu (Einstellungen → APIs).',
-			before: null, check: null, kept: null, soFar: null, allows: null,
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, DE, false)).toEqual({
+			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen).',
+			before: null, check: null, after: null, kept: null, soFar: null, allows: null,
 		});
-		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, EN)?.cause)
-			.toBe('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → APIs).');
-		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['alt', 'descriptionHtml', 'title'] }), true, DE)?.cause)
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, EN, false)?.cause)
+			.toBe('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → API connections).');
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['alt', 'descriptionHtml', 'title'] }), true, DE, false)?.cause)
 			.toContain('noch nicht, die Alt-Texte der Bilder, die Beschreibung und den Titel zu ändern.');
 		// A field this page has no name for, or none given: "these fields".
-		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml', 'vendor'] }), true, DE)?.cause).toContain('noch nicht, diese Felder zu ändern.');
-		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: null }), true, EN)?.cause).toContain('does not yet let lynox change these fields.');
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml', 'vendor'] }), true, DE, false)?.cause).toContain('noch nicht, diese Felder zu ändern.');
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: null }), true, EN, false)?.cause).toContain('does not yet let lynox change these fields.');
 		// Something of the run was written, or sent without a clear answer: not "wrote nothing".
 		for (const o of [{ applied: 1, sentUnknown: 0 }, { applied: 0, sentUnknown: 1 }]) {
-			const de = bulkResumeText(w('consentOutdated', { ...o, consentFields: ['descriptionHtml'] }), true, DE)!.cause;
+			const de = bulkResumeText(w('consentOutdated', { ...o, consentFields: ['descriptionHtml'] }), true, DE, false)!.cause;
 			expect(de).not.toContain('nichts geschrieben');
 			expect(de.startsWith('lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern.')).toBe(true);
 		}
-		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(DE))?.cause)
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(DE), false)?.cause)
 			.toBe('lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Das ändert sich nur, wenn der Inhaber dieser Instanz Shopify neu verbindet; bitte den Inhaber darum und lass den Lauf danach im Chat neu planen.');
 		// A mandate's session is not sent to a connection only the owner's reconnect sets right.
 		for (const [i, lang] of [[DE, 'de'], [EN, 'en']] as const) {
-			const mandate = bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(i))!.cause;
-			const owner = bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, i)!.cause;
+			const mandate = bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(i), false)!.cause;
+			const owner = bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, i, false)!.cause;
 			expect(mandate, lang).not.toBe(owner);
 			expect(mandate, lang).toMatch(lang === 'de' ? /Inhaber/ : /owner/);
-			const more = bulkResumeText(w('consentOutdated', { applied: 1, sentUnknown: 0, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(i))!.cause;
+			const more = bulkResumeText(w('consentOutdated', { applied: 1, sentUnknown: 0, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(i), false)!.cause;
 			expect(more, lang).toMatch(lang === 'de' ? /^lynox schreibt in diesem Lauf nichts mehr; .*Inhaber/ : /^lynox writes nothing more in this run; .*owner/);
 		}
 	});
 
 	it('words why a write run halted, and what to do first', () => {
-		expect(bulkResumeText(w('failureRate'), true, DE)).toMatchObject({
+		expect(bulkResumeText(w('failureRate'), true, DE, true)).toMatchObject({
 			cause: 'In diesem Durchgang liessen sich mehr als 50 Ziele nicht schreiben.',
 			before: 'Prüfe unten die Ziele mit Fehler, bevor du weiterschreibst.',
 		});
 		// Under twenty targets the halt comes at the first failure.
-		expect(bulkResumeText(w('failureRate', { failureLimit: 0 }), true, EN)?.cause).toBe('In this pass, a target could not be written.');
-		expect(bulkResumeText(w('consecutiveFailures'), true, DE)?.cause).toBe('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
-		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
-		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN)?.cause).toBe('The run reached the approved maximum: 40 targets.');
-		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
-		expect(bulkResumeText(w('unauthorized'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. Then you can continue.');
-		expect(bulkResumeText(w('credential'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
-		expect(bulkResumeText(w('unavailable'), true, EN)?.before).toBe('You can continue. If the run halts again right away, shop.example.invalid is not reachable yet; try again later.');
-		expect(bulkResumeText(w('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
-		expect(bulkResumeText(w('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);
-		expect(bulkResumeText(w('timeBudget'), true, DE)).toMatchObject({ before: null, soFar: null, allows: null });
+		expect(bulkResumeText(w('failureRate', { failureLimit: 0 }), true, EN, true)?.cause).toBe('In this pass, a target could not be written.');
+		expect(bulkResumeText(w('consecutiveFailures'), true, DE, true)?.cause).toBe('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
+		expect(bulkResumeText(w('unrecorded'), true, DE, true)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
+		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN, true)?.cause).toBe('The run reached the approved maximum: 40 targets.');
+		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE, true)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
+		expect(bulkResumeText(w('unauthorized'), true, EN, true)?.before).toBe('Open Settings → API connections and tap the chat icon next to the connection for shop.example.invalid to reconnect the access. Then you can continue.');
+		expect(bulkResumeText(w('credential'), true, EN, true)?.before).toBe('Open Settings → API connections and tap the chat icon next to the connection for shop.example.invalid to reconnect the access. If there is no connection, ask lynox in the chat to set up the access.');
+		expect(bulkResumeText(w('unavailable'), true, EN, true)?.before).toBe('You can continue. If the run halts again right away, shop.example.invalid is not reachable yet; try again later.');
+		expect(bulkResumeText(w('blocked'), false, DE, true)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
+		expect(bulkResumeText(w('blocked'), null, DE, true)?.before).toBe(bulkHaltText(at('blocked'), true, DE, true)?.before);
+		expect(bulkResumeText(w('timeBudget'), true, DE, true)).toMatchObject({ before: null, soFar: null, allows: null });
 		// Shopify's own switch: who turns it back on depends on who runs the instance.
-		expect(bulkResumeText(w('shopifyWriteOff'), true, DE)).toMatchObject({
+		expect(bulkResumeText(w('shopifyWriteOff'), true, DE, true)).toMatchObject({
 			cause: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kannst du ihn hier fortsetzen.',
 			before: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
 		});
-		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
+		expect(bulkResumeText(w('shopifyWriteOff'), false, EN, true)?.before).toBe('You enable bulk changes in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
 		// No way on past a changed run: no promise of what writing on keeps.
-		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, kept: null, soFar: null, allows: null });
+		expect(bulkResumeText(w('checksum'), true, DE, true)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, after: null, kept: null, soFar: null, allows: null });
+	});
+
+	it('counts as written only what the run wrote: a target found already holding its value is not', () => {
+		const heads = (written: number, takenBack: number, unchanged: number) => ({
+			deselected: 0, invalid: 0, unchanged, takenBack, written, settled: 0, conflict: 0, unclear: 0, failed: 0, open: 0,
+		});
+		const TAIL = ' Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.';
+		const STAYS = `Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal.${TAIL}`;
+		const NONE = `Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die übrigen Ziele.${TAIL}`;
+		// Only found ones: applied 2, none written by the run. The found ones are done, so the rest
+		// is tried, not all targets; the head counts them as unchanged.
+		expect(bulkResumeText(w('timeBudget', { applied: 2, heads: heads(0, 0, 2) }), true, DE, true)?.kept).toBe(NONE);
+		expect(bulkResumeText(w('timeBudget', { applied: 2, heads: heads(0, 0, 2), resumeTries: 4 }), true, EN, true)?.kept)
+			.toBe('No target is confirmed as written yet. lynox now tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		// Found and written mixed: something the run wrote stays, as before.
+		expect(bulkResumeText(w('timeBudget', { applied: 3, heads: heads(1, 0, 2) }), true, DE, true)?.kept).toBe(STAYS);
+		// Written and taken back since counts as applied, as before.
+		expect(bulkResumeText(w('timeBudget', { applied: 1, heads: heads(0, 1, 0) }), true, DE, true)?.kept).toBe(STAYS);
+		// An engine without heads: applied, as before.
+		expect(bulkResumeText(w('timeBudget', { applied: 2 }), true, DE, true)?.kept).toBe(STAYS);
+		// An undo keeps reading the applied count: the same heads give its sentence that something stays.
+		expect(bulkResumeText(w('timeBudget', { kind: 'undo', applied: 2, heads: heads(0, 0, 2) }), true, DE, true)?.kept)
+			.toBe('Was schon zurückgenommen ist, bleibt so. lynox nimmt alle übrigen Ziele zurück. Ausgenommen sind Ziele, deren früheren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
 	});
 
 	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
-		expect(bulkResumeText(w('timeBudget'), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
-		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('timeBudget'), true, DE, true)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE, true)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
 		// At its maximum the run writes on under the new one the owner types.
-		expect(bulkResumeText(w('maxTargets'), true, EN)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		expect(bulkResumeText(w('maxTargets'), true, EN, true)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
 		// With no target confirmed as written, nothing is said to stay — also where targets failed.
-		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0, failed: 0, failedOnce: 0 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
-		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, failed: 3, failedOnce: 3 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries all targets. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
-		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
-		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0, failed: 0, failedOnce: 0 }), true, DE, true)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die übrigen Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, failed: 3, failedOnce: 3 }), true, EN, true)?.kept).toBe('No target is confirmed as written yet. lynox now tries the remaining targets. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, DE, true)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die übrigen Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN, true)?.kept).toBe('No target is confirmed as written yet. lynox now tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
 	});
 
 	it('counts the targets failed so far, as at least the ones failed now on a run from before the count', () => {
-		expect(bulkResumeText(w('failureRate'), true, DE)?.soFar).toBe('70 Ziele sind bisher mindestens einmal gescheitert.');
-		expect(bulkResumeText(w('consecutiveFailures', { failedOnce: 1 }), true, EN)?.soFar).toBe('1 target has failed at least once so far.');
-		expect(bulkResumeText(w('failureRate', { failedOnce: null }), true, DE)?.soFar).toBe('Bisher sind mindestens 51 Ziele gescheitert.');
-		expect(bulkResumeText(w('failureRate', { failedOnce: null, failed: 1 }), true, EN)?.soFar).toBe('So far at least 1 target has failed.');
+		expect(bulkResumeText(w('failureRate'), true, DE, true)?.soFar).toBe('70 Ziele sind bisher mindestens einmal gescheitert.');
+		expect(bulkResumeText(w('consecutiveFailures', { failedOnce: 1 }), true, EN, true)?.soFar).toBe('1 target has failed at least once so far.');
+		expect(bulkResumeText(w('failureRate', { failedOnce: null }), true, DE, true)?.soFar).toBe('Bisher sind mindestens 51 Ziele ohne Bestätigung.');
+		expect(bulkResumeText(w('failureRate', { failedOnce: null, failed: 1 }), true, EN, true)?.soFar).toBe('So far, at least 1 target has no confirmation.');
+	});
+
+	it('names targets of which it is open whether the change arrived apart from the written ones, in the undo offer', () => {
+		const ex = (written: number, open: number | null, i: BulkI18n) => bulkUndoExplainText(open === null ? {} : { undoableParts: { written, open } }, i);
+		// Only written targets, or an engine without the parts: the sentence as before.
+		expect(ex(2, 0, DE)).toBe(DE.t('bulk.undo.explain'));
+		expect(ex(0, null, EN)).toBe(EN.t('bulk.undo.explain'));
+		// Written and open.
+		expect(ex(2, 3, DE)).toContain('Bei 3\u00a0weiteren Zielen ist offen, ob die Änderung beim Anbieter angekommen ist.');
+		expect(ex(2, 1, DE)).toContain('Bei einem weiteren Ziel ist offen, ob');
+		expect(ex(2, 1, EN)).toContain('For one more target it is unclear whether');
+		// The singular forms in full: one target, never "those".
+		expect(ex(2, 1, EN)).toBe('Taking back restores the previous value of every written target. For one more target it is unclear whether the change reached the provider. For that target, it checks first and only resets where the value from this run is in place. If someone has changed a target since, it leaves that target as it is and shows it to you. Before writing, it tells you how many targets it will work on, and needs a second approval.');
+		expect(ex(0, 1, EN)).toBe('No target is confirmed as written. For one target it is unclear whether the change reached the provider. Taking back checks that target and restores the previous value only where the value from this run is in place. Before writing, it tells you how many targets it will work on, and needs a second approval.');
+		expect(ex(2, 3, DE)).toMatch(/^Die Rücknahme stellt bei jedem geschriebenen Ziel/);
+		// None written: it does not say "every written target".
+		expect(ex(0, 1, DE)).toMatch(/^Kein Ziel ist als geschrieben bestätigt\. Bei einem Ziel ist offen, ob/);
+		expect(ex(0, 2, EN)).toMatch(/^No target is confirmed as written\. For 2\u00a0targets it is unclear/);
+		expect(ex(0, 2, DE)).not.toContain('jedem geschriebenen Ziel');
+		// No number promised before writing that the undo cannot know.
+		for (const [w, o] of [[2, 3], [0, 1]] as const) {
+			expect(ex(w, o, DE)).toContain('Vor dem Schreiben sagt sie dir, wie viele Ziele sie sich vornimmt');
+			expect(ex(w, o, DE)).not.toContain('zurückbekommen');
+			expect(ex(w, o, EN)).toContain('Before writing, it tells you how many targets it will work on');
+		}
+	});
+
+	it('does not count a target whose write was never confirmed as getting its value back, in the undo approval', () => {
+		const ap = (update: number, create: number, undoOpen: number | undefined, i: BulkI18n) =>
+			bulkUndoApproveText({ changes: { update, create, delete: 0, unchanged: 0, invalid: 0 }, ...(undoOpen === undefined ? {} : { undoOpen }) }, i);
+		expect(ap(3, 0, undefined, DE)).toBe('3\u00a0Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		// One target with none open: the singular sentence, never "1 Ziele".
+		expect(ap(1, 0, undefined, DE)).toBe('1\u00a0Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.');
+		expect(ap(0, 1, 0, EN)).toBe('1\u00a0target gets its previous value back. If someone has changed it since then, it stays as it is.');
+		expect(ap(3, 0, 0, EN)).toBe('3\u00a0targets get their previous value back. Targets that someone has changed since then stay as they are.');
+		expect(ap(2, 1, 1, DE)).toBe('2\u00a0geschriebene Ziele bekommen ihren Wert von vorher zurück. Bei einem weiteren Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		expect(ap(3, 0, 2, DE)).toBe('1\u00a0geschriebenes Ziel bekommt seinen Wert von vorher zurück. Bei 2\u00a0weiteren Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		expect(ap(4, 0, 1, EN)).toBe('3\u00a0written targets get their previous value back. For one more target, taking back checks first and only resets where the value from the original run is in place. Targets that someone has changed since then stay as they are.');
+		expect(ap(2, 0, 2, DE)).toBe('Bei 2\u00a0Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht.');
+		expect(ap(1, 0, 1, EN)).toBe('For one target, taking back checks first and only resets where the value from the original run is in place.');
+		// An older or out-of-step count above the targets is held to them: never a negative written count.
+		expect(ap(1, 0, 2, DE)).toBe('Bei einem Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht.');
+	});
+
+	it('says in the undo approval, where no target gets a value back, that the owner took every target out, that only the deletes are left after a take-out, or that the source only created entries', () => {
+		const ap = (update: number, deletes: number, tookOut: boolean, i: BulkI18n, listed = tookOut) =>
+			bulkUndoApproveText({ changes: { update, create: 0, delete: deletes, unchanged: 0, invalid: 0 }, undoOpen: 0 }, i, { tookOut, listed });
+		expect(ap(0, 0, true, DE)).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(ap(0, 0, true, EN)).toBe('You took out every target that would get a value back, so this undo writes nothing. Put one back, or leave it with “Not now”.');
+		expect(ap(0, 1, true, DE)).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(ap(0, 1, true, EN)).toBe('You took out every target that would get a value back; the undo now only deletes the entry below.');
+		expect(ap(0, 3, true, DE)).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; die Rücknahme löscht nur noch die 3\u00a0Einträge unten.');
+		expect(ap(0, 3, true, EN)).toBe('You took out every target that would get a value back; the undo now only deletes the 3\u00a0entries below.');
+		// Nothing taken out and no target listed: the source only created entries, and the sentence does not say the owner took any out.
+		expect(ap(0, 1, false, DE)).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur den Eintrag unten.');
+		expect(ap(0, 1, false, EN)).toBe('This undo writes no value back; it only deletes the entry below.');
+		expect(ap(0, 3, false, DE)).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur die 3\u00a0Einträge unten.');
+		expect(ap(0, 3, false, EN)).toBe('This undo writes no value back; it only deletes the 3\u00a0entries below.');
+		// A target left that gets a value back: the family as before, taken out or not.
+		expect(ap(1, 2, true, DE)).toBe('1\u00a0Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.');
+		// Without options it reads as nothing taken out and nothing listed.
+		expect(bulkUndoApproveText({ changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 }, undoOpen: 0 }, DE)).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur den Eintrag unten.');
+	});
+
+	it('says in the undo approval, where every listed target is refused and none taken out, that nothing comes back and why, not that anyone took a target out', () => {
+		const ap = (deletes: number, i: BulkI18n) =>
+			bulkUndoApproveText({ changes: { update: 0, create: 0, delete: deletes, unchanged: 0, invalid: 2 }, undoOpen: 0 }, i, { tookOut: false, listed: true });
+		expect(ap(0, DE)).toBe('Diese Rücknahme schreibt nichts: Kein Ziel bekommt seinen Wert von vorher zurück. Der Grund steht bei jedem Ziel. Verwirf sie, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(ap(0, EN)).toBe('This undo writes nothing: no target gets its previous value back. The reason is shown by each target. Discard it, or leave it with “Not now”.');
+		// Not listed either (no target at all): still nothing back, never "you took out".
+		expect(bulkUndoApproveText({ changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 }, undoOpen: 0 }, DE)).toBe(ap(0, DE));
+		expect(ap(1, DE)).toBe('Kein Ziel bekommt seinen Wert von vorher zurück; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(ap(1, EN)).toBe('No target gets its previous value back; the undo now only deletes the entry below.');
+		expect(ap(3, DE)).toBe('Kein Ziel bekommt seinen Wert von vorher zurück; die Rücknahme löscht nur noch die 3\u00a0Einträge unten.');
+		expect(ap(3, EN)).toBe('No target gets its previous value back; the undo now only deletes the 3\u00a0entries below.');
+		for (const d of [0, 1, 3]) {
+			expect(ap(d, DE)).not.toContain('Du hast');
+			expect(ap(d, EN)).not.toContain('You took');
+		}
 	});
 
 	it('says what writing on lets fail, by the limit against the open targets', () => {
-		const allows = (o: Partial<BulkRunDetailData>, i: BulkI18n) => bulkResumeText(w('failureRate', o), true, i)?.allows;
+		const allows = (o: Partial<BulkRunDetailData>, i: BulkI18n) => bulkResumeText(w('failureRate', o), true, i, true)?.allows;
 		// The limit below the open targets.
-		expect(allows({}, DE)).toBe('Mit dem Weiterschreiben dürfen noch einmal bis zu 50 Ziele scheitern, oder drei in Folge, bevor der Lauf wieder anhält.');
-		expect(allows({}, EN)).toBe('If you continue, up to 50 more targets may fail, or three in a row, before the run stops again.');
-		expect(allows({ failureLimit: 2 }, EN)).toBe('If you continue, up to 2 more targets may fail before the run stops again.');
-		expect(allows({ failureLimit: 1 }, DE)).toBe('Mit dem Weiterschreiben darf noch einmal ein Ziel scheitern, bevor der Lauf wieder anhält.');
-		expect(allows({ failureLimit: 1 }, EN)).toBe('If you continue, one more target may fail before the run stops again.');
-		expect(allows({ failureLimit: 0 }, EN)).toBe('If you continue, the run stops at the next target that cannot be written.');
+		expect(allows({}, DE)).toBe('Dabei dürfen noch einmal bis zu 50 Ziele scheitern, oder drei in Folge, bevor der Lauf wieder anhält.');
+		expect(allows({}, EN)).toBe('Up to 50 more targets may then fail, or three in a row, before the run stops again.');
+		expect(allows({ failureLimit: 2 }, EN)).toBe('Up to 2 more targets may then fail before the run stops again.');
+		expect(allows({ failureLimit: 1 }, DE)).toBe('Dabei darf noch einmal ein Ziel scheitern, bevor der Lauf wieder anhält.');
+		expect(allows({ failureLimit: 1 }, EN)).toBe('One more target may then fail before the run stops again.');
+		expect(allows({ failureLimit: 0 }, EN)).toBe('The run then stops at the next target that cannot be written.');
 		// The limit at or above the open targets: the share cannot be passed.
-		expect(allows({ resumeOpen: 38, resumeTries: 38 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf wegen Fehlschlägen nur noch an, wenn drei Ziele in Folge scheitern.');
-		expect(allows({ resumeOpen: 50, resumeTries: 50 }, EN)).toBe('If you continue, the run only stops for failures if three targets in a row fail.');
-		expect(allows({ resumeOpen: 3, resumeTries: 3, failureLimit: 3 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf wegen Fehlschlägen nur noch an, wenn drei Ziele in Folge scheitern.');
-		expect(allows({ resumeOpen: 2, resumeTries: 2 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf nicht mehr wegen Fehlschlägen an. Es sind nur noch 2 Ziele übrig.');
-		expect(allows({ resumeOpen: 1, resumeTries: 1 }, EN)).toBe('If you continue, the run no longer stops because of failures. Only one target is left.');
-		expect(allows({ resumeOpen: 1, resumeTries: 1 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf nicht mehr wegen Fehlschlägen an. Es ist nur noch ein Ziel übrig.');
+		expect(allows({ resumeOpen: 38, resumeTries: 38 }, DE)).toBe('Wegen Fehlschlägen hält der Lauf dann nur noch an, wenn drei Ziele in Folge scheitern.');
+		expect(allows({ resumeOpen: 50, resumeTries: 50 }, EN)).toBe('The run then only stops for failures if three targets in a row fail.');
+		expect(allows({ resumeOpen: 3, resumeTries: 3, failureLimit: 3 }, DE)).toBe('Wegen Fehlschlägen hält der Lauf dann nur noch an, wenn drei Ziele in Folge scheitern.');
+		expect(allows({ resumeOpen: 2, resumeTries: 2 }, DE)).toBe('Wegen Fehlschlägen hält der Lauf dann nicht mehr an. Es sind nur noch 2 Ziele übrig.');
+		expect(allows({ resumeOpen: 1, resumeTries: 1 }, EN)).toBe('The run then no longer stops because of failures. Only one target is left.');
+		expect(allows({ resumeOpen: 1, resumeTries: 1 }, DE)).toBe('Wegen Fehlschlägen hält der Lauf dann nicht mehr an. Es ist nur noch ein Ziel übrig.');
 		// Bounded by the open targets, never by the maximum: a target can fail before it is sent to.
 		expect(allows({ resumeTries: 1 }, DE)).toBe(allows({}, DE));
 		expect(allows({ resumeOpen: 0, resumeTries: 0 }, DE)).toBeNull();
 		// Only on a halt on failures.
-		expect(bulkResumeText(w('timeBudget'), true, DE)?.allows).toBeNull();
+		expect(bulkResumeText(w('timeBudget'), true, DE, true)?.allows).toBeNull();
 	});
 
 	it('takes a maximum above the current one and at most every target, as a whole number', () => {
@@ -892,6 +1214,61 @@ describe('going on from a run that halted', () => {
 				bulkHaltCause(any(haltKey, { phase, haltReason: engine, probe: haltKey === 'probeRequired' ? PROBE : null }), true, 'Ziele lesen', DE));
 			expect(said.some((x) => x !== engine && !/bulk\.|\{/.test(x)), haltKey).toBe(true);
 		}
+	});
+
+	it('says a store\'s own cause with the page\'s sentence in every phase, and promises going on only where the page offers it (U-232)', () => {
+		const causes = ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion'];
+		const goingOn = ['shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable'];
+		for (const [lang, i, t] of [['de', DE, de], ['en', EN, en]] as const) {
+			for (const k of causes) {
+				const engine = BULK_HALT_REASONS[k as keyof typeof BULK_HALT_REASONS];
+				// Every phase, exactly the page's cause: never the engine's reason, and no promise in it.
+				for (const phase of ['planned', 'approved', 'writing', 'aborted'] as const) {
+					expect([lang, k, phase, bulkHaltCause(any(k, { phase, haltReason: engine }), true, null, i)]).toEqual([lang, k, phase, t[`bulk.halt.${k}`]]);
+				}
+				const ways = goingOn.includes(k);
+				// A planned run with its restart button: the promise as its step; without one, none.
+				expect([lang, k, bulkHaltText(any(k, { phase: 'planned' }), true, i, true)?.before ?? null]).toEqual([lang, k, ways ? t[`bulk.halt.${k}_before`] : null]);
+				expect([lang, k, bulkHaltText(any(k, { phase: 'planned', judge: { rule: 'r' } as never, judgeServedBy: null }), true, i, true)?.before ?? null]).toEqual([lang, k, null]);
+				if (!ways) {
+					// No way on: no sentence offers writing on, so the page offers none.
+					expect([k, bulkResumeKind(w(k))]).toEqual([k, null]);
+					continue;
+				}
+				// A write run: the promise with writing on, and its own form with checking.
+				expect([lang, k, bulkResumeText(w(k), true, i, true)?.before]).toEqual([lang, k, t[`bulk.halt.${k}_before`]]);
+				expect([lang, k, bulkResumeText(w(k, { sentUnknown: 1, resumeSends: 0 }), true, i, true)?.before]).toEqual([lang, k, t[`bulk.halt.${k}_before_check`]]);
+				// A mandate sees no step: it reads that the owner can go on, only where the owner is offered it.
+				const mandate = bulkMandateI18n(i);
+				expect([lang, k, bulkHaltCause(any(k, { haltReason: engine }), true, null, mandate, true)]).toEqual([lang, k, `${t[`bulk.halt.${k}`]} ${t[`bulk.halt.${k}_before_mandate`]}`]);
+				expect([lang, k, bulkHaltCause(any(k, { phase: 'planned', judge: { rule: 'r' } as never, judgeServedBy: null }), true, null, mandate, true)]).toEqual([lang, k, t[`bulk.halt.${k}`]]);
+				expect([lang, k, bulkHaltCause(any(k, { resumeOpen: 2, resumeTries: 2, resumeSends: 0, sentUnknown: 0, conflicts: 2 }), true, null, mandate, true)]).toEqual([lang, k, t[`bulk.halt.${k}`]]);
+				// Checking is not continuing: the owner is offered a check, so the mandate reads the cause alone.
+				const checked = any(k, { haltReason: engine, sentUnknown: 1, resumeSends: 0 });
+				expect(bulkResumeKind(checked)).toBe('check');
+				expect([lang, k, bulkHaltCause(checked, true, null, mandate, true)]).toEqual([lang, k, t[`bulk.halt.${k}`]]);
+			}
+		}
+	});
+
+	it('says a start check\'s refusal on a store\'s own cause by its code, approving and writing on (U-232)', () => {
+		for (const k of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion']) {
+			expect([k, bulkReachRefusalKey(`reach_approve_${k}`)]).toEqual([k, `bulk.reach.approve.${k}`]);
+			expect([k, bulkReachRefusalKey(`reach_resume_${k}`)]).toEqual([k, `bulk.halt.${k}`]);
+			for (const lang of [de, en]) expect([k, typeof lang[`bulk.reach.approve.${k}`]]).toEqual([k, 'string']);
+		}
+		// Any other code, or a cause that is not a store's, keeps the engine's sentence.
+		for (const code of ['reach_approve_credential', 'reach_later_shopifyNotCleared', 'planner_unknown', 'reach_approve_constructor']) expect([code, bulkReachRefusalKey(code)]).toEqual([code, null]);
+	});
+
+	it('takes approving and writing on away only where they can never pass: self-hosted, no API version', () => {
+		const hopeless = ['shopifySelfHosted', 'shopifyNoApiVersion'];
+		for (const k of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion']) {
+			expect([k, bulkReachHopeless(`reach_approve_${k}`)]).toEqual([k, hopeless.includes(k)]);
+			// Writing on meets the same start check: the same causes take it away.
+			expect([k, bulkReachHopeless(`reach_resume_${k}`)]).toEqual([k, hopeless.includes(k)]);
+		}
+		for (const code of [undefined, 'reach_approve_credential', 'reach_resume_credential', 'planner_unknown', 'reach_approve_constructor', 'reach_undo_shopifySelfHosted', 'reach_resumex_shopifySelfHosted', 'xreach_approve_shopifySelfHosted', 'xreach_resume_shopifySelfHosted']) expect([code, bulkReachHopeless(code)]).toEqual([code, false]);
 	});
 
 	it('words the five halts that had only the engine\'s reason, in both languages', () => {
@@ -954,11 +1331,11 @@ describe('going on from a run that halted', () => {
 		expect(link).toBe(`mailto:support@lynox.ai?subject=${encodeURIComponent('lynox: Massenlauf run-7 auf shop.example.invalid angehalten')}`);
 		expect(bulkSupportMailto(any('shopifyWriteOff'), null, EN)).toBe(`mailto:support@lynox.ai?subject=${encodeURIComponent('lynox: bulk run run-7 on shop.example.invalid halted')}`);
 		// The sentence it stands next to names support, and keeps the address readable.
-		expect(bulkHaltText(planned, true, DE)?.before).toContain('support@lynox.ai');
-		expect(bulkResumeText(any('shopifyWriteOff'), true, DE)?.before).toContain('support@lynox.ai');
+		expect(bulkHaltText(planned, true, DE, true)?.before).toContain('support@lynox.ai');
+		expect(bulkResumeText(any('shopifyWriteOff'), true, DE, true)?.before).toContain('support@lynox.ai');
 		// Self-hosted: the sentence sends the owner to their configuration, not to support.
 		expect(bulkSupportMailto(planned, false, DE)).toBeNull();
-		expect(bulkHaltText(planned, false, DE)?.before).not.toContain('support@');
+		expect(bulkHaltText(planned, false, DE, true)?.before).not.toContain('support@');
 		// A halt whose sentence does not name support has no link.
 		for (const haltKey of ['unavailable', 'spendLimit', 'credential', 'probeRequired']) {
 			expect(bulkSupportMailto(any(haltKey, { phase: 'planned' }), true, DE), haltKey).toBeNull();
@@ -969,9 +1346,9 @@ describe('going on from a run that halted', () => {
 		// A judged run that cannot be judged on gets no restart, so neither sentence nor link; with its model it gets both.
 		const judgedPlanned = any('blocked', { phase: 'planned', judge: judged.judge, judgeServedBy: judged.judgeServedBy });
 		expect(bulkSupportMailto(judgedPlanned, true, DE)).toBe(link);
-		expect(bulkHaltText(judgedPlanned, true, DE)?.before).toContain('support@lynox.ai');
+		expect(bulkHaltText(judgedPlanned, true, DE, true)?.before).toContain('support@lynox.ai');
 		for (const without of [{ ...judgedPlanned, judgeServedBy: null }, { ...judgedPlanned, judgeOwnKey: true }]) {
-			expect([without.judgeOwnKey, bulkSupportMailto(without, true, DE), bulkHaltText(without, true, DE)?.before]).toEqual([without.judgeOwnKey, null, null]);
+			expect([without.judgeOwnKey, bulkSupportMailto(without, true, DE), bulkHaltText(without, true, DE, true)?.before]).toEqual([without.judgeOwnKey, null, null]);
 		}
 		expect(bulkSupportMailto(any('blocked', { phase: 'aborted' }), true, DE)).toBeNull();
 	});
@@ -1095,6 +1472,15 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.head.stopped');
 		// A discarded run is named as discarded, next to its chip and sentence (U-324).
 		expect(bulkHaltHeadKey({ haltKey: 'discarded' })).toBe('bulk.head.discarded');
+		// Only a planned run waits for its start; the same key on a run past it stays a halt (U-437).
+		// It reads "Next step" only where its sentence names the viewer's start, else "Waiting".
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'awaitingStart' }, true)).toBe('bulk.head.next');
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'listed' }, true)).toBe('bulk.head.next');
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'awaitingStart' })).toBe('bulk.head.waiting');
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'listed' }, false)).toBe('bulk.head.waiting');
+		expect(bulkHaltHeadKey({ phase: 'writing', haltKey: 'awaitingStart' }, true)).toBe('bulk.head.halted');
+		expect(bulkHaltHeadKey({ phase: 'writing', haltKey: 'listed' }, true)).toBe('bulk.head.halted');
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'unavailable' }, true)).toBe('bulk.head.halted');
 		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.stopped_suffix');
 		for (const haltKey of ['maxTargets', 'costCap', 'consecutiveFailures', null]) {
 			expect(bulkHaltHeadKey({ haltKey })).toBe('bulk.head.halted');
@@ -1104,7 +1490,7 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 		expect(Object.keys(BULK_HALT_REASONS)).toContain('stoppedByOwner');
 	});
 	it('both views ask the helpers, not a fixed key', () => {
-		expect(readFileSync(`${HERE}BulkRunDetail.svelte`, 'utf8')).toContain("{t(bulkHaltHeadKey(run))}");
+		expect(readFileSync(`${HERE}BulkRunDetail.svelte`, 'utf8')).toContain("{t(bulkHaltHeadKey(run, startButton !== null && ownerActs))}");
 		expect(readFileSync(`${HERE}BulkRunsView.svelte`, 'utf8')).toContain("t(bulkHaltSuffixKey(run))");
 		const i18n = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 		expect(i18n).toContain("'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' }");
@@ -1594,14 +1980,14 @@ describe('the sentences the page words by the list\'s form, the judge and the re
 		});
 		const cause = 'Die Liste ist länger oder grösser, als ein Massenlauf fassen kann. Dieser Lauf lässt sich nicht fortsetzen; lynox hat nichts geändert.';
 		for (const form of ['shopify', 'shopify_filtered']) {
-			expect(bulkHaltText(halted(form), true, DE)).toEqual({ cause, before: 'Bitte lynox im Chat, den Lauf für weniger Produkte neu zu planen, etwa nur für bestimmte Produkttypen oder Anbieter.' });
+			expect(bulkHaltText(halted(form), true, DE, false)).toEqual({ cause, before: 'Bitte lynox im Chat, den Lauf für weniger Produkte neu zu planen, etwa nur für bestimmte Produkttypen oder Anbieter.' });
 		}
-		expect(bulkHaltText(halted('woocommerce', 'http:shop.example.com'), true, DE)).toEqual({ cause, before: 'Lässt sich die Liste bei ihrer Quelle in kleinere Teile aufteilen, bitte lynox im Chat, für einen Teil davon einen neuen Lauf zu planen.' });
+		expect(bulkHaltText(halted('woocommerce', 'http:shop.example.com'), true, DE, false)).toEqual({ cause, before: 'Lässt sich die Liste bei ihrer Quelle in kleinere Teile aufteilen, bitte lynox im Chat, für einen Teil davon einen neuen Lauf zu planen.' });
 		// Only a list too large reads the Shopify step: another halt of a Shopify list keeps its own.
 		for (const haltKey of ['listNoProgress', 'listNotAList']) {
-			const shop = bulkHaltText({ ...halted('shopify'), haltKey }, true, DE);
+			const shop = bulkHaltText({ ...halted('shopify'), haltKey }, true, DE, false);
 			expect(shop?.before ?? '').not.toContain('weniger Produkte');
-			expect(shop).toEqual(bulkHaltText({ ...halted('woocommerce', 'http:shop.example.com'), haltKey }, true, DE));
+			expect(shop).toEqual(bulkHaltText({ ...halted('woocommerce', 'http:shop.example.com'), haltKey }, true, DE, false));
 		}
 	});
 });
@@ -1687,12 +2073,14 @@ describe('bulkHiddenCountText', () => {
 
 describe('a run the owner discarded before approving it, as the list and the step chip name it', () => {
 	const DISCARDED = 'the owner discarded this run before approving it';
-	it('reads "discarded" without the halted suffix; every other aborted run reads as before', () => {
+	it('reads "discarded" without the halted suffix; another end before approval reads "aborted"', () => {
 		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'discarded' })).toBe('bulk.phase.discarded');
 		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'discarded', haltReason: DISCARDED })).toBe(false);
 		// The twins: another end before approval, and a run that is not aborted.
-		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'superseded' })).toBe('bulk.phase.aborted');
-		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'superseded', haltReason: 'x' })).toBe(true);
+		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'mandateEnded' })).toBe('bulk.phase.aborted');
+		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'mandateEnded', haltReason: 'x' })).toBe(false);
+		// A halted run that is not aborted carries the suffix.
+		expect(bulkPhaseHasSuffix({ phase: 'writing', haltKey: 'mandateEnded', haltReason: 'x' })).toBe(true);
 		expect(bulkPhaseKey({ phase: 'previewed', haltKey: null })).toBe('bulk.phase.previewed');
 		expect(bulkPhaseHasSuffix({ phase: 'previewed', haltKey: null, haltReason: null })).toBe(false);
 	});
@@ -1726,5 +2114,137 @@ describe('bulkSecretInContextKey', () => {
 		expect(bulkSecretInContextKey(true, false)).toBe('bulk.invalid.secret_in_context');
 		expect(bulkSecretInContextKey(false, true)).toBe('bulk.invalid.secret_in_context_column');
 		expect(bulkSecretInContextKey(false, false)).toBe('bulk.invalid.secret_in_context_field');
+	});
+});
+
+// A start refused because the run's rule came from a saved artifact that changed, is gone or
+// cannot be read now, and the sentence under such a rule: the page words each itself, and names
+// the artifact by the title it had at planning, a value an access can write.
+describe('the sentences about a rule taken from a saved artifact', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const Q = String.raw`'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"`;
+	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.(?:rule_source\.[a-z_]+|(?:start|restart|approve)\.rule_from_artifact[a-z_]*))': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = (m[2] ?? m[3])!; en[m[1]!] = (m[4] ?? m[5])!; }
+	}
+
+	it('picks a sentence for every code, named only where a title is there and the artifact can be read', () => {
+		expect(BULK_RULE_SOURCE_CODES.map((c) => [bulkRuleSourceKey(c, true), bulkRuleSourceKey(c, false)])).toEqual([
+			['bulk.rule_source.changed_titled', 'bulk.rule_source.changed'],
+			['bulk.rule_source.gone_titled', 'bulk.rule_source.gone'],
+			['bulk.rule_source.unreadable', 'bulk.rule_source.unreadable'],
+		]);
+		expect(bulkRuleSourceKey('checksum', true)).toBeNull();
+		expect(bulkRuleSourceKey(undefined, false)).toBeNull();
+		expect([bulkRuleFromArtifactKey('start', true), bulkRuleFromArtifactKey('restart', false), bulkRuleFromArtifactKey('approve', false)])
+			.toEqual(['bulk.start.rule_from_artifact', 'bulk.restart.rule_from_artifact_untitled', 'bulk.approve.rule_from_artifact_untitled']);
+	});
+
+	// After the start the artifact may have changed or gone: where judging goes on and at the approval
+	// the sentence says the rule was taken when the run was planned, with no pointer to Artifacts (U-461).
+	it('says at a restart and at the approval that the rule was taken when the run was planned, word for word', () => {
+		const fr = 'Prüf, ob sie sagt, was du willst, bevor du die Beurteilung fortsetzt.';
+		const fe = 'Check that it says what you want before you continue the judging.';
+		const ar = 'Prüf, ob sie sagt, was du willst, bevor du freigibst.';
+		const ae = 'Check that it says what you want before you approve.';
+		expect([de['bulk.restart.rule_from_artifact'], en['bulk.restart.rule_from_artifact']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus {title} übernommen. ${fr}`, `This rule was taken word for word from {title} when the run was planned. ${fe}`]);
+		expect([de['bulk.restart.rule_from_artifact_untitled'], en['bulk.restart.rule_from_artifact_untitled']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus einem gespeicherten Artefakt übernommen. ${fr}`, `This rule was taken word for word from a saved artifact when the run was planned. ${fe}`]);
+		expect([de['bulk.approve.rule_from_artifact'], en['bulk.approve.rule_from_artifact']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus {title} übernommen. ${ar}`, `This rule was taken word for word from {title} when the run was planned. ${ae}`]);
+		expect([de['bulk.approve.rule_from_artifact_untitled'], en['bulk.approve.rule_from_artifact_untitled']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus einem gespeicherten Artefakt übernommen. ${ar}`, `This rule was taken word for word from a saved artifact when the run was planned. ${ae}`]);
+	});
+
+	it('takes a title only when it is text with more than spaces', () => {
+		expect([bulkArtifactTitle('Regeln'), bulkArtifactTitle(''), bulkArtifactTitle('  \n'), bulkArtifactTitle(undefined), bulkArtifactTitle(null), bulkArtifactTitle(7)])
+			.toEqual(['Regeln', null, null, null, null, null]);
+	});
+
+	it('has each sentence in both languages; a named one has its title slot and no quote marks of its own around it', () => {
+		const keys = [...BULK_RULE_SOURCE_CODES.flatMap((c) => [bulkRuleSourceKey(c, true)!, bulkRuleSourceKey(c, false)!]),
+			...(['start', 'restart', 'approve'] as const).flatMap((s) => [bulkRuleFromArtifactKey(s, true), bulkRuleFromArtifactKey(s, false)])];
+		for (const key of new Set(keys)) {
+			for (const table of [de, en]) {
+				expect(table[key], key).toBeDefined();
+				expect(table[key]!.includes('{title}'), key).toBe(key.endsWith('_titled') || key.endsWith('.rule_from_artifact'));
+				expect(table[key], key).not.toMatch(/[„“”"»«]\{title\}|\{title\}[„“”"»«]/);
+			}
+		}
+	});
+});
+
+// An answer the rule refused names the field and the rule it broke: read from the i18n
+// source, both languages, word for word; never a value, which the engine does not keep.
+describe('the sentence for an answer the rule refused', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!.replace(/\\'/g, "'"); en[m[1]!] = m[3]!.replace(/\\'/g, "'"); }
+	}
+	const from = (table: Record<string, string>): BulkI18n => ({
+		t: (k) => table[k] ?? k,
+		tf: (k, vars) => Object.entries(vars).reduce((s, [name, v]) => s.split(`{${name}}`).join(v), table[k] ?? k),
+	});
+	const DE = from({ ...de, 'bulk.field.shopify.seo_title': 'SEO-Titel' });
+	const EN = from({ ...en, 'bulk.field.shopify.seo_title': 'SEO title' });
+	const host = 'acme.myshopify.com';
+	const seo = { field: 'seo_title', kind: 'maxLength', limit: 60 };
+	const ctx = (refusal: unknown, dataStore = false) => ({ field: undefined, host, dataStore, refusal: refusal as never });
+
+	it('names the field and the limit on a Shopify run, in German and English', () => {
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx(seo))).toBe(
+			'Das Modell hat für dieses Produkt keine verwertbare Antwort gegeben. Feld SEO-Titel: Der Text ist länger als 60 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.',
+		);
+		expect(bulkInvalidText('verdict_invalid', true, true, EN, ctx(seo))).toBe(
+			'The model gave no usable answer for this product. Field SEO title: the text is longer than 60 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.',
+		);
+	});
+
+	it('names the field by the rule on any other run', () => {
+		expect(bulkInvalidText('verdict_invalid', false, true, DE, { ...ctx({ field: 'summary', kind: 'minLength', limit: 3 }, true), host: null })).toBe(
+			'Das Modell hat für dieses Ziel keine verwertbare Antwort gegeben. Feld summary: Der Text ist kürzer als 3 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.',
+		);
+		expect(bulkInvalidText('verdict_invalid', false, true, EN, { ...ctx({ field: 'summary', kind: 'minLength', limit: 3 }, true), host: null })).toBe(
+			'The model gave no usable answer for this target. Field summary: the text is shorter than 3 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.',
+		);
+	});
+
+	it('has a sentence for every rule kind in both languages', () => {
+		for (const kind of BULK_REFUSAL_KINDS) {
+			expect(de[`bulk.invalid.refusal.${kind}`], kind).toBeDefined();
+			expect(en[`bulk.invalid.refusal.${kind}`], kind).toBeDefined();
+			expect(bulkRefusalText({ field: 'title', kind, limit: 2 }, false, null, EN), kind).not.toContain('bulk.invalid');
+		}
+	});
+
+	it('words each rule kind as agreed, in German and English', () => {
+		const agreed: Record<string, [string, string]> = {
+			maxLength: ['Der Text ist länger als 2 Zeichen', 'the text is longer than 2 characters'],
+			minLength: ['Der Text ist kürzer als 2 Zeichen', 'the text is shorter than 2 characters'],
+			maximum: ['Der Wert ist grösser als 2', 'the value is greater than 2'],
+			minimum: ['Der Wert ist kleiner als 2', 'the value is less than 2'],
+			maxItems: ['Die Liste hat mehr als 2 Einträge', 'the list has more than 2 entries'],
+			enum: ['Der Wert gehört nicht zu den erlaubten Werten', 'the value is not one of the allowed values'],
+			pattern: ['Der Wert hat nicht die verlangte Form', 'the value is not in the required form'],
+			type: ['Der Wert hat den falschen Typ', 'the value has the wrong type'],
+			required: ['Das Feld fehlt', 'the field is missing'],
+		};
+		expect(Object.keys(agreed).sort()).toEqual([...BULK_REFUSAL_KINDS].sort());
+		for (const [kind, [deRule, enRule]] of Object.entries(agreed)) {
+			expect(bulkRefusalSentence({ field: 'title', kind: kind as never, limit: 2 }, false, DE)?.rule, kind).toBe(deRule);
+			expect(bulkRefusalSentence({ field: 'title', kind: kind as never, limit: 2 }, false, EN)?.rule, kind).toBe(enRule);
+		}
+	});
+
+	it('reads the sentence without a field where none was kept, the kind is unknown or a bound is missing', () => {
+		const plain = bulkInvalidText('verdict_invalid', true, true, DE);
+		expect(plain).toBe(de['bulk.invalid.verdict_invalid']);
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx(undefined))).toBe(plain);
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx({ field: 'seo_title', kind: 'shout' }))).toBe(plain);
+		expect(bulkInvalidText('verdict_invalid', true, true, DE, ctx({ field: 'seo_title', kind: 'maxLength' }))).toBe(plain);
 	});
 });

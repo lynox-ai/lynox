@@ -570,6 +570,8 @@ describe('save_workflow — workflow_id source', () => {
     const parsed = JSON.parse(result) as { workflow_id: string; already_reusable: boolean };
     expect(parsed.already_reusable).toBe(true);
     expect(parsed.workflow_id).toBe('tmpl-1');
+    // The stored name is left out: it can be text a prior turn brought in from outside.
+    expect(Object.keys(parsed).sort()).toEqual(['already_reusable', 'next', 'steps', 'workflow_id']);
   });
 
   it('errors for an unknown workflow_id', async () => {

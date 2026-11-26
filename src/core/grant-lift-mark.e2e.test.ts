@@ -379,7 +379,7 @@ describe('the mark at the write gate itself, with a contract handed to the agent
     });
     const ctx = createToolContext({});
     ctx.apiStore = store;
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     const [ev] = await run(withGrantId(contractFor('example.com', '/v1/report'), 'grant-shop'), 'https://example.com/v1/report', ctx, { promptUser });
     expect(promptUser).toHaveBeenCalled();
     expect(sent.map((s) => s.method)).toEqual(['POST']);

@@ -375,7 +375,7 @@ describe('run_workflow without a run history', () => {
     const toolContext = createToolContext({});
     toolContext.containment = containment;
     if (withHistory) toolContext.runHistory = history;
-    return { toolContext, currentThreadId: thread, getAvailableTools: () => [] } as unknown as IAgent;
+    return { toolContext, currentThreadId: thread, getAvailableTools: () => [], hasRunCostCeiling: () => false } as unknown as IAgent;
   };
 
   it('is refused in a contained chat before anything runs, and goes on elsewhere (control)', async () => {
