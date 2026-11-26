@@ -12,6 +12,7 @@ import { EngineDb, deriveEngineEncKey } from './engine-db.js';
 import { encryptStoredText } from './migration-rekey.js';
 import { RunHistory } from './run-history.js';
 import { generateEphemeralKeypair, deriveTransferKey, deserializePublicKey, serializePublicKey } from './migration-crypto.js';
+import { MIGRATION_MEMORY } from './migration-ceiling.js';
 
 const calls = { stores: 0, ledgers: 0, rewritten: [] as string[], judged: [] as Array<{ store: string; input: { rawBytes: number; othersBytes: number; restBytes: number; maxTotalBytes: number } }> };
 /** Every plaintext buffer the source makes: the framed payloads and the bodies they were framed from. */
@@ -262,8 +263,8 @@ describe('a store is judged by its raw size before its plaintext form is built',
     source();
     const at = engineInput();
     const vast = { import_limit_mb: 1e12, baseline_mb: 0, k: 1, rest_factor: 0 };
-    // Resident 100 MiB, so the limit sits exactly at 100 + kSource * engine.db.
-    const fits = 100 + (7.0 * at.rawBytes) / MIB;
+    // Resident 100 MiB, so the limit sits exactly at 100 + the fixed part + kSource * engine.db.
+    const fits = 100 + MIGRATION_MEMORY.kSourceBaseMb + (MIGRATION_MEMORY.kSource * at.rawBytes) / MIB;
     const own = (limitMb: number) => ({ limitMb: () => limitMb, rssMb: () => 100 });
     new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: own(fits) }).export(key(), undefined, { plain: { ceiling: vast } });
     expect(calls.rewritten).toContain('engine.db');
@@ -271,6 +272,36 @@ describe('a store is judged by its raw size before its plaintext form is built',
     const r = new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: own(fits - 0.001) }).export(key(), undefined, { plain: { ceiling: vast } });
     expect(calls.rewritten).not.toContain('engine.db');
     expect(r.plain?.stores.find((s) => s.store === 'engine.db')).toMatchObject({ path: 'raw', reason: 'source-memory' });
+  });
+
+  it('against this instance\'s own memory, a store judged later counts the stores let through before it', () => {
+    source();
+    const at = engineInput();
+    // history.db's raw size, from one export with room for everything.
+    new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT }).export(key(), undefined, { plain: { ceiling: { import_limit_mb: 1e12, baseline_mb: 0, k: 1, rest_factor: 0 } } });
+    const history = calls.judged.find((j) => j.store === 'other');
+    expect(history).toBeDefined();
+    const historyRaw = history!.input.rawBytes;
+    calls.judged.length = 0; calls.rewritten.length = 0;
+    const vast = { import_limit_mb: 1e12, baseline_mb: 0, k: 1, rest_factor: 0 };
+    const both = 100 + MIGRATION_MEMORY.kSourceBaseMb + (MIGRATION_MEMORY.kSource * (at.rawBytes + historyRaw)) / MIB;
+    // Room for both together: both are rewritten. The memory is read before the first rewrite and
+    // again for history.db; unchanged, the joint line decides.
+    let reads = 0;
+    new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: { limitMb: () => both, rssMb: () => { reads++; return 100; } } }).export(key(), undefined, { plain: { ceiling: vast } });
+    expect(reads).toBe(2);
+    expect(calls.rewritten).toEqual(['engine.db', 'history.db']);
+    calls.rewritten.length = 0;
+    // The same room, but the memory has grown past it by history.db's turn: history.db is not rewritten.
+    let later = 0;
+    const grown = new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: { limitMb: () => both, rssMb: () => (later++ === 0 ? 100 : both) } }).export(key(), undefined, { plain: { ceiling: vast } });
+    expect(calls.rewritten).toEqual(['engine.db']);
+    expect(grown.plain?.stores.find((s) => s.store === 'history.db')).toMatchObject({ path: 'raw', reason: 'source-memory' });
+    calls.rewritten.length = 0;
+    // A thousandth of a MiB less: engine.db still fits alone, history.db not next to it.
+    const r = new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: { limitMb: () => both - 0.001, rssMb: () => 100 } }).export(key(), undefined, { plain: { ceiling: vast } });
+    expect(calls.rewritten).toEqual(['engine.db']);
+    expect(r.plain?.stores.find((s) => s.store === 'history.db')).toMatchObject({ path: 'raw', reason: 'source-memory' });
   });
 
   it('a store refused before its rewrite is reported with the reason', () => {

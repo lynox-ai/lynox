@@ -474,13 +474,15 @@ async function applyRunEffect(
   /** One claimed target: what to record for it. */
   async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
     Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
+    let localSent = false;
     try {
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
       if (cur !== 'foreign' && (sameImage(cur, t.after, htmlFields) || (savedForm && sameInSavedForm(cur, t.after, htmlFields)))) {
-        // Found as planned: either a loop of this run wrote it and died before recording it
-        // (the target is marked sent), or someone else set the value, and the run sends
-        // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
+        // Found as planned: a send of this run may have written it (one still unclear, or on a
+        // local run a writer that threw after its write), or someone else set the value; the run
+        // sends nothing to it, and the ledger tells the two apart ({@link
+        // BulkLedger.recordApplied}, `found_unsent`). What is there is
         // also what an undo must expect.
         // Found only under the HTML comparison is not counted as a rewrite: the comparison explains
         // the store's form of the planned description, as for a read-back.
@@ -502,7 +504,7 @@ async function applyRunEffect(
       // target is recorded still left a row saying whose credential reached the host.
       const sent = (): void => { ledger.markSent(runId, t.seq, carried?.() ?? null); };
       const refused = (): void => { ledger.markRefused(runId, t.seq); };
-      if (w.reportsSend !== true) sent();
+      if (w.reportsSend !== true) { sent(); localSent = true; }
       const out = await w.write(t.key, t.after, sent, refused);
       if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
       return {
@@ -511,6 +513,11 @@ async function applyRunEffect(
         ...(out.hostRewrote === true ? { hostRewrote: true as const } : {}),
       };
     } catch (err: unknown) {
+      // A local writer that throws has answered: its outcome is known, so its send is booked as
+      // answered, as an external writer's refusal is (`onRefused`). Only the send of this pass,
+      // never one a loop that died left before it. No count reads a local run's open sends today;
+      // this keeps the column true for whatever reads it next.
+      if (localSent) ledger.markRefused(runId, t.seq);
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
       if (err instanceof BulkSecretError) return { kind: 'secret' };
@@ -772,7 +779,7 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
       if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error('not a row');
       // Bulk apply runs in the worker, outside any conversation, so it holds no grant set:
       // the row reads as unknown, and an update keeps what the row already held beside it.
-      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null });
+      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null, writtenBy: null, untrusted: false });
     },
   };
 }

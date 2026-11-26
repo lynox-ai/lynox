@@ -13,7 +13,7 @@ import {
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
 import { htmlFieldsOfFormName } from '../../core/bulk-html.js';
-import { JUDGE_MAX_HTML, contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { JUDGE_MAX_HTML, contextFieldsOfListForm, judgeFields, judgeRuleFromArtifact, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule, type JudgeRuleSource } from '../../core/bulk-judge-rule.js';
 import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_STATUS_VALUES, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
@@ -188,9 +188,9 @@ const SHOPIFY_FORM_RULES: Record<string, string> = {
 /** Record a run whose targets come from a list on the host (PRD bulk-loop §3.2): nothing
  *  is read here — the list is read once the user starts the run. A refused plan in a Shopify form
  *  gets that form's rules (`SHOPIFY_FORM_RULES`), unless the refusal is that the read is off. */
-function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judgeInput: unknown): string {
+function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judgeInput: unknown, ruleSource: JudgeRuleSource | undefined): string {
   try {
-    return planListChecked(input, agent, ledger, judgeInput);
+    return planListChecked(input, agent, ledger, judgeInput, ruleSource);
   } catch (err) {
     const list = input.source_list;
     const form = typeof list === 'object' && list !== null ? (list as Record<string, unknown>)['form'] : undefined;
@@ -244,7 +244,7 @@ class ShopifyAccessRefusal extends BulkSourceError {}
 
 /** Where the connections are listed, as the owner's UI names it (web-ui `nav.settings` → `settings.apis`,
  *  held equal by a test): in the instance's language, so the model copies the label the person sees. */
-const CONNECTIONS_PLACE = { de: 'Einstellungen → APIs', en: 'Settings → APIs' } as const;
+const CONNECTIONS_PLACE = { de: 'Einstellungen → API-Verbindungen', en: 'Settings → API connections' } as const;
 export function connectionsPlace(): string {
   return CONNECTIONS_PLACE[noticeLanguage(loadConfig().language)];
 }
@@ -316,7 +316,7 @@ function shopifyHostHint(input: BulkPlanInput, agent: IAgent): string {
 
 const SHOPIFY_READ_OFF = 'Reading a Shopify store in a bulk run is switched off on this instance.';
 
-function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judgeInput: unknown): string {
+function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judgeInput: unknown, ruleSource: JudgeRuleSource | undefined): string {
   if (input.target_system !== 'http') throw new BulkSourceError('source_list needs target_system "http".');
   // Said, not dropped: a planner who gave one expects it to narrow or shape the run.
   const unused = (['source_filter', 'source_format', 'target_collection'] as const).filter((k) => input[k] !== undefined && input[k] !== null);
@@ -356,7 +356,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     const raw = typeof listInput === 'object' && listInput !== null ? listInput as Record<string, unknown> : {};
     if (raw['after'] !== undefined) throw new BulkSourceError('With judge, source_list takes no "after": the model decides each target\'s values.');
     const idField = typeof raw['id_field'] === 'string' ? raw['id_field'] : 'id';
-    judge = normalizeJudgeRule(judgeInput, { idField, contextFields: contextFieldsOfListForm(raw['form']), htmlFields: htmlFieldsOfFormName(raw['form']) });
+    judge = normalizeJudgeRule(judgeInput, { idField, contextFields: contextFieldsOfListForm(raw['form']), htmlFields: htmlFieldsOfFormName(raw['form']), source: ruleSource });
     // A store takes its product fields as text: a verdict of another type would be judged and paid
     // for, then refused by the write document for the whole run. A field the store cannot be
     // written is left to the Shopify parse below, which names the fields that can.
@@ -378,7 +378,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
   return [
     'List dry run recorded — nothing was sent, read or written. Nothing is read until the user starts it outside this chat.',
     formatStatus(out.status),
-    ...(judge ? [JUDGE_NOTE] : []),
+    ...(judge ? [JUDGE_NOTE, ...ruleSourceNote(judge)] : []),
     'Once started, the engine reads the list page by page with the host\'s stored API credential and stops, so the user sees how many targets it holds. ' +
       'Each target is read only after the user starts the run a second time; bulk_status shows phase previewed when that is done. ' +
       'What the list and the targets hold is in the run\'s ledger for the user to review; it is not shown to you.',
@@ -401,6 +401,13 @@ const JUDGE_COLUMN_TYPES: Record<string, readonly string[]> = {
 // tests/online/bulk-plan-run-place-eval.test.ts: worded without the opening clause, one provider
 // still named places the hand judge found wrong.
 export const NO_PLACE_NOTE = 'This result does not tell you where in lynox the user finds this run: do not name a tab, page, menu, button or link for it, and do not make one up. When you say where it is, say only that they find it in lynox, outside this chat.';
+
+/** Where a run's rule came from, when it was named by its artifact: the planner says so, and does
+ *  not retype the rule in its reply as if it were the rule. */
+function ruleSourceNote(judge: JudgeRule): string[] {
+  if (judge.source === undefined) return [];
+  return [`The rule is the text of artifact ${judge.source.artifact} (v${String(judge.source.version)}) as saved, unchanged. If that artifact is edited before the run starts, the start is refused and the run must be planned again.`];
+}
 
 /** What a planner is told about a judged run. Counts and rules only — never a verdict. */
 const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +
@@ -458,12 +465,13 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           type: 'object',
           description: 'A rule a model applies to each target instead of a given "after".',
           properties: {
-            rule: { type: 'string', description: 'What to decide for each target, in plain words (up to 4000 characters).' },
+            rule: { type: 'string', description: 'What to decide for each target, in plain words (up to 4000 characters). Give rule or rule_artifact.' },
+            rule_artifact: { type: 'string', description: 'Instead of rule: the id of a saved markdown or text artifact that holds the rule (artifact_list shows ids). Its text is taken as saved, character for character. Use this whenever the rule is already saved, or must be kept word for word; type rule only for a short rule of your own. Not under an access.' },
             schema: { type: 'object', description: `The fields the model sets, field name → {type: "string", maxLength} or {type: "string", enum: [...]} or {type: "number"|"integer"} or {type: "boolean"}. No pattern, no lists or nested objects; at most 20 fields. Set each text field's maxLength near the longest text the run writes in it: the list form's HTML fields (shopify: descriptionHtml; woocommerce: description, short_description) may take up to ${String(JUDGE_MAX_HTML)} together, and in a list run a larger maxLength makes the run hold fewer targets.` },
             tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Which tier places the call (its provider, its limit). The model that judges is set per provider, not by the tier. Default fast.' },
             context: { type: 'array', items: { type: 'string' }, description: 'Optional: other fields of each target the model reads to decide, but never sets — not a field of schema, not the id field; at most 20. The user sees them before starting the run, and they go to the model too.' },
           },
-          required: ['rule', 'schema'],
+          required: ['schema'],
         },
       },
       required: ['target_system'],
@@ -476,7 +484,16 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       refusePlannerStartDomains(input);
       const sources = [input.source_file, input.source_collection, input.source_list].filter((v) => v !== undefined).length;
       if (sources !== 1) throw new BulkSourceError('Give exactly one of source_file, source_collection or source_list.');
-      if (input.source_list !== undefined) return planList(input, agent, ledger, input.judge);
+      // A rule named by its artifact is read here, once, before any form is planned: every form
+      // below plans the same text, and stores where it came from.
+      // Who plans and where artifacts live are asked only for a rule named by its artifact: a plan
+      // without one reads neither, as before.
+      const fromArtifact = judgeRuleFromArtifact(input.judge, () => ({
+        store: agent.toolContext.artifactStore, ownerPlans: isOwnerPrincipal(agent.principal),
+      }));
+      const judgeInput: unknown = fromArtifact?.input ?? input.judge;
+      const ruleSource = fromArtifact?.source;
+      if (input.source_list !== undefined) return planList(input, agent, ledger, judgeInput, ruleSource);
       if (input.judge !== undefined && input.target_system === 'workspace') {
         // A workspace target is text, not fields: a verdict over F has nothing to replace in it.
         throw new BulkSourceError('judge needs target_system "data_store" or "http": a workspace file has no fields to decide.');
@@ -518,7 +535,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         if (!input.target_collection) throw new BulkSourceError('target_system "data_store" needs target_collection.');
         if (input.judge !== undefined) {
           const { keyCol, colDefs } = dataStoreColumns(store, input.target_collection);
-          judge = normalizeJudgeRule(input.judge, { idField: keyCol });
+          judge = normalizeJudgeRule(judgeInput, { idField: keyCol, source: ruleSource });
           for (const f of Object.keys(judge.schema.properties)) {
             const col = colDefs.get(f);
             if (!col) throw new BulkSourceError(`judge.schema names ${f}, which is not a column of the target collection.`);
@@ -547,7 +564,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
         // An external host has no transaction to roll back into (PRD §3.4).
         if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
-        if (input.judge !== undefined) judge = normalizeJudgeRule(input.judge);
+        if (input.judge !== undefined) judge = normalizeJudgeRule(judgeInput, { source: ruleSource });
         const template = judge ? judgeTemplate(judge) : null;
         const external = planExternal(template ? source.map((r) => ({ target: r.target, after: template })) : source, host, detectSecretInContent);
         const keys = external.filter((t) => !('invalid' in t)).map((t) => t.key);
@@ -565,7 +582,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             : 'Dry run recorded — nothing was written, and no target was valid, so there is nothing to read.',
           formatStatus(out.status),
           // With no valid target there is nothing to judge: the judge note would promise verdicts.
-          ...(judge && !nothingToApprove(out.status) ? [JUDGE_NOTE] : []),
+          ...(judge && !nothingToApprove(out.status) ? [JUDGE_NOTE, ...ruleSourceNote(judge)] : []),
           ...(nothingToApprove(out.status) ? [] : ['Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
             'The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
             'Only the user can start and approve it, outside this chat.', NO_PLACE_NOTE]),
@@ -583,7 +600,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       return [
         'Dry run recorded — nothing was written to any target.',
         formatStatus(status),
-        ...(judge ? [JUDGE_NOTE] : []),
+        ...(judge ? [JUDGE_NOTE, ...ruleSourceNote(judge)] : []),
         nothingToApprove(status)
           ? 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you.'
           : 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +

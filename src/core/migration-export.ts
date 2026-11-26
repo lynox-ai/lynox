@@ -23,6 +23,7 @@
 import { existsSync, readFileSync, unlinkSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { snapshotSqlite } from './sqlite-snapshot.js';
+import { MigrationStop } from './migration-stop.js';
 import { getLynoxDir } from './config.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey } from './memory-file.js';
@@ -237,7 +238,7 @@ export class MigrationExporter {
     this.lynoxDir = options?.lynoxDir ?? getLynoxDir();
     const key = options?.vaultKey ?? process.env['LYNOX_VAULT_KEY'];
     if (!key) {
-      throw new Error('Vault key required for migration export. Set LYNOX_VAULT_KEY or pass vaultKey option.');
+      throw new MigrationStop('vault_key_missing', 'Vault key required for migration export. Set LYNOX_VAULT_KEY or pass vaultKey option.');
     }
     this.vaultKey = key;
   }
@@ -330,7 +331,10 @@ export class MigrationExporter {
       }
       if (over.length > 0) {
         for (const pc of plaintextChunks) pc.data.fill(0);
-        throw new Error(`This instance's data does not fit one migration: ${over.join('; ')}. None of your data was sent, and the data on this instance is unchanged. A migration cannot move only part of it; write to support@lynox.ai with this message and we will look at it with you.`);
+        throw new MigrationStop('data_too_large', `This instance's data does not fit one migration: ${over.join('; ')}. None of your data was sent, and the data on this instance is unchanged. A migration cannot move only part of it; write to support@lynox.ai with this message and we will look at it with you.`, {
+          ...(chunkMetas.length > this.bounds.maxChunks ? { parts: chunkMetas.length, maxParts: this.bounds.maxChunks } : {}),
+          ...(totalBytes > this.bounds.maxTotalBytes ? { bytes: totalBytes, maxBytes: this.bounds.maxTotalBytes } : {}),
+        });
       }
 
       // Build manifest (without hash first, then compute)
@@ -408,6 +412,12 @@ export class MigrationExporter {
   ): void {
     const bytes = (cs: PlaintextChunk[]): number => cs.reduce((n, c) => n + c.data.length, 0);
     const restBytes = bytes(chunks) + (sweeps ? bytes(sweeps.raw) : 0);
+    // This instance's memory is read before the first rewrite: a store judged later is judged
+    // together with the stores already let through, whose forms are then in memory. It is read
+    // again for each later store, so growth the line does not foresee is not missed either.
+    const limitMb = this.ownMemory.limitMb();
+    const rssMb = this.ownMemory.rssMb();
+    let formedBytes = 0;
     for (const d of databases) {
       const image = d.image;
       if (!image || !isPlainStore(d.name)) continue;
@@ -415,10 +425,14 @@ export class MigrationExporter {
       const othersBytes = restBytes + databases.reduce((n, o) => n + (o === d ? 0 : bytes(o.raw)), 0);
       const refused = plainFormRefusal({
         ceiling, rawBytes: image.length, othersBytes, restBytes, maxTotalBytes: this.bounds.maxTotalBytes,
-        source: { limitMb: this.ownMemory.limitMb(), rssMb: this.ownMemory.rssMb(), k: MIGRATION_MEMORY.kSource },
+        source: { limitMb, rssMb, rssNowMb: formedBytes === 0 ? rssMb : this.ownMemory.rssMb(), baseMb: MIGRATION_MEMORY.kSourceBaseMb, k: MIGRATION_MEMORY.kSource, formedBytes },
       });
       if (refused) d.refused = refused;
-      else d.plain = this.plainForm(image, d.name);
+      else {
+        // Counted even when the rewrite then fails: its copies were held all the same.
+        formedBytes += image.length;
+        d.plain = this.plainForm(image, d.name);
+      }
     }
     // The ledgers' plaintext form only when engine.db has one and their raw form is within the
     // sweeps cap: above it the choice sends engine.db raw anyway, so the form is not built.
@@ -835,8 +849,10 @@ export class MigrationExporter {
     if (truncated) {
       // Loud, not silent. A bounded export that says nothing reads exactly like a complete
       // one — the shape this whole change exists to remove from the coverage lists.
-      throw new Error(
+      throw new MigrationStop(
+        'folder_too_large',
         `${dirName}/ exceeds the migration limits (${String(maxEntries)} entries / ${String(maxBytes)} bytes) — refusing to ship a partial copy of it`,
+        { dir: dirName, entries: maxEntries, bytes: maxBytes },
       );
     }
     return splitIntoChunks(
@@ -865,8 +881,10 @@ export class MigrationExporter {
     const files: Record<string, string> = {};
     let count = 0;
     let total = 0;
-    const tooBig = new Error(
+    const tooBig = new MigrationStop(
+      'folder_too_large',
       `workspace/ exceeds the migration limits (${String(maxEntries)} entries / ${String(maxBytes)} bytes) — refusing to ship a partial copy of it`,
+      { dir: 'workspace', entries: maxEntries, bytes: maxBytes },
     );
     try {
       const data = statSync(this.lynoxDir);

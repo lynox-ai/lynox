@@ -74,6 +74,43 @@ export function principalTag(p: RequestPrincipal): string {
   }
 }
 
+/** The prefix of the tag a trigger's run writes with (`runAuthorTag`). */
+export const TRIGGER_AUTHOR_PREFIX = 'trigger:';
+/** The prefix of the tag a workflow step writes with (`workflowAuthorTag`). */
+export const WORKFLOW_AUTHOR_PREFIX = 'workflow:';
+
+/**
+ * The tag a run's own writes carry: the message it persists as its typed turn, and every row
+ * it writes into the data store. A run a trigger started carries `trigger:<id>` whoever the
+ * trigger runs for, the owner included: nobody typed that turn, and a later check must not
+ * read it as something the owner wrote. Every other run carries its principal's tag. A trigger
+ * named by its origin alone still gets the trigger tag, with `unknown` for the id.
+ */
+export function runAuthorTag(principal: RequestPrincipal, run?: { triggerId?: string | undefined; triggerOrigin?: string | undefined } | undefined): string {
+  if (run?.triggerId !== undefined || run?.triggerOrigin !== undefined) return `${TRIGGER_AUTHOR_PREFIX}${run.triggerId ?? 'unknown'}`;
+  return principalTag(principal);
+}
+
+/** The tag a workflow step's writes carry: never `owner`, whoever started the workflow. */
+export function workflowAuthorTag(runId: string | undefined): string {
+  return `${WORKFLOW_AUTHOR_PREFIX}${runId ?? 'unknown'}`;
+}
+
+/** The tag a run under the owner's principal records on a trigger when the run's author is not known. */
+export const UNKNOWN_RUN_TAG = 'unknown';
+
+/**
+ * Whether a recorded tag names a run rather than a person: a trigger's run, a workflow step, or a
+ * run whose author is not known. A trigger such a run created or rewrote acts for the owner (it is
+ * not someone else's plan), but its instruction is not words the owner wrote
+ * ({@link ownerInstructionCounts}), and the owner's stamp does not make it so
+ * (`TriggerStore.setConfirmedAt`).
+ */
+export function isRunTag(tag: string | null | undefined): boolean {
+  return typeof tag === 'string'
+    && (tag.startsWith(TRIGGER_AUTHOR_PREFIX) || tag.startsWith(WORKFLOW_AUTHOR_PREFIX) || tag === UNKNOWN_RUN_TAG);
+}
+
 /**
  * Whether a trigger waits for the owner's stamp because a mandate created or last changed
  * it (PRD customer-granted-operator-access §3.12, §3.13). Pure and exported so the rule is
@@ -96,11 +133,12 @@ export function isMandateTag(tag: string | null | undefined): boolean {
  * that changed it, else its creator. The owner's stamp and the owner's later edit leave
  * `mandate_editor` as it is, and so the text as written (PRD customer-granted-operator-access B6).
  * Fail-closed: any tag but the owner's (or none: a row from before tags, or the owner's agent)
- * counts.
+ * counts. A run's tag ({@link isRunTag}) is not someone else: such a run acted under the owner's
+ * principal, and a trigger it created is the owner's plan, as it was when that left no tag.
  */
 export function setUpByOther(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): boolean {
   const tag = t.mandate_editor ?? t.created_by;
-  return !(tag === undefined || tag === null || tag === principalTag(OWNER_PRINCIPAL));
+  return !(tag === undefined || tag === null || tag === principalTag(OWNER_PRINCIPAL) || isRunTag(tag));
 }
 
 /** A mandate's address an escalation title or a diagnosis may name, and whether it set the plan up or changed it. */
@@ -298,4 +336,28 @@ export function planMembers(trigger: PlanMandate | undefined, workflow: PlanMand
 export function principalFromTag(tag: string | null | undefined): RequestPrincipal {
   if (tag === CP_ADMIN_TAG) return CP_ADMIN_PRINCIPAL;
   return isMandateTag(tag) ? { kind: 'mandate', email: tag!.slice(MANDATE_TAG_PREFIX.length) } : OWNER_PRINCIPAL;
+}
+
+/**
+ * Whether a trigger's instruction (its title and description) counts as words the owner wrote,
+ * so the send targets it names are owner-known in that trigger's own run. Only when the owner set
+ * it up (`created_by`), no turn that had read outside content created or rewrote it
+ * (`created_untrusted`, which an edit only adds to), no mandate ever changed it
+ * (`mandate_editor`, which only a mandate's change writes and nothing clears: neither the owner's
+ * later edit nor a confirmation takes it back, since confirming agrees to the run, not to its
+ * targets), and the last party that changed it is the owner. A trigger from before these columns
+ * names no creator and does not count, nor does one a run created or last rewrote: its tag is the
+ * run's ({@link isRunTag}). What its run reads or produces never counts.
+ */
+export function ownerInstructionCounts(t: {
+  readonly created_by?: string | null | undefined;
+  readonly created_untrusted?: string | null | undefined;
+  readonly edited_by?: string | null | undefined;
+  readonly mandate_editor?: string | null | undefined;
+}): boolean {
+  const untrusted = t.created_untrusted;
+  return t.created_by === principalTag(OWNER_PRINCIPAL)
+    && (untrusted === undefined || untrusted === null || untrusted === '' || untrusted === 'none')
+    && (t.mandate_editor === undefined || t.mandate_editor === null)
+    && (t.edited_by === undefined || t.edited_by === null || t.edited_by === principalTag(OWNER_PRINCIPAL));
 }

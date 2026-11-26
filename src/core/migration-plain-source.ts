@@ -311,8 +311,9 @@ export function choosePlainPaths(input: PathInput): Map<PlainStore, { path: 'pla
  * The third is new and may be stricter than the choice, on purpose: the choice judges the
  * destination's memory, this one the source's own.
  * - `source-memory`: building the form would take this instance over its own memory limit: its
- *   resident memory now plus `kSource` times the store (the measured upper bound of the source's
- *   peak per byte, which counts the snapshot it already holds once more).
+ *   resident memory before the first rewrite plus `kSourceBaseMb` and `kSource` times this store
+ *   and the stores already let through (a line above the source's measured peak over it), and
+ *   its resident memory now plus the same for this store alone.
  * The destination's numbers are untrusted. A destination that announces a vast limit still meets
  * `bounds` and `source-memory`, which are the source's own; `bounds` caps the bundle's size,
  * `source-memory` what the rewrite may hold.
@@ -327,15 +328,22 @@ export function plainFormRefusal(input: {
   restBytes: number;
   /** The source's bound on a bundle's total size. */
   maxTotalBytes: number;
-  /** This instance's memory: its limit and its resident memory now, in MiB, and the source's k. */
-  source: { limitMb: number; rssMb: number; k: number };
+  /**
+   * This instance's memory: its limit, its resident memory before the first rewrite and now, in
+   * MiB; the source's fixed part (MiB) and k; and the raw bytes of the stores already let through.
+   */
+  source: { limitMb: number; rssMb: number; rssNowMb: number; baseMb: number; k: number; formedBytes: number };
 }): 'bounds' | 'memory' | 'source-memory' | null {
   if (input.rawBytes > input.maxTotalBytes - input.othersBytes) return 'bounds';
   if (input.rawBytes > maxPlainStoreBytes(input.ceiling, input.othersBytes, input.restBytes)) return 'memory';
-  const { limitMb, rssMb, k } = input.source;
+  const { limitMb, rssMb, rssNowMb, baseMb, k, formedBytes } = input.source;
   // Anything it cannot judge refuses, as `storePath` does.
-  if (![limitMb, rssMb, k].every((n) => Number.isFinite(n) && n >= 0) || k < 1) return 'source-memory';
-  if (rssMb + (k * input.rawBytes) / (1024 * 1024) > limitMb) return 'source-memory';
+  if (![limitMb, rssMb, rssNowMb, baseMb, k, formedBytes].every((n) => Number.isFinite(n) && n >= 0) || k < 1) return 'source-memory';
+  const MIB = 1024 * 1024;
+  // Against the memory before the first rewrite with every store let through, and against the
+  // memory now with this store alone; the stricter one decides.
+  if (rssMb + baseMb + (k * (formedBytes + input.rawBytes)) / MIB > limitMb) return 'source-memory';
+  if (rssNowMb + baseMb + (k * input.rawBytes) / MIB > limitMb) return 'source-memory';
   return null;
 }
 
