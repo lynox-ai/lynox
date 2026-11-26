@@ -103,7 +103,7 @@ describe('contentBottomOf', () => {
 		expect(contentBottomOf(null)).toBeNull();
 	});
 
-	it('stops at any other node after the last element, a comment say: null, to scroll is taken', () => {
+	it('is null when any other node, such as a comment, follows the last element', () => {
 		expect(contentBottomOf({ nodeType: 8, textContent: '', previousSibling: el(426) })).toBeNull();
 	});
 });
