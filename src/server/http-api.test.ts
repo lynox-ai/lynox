@@ -20285,7 +20285,11 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getKnowledgeStore: () => ({
           listActive, listPending, listPendingMasked, listSourcesMasked,
-          getBlock: (id: string) => ({ content: `block:${id}`, charLimit: 100 }),
+          // Likewise the blocks: the export reads them masked, never as stored.
+          getBlock: () => { throw new Error('export must use getBlockMasked'); },
+          getBlockMasked: (id: string) => `block:${id}`,
+          // Nothing rejected or superseded is held, so the block can read complete.
+          countRejectedOrSuperseded: () => 0,
         }),
         getKnowledgeLayer: () => null,
         getCRM: () => null,

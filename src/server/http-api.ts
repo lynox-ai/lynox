@@ -143,6 +143,7 @@ import { resolveClientIp } from './client-ip.js';
 import { awaitsOwnQuestion } from './own-question.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
+import type { KnowledgeStore } from '../core/knowledge-store.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
 import { judgeRuleSourceChanged } from '../core/bulk-judge-rule.js';
@@ -14940,48 +14941,77 @@ export class LynoxHTTPApi {
       // Pending entries are included: a queued fact is stored personal data whether or not it
       // was ever approved, and Art. 15 asks what is held, not what is active.
       const EMPTY_KNOWLEDGE = { entries: [], pending_entries: [], sources: [], blocks: {}, may_be_incomplete: false };
+      // One store's block. It throws where a read does: `listActive` decrypts every row, so one
+      // unreadable row would otherwise throw out of a handler with no wrapper and take the ENTIRE
+      // export with it — threads, CRM, everything. Each caller catches, as its `knowledge_graph`
+      // neighbour does: a missing section is a gap; a 500 is no answer at all.
+      const durableBlock = (store: KnowledgeStore): Record<string, unknown> => {
+        const ENTRY_CAP = 500;
+        const active = store.listActive(ENTRY_CAP);
+        // Masked, matching the active half. The raw-text queue is for a human deciding about
+        // an entry; this is a file that gets stored and forwarded.
+        const pending = store.listPendingMasked(ENTRY_CAP);
+        // The wording each conversation used for an entry, masked like the rest: a source can
+        // hold words the entry itself does not carry.
+        const sources = store.listSourcesMasked(ENTRY_CAP);
+        // Masked as well: a block is edited without a write-side shape scan, so it can hold a
+        // pasted key the entries' own check would have refused.
+        const blocks: Record<string, string | null> = {};
+        for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = store.getBlockMasked(id);
+        return {
+          entries: active,
+          pending_entries: pending,
+          sources,
+          blocks,
+          // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
+          // a different thing from one that looks complete. Named `may_be_incomplete` rather
+          // than `truncated` because that is the honest strength of the claim — the store
+          // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
+          // exactly 500, and over-reporting is the right way to be wrong here.
+          // Rejected and superseded entries are still stored but not in these lists, so a copy
+          // that leaves them out is not complete.
+          may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP
+            || store.countRejectedOrSuperseded() > 0,
+        };
+      };
       const knowledgeStore = engine.getKnowledgeStore();
       if (knowledgeStore) {
-        // try/catch like its `knowledge_graph` neighbour, and for the same reason: `listActive`
-        // decrypts every row, so one unreadable row would throw out of a handler with no
-        // wrapper and take the ENTIRE export with it — threads, CRM, everything. A missing
-        // section is a gap; a 500 is no answer at all.
         try {
-          const ENTRY_CAP = 500;
-          const active = knowledgeStore.listActive(ENTRY_CAP);
-          // Masked, matching the active half. The raw-text queue is for a human deciding about
-          // an entry; this is a file that gets stored and forwarded.
-          const pending = knowledgeStore.listPendingMasked(ENTRY_CAP);
-          // The wording each conversation used for an entry, masked like the rest: a source can
-          // hold words the entry itself does not carry.
-          const sources = knowledgeStore.listSourcesMasked(ENTRY_CAP);
-          const blocks: Record<string, string | null> = {};
-          for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = knowledgeStore.getBlock(id)?.content ?? null;
-          exportData['durable_knowledge'] = {
-            entries: active,
-            pending_entries: pending,
-            sources,
-            blocks,
-            // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
-            // a different thing from one that looks complete. Named `may_be_incomplete` rather
-            // than `truncated` because that is the honest strength of the claim — the store
-            // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
-            // exactly 500, and over-reporting is the right way to be wrong here.
-            may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP,
-          };
+          exportData['durable_knowledge'] = durableBlock(knowledgeStore);
         } catch {
           exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
         }
-      } else if (engine.getUserConfig().durable_memory_enabled === true) {
-        // Switched on, yet no store: the engine opens it at boot when the setting is on, so
-        // that open failed (or its database did). Not read, so not known to be empty.
-        exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
-        process.stderr.write('⚠ /api/export: durable knowledge store unavailable — exported empty and marked incomplete\n');
       } else {
-        // Switched off: no store was opened, so nothing is read and nothing failed. Entries
-        // written while it was on stay in engine.db and are not in this block.
-        exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
+        // No store. With the setting off none is opened; with it on, the open at boot failed,
+        // or the setting was switched on after boot. Either way nothing is deleted, and the
+        // tables are in engine.db whatever the setting, so entries written while a store was
+        // open are still held; the export is the answer to an access request and carries them.
+        // Read through a store built only to read, so the export writes nothing.
+        const engineDb = engine.getEngineDb();
+        if (engineDb) {
+          try {
+            const { SubjectStore } = await import('../core/subject-store.js');
+            const { KnowledgeStore: ReadStore } = await import('../core/knowledge-store.js');
+            const subjects = engine.getSubjectStore() ?? new SubjectStore(engineDb);
+            exportData['durable_knowledge'] = durableBlock(new ReadStore(engineDb, subjects, engine.getSecretStore() ?? null, { readOnly: true }));
+          } catch {
+            exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+            process.stderr.write('⚠ /api/export: durable knowledge read failed — exported empty and marked incomplete\n');
+          }
+        } else {
+          // No engine.db: the tables that would hold entries were not read.
+          exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+          process.stderr.write('⚠ /api/export: engine database unavailable — durable knowledge exported empty and marked incomplete\n');
+        }
       }
+      // `enabled` is the setting: whether durable memory is switched on in the config. With it
+      // off, the block still carries what is held, and `enabled: false` says the entries are
+      // stored but not in use. It can differ from the store the engine built at boot after the
+      // config is reloaded; the block's content does not depend on it.
+      exportData['durable_knowledge'] = {
+        ...(exportData['durable_knowledge'] as Record<string, unknown>),
+        enabled: engine.getUserConfig().durable_memory_enabled === true,
+      };
 
       // CRM contacts + deals, and every DataStore collection: walked to the END by
       // `_id`, the way the threads are walked above.

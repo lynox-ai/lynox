@@ -48,11 +48,18 @@
 - `GET /api/export` now sets `contacts_may_be_incomplete`,
   `deals_may_be_incomplete`, `datastore_may_be_incomplete`,
   `threads_may_be_incomplete` and `durable_knowledge.may_be_incomplete` to
-  `true` when the store behind the block could not be opened at boot (the
-  durable knowledge one only while durable memory is switched on). Until now
+  `true` when the store behind the block could not be opened at boot. Until now
   those blocks came out empty and marked complete, as if the account held no
   contacts, deals, tables, chats or memory entries. A client that reads the
   flags only as "a cap was reached" also sees them on such an instance.
+- With durable memory switched off, `GET /api/export` now carries the durable
+  knowledge entries and memory blocks still held from when it was on, read
+  without changing anything. Switching it off never deleted them, and until now
+  the block came out empty and marked complete. The block's new `enabled` field
+  says whether durable memory is switched on. The same read runs when durable
+  memory is on but its store did not open, and the block is marked incomplete
+  while entries the owner rejected or that were superseded are stored, since
+  the export does not carry those yet.
 
 ## 2.18.0 — 2026-11-17
 
