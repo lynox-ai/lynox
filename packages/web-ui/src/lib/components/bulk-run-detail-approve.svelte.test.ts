@@ -2459,11 +2459,12 @@ describe('approving an undo, per target (U-466)', () => {
 
 	it('heads only a row that shows values with the column on a narrow screen, not a row that only gives its reason', async () => {
 		german();
-		run = undoRun({ total: 3, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 2 } });
-		targets = [...refused(), { ...undoTargets()[0]!, seq: 2 }];
+		run = undoRun({ total: 4, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 2 } });
+		// A row of fields and a row of text lines both show values; the two refused rows only their reason.
+		targets = [...refused(), { ...undoTargets()[0]!, seq: 2 }, { ...undoTargets()[0]!, seq: 3, diff: { kind: 'text', removed: ['alt'], added: ['neu'] } }];
 		await render();
 		const labels = rows().map((r) => r.querySelector('[data-testid="bulk-values-label"]')?.textContent ?? null);
-		expect(labels).toEqual([null, null, 'Jetzt → zurück auf']);
+		expect(labels).toEqual([null, null, 'Jetzt → zurück auf', 'Jetzt → zurück auf']);
 	});
 
 	it('says of an undo whose every target is refused that it only deletes the entry left, not that it writes no value back for a source that only created, and keeps the approval', async () => {
