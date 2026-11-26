@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { setLocale, getLocale } from '../i18n.svelte.js';
 import { startPausedPlansNav } from '../stores/paused-plans.svelte.js';
+import { noteSettingsViewer, resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 // A margin or a padding class of any side or axis, also behind variants (`sm:`, `hover:`) and `!`:
 // `m`/`p` with one of `lrxytbse`, `bs` or `be`, or none. Not `max-w-`, `min-w-`, `place-`, `pointer-`.
@@ -241,6 +242,51 @@ describe('a plan that waits for its takeover (U-410)', () => {
 		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
 		await render();
 		expect(runNow()).not.toBeNull();
+	});
+});
+
+describe('Delete and the switch at a paused plan, which the route refuses to a helper', () => {
+	const del = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-delete]');
+	const toggle = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-toggle]');
+	// What a helper's list carries for a paused plan: the pause, not whose access ended (owner only).
+	const HELPER_PAUSED = { ...PAUSED, paused_who: undefined, paused_ended: undefined };
+	const remount = async (): Promise<void> => {
+		unmount(component!);
+		component = undefined;
+		await render();
+	};
+	afterEach(() => { resetSettingsViewer(); });
+	it('offers a helper neither at a paused plan, open or completed', async () => {
+		viewer = 'mandate';
+		rows = [HELPER_PAUSED];
+		await render();
+		// The row is there with its badge, so the buttons are missing at it, not with an empty list.
+		expect(target.querySelector('[data-trigger-paused]')).not.toBeNull();
+		expect([del(), toggle()]).toEqual([null, null]);
+		rows = [{ ...HELPER_PAUSED, status: 'completed' }];
+		await remount();
+		expect(target.textContent).toContain('Wochenreport');
+		expect([del(), toggle()]).toEqual([null, null]);
+	});
+	it('keeps both for the owner at a completed paused plan, and Delete at an open one', async () => {
+		await render();
+		expect(del()?.textContent?.trim()).toBe('Löschen');
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await remount();
+		expect([del()?.textContent?.trim(), toggle()?.textContent?.trim()]).toEqual(['Löschen', 'Pausieren']);
+	});
+	it('keeps both for the owner the list does not name, once the session says owner', async () => {
+		viewer = 'none';
+		noteSettingsViewer({ viewer: 'owner' });
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		expect([del()?.textContent?.trim(), toggle()?.textContent?.trim()]).toEqual(['Löschen', 'Pausieren']);
+	});
+	it('gives a helper both at a plan that is not paused', async () => {
+		viewer = 'mandate';
+		rows = [{ ...HELPER_PAUSED, paused: false }];
+		await render();
+		expect([del()?.textContent?.trim(), toggle()?.textContent?.trim()]).toEqual(['Löschen', 'Pausieren']);
 	});
 });
 

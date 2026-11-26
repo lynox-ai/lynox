@@ -86,7 +86,7 @@ describe.each([['write_file', writeFileTool], ['edit_file', editFileTool]] as co
     writeFileSync(join(ws, '.env'), 'KEY=old\n');
     writeFileSync(join(ws, 'notes.txt'), 'old\n');
     const agent = agentWith([resolvingThen(tool, () => relink(join(ws, 'notes.txt'), '.env'))]);
-    const asked = vi.fn().mockResolvedValue('Allow');
+    const asked = vi.fn().mockResolvedValue('allow');
     agent.promptUser = asked;
     const result = await call(agent, name, { path: 'notes.txt', ...INPUT[name] });
     expect(result.is_error).toBe(true);
@@ -233,7 +233,7 @@ describe('the diff preview reads the file that is written', () => {
     writeFileSync(join(ws, 'report.html'), 'WORKSPACE TEXT\n');
     const agent = agentWith([writeFileTool]);
     // Emptying a file is asked about, so the preview is shown first.
-    agent.promptUser = vi.fn().mockResolvedValue('Allow');
+    agent.promptUser = vi.fn().mockResolvedValue('allow');
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     let shown: string;
     try {
@@ -340,13 +340,15 @@ describe('the window a question opens', () => {
     writeFileSync(join(ws, 'notes.txt'), 'old\n');
     const agent = agentWith([writeFileTool]);
     // Emptying a file is asked about; while the question is open, notes.txt becomes a link.
-    const asked = vi.fn().mockImplementation(async () => { relink(join(ws, 'notes.txt'), '.env'); return 'Allow'; });
+    const asked = vi.fn().mockImplementation(async () => { relink(join(ws, 'notes.txt'), '.env'); return 'allow'; });
     agent.promptUser = asked;
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       const result = await call(agent, 'write_file', { path: 'notes.txt', content: '' });
       expect(asked).toHaveBeenCalledTimes(1);
       expect(result.is_error).toBe(true);
+      // Refused for the link, not for the answer: the owner allowed.
+      expect(String(result.content)).toContain(LINK_REFUSED);
     } finally {
       stderr.mockRestore();
     }
@@ -357,7 +359,7 @@ describe('the window a question opens', () => {
     setup(false);
     writeFileSync(join(ws, 'notes.txt'), 'old\n');
     const agent = agentWith([writeFileTool]);
-    const asked = vi.fn().mockResolvedValue('Allow');
+    const asked = vi.fn().mockResolvedValue('allow');
     agent.promptUser = asked;
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
