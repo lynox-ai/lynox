@@ -57,15 +57,14 @@ import { abortedCallCost, partialMessageOf, reportAbortedCall } from './aborted-
 import {
   FOLLOW_UP_TOOL_NAME,
   FOLLOW_UP_FALLBACK_MAX_TOKENS,
-  FOLLOW_UP_FALLBACK_SYSTEM,
   FOLLOW_UP_TIMEOUT_MS,
-  buildFollowUpExcerpt,
+  buildFollowUpRequest,
   normalizeFollowUpSuggestions,
   lastUserText,
 } from './follow-up-fallback.js';
 import {
-  CAPTURE_FALLBACK_MAX_TOKENS, CAPTURE_SYSTEM, CAPTURE_TIMEOUT_MS, CAPTURE_TOOL,
-  CAPTURE_TOOL_NAME, buildCaptureExcerpt, excerptOverridesAttribution, parseExtractedFacts,
+  CAPTURE_FALLBACK_MAX_TOKENS, CAPTURE_TIMEOUT_MS,
+  CAPTURE_TOOL_NAME, buildCaptureRequest, excerptOverridesAttribution, parseExtractedFacts,
   routeCapturedFact,
 } from './capture-fallback.js';
 import { newToolUseId } from './tool-use-id.js';
@@ -2125,11 +2124,7 @@ export class Agent implements IAgent {
       // So the wrong client stays until the right one can be chosen WITH its credentials, and
       // the catch below now says when this path fails — which is what was missing to measure
       // how often it actually fires.
-      const request = {
-        system: FOLLOW_UP_FALLBACK_SYSTEM,
-        messages: [{ role: 'user' as const, content: buildFollowUpExcerpt(question, text) }],
-        tools: [entry.definition],
-      };
+      const request = buildFollowUpRequest(question, text, entry.definition);
       const signalWasAborted = timeout.signal.aborted || this.abortController?.signal.aborted === true;
       const stream = helper.client.beta.messages.stream({
         model: helper.modelId,
@@ -2331,11 +2326,7 @@ export class Agent implements IAgent {
     let inFlight: AbortableHelperCall | undefined;
     try {
       const helper = this._helperModel();
-      const request = {
-        system: CAPTURE_SYSTEM,
-        messages: [{ role: 'user' as const, content: buildCaptureExcerpt(safeQuestion, safeAnswer) }],
-        tools: [CAPTURE_TOOL],
-      };
+      const request = buildCaptureRequest(safeQuestion, safeAnswer);
       const signalWasAborted = timeout.signal.aborted || this.abortController?.signal.aborted === true;
       const stream = helper.client.beta.messages.stream({
         model: helper.modelId,

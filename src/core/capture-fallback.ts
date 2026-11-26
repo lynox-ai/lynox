@@ -228,6 +228,24 @@ export function buildCaptureExcerpt(question: string, answer: string): string {
   ].join('\n');
 }
 
+/**
+ * The system, message and tool of the capture call, built from the turn's masked question
+ * and answer. One builder for the agent and for the model-fitness replay
+ * (`scripts/model-fitness/replay.ts`), so the replay measures the request the agent sends.
+ * The caller adds the model, `max_tokens` and the forced `tool_choice`.
+ */
+export function buildCaptureRequest(question: string, answer: string): {
+  system: string;
+  messages: Array<{ role: 'user'; content: string }>;
+  tools: BetaTool[];
+} {
+  return {
+    system: CAPTURE_SYSTEM,
+    messages: [{ role: 'user', content: buildCaptureExcerpt(question, answer) }],
+    tools: [CAPTURE_TOOL],
+  };
+}
+
 /** Where a fact came from, as the extractor attributed it. */
 export type FactSource = 'user_stated' | 'external';
 
