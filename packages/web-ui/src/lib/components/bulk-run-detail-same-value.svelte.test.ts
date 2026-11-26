@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { t, tf } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
-import { bulkSameValueOthers } from './bulk-runs.js';
+import { bulkChoiceFields, bulkSameValueOthers } from './bulk-runs.js';
 
 // A judge can give different products one new value: three products got one SEO title in a
 // preview, and each row showed alone. The preview now marks every target whose new value in a
@@ -150,6 +150,23 @@ describe('a preview where several targets get one new value', () => {
 		expect(target.querySelector('[data-testid="bulk-same-value-count"]')?.textContent).toBe('4 Produkte bekommen denselben Wert wie ein anderes Produkt. Sie sind in der Vorschau markiert.');
 	});
 
+	it('does not mark the common choice from a fixed list of a judged run, nor count it above the preview, and still marks a text two targets share', async () => {
+		run = makeRun({
+			judge: { tier: 'standard', unjudged: 0 },
+			judgeRule: { rule: 'Ordne jedes Produkt einer Art zu und gib ihm einen Titel.', schema: { properties: { product_type: { type: 'string', enum: ['Shampoo', 'Spülung'] }, seo_title: { type: 'string', maxLength: 70 } } }, tier: 'standard' },
+		});
+		targets = [
+			tgt(1, fields(['product_type', 'Shampoo'], ['seo_title', SAME])),
+			tgt(2, fields(['product_type', 'Shampoo'], ['seo_title', SAME])),
+			tgt(3, fields(['product_type', 'Shampoo'], ['seo_title', 'Sauerstoff Gas'])),
+			tgt(4, fields(['product_type', 'Spülung'], ['seo_title', 'Stickstoff Gas'])),
+		];
+		await render();
+		// The two that share a title are marked for the title alone, not as the same as 2 others for the choice.
+		expect([1, 2, 3, 4].map(chipOf)).toEqual(['gleich wie bei einem anderen', 'gleich wie bei einem anderen', null, null]);
+		expect(target.querySelector('[data-testid="bulk-same-value-count"]')?.textContent).toBe('2 Produkte bekommen denselben Wert wie ein anderes Produkt. Sie sind in der Vorschau markiert.');
+	});
+
 	it('does not mark a run that is past its preview', async () => {
 		run = makeRun({ phase: 'done', applied: 4 });
 		await render();
@@ -159,7 +176,7 @@ describe('a preview where several targets get one new value', () => {
 });
 
 // A run without a judge unless a test says otherwise.
-const same = (ts: BulkTarget[], o: { judged?: boolean } = {}): Map<number, number> =>
+const same = (ts: BulkTarget[], o: { judged?: boolean; choiceFields?: ReadonlySet<string> } = {}): Map<number, number> =>
 	bulkSameValueOthers(ts, { judged: false, ...o });
 
 describe('which targets share a value', () => {
@@ -259,5 +276,25 @@ describe('which targets share a value', () => {
 		expect(m.get(1)).toBe(1);
 		expect(m.get(2)).toBe(1);
 		expect(m.has(3)).toBe(false);
+	});
+
+	it('does not count a field filled from a fixed list of choices, and counts the other fields as before', () => {
+		const ts = [
+			tgt(1, fields(['product_type', 'Shampoo'], ['seo_title', 'X'])),
+			tgt(2, fields(['product_type', 'Shampoo'], ['seo_title', 'X'])),
+			tgt(3, fields(['product_type', 'Shampoo'], ['seo_title', 'Y'])),
+		];
+		const m = same(ts, { judged: true, choiceFields: new Set(['product_type']) });
+		expect([...m.entries()]).toEqual([[1, 1], [2, 1]]);
+		// Without the choice field left out, all three share it.
+		expect(same(ts, { judged: true }).get(3)).toBe(2);
+	});
+});
+
+describe('which fields a judge fills from a fixed list', () => {
+	it('names a text field with choices, and not a free text, a number or a run without a rule', () => {
+		const schema = { properties: { product_type: { type: 'string', enum: ['Shampoo', 'Spülung'] }, seo_title: { type: 'string', maxLength: 70 }, rank: { type: 'number' }, empty: { type: 'string', enum: [] } } };
+		expect([...bulkChoiceFields({ schema })]).toEqual(['product_type']);
+		expect(bulkChoiceFields(null).size).toBe(0);
 	});
 });
