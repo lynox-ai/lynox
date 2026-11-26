@@ -159,7 +159,7 @@ import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './webhook-receiver.js';
 import { requestLogUrl } from './request-log-url.js';
-import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
+import { PAUSED_DONE_WORKFLOW_FIRST, isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
@@ -2062,7 +2062,7 @@ const ERASED_DURING_REQUEST = 'All data was erased while this message was being 
 /** A paused plan's refusal (`plan-pause.ts`); `code: 'paused'` is what the view switches on. */
 const PAUSED_REFUSAL = 'paused because an access ended; it needs to be taken over';
 /** The same for a completed plan that keeps its pause: nothing takes it over or reopens it. */
-const PAUSED_DONE_REFUSAL = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.';
+const PAUSED_DONE_REFUSAL = `completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again. ${PAUSED_DONE_WORKFLOW_FIRST}`;
 /** The refusal for this paused plan: its own sentence once it is completed. */
 const pausedRefusal = (t: { readonly status?: string | undefined } | undefined): string =>
   t?.status === 'completed' ? PAUSED_DONE_REFUSAL : PAUSED_REFUSAL;
@@ -3417,7 +3417,8 @@ export class LynoxHTTPApi {
   /**
    * Refuses a change to a paused plan (`plan-pause.ts`), before anything marks it: a mandate
    * changes nothing on one, the owner may switch it, complete it or delete it but not edit or
-   * stamp it, since only the takeover lets it run again. True when it answered the request.
+   * stamp it, since only the takeover lets it run again, and nothing at a completed one. True when
+   * it answered the request.
    */
   private _refusePaused(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string, action: 'edit' | 'enable' | 'complete' | 'delete' | 'confirm'): boolean {
     // Off, nothing is read for it: the routes are main's.

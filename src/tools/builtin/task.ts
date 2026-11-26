@@ -119,7 +119,7 @@ export function triggerDetailLine(t: {
   paused_at?: number | undefined;
 }): string {
   const parts: string[] = [];
-  // A paused plan says so first; it has no next run until it is taken over (`plan-pause.ts`).
+  // A paused plan says so first; it has no next run while it is paused (`plan-pause.ts`).
   const paused = isPaused(t);
   if (paused) parts.push(`PAUSED — ${pausedModelText(t)}`);
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
@@ -159,7 +159,7 @@ export function triggerDetailLine(t: {
     // A stop that paused the plan stored "paused until the owner takes it over". That half holds only
     // while the plan is paused and open: taken over or with the switch off it is not paused, and
     // completed it has no takeover (`pausedModelText`). Otherwise the stored sentence is read without
-    // it; the stored value stays, the takeover reads it (`plan-takeover.ts`).
+    // it; the stored value stays, the takeover reads it (`scheduleOf`, `stopResults` in `takeover-core.ts`).
     const stored = (!paused || t.status === 'completed') && t.last_run_result === ACCESS_ENDED_PAUSED_RESULT
       ? ACCESS_ENDED_RESULT
       : t.last_run_result;

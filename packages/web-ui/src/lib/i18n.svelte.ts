@@ -2699,7 +2699,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'triggers.paused_takeover': { de: 'Pausiert · Übernahme nötig', en: 'Paused · needs takeover' },
 	'triggers.paused_owner_takes_over': { de: 'Pausiert, bis der Inhaber den Plan übernimmt.', en: 'Paused until the owner takes the plan over.' },
 	'triggers.paused_done': { de: 'Abgeschlossen · pausiert', en: 'Completed · paused' },
-	'triggers.paused_done_hint': { de: 'Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.', en: 'An access ended. To run this plan again, set up a new one.' },
+	'triggers.paused_done_hint': { de: 'Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an. Läuft er auf einem Workflow, den die Person mit diesem Zugang angelegt oder zuletzt geändert hat, übernimm vorher den Workflow unter „{tab}“ mit „{button}“.', en: 'An access ended. If the plan should run again, create a new one. If it runs a workflow that the person with this access created or last changed, first take over that workflow under “{tab}” with “{button}”.' },
 	// 641c-2: the owner's takeover of a paused plan (`utils/plan-takeover.ts`); wording ux U-037/U-039, PRD 641c "Texte".
 	'takeover.button': { de: 'Übernehmen', en: 'Take over' },
 	'takeover.title': { de: 'Plan übernehmen?', en: 'Take over this plan?' },

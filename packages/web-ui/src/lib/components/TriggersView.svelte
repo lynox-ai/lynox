@@ -335,14 +335,14 @@
 	}
 
 	// A completed plan keeps its pause (reopened, it would need the takeover still), but nothing is
-	// due on it: no label, no button, not in the notices, as the badge's count leaves it out too.
+	// due on it: no takeover label or button, not in the notices, as the badge's count leaves it out
+	// too. It has its own mark and line instead (`pausedDone`, U-275).
 	function pausedOpen(trigger: Trigger): boolean {
 		return trigger.paused === true && trigger.status !== 'completed';
 	}
 
-	// Run now on a completed plan that keeps its pause is refused with the paused sentence, which
-	// sends the owner to a takeover this plan does not offer, and nothing reopens a paused plan. So
-	// the button is not offered there (ux U-179).
+	// Run now on a completed plan that keeps its pause is refused: nothing takes it over and nothing
+	// reopens a paused plan, so it never runs again. So the button is not offered there (U-179).
 	function pausedDone(trigger: Trigger): boolean {
 		return trigger.paused === true && trigger.status === 'completed';
 	}
@@ -699,7 +699,7 @@
 							<!-- A completed plan that keeps its pause has no way back at the plan: nothing takes it
 							     over or reopens it. The line names the way there is (U-275). -->
 							{#if pausedDone(trigger)}
-								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-done-hint>{t('triggers.paused_done_hint')}</p>
+								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-done-hint>{tf('triggers.paused_done_hint', { tab: t('hub.automation.workflows'), button: t('workflow_library.takeover.button') })}</p>
 							{/if}
 							<!-- Why its run does not do its work, with the way out: a watch the policy keeps from its
 							     page, or the cause its last failed run stored. Only causes lynox itself knows, said in

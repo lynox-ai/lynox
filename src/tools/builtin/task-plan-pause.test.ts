@@ -90,9 +90,9 @@ describe('a paused plan in the task tools', () => {
     expect(await taskUpdateTool.handler({ task_id: 'a', status: 'completed' }, agent())).toContain('Task completed');
   });
 
-  it('the completed plan\'s model text, exactly, offers a new plan and no takeover (U-275)', () => {
-    expect(PAUSED_DONE_MODEL_TEXT).toBe("completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan.");
-    expect(PAUSED_DONE_UPDATE_REFUSAL).toBe("Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan.");
+  it('the completed plan\'s model text, exactly, offers a new plan after the workflow\'s takeover where it needs one, and no takeover of the plan (U-275)', () => {
+    expect(PAUSED_DONE_MODEL_TEXT).toBe("completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan. If it runs a workflow that the person with this access created or last changed, that workflow has to be taken over first, under \"Workflows\" with \"Take over workflow\".");
+    expect(PAUSED_DONE_UPDATE_REFUSAL).toBe("Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan. If it runs a workflow that the person with this access created or last changed, that workflow has to be taken over first, under \"Workflows\" with \"Take over workflow\".");
     for (const text of [PAUSED_DONE_MODEL_TEXT, PAUSED_DONE_UPDATE_REFUSAL]) expect(text).not.toMatch(/takes? it over|until the owner/);
   });
 

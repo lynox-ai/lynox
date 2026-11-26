@@ -170,11 +170,11 @@ describe('a completed plan that keeps its pause', () => {
 describe('a completed plan that keeps its pause (U-275)', () => {
 	const mark = (): Element | null => target.querySelector('[data-trigger-paused-done]');
 	const hint = (): Element | null => target.querySelector('[data-trigger-paused-done-hint]');
-	it('is marked completed and paused, and its line names the way there is: a new plan', async () => {
+	it('is marked completed and paused, and its line names the way there is: a new plan, after the workflow\'s takeover where it needs one', async () => {
 		rows = [{ ...PAUSED, status: 'completed' }];
 		await render();
 		expect(mark()?.textContent).toBe('Abgeschlossen · pausiert');
-		expect(hint()?.textContent).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.');
+		expect(hint()?.textContent).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an. Läuft er auf einem Workflow, den die Person mit diesem Zugang angelegt oder zuletzt geändert hat, übernimm vorher den Workflow unter „Workflows“ mit „Workflow übernehmen“.');
 		expect(target.querySelector('[data-trigger-paused]')).toBeNull();
 	});
 	it('an open paused plan keeps the takeover mark, and neither the completed mark nor its line', async () => {
