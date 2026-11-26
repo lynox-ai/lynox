@@ -799,6 +799,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.target.host_rewrote': { de: 'Im Shop anders gespeichert', en: 'Stored differently in the shop' },
 	'bulk.target.product': { de: 'Produkt {n}', en: 'Product {n}' },
 	'bulk.target.open_admin': { de: 'Im Shopify-Admin öffnen', en: 'Open in Shopify admin' },
+	'bulk.target.open_in_shop': { de: 'In Shopify öffnen', en: 'Open in Shopify' },
 	'bulk.outliers.count': { de: '{n} Beurteilungen weichen vom Rest dieses Laufs ab und stehen deshalb oben. Auch eine unauffällige Beurteilung kann falsch sein.', en: '{n} verdicts differ from the rest of this run, so they are listed first. A verdict that does not stand out can still be wrong.' },
 	'bulk.outliers.count_one': { de: '1 Beurteilung weicht vom Rest dieses Laufs ab und steht deshalb oben. Auch eine unauffällige Beurteilung kann falsch sein.', en: '1 verdict differs from the rest of this run, so it is listed first. A verdict that does not stand out can still be wrong.' },
 	'bulk.outliers.over': { de: '{n} Beurteilungen weichen vom Rest dieses Laufs ab; die ersten {first} stehen oben. Auch eine unauffällige Beurteilung kann falsch sein.', en: '{n} verdicts differ from the rest of this run; the first {first} are listed first. A verdict that does not stand out can still be wrong.' },
