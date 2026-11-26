@@ -29,6 +29,21 @@ describe('signalDebuggerOff', () => {
     expect(signalDebuggerOff([`${SIGNAL_DEBUGGER_OFF}x`], `${SIGNAL_DEBUGGER_OFF}x`)).toBe(false);
   });
 
+  it('reads the flag the way node applies it: NODE_OPTIONS first, the argv after, the last word wins', () => {
+    expect(signalDebuggerOff(['--no-disable-sigusr1'], SIGNAL_DEBUGGER_OFF)).toBe(false);
+    expect(signalDebuggerOff([], `${SIGNAL_DEBUGGER_OFF} --no-disable-sigusr1`)).toBe(false);
+    expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF], '--no-disable-sigusr1')).toBe(true);
+    expect(signalDebuggerOff([], `"${SIGNAL_DEBUGGER_OFF}"`)).toBe(true);
+  });
+
+  it('refuses an option that opens a debugger without a signal, even with the flag', () => {
+    for (const open of ['--inspect', '--inspect=0.0.0.0:9229', '--inspect-brk', '--inspect-wait=9229']) {
+      expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF, open], undefined), open).toBe(false);
+      expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF], open), open).toBe(false);
+    }
+    expect(signalDebuggerOff([SIGNAL_DEBUGGER_OFF, '--inspect-port=0'], undefined)).toBe(true);
+  });
+
   it('reads a real start: the image NODE_OPTIONS replaced by an operator and no argv flag fails, the argv flag holds', () => {
     // The image sets NODE_OPTIONS; an operator's own replaces it, and only the argv flag is left.
     const replaced = startedWith([], '--max-old-space-size=512');
@@ -55,23 +70,34 @@ describe('startedFromImage', () => {
 describe.skipIf(process.platform === 'win32')('the flag in a real node process', () => {
   // A process that waits, signalled the way a process of the same user would; the debugger port is
   // 0 so no fixed port is taken. Only node's own line on stderr is read, nothing is connected.
-  const signalled = (argv: string[]): Promise<string> => new Promise((resolve, reject) => {
+  // `ready` says the child was running when it was signalled, so a child that never started (a
+  // node that does not know the flag) cannot pass as one that kept its debugger closed.
+  const signalled = (argv: string[], nodeOptions?: string): Promise<{ err: string; ready: boolean }> => new Promise((resolve, reject) => {
     const env: NodeJS.ProcessEnv = { ...process.env };
-    delete env['NODE_OPTIONS'];
+    if (nodeOptions === undefined) delete env['NODE_OPTIONS']; else env['NODE_OPTIONS'] = nodeOptions;
     const child = spawn(process.execPath, [...argv, '--inspect-port=0', '-e', 'process.stdout.write("ready\\n"); setInterval(() => {}, 1000)'], { env });
     let err = '';
+    let ready = false;
     child.stderr.on('data', (d: Buffer) => { err += d.toString(); });
     child.stdout.once('data', () => {
+      ready = true;
       child.kill('SIGUSR1');
       setTimeout(() => { child.kill('SIGKILL'); }, 1500);
     });
     child.once('error', reject);
-    child.once('exit', () => { resolve(err); });
+    child.once('exit', () => { resolve({ err, ready }); });
   });
 
-  it('keeps the debugger closed on the signal, where the same start without it opens one', async () => {
-    expect(await signalled([])).toMatch(/Debugger listening/);
-    expect(await signalled([SIGNAL_DEBUGGER_OFF])).not.toMatch(/Debugger listening/);
+  it('keeps the debugger closed on the signal, by argv or by NODE_OPTIONS, where the same start without it opens one', async () => {
+    const without = await signalled([]);
+    expect(without.ready).toBe(true);
+    expect(without.err).toMatch(/Debugger listening/);
+    const byArgv = await signalled([SIGNAL_DEBUGGER_OFF]);
+    expect(byArgv.ready).toBe(true);
+    expect(byArgv.err).not.toMatch(/Debugger listening/);
+    const byEnv = await signalled([], SIGNAL_DEBUGGER_OFF);
+    expect(byEnv.ready).toBe(true);
+    expect(byEnv.err).not.toMatch(/Debugger listening/);
   });
 });
 
