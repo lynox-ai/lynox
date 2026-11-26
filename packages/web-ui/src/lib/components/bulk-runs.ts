@@ -156,6 +156,12 @@ export interface BulkRunDetailData extends BulkRun {
 	probeOwn?: boolean;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
+	/** Of `undoable`: the written targets, and those with a send of which it is open whether the
+	 *  change arrived. A target whose sends the host all refused is in neither. Absent from an
+	 *  engine before this field. */
+	undoableParts?: { written: number; open: number };
+	/** For an undo: how many of the targets it gives a value back take back a write never confirmed. */
+	undoOpen?: number;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
 	listFirstPage: string | null;
 	/** A Shopify list narrowed to a product type and/or vendor: the values as the planner gave them (supplied text). */
@@ -167,6 +173,9 @@ export interface BulkRunDetailData extends BulkRun {
 	listNote: string | null;
 	/** A judged run's rule as the owner starts it (owner only), and its hash the start presents. */
 	judgeRule: { rule: string; schema: { properties: Record<string, unknown> }; tier: string; context?: string[] | undefined } | null;
+	/** Set when the rule is an artifact's text, taken word for word; `title` is the artifact's title
+	 *  as planned. The owner's only, as the rule is; absent on an older engine. */
+	ruleFromArtifact?: { title?: string | undefined } | null | undefined;
 	judgeRuleHash: string | null;
 	/** Who would judge the run now: the provider serving the call and the model's catalog name. */
 	judgeServedBy: { provider: string; label: string } | null;
@@ -713,6 +722,32 @@ export function bulkLinkDomainShown(domain: string): string {
 	return chars.length <= BULK_LINK_DOMAIN_SHOWN_MAX ? chars.join('') : `${chars.slice(0, BULK_LINK_DOMAIN_SHOWN_MAX - 1).join('')}…`;
 }
 
+/** The start refusals of a run whose rule came from a saved artifact, by the engine's code. */
+export const BULK_RULE_SOURCE_CODES: readonly string[] = ['rule_source_changed', 'rule_source_gone', 'rule_source_unreadable'];
+
+/** An artifact's title as the page may name it: the one it had when the run was planned, or null
+ *  when it had none (absent, not text, or only spaces). An access can write a title, so the page
+ *  draws it as a value someone else wrote (`shownValue`, `MarkedLine`), never as its own words. */
+export function bulkArtifactTitle(title: unknown): string | null {
+	return typeof title === 'string' && title.trim() !== '' ? title : null;
+}
+
+/** The key of the owner's sentence for a start the engine refused because the rule's artifact
+ *  changed, is gone or cannot be read now; null for any other code. `titled` picks the sentence
+ *  that names the artifact by its planned title; one that cannot be read is never named. */
+export function bulkRuleSourceKey(code: string | undefined, titled: boolean): string | null {
+	if (code === 'rule_source_unreadable') return 'bulk.rule_source.unreadable';
+	if (code !== 'rule_source_changed' && code !== 'rule_source_gone') return null;
+	return `bulk.rule_source.${code === 'rule_source_changed' ? 'changed' : 'gone'}${titled ? '_titled' : ''}`;
+}
+
+/** The key of the sentence under a rule taken word for word from a saved artifact, in place of
+ *  "lynox wrote this rule": at the start of judging or at the approval, named by its planned title
+ *  when it had one. */
+export function bulkRuleFromArtifactKey(step: 'start' | 'approve', titled: boolean): string {
+	return `bulk.${step}.rule_from_artifact${titled ? '' : '_untitled'}`;
+}
+
 /** A list of more values than this is folded until the owner shows it all (ux U-175). */
 export const BULK_LIST_FILTER_UNFOLDED_MAX = 5;
 /** How many values a folded list shows before the count of the rest. */
@@ -1160,6 +1195,31 @@ export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>,
 	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n, target: bulkSystemName(run.targetSystem, i18n) });
 }
 
+/** The undo offer's sentence: written targets only, written plus targets of which it is open
+ *  whether the change arrived, or only those. The open ones are named apart from the written ones
+ *  (the head's count), because the undo reads them first and resets only where the run's value is. */
+export function bulkUndoExplainText(run: Pick<BulkRunDetailData, 'undoableParts'>, i18n: BulkI18n): string {
+	const open = run.undoableParts?.open ?? 0;
+	if (open === 0) return i18n.t('bulk.undo.explain');
+	const one = open === 1 ? '_one' : '';
+	const key = run.undoableParts!.written > 0 ? `bulk.undo.explain_open${one}` : `bulk.undo.explain_open_only${one}`;
+	return i18n.tf(key, { n: String(open) });
+}
+
+/** The undo approval's count sentence. `n` is every target the undo gives a value back; of those,
+ *  `undoOpen` take back a write that was never confirmed, so they are not counted as getting a
+ *  value back but named as checked first. */
+export function bulkUndoApproveText(run: Pick<BulkRunDetailData, 'changes' | 'undoOpen'>, i18n: BulkI18n): string {
+	const n = run.changes.update + run.changes.create;
+	const open = Math.min(run.undoOpen ?? 0, n);
+	if (open === 0) return i18n.tf(bulkOne('bulk.undo.approve_explain', n), { n: String(n) });
+	const openOne = open === 1 ? '_one' : '';
+	const written = n - open;
+	if (written === 0) return i18n.tf(`bulk.undo.approve_open_only${openOne}`, { n: String(open) });
+	const head = i18n.tf(written === 1 ? 'bulk.undo.approve_written_one' : 'bulk.undo.approve_written', { w: String(written) });
+	return `${head} ${i18n.tf(`bulk.undo.approve_open_more${openOne}`, { n: String(open) })} ${i18n.t('bulk.undo.approve_changed_stay')}`;
+}
+
 /** The line about targets that held another value than expected when lynox last read them, or
  *  null when there are none. Worded for every case: after a send without a clear answer lynox did
  *  send to them (so not "not written"), an undo expects what its source wrote (so not "since the
@@ -1326,8 +1386,13 @@ export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number |
  *  would take back, and is not at its probe (that has its own way back). An atomic run is taken
  *  back whole or not at all, so only once it finished: the engine refuses any other
  *  (`atomic_partial`), and one that aborted has already rolled back what it could. */
-export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe' | 'atomic'>): boolean {
+export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe' | 'atomic'> & Partial<Pick<BulkRunDetailData, 'undoableParts'>>): boolean {
 	if (run.kind !== 'apply' || run.undoable <= 0 || bulkAtProbe(run)) return false;
+	// Only what the head shows as written, or a send of which it is open whether it arrived: a run
+	// whose every other send the host refused changed nothing an undo could take back. This trusts
+	// the engine's reading of a refusal: a send counts as refused only on an answer that says the
+	// host did not act; a timeout or an unreadable answer stays open.
+	if (run.undoableParts !== undefined && run.undoableParts.written + run.undoableParts.open === 0) return false;
 	if (run.atomic) return run.phase === 'done';
 	return run.phase === 'done' || run.phase === 'aborted' || (run.phase === 'writing' && run.haltReason !== null);
 }

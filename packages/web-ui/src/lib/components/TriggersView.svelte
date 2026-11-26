@@ -19,6 +19,9 @@
 	import { FoldGroup } from '../utils/fold-group.svelte.js';
 	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { approvalSetupKind, approvalSetupName, type ApprovalSetupLine } from './approvals.js';
+	import { visibleText } from '../visible-text.js';
+	import { monthDay } from '../utils/cron-human.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -49,6 +52,11 @@
 		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
 		created_by?: string;
 		edited_by?: string;
+		// The same, as the lines shown under the title: a helper that set it up or changed it
+		// last, named as the session may read it — by name, or to a helper another helper's mark
+		// as "another person with delegated access" (`GET /api/triggers`). Only the marks on the trigger itself, not on the workflow it
+		// runs. Empty for the owner's own.
+		setup?: ApprovalSetupLine[];
 		// The last mandate that changed the trigger, kept after the owner changes it again.
 		mandate_editor?: string;
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
@@ -519,7 +527,7 @@
 		const day = m[3];
 		const weekday = m[4];
 		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
-		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${local}`;
+		if (day !== '*') return tf('tasks.monthly_on_day', { day: monthDay(Number(day), getLocale()), time: local });
 		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${local}`;
 		return `${t('tasks.daily_at')} ${local}`;
 	}
@@ -646,6 +654,11 @@
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
 							</div>
+							<!-- Who set it up or changed it last, when that was a helper, worded as on an
+							     approval card (U-202). The owner's own trigger has none. -->
+							{#each trigger.setup ?? [] as line, i (i)}
+								<p class="mt-0.5 text-xs text-text-muted break-words" data-trigger-setup={line.kind}>{tf(`approvals.setup.${approvalSetupKind(line, viewer)}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
+							{/each}
 							<!-- A helper has no takeover button: who lets the plan run again is said here,
 							     visibly. A bulk run never reaches this pause (it has no helper's mark). -->
 							{#if viewer === 'mandate' && pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}
@@ -653,7 +666,7 @@
 							{/if}
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
-									<span class="flex items-center gap-1">
+									<span class="flex items-center gap-1" data-trigger-schedule>
 										<Icon name="clock" size="xs" />
 										{cronToHuman(trigger.schedule_cron)}
 									</span>

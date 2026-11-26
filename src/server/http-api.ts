@@ -97,7 +97,7 @@ import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
-import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
+import { approvalCard, approvalScopeOf, listScopeOf, mandateNamer, setupLines, type DisplayNameOf, type SetupMarks } from '../core/approval-view.js';
 import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
@@ -143,8 +143,10 @@ import { resolveClientIp } from './client-ip.js';
 import { awaitsOwnQuestion } from './own-question.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
+import type { KnowledgeStore } from '../core/knowledge-store.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
+import { judgeRuleSourceChanged } from '../core/bulk-judge-rule.js';
 import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
@@ -175,6 +177,7 @@ import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
 import { ArtifactFileRefusedError, ArtifactPlaceholderError } from '../core/artifact-store.js';
 import { findHiddenChar } from '../core/hidden-text.js';
+import { ToolSilenceClock } from '../core/tool-silence.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -471,6 +474,18 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
     paused_ended: entries.map((e) => ({ email: e.email, reason: e.reason, ends_at: new Date(e.endsAt * 1000).toISOString(), warned: e.warned === true })),
   };
 }
+
+/** A trigger's setup marks from its stored columns, as an approval card and the trigger list read them. */
+export function triggerSetupMarks(trigger: TriggerRecord): SetupMarks {
+  return {
+    createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
+    mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
+    creatorCovered: creatorCovered(planAuthorshipOf(trigger)), editorCovered: editorCovered(planAuthorshipOf(trigger)),
+  };
+}
+
+/** No approval entry: the trigger list names only the marks on the trigger itself. */
+const NO_APPROVAL_ENTRY = { mandateId: null, createdBy: null } as const;
 
 /** One ended access behind a paused plan, as the owner's view reads it. */
 export interface PausedEnded {
@@ -2072,9 +2087,10 @@ export class LynoxHTTPApi {
   // run waits on its own question (that one waits for its answer, a stop, or its TTL).
   /** `parked` says whether the run waits on a question it asked itself. The thread's one open
    *  question can be a scheduled run's instead, asked beside a working chat run. `streamGone`
-   *  says whether the run's own stream has dropped. A slot without them is read as not parked,
-   *  with `streamAlive` as its stream. */
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; streamGone?: () => boolean }>();
+   *  says whether the run's own stream has dropped. `toolWorking` says whether one of its tool
+   *  calls is still within its own limit (`ToolSilenceClock`). A slot without them is read as
+   *  not parked and not working a tool, with `streamAlive` as its stream. */
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; streamGone?: () => boolean; toolWorking?: () => boolean }>();
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -2640,7 +2656,15 @@ export class LynoxHTTPApi {
   private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
   private static readonly SESSION_COOKIE_NAME = 'lynox_session';
   /** The owner's principal part of a session cookie; the Web UI mints the same bytes (`ownerSession`). */
-  private static readonly OWNER_PRINCIPAL_PART = Buffer.from(JSON.stringify({ v: 1, kind: 'owner' }), 'utf8').toString('base64url');
+  /**
+   * The owner's principal part of a session cookie minted in `generation` (owner-sessions.ts): the
+   * bytes of today's `{v:1,kind:'owner'}` in generation 0, `{v:1,kind:'owner',gen:n}` after the
+   * first end. The web UI mints the same bytes (`ownerSessionPrincipal`).
+   */
+  private static _ownerPrincipalPart(generation: number): string {
+    const principal = generation === 0 ? { v: 1, kind: 'owner' } : { v: 1, kind: 'owner', gen: generation };
+    return Buffer.from(JSON.stringify(principal), 'utf8').toString('base64url');
+  }
   /** A principal cookie stamped further than this in the future is refused (D4). */
   private static readonly SESSION_FUTURE_SKEW_S = 60;
 
@@ -2819,6 +2843,23 @@ export class LynoxHTTPApi {
       listed: { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) },
       by: plan.of.email,
       workflow,
+    };
+  }
+
+  /**
+   * The name each grant was last shown under in the actor trail, read once per grant for one
+   * request. Null where the trail has none or cannot be read: the address stands in. Who may see
+   * which name is the caller's to decide (`mandateNamer`).
+   */
+  #displayNameReader(): DisplayNameOf {
+    const log = this.engine?.getAuditLog() ?? null;
+    const names = new Map<string, string | null>();
+    return (id) => {
+      if (names.has(id)) return names.get(id) ?? null;
+      let display: string | null = null;
+      if (log !== null) { try { display = log.displayNameOf(id); } catch { /* the address stands in */ } }
+      names.set(id, display);
+      return display;
     };
   }
 
@@ -3430,11 +3471,12 @@ export class LynoxHTTPApi {
       return null;
     }
 
-    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() ? null : { iat: timestamp, principal: null };
+    // A cookie without a principal was minted before generations existed: generation 0.
+    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() || this._ownerSessionEnded(0) ? null : { iat: timestamp, principal: null };
     const session = LynoxHTTPApi._parseSessionPrincipal(parts[1]!);
     if (session === null) return null;
     if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
-    if (session.kind === 'owner') return { iat: timestamp, principal: null };
+    if (session.kind === 'owner') return this._ownerSessionEnded(session.gen) ? null : { iat: timestamp, principal: null };
     if (nowS >= session.exp) return null;
     return {
       iat: timestamp,
@@ -3443,6 +3485,21 @@ export class LynoxHTTPApi {
         ...(session.mandateExp !== undefined ? { mandateExp: session.mandateExp } : {}),
       },
     };
+  }
+
+  /**
+   * Whether an owner cookie of this generation is refused: any generation but the live one
+   * (owner-sessions.ts, `Engine.liveOwnerGeneration`, which has one of its own when engine.db did not
+   * open); a store that cannot be read refuses. A mandate's session is not touched: it ends with its
+   * mandate (`_mandateLive`).
+   */
+  private _ownerSessionEnded(generation: number): boolean {
+    if (!this.engine) return generation !== 0;
+    try {
+      return generation !== this.engine.liveOwnerGeneration();
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -3455,7 +3512,7 @@ export class LynoxHTTPApi {
   }
 
   /** The signed principal part of a session cookie; null for anything this engine does not know. */
-  private static _parseSessionPrincipal(part: string): { kind: 'owner' } | { kind: 'mandate'; email: string; display: string; mandateId: string; exp: number; mandateExp?: number } | null {
+  private static _parseSessionPrincipal(part: string): { kind: 'owner'; gen: number } | { kind: 'mandate'; email: string; display: string; mandateId: string; exp: number; mandateExp?: number } | null {
     let raw: unknown;
     try {
       raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
@@ -3465,8 +3522,14 @@ export class LynoxHTTPApi {
     if (raw === null || typeof raw !== 'object') return null;
     const p = raw as Record<string, unknown>;
     if (p['v'] !== 1) return null;
-    // Exactly `{v:1,kind:'owner'}`: any other field beside it is refused, never read as the owner.
-    if (p['kind'] === 'owner') return Object.keys(p).length === 2 ? { kind: 'owner' } : null;
+    // Exactly `{v:1,kind:'owner'}` (generation 0) or `{v:1,kind:'owner',gen:n}` with n a whole number
+    // from 1: any other field, or another `gen`, is refused, never read as the owner.
+    if (p['kind'] === 'owner') {
+      const keys = Object.keys(p).length;
+      if (keys === 2) return { kind: 'owner', gen: 0 };
+      const gen = p['gen'];
+      return keys === 3 && typeof gen === 'number' && Number.isSafeInteger(gen) && gen >= 1 ? { kind: 'owner', gen } : null;
+    }
     if (p['kind'] !== 'mandate') return null;
     const { email, display, mandate_id: mandateId, exp } = p;
     if (typeof email !== 'string' || email.length === 0) return null;
@@ -3520,11 +3583,23 @@ export class LynoxHTTPApi {
   ): void {
     const ageSec = Math.floor(Date.now() / 1000) - cookieIssuedAt;
     if (ageSec < LynoxHTTPApi.SESSION_REFRESH_AFTER_S) return;
+    // In the live generation: the cookie being refreshed was just let in, so it is of that one; a
+    // cookie of another was refused before this and is never refreshed into the live one.
+    LynoxHTTPApi._setOwnerSessionCookie(req, res, secret, this.engine ? this.engine.liveOwnerGeneration() : 0, trustProxy);
+  }
 
+  /** Mint the owner's session cookie in `generation`, signed now, and set it on the response. */
+  private static _setOwnerSessionCookie(
+    req: IncomingMessage,
+    res: ServerResponse,
+    secret: string,
+    generation: number,
+    trustProxy: boolean,
+  ): void {
     const key = createHmac('sha256', 'lynox-session').update(secret).digest();
     const nonce = randomBytes(8).toString('hex');
     const ts = Math.floor(Date.now() / 1000).toString();
-    const payload = `${nonce}.${LynoxHTTPApi.OWNER_PRINCIPAL_PART}.${ts}`;
+    const payload = `${nonce}.${LynoxHTTPApi._ownerPrincipalPart(generation)}.${ts}`;
     const hmac = createHmac('sha256', key).update(payload).digest('hex');
     const token = `${payload}.${hmac}`;
 
@@ -5064,12 +5139,16 @@ export class LynoxHTTPApi {
       // from the client's perspective — every /run retry gets 409 until the 30-min
       // streamTimeout fires server-side. A run waiting on its OWN question is not taken over:
       // it is silent by design, its question waits for an answer (or a stop, or its TTL), and
-      // a new message gets the 409 the chat shows as blocked by that question.
+      // a new message gets the 409 the chat shows as blocked by that question. Nor is a run
+      // one of whose tools is still within its own limit: a shell command can work silently for
+      // up to fifteen minutes, and the run taken over in the middle of it was lost.
       const STALE_RUN_SILENCE_MS = 60_000;
       const existingSlot = this.runningSessions.get(sessionId);
       if (existingSlot && (!existingSlot.streamAlive || existingSlot.streamGone?.() === true)) {
         // A scheduled run's question in this thread is not the run's: it does not hold it back.
-        const stale = existingSlot.parked?.() !== true && Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
+        const stale = existingSlot.parked?.() !== true
+          && existingSlot.toolWorking?.() !== true
+          && Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
         if (stale) {
           // Taking over ends the run: only that run's principal (or the owner) may, even in the
           // mandate's own conversation (§3.13 E7).
@@ -5590,6 +5669,9 @@ export class LynoxHTTPApi {
       // and a reconnecting client can replay-then-tail (Tier 2).
       const runId = randomUUID();
       const runBuffer = this.engine?.getRunBufferManager()?.create(runId) ?? null;
+      // The run's open tool calls, each until its own limit: what keeps a tool that works
+      // silently from reading as a stuck run (the takeover above).
+      const toolClock = new ToolSilenceClock();
 
       // Wire streaming. Every rendered event is appended to the buffer (which
       // assigns a monotonic seq) and emitted with an `id:` line so a client can
@@ -5602,6 +5684,7 @@ export class LynoxHTTPApi {
       // used 20 lines below — would have dropped `fatal` from every error on the
       // wire without a single test or type failing.
       session.onStream = async (event: EmittedStreamEvent) => {
+        toolClock.note(event);
         const seq = runBuffer?.append(event);
         // Every engine event counts as activity, also once the stream is gone: a run that
         // keeps working headless is not stale. Only an engine silent for the stale window is.
@@ -5946,6 +6029,7 @@ export class LynoxHTTPApi {
       // far. Idempotent — with no live timer it is a no-op, so a defensive
       // double-pause can never double-subtract the budget.
       const pauseWallClock = (): void => {
+        toolClock.pause();
         if (streamTimeout === undefined) return;
         clearTimeout(streamTimeout);
         streamTimeout = undefined;
@@ -5956,6 +6040,7 @@ export class LynoxHTTPApi {
       // works on headless and keeps its ceiling. Skips once the wall-clock itself
       // has fired, and if a timer is somehow already live so it never stacks two.
       const resumeWallClock = (): void => {
+        toolClock.resume();
         // The answer is activity too: a run that waited long for it is not silent from here on,
         // and a new message must not take it over before its next engine event.
         const live = this.runningSessions.get(sessionId);
@@ -6022,7 +6107,7 @@ export class LynoxHTTPApi {
         const pending = promptStore?.getPending(sessionId);
         if (pending) promptStore?.expirePrompt(pending.id, reason);
       };
-      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt, streamGone: () => aborted });
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt, streamGone: () => aborted, toolWorking: () => toolClock.holds() });
       // A client that left while this request was still being set up (a file being read, a
       // takeover draining) closed the response before anyone listened: its close is past, so
       // the drop is taken now, once the slot it marks exists.
@@ -9684,6 +9769,13 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
+      // Who set each trigger up or changed it last, when that was a mandate: lines as on an
+      // approval card, named by the same rule (in these lines a mandate sees another grant as
+      // another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
+      // from the marks on the trigger itself — the card also reads its workflow's. The owner's
+      // own setup has no line. No session, no lines.
+      const setupScope = approvalScopeOf(principal);
+      const setupNameOf = setupScope === null ? null : mandateNamer(setupScope, this.#displayNameReader());
       const policyContext = engine.getToolContext();
       // Why the run does not do its work: a watch the policy refuses now holds the next run and is
       // told first; otherwise the cause the last failed run stored, read through its closed parser.
@@ -9722,6 +9814,7 @@ export class LynoxHTTPApi {
             recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
               && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
             ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
+            setup: setupNameOf === null ? [] : setupLines(NO_APPROVAL_ENTRY, triggerSetupMarks(trigger), undefined, setupNameOf),
             // The workflow's name where the title is that name as the engine wrote it (scheduled
             // without a title): the view says "Scheduled: " itself, in the reader's language, and
             // sets the name apart as a value. Any other title stays whole, the prefix included; so
@@ -10637,6 +10730,10 @@ export class LynoxHTTPApi {
         // the owner sees it before the start the hash binds, never only the fields it decides.
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier, ...(judgeRule.context !== undefined ? { context: judgeRule.context } : {}) } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
+        // A rule taken word for word from a saved artifact is not lynox's wording: the page says
+        // where it came from, by the title it had when the run was planned. Read from the stored
+        // rule, so the owner's only, as the rule is.
+        ruleFromArtifact: judgeRule?.source !== undefined ? (judgeRule.source.title !== undefined ? { title: judgeRule.source.title } : {}) : null,
         judgeModel,
         judgeServedBy,
         // The start route refuses every judged start on such an instance (judge_unavailable); the
@@ -10656,6 +10753,13 @@ export class LynoxHTTPApi {
         // What an undo would take back now; for an external run that includes a failed write,
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
+        // The same, in the two parts the page names apart: the written targets, and those sent to
+        // without a confirmed write, of which it is open whether the change arrived. A target whose
+        // every send the host refused is in neither.
+        undoableParts: ledger.countUndoableParts(status.id),
+        // For an undo: how many of the targets it gives a value back take back a source write
+        // that was never confirmed, so the page does not count them as getting a value back.
+        undoOpen: ledger.countUndoOpenTargets(status.id),
         // An undone run names the undo that took it back and when, so its page says it is no longer live.
         undoneBy: ledger.undoneBy(status.id),
       });
@@ -10768,16 +10872,8 @@ export class LynoxHTTPApi {
       const engineDb = this.engine?.getEngineDb() ?? null;
       const triggers = engineDb === null ? null : new TriggerStore(engineDb);
       const workflows = engineDb === null ? null : new WorkflowStore(engineDb);
-      const log = this.engine?.getAuditLog() ?? null;
-      // Read once per grant. Which grants a card may name this way is the card's to decide.
-      const names = new Map<string, string | null>();
-      const displayNameOf = (id: string): string | null => {
-        if (names.has(id)) return names.get(id) ?? null;
-        let display: string | null = null;
-        if (log !== null) { try { display = log.displayNameOf(id); } catch { /* the address stands in */ } }
-        names.set(id, display);
-        return display;
-      };
+      // Which grants a card may name this way is the card's to decide.
+      const displayNameOf = this.#displayNameReader();
       const threads = this.engine?.getThreadStore() ?? null;
       const containment = this.engine?.getToolContext().containment ?? null;
       const threadOf = (threadId: string): { createdBy: string | null; contained: boolean } | undefined => {
@@ -10792,11 +10888,7 @@ export class LynoxHTTPApi {
         const w = trigger?.pipeline_id === undefined ? undefined : workflows?.authorship(trigger.pipeline_id);
         return approvalCard(entry, {
           scope, now, displayNameOf, threadOf,
-          trigger: trigger === undefined ? undefined : {
-            createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
-            mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
-            creatorCovered: creatorCovered(planAuthorshipOf(trigger)), editorCovered: editorCovered(planAuthorshipOf(trigger)),
-          },
+          trigger: trigger === undefined ? undefined : triggerSetupMarks(trigger),
           workflow: w === undefined ? undefined : {
             createdBy: w.createdBy, createdMandateId: w.createdMandateId, mandateEditor: w.mandateEditor, mandateEditorId: w.mandateEditorId,
             creatorCovered: creatorCovered(planAuthorshipOfWorkflow(w)), editorCovered: editorCovered(planAuthorshipOfWorkflow(w)),
@@ -10926,6 +11018,10 @@ export class LynoxHTTPApi {
           // The link domains the owner allows a judged run's verdicts to add (PRD shopify-preset
           // §20.2 item 5, S20-4): only here, on the owner's route, written with the start itself.
           startDomains: fields['startDomains'],
+          // A rule taken from an artifact begins judging only while the artifact still holds the text
+          // the run was planned with: the run judges by the planned text, never a newer one, and an
+          // owner who edited the rule since meant the edit.
+          ruleSourceChanged: (rule) => judgeRuleSourceChanged(rule, engine.getArtifactStore()),
         });
         // The texts are ux's.
         if (!read.ok && read.reason === 'start_domains_invalid') {
@@ -10945,6 +11041,11 @@ export class LynoxHTTPApi {
           errorResponse(res, 409, 'Another judged run is started and not yet approved. Starting this one ends it, keeping what it spent: start again with "supersedes" set to its id.', 'supersede_required', {
             supersedable: { id: read.supersedable.id, costUsd: read.supersedable.costUsd },
           });
+          return;
+        }
+        if (!read.ok && read.reason === 'rule_source') {
+          const { code, message, title } = read.refusal;
+          errorResponse(res, 409, message, code, title !== undefined ? { title } : undefined);
           return;
         }
         if (!read.ok && read.reason === 'rule_refused') {
@@ -12482,6 +12583,64 @@ export class LynoxHTTPApi {
       const out: MandateRevocationResponse = { newly_revoked: newly };
       jsonResponse(res, 200, out);
     });
+
+    // End every owner session of this instance, from the control plane (owner-sessions.ts): the
+    // operator's way when the owner asks for it or a cookie left the owner's hands. Same auth as the
+    // mandate revocation above, and the same end as the owner's route. The instance secret stays, so
+    // usage reports and secret delivery go on. With `{ generation }` it ends nothing by itself and
+    // re-asserts the generation the control plane recorded, raised to, never lowered: an instance
+    // restored from an older backup is healed by that call.
+    this.addCpAdminRoute('POST /api/admin/owner-sessions/end', async (req, res, _params, body) => {
+      const sessions = engine.getOwnerSessions();
+      if (!sessions) {
+        errorResponse(res, 503, 'The store of owner sessions is not available, so no session was ended. Restart the instance and try again.', 'owner_sessions_unavailable');
+        return;
+      }
+      const asserted = body !== null && typeof body === 'object' ? (body as Record<string, unknown>)['generation'] : undefined;
+      if (asserted !== undefined) {
+        // The control plane's alone: on a self-hosted instance this route is the owner's admin
+        // scope, and a raise far ahead would leave every later session past what a cookie can carry.
+        if (!this._cpAdminRequests.has(req)) {
+          errorResponse(res, 403, 'Only the control plane re-asserts a generation. To end the owner sessions, send the call without generation.', 'owner_sessions_assert_cp_only');
+          return;
+        }
+        // Never past the clock in milliseconds, which is where a recreated engine.db starts: no
+        // generation an end reaches is higher, and the counter stays far inside a safe integer.
+        if (typeof asserted !== 'number' || !Number.isSafeInteger(asserted) || asserted < 0 || asserted > Date.now()) {
+          errorResponse(res, 400, 'Expected { generation?: a whole number of milliseconds from 0, not later than now }.', 'invalid_owner_sessions_end');
+          return;
+        }
+        jsonResponse(res, 200, { generation: sessions.raiseTo(asserted), ended: false });
+        return;
+      }
+      jsonResponse(res, 200, { generation: sessions.endAll(), ended: true });
+    });
+
+    // The owner ends every other session of theirs: each owner cookie minted until now is refused
+    // from here on, and a caller signed in by cookie gets one of the new generation, so this device
+    // stays signed in. A route of the owner's, never an agent tool: no model can be talked into
+    // signing the owner out. It ends sessions only: a passkey, a mandate or a bearer token stays.
+    this.addStatic('user', 'POST /api/auth/owner-sessions/end', async (req, res) => {
+      const sessions = engine.getOwnerSessions();
+      if (!sessions) {
+        errorResponse(res, 503, 'The store of owner sessions is not available, so no session was ended. Restart the instance and try again.', 'owner_sessions_unavailable');
+        return;
+      }
+      const secret = process.env['LYNOX_HTTP_SECRET'];
+      const byCookie = (this._authOrigin.get(req) ?? '').startsWith('cookie:');
+      // Checked again here, with nothing awaited before the end: the cookie was checked when the
+      // headers came, and a body held back past another end must not end that end's sessions and
+      // walk away with a cookie of the new generation.
+      if (byCookie && (!secret || this._verifySessionCookie(req, secret)?.principal !== null)) {
+        errorResponse(res, 401, 'Unauthorized');
+        return;
+      }
+      const generation = sessions.endAll();
+      if (secret && byCookie) {
+        LynoxHTTPApi._setOwnerSessionCookie(req, res, secret, generation, process.env['LYNOX_TRUST_PROXY'] === 'true');
+      }
+      jsonResponse(res, 200, { generation, ended: true });
+    }, ownerOnly('end the owner sessions'));
 
     // Drop the local grant WITHOUT revoking it at Google — the switch-back
     // path (D12). Separate from `/revoke` on purpose: the two differ only in
@@ -14808,48 +14967,77 @@ export class LynoxHTTPApi {
       // Pending entries are included: a queued fact is stored personal data whether or not it
       // was ever approved, and Art. 15 asks what is held, not what is active.
       const EMPTY_KNOWLEDGE = { entries: [], pending_entries: [], sources: [], blocks: {}, may_be_incomplete: false };
+      // One store's block. It throws where a read does: `listActive` decrypts every row, so one
+      // unreadable row would otherwise throw out of a handler with no wrapper and take the ENTIRE
+      // export with it — threads, CRM, everything. Each caller catches, as its `knowledge_graph`
+      // neighbour does: a missing section is a gap; a 500 is no answer at all.
+      const durableBlock = (store: KnowledgeStore): Record<string, unknown> => {
+        const ENTRY_CAP = 500;
+        const active = store.listActive(ENTRY_CAP);
+        // Masked, matching the active half. The raw-text queue is for a human deciding about
+        // an entry; this is a file that gets stored and forwarded.
+        const pending = store.listPendingMasked(ENTRY_CAP);
+        // The wording each conversation used for an entry, masked like the rest: a source can
+        // hold words the entry itself does not carry.
+        const sources = store.listSourcesMasked(ENTRY_CAP);
+        // Masked as well: a block is edited without a write-side shape scan, so it can hold a
+        // pasted key the entries' own check would have refused.
+        const blocks: Record<string, string | null> = {};
+        for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = store.getBlockMasked(id);
+        return {
+          entries: active,
+          pending_entries: pending,
+          sources,
+          blocks,
+          // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
+          // a different thing from one that looks complete. Named `may_be_incomplete` rather
+          // than `truncated` because that is the honest strength of the claim — the store
+          // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
+          // exactly 500, and over-reporting is the right way to be wrong here.
+          // Rejected and superseded entries are still stored but not in these lists, so a copy
+          // that leaves them out is not complete.
+          may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP
+            || store.countRejectedOrSuperseded() > 0,
+        };
+      };
       const knowledgeStore = engine.getKnowledgeStore();
       if (knowledgeStore) {
-        // try/catch like its `knowledge_graph` neighbour, and for the same reason: `listActive`
-        // decrypts every row, so one unreadable row would throw out of a handler with no
-        // wrapper and take the ENTIRE export with it — threads, CRM, everything. A missing
-        // section is a gap; a 500 is no answer at all.
         try {
-          const ENTRY_CAP = 500;
-          const active = knowledgeStore.listActive(ENTRY_CAP);
-          // Masked, matching the active half. The raw-text queue is for a human deciding about
-          // an entry; this is a file that gets stored and forwarded.
-          const pending = knowledgeStore.listPendingMasked(ENTRY_CAP);
-          // The wording each conversation used for an entry, masked like the rest: a source can
-          // hold words the entry itself does not carry.
-          const sources = knowledgeStore.listSourcesMasked(ENTRY_CAP);
-          const blocks: Record<string, string | null> = {};
-          for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = knowledgeStore.getBlock(id)?.content ?? null;
-          exportData['durable_knowledge'] = {
-            entries: active,
-            pending_entries: pending,
-            sources,
-            blocks,
-            // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
-            // a different thing from one that looks complete. Named `may_be_incomplete` rather
-            // than `truncated` because that is the honest strength of the claim — the store
-            // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
-            // exactly 500, and over-reporting is the right way to be wrong here.
-            may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP,
-          };
+          exportData['durable_knowledge'] = durableBlock(knowledgeStore);
         } catch {
           exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
         }
-      } else if (engine.getUserConfig().durable_memory_enabled === true) {
-        // Switched on, yet no store: the engine opens it at boot when the setting is on, so
-        // that open failed (or its database did). Not read, so not known to be empty.
-        exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
-        process.stderr.write('⚠ /api/export: durable knowledge store unavailable — exported empty and marked incomplete\n');
       } else {
-        // Switched off: no store was opened, so nothing is read and nothing failed. Entries
-        // written while it was on stay in engine.db and are not in this block.
-        exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
+        // No store. With the setting off none is opened; with it on, the open at boot failed,
+        // or the setting was switched on after boot. Either way nothing is deleted, and the
+        // tables are in engine.db whatever the setting, so entries written while a store was
+        // open are still held; the export is the answer to an access request and carries them.
+        // Read through a store built only to read, so the export writes nothing.
+        const engineDb = engine.getEngineDb();
+        if (engineDb) {
+          try {
+            const { SubjectStore } = await import('../core/subject-store.js');
+            const { KnowledgeStore: ReadStore } = await import('../core/knowledge-store.js');
+            const subjects = engine.getSubjectStore() ?? new SubjectStore(engineDb);
+            exportData['durable_knowledge'] = durableBlock(new ReadStore(engineDb, subjects, engine.getSecretStore() ?? null, { readOnly: true }));
+          } catch {
+            exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+            process.stderr.write('⚠ /api/export: durable knowledge read failed — exported empty and marked incomplete\n');
+          }
+        } else {
+          // No engine.db: the tables that would hold entries were not read.
+          exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+          process.stderr.write('⚠ /api/export: engine database unavailable — durable knowledge exported empty and marked incomplete\n');
+        }
       }
+      // `enabled` is the setting: whether durable memory is switched on in the config. With it
+      // off, the block still carries what is held, and `enabled: false` says the entries are
+      // stored but not in use. It can differ from the store the engine built at boot after the
+      // config is reloaded; the block's content does not depend on it.
+      exportData['durable_knowledge'] = {
+        ...(exportData['durable_knowledge'] as Record<string, unknown>),
+        enabled: engine.getUserConfig().durable_memory_enabled === true,
+      };
 
       // CRM contacts + deals, and every DataStore collection: walked to the END by
       // `_id`, the way the threads are walked above.

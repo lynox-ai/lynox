@@ -108,6 +108,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       secret_release_requests: ACCESS,
       vault_name_bindings: ACCESS,
       mandate_ends: ACCESS,
+      owner_sessions: OPERATING,
       // Each row names an end in `mandate_ends`, which stays here too: on another instance no
       // warning was sent, and a pause there says so.
       plan_advance_warnings: OPERATING,

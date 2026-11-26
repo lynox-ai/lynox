@@ -757,7 +757,7 @@ describe('the preview effect', () => {
       expect(none.summary).not.toMatch(/API calls/);
       ledger.resumePreview(refused);
       const out = await runBulkPreview(refused, previewDeps(client(), { costPerCallUsd: 0.002 }));
-      expect(out.summary).toContain('2 API calls this pass, estimated $0.0040 ($0.002 each from the profile rate).');
+      expect(out.summary).toContain('2 API calls this pass, estimated $0.0040 ($0.002 each, as set in the API connection).');
       expect(s.requests).toHaveLength(2);
     } finally {
       restore();
@@ -1063,7 +1063,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
       const w = workerFor({ costUsd: 0.01 });
       await w.tick();
-      expect(w.recordTaskRun.mock.calls[0]![1]).toContain('2 API calls this pass, estimated $0.0200 ($0.01 each from the profile rate).');
+      expect(w.recordTaskRun.mock.calls[0]![1]).toContain('2 API calls this pass, estimated $0.0200 ($0.01 each, as set in the API connection).');
     } finally {
       restore();
     }
@@ -1073,8 +1073,8 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
   // records and pushes is the owner's language — the counts and the estimate included.
   it('records and pushes the outcome in German on an instance set to German, in English without', async () => {
     for (const [language, done, counts, costs] of [
-      ['de', 'Vorschau fertig. Der Massenlauf wartet auf deine Prüfung.', 'Gelesen 2, ungültig 0, nicht gelesen 0 von 2 Zielen.', '2 API-Abrufe in diesem Durchgang, geschätzt $0.0200 (je $0.01 laut Profil).'],
-      [undefined, 'Bulk preview done. The run is ready for review.', 'Read 2, invalid 0, unread 0 of 2 targets.', '2 API calls this pass, estimated $0.0200 ($0.01 each from the profile rate).'],
+      ['de', 'Vorschau fertig. Der Massenlauf wartet auf deine Prüfung.', 'Gelesen 2, ungültig 0, nicht gelesen 0 von 2 Zielen.', '2 API-Abrufe in diesem Durchgang, geschätzt $0.0200 (je $0.01, wie in der API-Verbindung eingetragen).'],
+      [undefined, 'Bulk preview done. The run is ready for review.', 'Read 2, invalid 0, unread 0 of 2 targets.', '2 API calls this pass, estimated $0.0200 ($0.01 each, as set in the API connection).'],
     ] as const) {
       const s = shop();
       const restore = serve(s);

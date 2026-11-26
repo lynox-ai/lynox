@@ -32,3 +32,16 @@ describe('the halt notices that name the connections page', () => {
     expect(BULK_NOTICES.en.consentOutdated(['descriptionHtml'], false)).toBe('lynox writes nothing more in this run; what it already wrote stays. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.');
   });
 });
+
+/**
+ * Verbatim (U-459): the halt for app credentials stored under other names calls the stored
+ * access a Shopify connection, and the German push stays within the 157 characters it is held to.
+ */
+describe('the halt notice for app credentials under other names', () => {
+  it('says connection, in German and English', () => {
+    const de = BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.storeClientMisnamed);
+    expect(de).toBe('In der Shopify-Verbindung liegen die App-Zugangsdaten unter anderen Namen. Lass das im Chat von lynox anpassen, dann lässt sich der Lauf fortsetzen.');
+    expect(de.length).toBeLessThanOrEqual(157);
+    expect(BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS.storeClientMisnamed)).toBe('The Shopify connection keeps the app credentials under other names. Have lynox fix that in the chat, then the run can be continued.');
+  });
+});
