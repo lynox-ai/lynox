@@ -142,4 +142,17 @@ describe('the image starts every node with the flag', () => {
     expect(production).toMatch(/AS production/);
     expect(production).toMatch(/^ENV NODE_OPTIONS=--disable-sigusr1$/m);
   });
+
+  // The entry blocks run only when node starts the file as its main module, which a test of the
+  // module does not; the image run is where they are measured. Here the text holds them in place:
+  // each checks before it starts anything, and the engine asks when it was started from the image.
+  it('checks before each process starts its work: egress proxy, exec daemon, and the engine from the image', () => {
+    const entry = (file: string): string => {
+      const text = readFileSync(join(ROOT, 'src', file), 'utf8');
+      return text.slice(text.lastIndexOf('\nif ('));
+    };
+    expect(entry('egress-proxy/main.ts')).toMatch(/\{ assertSignalDebuggerOff\('egress-proxy'\); return main\(\); \}/);
+    expect(entry('shell-sidecar/exec-daemon.ts')).toMatch(/\{ assertSignalDebuggerOff\('exec-daemon'\); return main\(\); \}/);
+    expect(entry('index.ts')).toMatch(/if \(startedFromImage\(process\.argv\[1\]\)\) assertSignalDebuggerOff\('the engine'\);\n\s+return runCLI\(\);/);
+  });
 });
