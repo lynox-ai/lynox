@@ -195,6 +195,36 @@ describe('a judged run that judges again shows its rule as at the start', () => 
 		expect(drafted()).toEqual(['lynox wrote this rule. Check that it says what you want before you continue judging.']);
 	});
 
+	it('without an artifact keeps the very element it had, under the rule', async () => {
+		await render(halted('unavailable'));
+		const box = target.querySelector('[data-testid="bulk-restart-rule"]')!;
+		// As before the artifact case came in: one paragraph, its test id and classes, the restart's own sentence.
+		expect(box.lastElementChild?.outerHTML).toBe(`<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">${t('bulk.restart.rule_drafted')}</p>`);
+		expect(box.querySelector('[data-testid="bulk-rule-from-artifact"]')).toBeNull();
+	});
+
+	it('says where judging goes on that a rule taken from an artifact came from it, its title set apart', async () => {
+		await render({ ...halted('unavailable'), ruleFromArtifact: { title: 'Regeln » Shop' } });
+		const origin = target.querySelector('[data-testid="bulk-restart-rule"] [data-testid="bulk-rule-from-artifact"]')!;
+		const boxes = [...origin.querySelectorAll('[data-foreign-value]')];
+		expect(boxes).toHaveLength(1);
+		expect(boxes[0]!.textContent).toContain('Regeln » Shop');
+		expect((origin.textContent ?? '').replace(boxes[0]!.textContent ?? '', '{title}')).toBe(t('bulk.restart.rule_from_artifact'));
+		expect(drafted()).toEqual([]);
+	});
+
+	it('says so without a title where the artifact had none, also in English', async () => {
+		await render({ ...halted('costCap'), ruleFromArtifact: {} });
+		const origin = (): string => target.querySelector('[data-testid="bulk-restart-rule"] [data-testid="bulk-rule-from-artifact"]')?.textContent ?? '';
+		expect(origin()).toBe(t('bulk.restart.rule_from_artifact_untitled'));
+		expect(drafted()).toEqual([]);
+		unmount(component!);
+		component = undefined;
+		setLocale('en');
+		await render({ ...halted('unavailable'), ruleFromArtifact: {} });
+		expect(origin()).toBe('This rule is taken word for word from a saved artifact. Check that it says what you want before you continue the judging.');
+	});
+
 	it('control: a judged run whose rule did not reach the page shows no empty box', async () => {
 		await render({ ...halted('unavailable'), judgeRule: null });
 		expect(target.textContent).toContain(t('bulk.restart.judge'));

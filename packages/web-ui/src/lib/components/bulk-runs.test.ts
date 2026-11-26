@@ -2085,7 +2085,7 @@ describe('bulkSecretInContextKey', () => {
 describe('the sentences about a rule taken from a saved artifact', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const Q = String.raw`'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"`;
-	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.(?:rule_source\.[a-z_]+|(?:start|approve)\.rule_from_artifact[a-z_]*))': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
+	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.(?:rule_source\.[a-z_]+|(?:start|restart|approve)\.rule_from_artifact[a-z_]*))': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
 	const de: Record<string, string> = {};
 	const en: Record<string, string> = {};
 	for (const l of source.split('\n')) {
@@ -2101,8 +2101,8 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 		]);
 		expect(bulkRuleSourceKey('checksum', true)).toBeNull();
 		expect(bulkRuleSourceKey(undefined, false)).toBeNull();
-		expect([bulkRuleFromArtifactKey('start', true), bulkRuleFromArtifactKey('approve', false)])
-			.toEqual(['bulk.start.rule_from_artifact', 'bulk.approve.rule_from_artifact_untitled']);
+		expect([bulkRuleFromArtifactKey('start', true), bulkRuleFromArtifactKey('restart', false), bulkRuleFromArtifactKey('approve', false)])
+			.toEqual(['bulk.start.rule_from_artifact', 'bulk.restart.rule_from_artifact_untitled', 'bulk.approve.rule_from_artifact_untitled']);
 	});
 
 	it('takes a title only when it is text with more than spaces', () => {
@@ -2112,7 +2112,7 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 
 	it('has each sentence in both languages; a named one has its title slot and no quote marks of its own around it', () => {
 		const keys = [...BULK_RULE_SOURCE_CODES.flatMap((c) => [bulkRuleSourceKey(c, true)!, bulkRuleSourceKey(c, false)!]),
-			...(['start', 'approve'] as const).flatMap((s) => [bulkRuleFromArtifactKey(s, true), bulkRuleFromArtifactKey(s, false)])];
+			...(['start', 'restart', 'approve'] as const).flatMap((s) => [bulkRuleFromArtifactKey(s, true), bulkRuleFromArtifactKey(s, false)])];
 		for (const key of new Set(keys)) {
 			for (const table of [de, en]) {
 				expect(table[key], key).toBeDefined();
