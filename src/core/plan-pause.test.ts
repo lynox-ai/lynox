@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager } from './task-manager.js';
+import { BulkTriggerLockedError, TaskManager } from './task-manager.js';
 import { MandateEnds } from './mandate-ends.js';
 import { TriggerStore } from './trigger-store.js';
 import { ADVANCE_WARNING_S, PAUSE_NOTICE_BODY_MAX, PAUSE_NOTICE_TITLE_MAX, advanceWarning, claimAdvanceWarnings, deliveredWarning, markWarningsDelivered, pauseNotice, pausePlanNow, type PausedFor } from './plan-pause.js';
@@ -309,6 +309,28 @@ describe('who pauses: a member whose end is proven', () => {
     expect(b.manager.recordTaskRun('p', 'gate', 'stopped', { keepSchedule: true })).toBe(false);
     const after = b.db.prepare('SELECT status, next_run_at, last_run_status, last_run_result FROM triggers WHERE id = ?').get('p');
     expect(after).toEqual({ status: before.status, next_run_at: before.next_run_at, last_run_status: 'stopped', last_run_result: 'gate' });
+  });
+});
+
+describe('a bulk run never waits for a takeover', () => {
+  it('carries no helper mark, takes none, and neither the sweep, the login nor the gate pauses it', () => {
+    const b = box();
+    const id = new TriggerStore(b.engineDb).armBulkEffect({ runId: 'r1', effect: 'bulk_apply', title: 'Bulk run r1', nextRunAt: DUE });
+    // Beside it, a plan the same helper created: the box pauses that one, so the bulk run's state is not the box's.
+    plan(b, 'p', { by: 'h@x.ch' });
+    const marks = (): unknown => b.db.prepare('SELECT created_by, created_mandate_id, edited_by, mandate_editor, mandate_editor_id, target_workflow_id FROM triggers WHERE id = ?').get(id);
+    const none = { created_by: null, created_mandate_id: null, edited_by: null, mandate_editor: null, mandate_editor_id: null, target_workflow_id: null };
+    expect(marks()).toEqual(none);
+    const helper = { kind: 'mandate' as const, email: 'h@x.ch', mandateId: 'g-h@x.ch' };
+    expect(() => b.manager.markEditedBy(id, helper, true)).toThrow(BulkTriggerLockedError);
+    expect(() => b.manager.markEditedByRun(id, tag('h@x.ch'))).toThrow(BulkTriggerLockedError);
+    // Refused before the write: the row still carries no mark.
+    expect(marks()).toEqual(none);
+    login(b, 'h@x.ch', NOW - H, NOW - 2 * H);
+    expect(sweep(b).paused).toEqual(['p']);
+    expect(sweep(b, NOW, { onlyMandate: 'g-h@x.ch', onlyMandateEmail: 'h@x.ch' }).paused).not.toContain(id);
+    expect(pausePlanNow(b.db, id, (m) => b.ends.endRow(m), false, NOW)).toBeUndefined();
+    expect(col(b, id).paused_at).toBeNull();
   });
 });
 
@@ -989,7 +1011,7 @@ describe('the advance warning\'s claiming transaction', () => {
 describe('the migration', () => {
   it('v57 adds the four pause columns, NULL on every existing row', () => {
     const b = box();
-    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(69);
+    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(76);
     const cols = (b.db.prepare('PRAGMA table_info(triggers)').all() as Array<{ name: string; dflt_value: unknown }>)
       .filter((c) => c.name.startsWith('pause'));
     // `paused_db_at` is v60's (the takeover's clock), not v57's.

@@ -44,15 +44,21 @@ import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
  *   absent): it came into the slot some other way than the connect callback, which alone writes
  *   the binding. The write refuses every request on it (`http.ts`, step 7) until the store is
  *   connected again.
- * The two dead states come before the scope: on a connection that cannot write at all, adding a
+ * - `expired`: a refresh of the connection's token failed (`oauth_grant.state` `refresh-dead`,
+ *   which the refresh writes and which also drops the binding). It is written for several causes
+ *   (for example the store refused the token, its answer was not usable, the vault changed meanwhile)
+ *   and the grant does not record which, so no cause is named; only a new connect helps, since
+ *   no refresh runs without the binding. Checked before the binding, which that refresh took away.
+ * The dead states come before the scope: on a connection that cannot write at all, adding a
  * scope changes nothing.
  */
-export type ShopifyMediaAccess = 'writable' | 'not_asked' | 'not_granted' | 'no_connection' | 'revoked' | 'unbound';
+export type ShopifyMediaAccess = 'writable' | 'not_asked' | 'not_granted' | 'no_connection' | 'revoked' | 'expired' | 'unbound';
 
 export function shopifyMediaAccess(profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined, host: string): ShopifyMediaAccess {
   // Only the Shopify preset derives its API host from the store (`apiOnDerivedHost`), so a match is that preset.
   if (profile === undefined || presetStoreHost(profile) !== host) return 'no_connection';
   if (profile.oauth_grant?.state === 'revoked') return 'revoked';
+  if (profile.oauth_grant?.state === 'refresh-dead') return 'expired';
   if (typeof profile.oauth_grant?.store_binding !== 'string') return 'unbound';
   // What the person confirmed, as the connect callback recorded it — never the profile's scope,
   // which a save changes without a consent page. A grant from before it was recorded, or a

@@ -8,8 +8,32 @@ import { getErrorMessage, logErrorChain } from '../../core/utils.js';
 import { randomUUID } from 'node:crypto';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import { INLINE_NAMED_ONLY_TOOLS } from '../../orchestrator/runtime-adapter.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
+import { runStepIds } from '../../orchestrator/step-id.js';
+import { isShownParamName } from '../../orchestrator/workflow-params.js';
+import { extractionFailureForModel } from '../../core/extraction-failure.js';
+
+/** save_workflow's answer when the session analysis names a parameter outside the allowed form. */
+export const SESSION_PARAM_NAME_REFUSAL =
+  'Error: The analysis of this session named a parameter in a form lynox does not accept ' +
+  '(1 to 40 characters: ASCII letters, digits, _ or -). No workflow was saved. ' +
+  'Call save_workflow once more to analyse the session again; if it is refused again, plan the steps ' +
+  'yourself with plan_task and save that plan with save_workflow and its workflow_id. ' +
+  'A workflow saved that way takes no parameters; tell the user so.';
+
+/**
+ * save_workflow's answer when the session analysis fails. It names the error class and the HTTP
+ * status (`extractionFailureForModel`), so the user and the run history keep the cause, and never
+ * the provider's message: an endpoint may echo what it was sent, the session's tool calls included.
+ */
+export function sessionAnalysisFailed(err: unknown): string {
+  return `Error: The analysis of this session failed: ${extractionFailureForModel(err)}. No workflow was saved. ` +
+    'Call save_workflow once more to retry; if it fails again, tell the user that lynox could not analyse ' +
+    'the session and name the cause in brackets, and offer to plan the steps with plan_task instead ' +
+    '(a workflow saved that way takes no parameters).';
+}
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
@@ -151,9 +175,10 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
   }
 
   if (existing.template) {
+    // The stored name is left out: it can be text a prior turn brought in from outside, and the
+    // caller already holds the id it passed.
     return JSON.stringify({
       workflow_id: existing.id,
-      name: existing.name,
       steps: existing.steps.length,
       already_reusable: true,
       next: `Workflow "${existing.id}" is already a reusable template. Call run_workflow with this workflow_id to run it.`,
@@ -189,10 +214,14 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
     // A plan_task pipeline carries no capture parameters; preserve any the
     // source already had (legacy rows backfill to []).
     parameters: existing.parameters ?? [],
+    // A step id stored before ids had a shape (an old plan_task cut a phase name only to 60
+    // characters) is saved as `step-<n>`, its references with it: the save takes no other id, and
+    // the model cannot choose ids here.
+    steps: runStepIds(existing.steps),
   };
 
   // Save-time gate — same as plan_task.
-  assertPlannedPipelineIsValid(reusable);
+  assertPlannedPipelineIsValid(reusable, turnIsLocked(agent.principal));
   // Commit the durable engine.db workflow definition FIRST — it runs the
   // fail-closed contract validator and throws on a bad contract, so the volatile
   // in-memory store is only populated once the durable write succeeded (no
@@ -284,6 +313,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       // Account the annotation's pool-key spend to the local session cap +
       // the tenant balance (no-op on self-host / BYOK).
       meteredHost: agent.toolContext.meteredHost,
+      chargeRun: (usd: number) => { agent.chargeExternalCost?.(usd); },
       sessionCounters: agent.sessionCounters,
       // A stop of the run, or the tool's time limit, ends the extraction call.
       signal: currentCallSignal(),
@@ -293,12 +323,22 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     if (currentCallSignal()?.aborted === true) throw processCaptureStopped();
     logErrorChain('save_workflow:extract', err);
     // Nothing has been persisted yet — safe to retry.
-    return `Error: Workflow extraction failed (${getErrorMessage(err)}). No workflow was saved. This is a transient analysis failure — call save_workflow again to retry.`;
+    return sessionAnalysisFailed(err);
   }
 
   // Stopped after the reply arrived: nothing is saved. Everything from here to the last write
   // is synchronous, so no stop can land between this check and the writes.
   if (currentCallSignal()?.aborted === true) throw processCaptureStopped();
+
+  // The parameter names come from the analysis, which read the session's tool calls, outside
+  // content included, and the result below returns them. A name outside the form a refusal may
+  // quote (`isShownParamName`) refuses the whole capture: dropping only that name would leave a
+  // step's `{{name}}` in its task as raw text, the name included, since only listed names move
+  // under `params.` and an unknown one passes the save as a possible context key. Nothing is
+  // stored yet, and the name is not quoted.
+  if (!record.parameters.every((p) => isShownParamName(p.name))) {
+    return SESSION_PARAM_NAME_REFUSAL;
+  }
 
   // --- Phase 2: build the reusable pipeline from the extracted steps ---
   const pipelineSteps = processToSteps(record);
@@ -333,7 +373,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     };
 
     // Save-time gate — same as plan_task.
-    assertPlannedPipelineIsValid(planned);
+    assertPlannedPipelineIsValid(planned, turnIsLocked(agent.principal));
 
     // Commit the durable engine.db workflow definition FIRST — it runs
     // the fail-closed contract validator and throws on a bad contract, so the

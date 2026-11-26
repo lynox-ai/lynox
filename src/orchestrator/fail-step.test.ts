@@ -528,7 +528,7 @@ describe('fix round 1 (refute-code-r1)', { timeout: 60_000 }, () => {
   it('under stop, the run-level sentence names a step id outside the shape by the note alone where no order is known', () => {
     const stepId = 'ab\u200Ccd';
     const json = formatResult(stopState(STOP_REASON, { stepId, reason: STOP_REASON }), 'm');
-    expect(json).toContain('"reportedFailure": "Step \\"(id outside the allowed form)\\" reported that it could not complete its task.');
+    expect(json).toContain('"reportedFailure": "Step \\"(lynox does not show its id)\\" reported that it could not complete its task.');
     expect(json).not.toContain('\u200C');
     expect(json).not.toContain('__lynox_name_');
   });
@@ -565,11 +565,11 @@ describe('fix round 1 (refute-code-r1)', { timeout: 60_000 }, () => {
     const state = { runId: 'r', manifestName: 'm', status: 'completed' as const, startedAt: '', globalContext: {}, outputs: new Map<string, AgentOutput>([[stepId, out]]) };
     // A hidden character puts the id outside the shape: its position in the workflow stands in.
     const json = formatResult(state, 'm', undefined, ['first', stepId]);
-    expect(json).toContain('"stepId": "#2 (id outside the allowed form)"');
+    expect(json).toContain('"stepId": "#2 (lynox does not show its id)"');
     expect(json).not.toContain('‌');
     expect(json).not.toContain('abcd');
     const steps = (JSON.parse(json) as { steps: Array<{ stepId: string; error?: string }> }).steps;
-    expect(steps[0]!.error).toBe('Step "#2 (id outside the allowed form)" reported that it could not complete its task. Its reason is not shown here; diagnose_workflow_run with this run\'s id shows it, quoted.');
+    expect(steps[0]!.error).toBe('Step "#2 (lynox does not show its id)" reported that it could not complete its task. Its reason is not shown here; diagnose_workflow_run with this run\'s id shows it, quoted.');
     expect(json).not.toContain('__lynox_name_');
   });
 

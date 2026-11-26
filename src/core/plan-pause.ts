@@ -292,6 +292,32 @@ export function writePause(db: Database.Database, id: string, entries: readonly 
  */
 export const PAUSED_MODEL_TEXT = "paused until the owner takes it over (the helper's access ended or was not renewed in time)";
 
+/**
+ * What a completed plan that keeps its pause adds about its workflow. A new plan on the same
+ * workflow pauses again while the ended mandate is that workflow's member (see `PAUSED_MODEL_TEXT`
+ * above), so the way names the workflow's takeover first. It is the owner's (an owner-only route,
+ * no tool reaches it), so the sentence says who does it, true for every reader. One sentence for
+ * every plan: the reader checks the condition at the workflow's card, which names the ended access
+ * (U-275).
+ */
+export const PAUSED_DONE_WORKFLOW_FIRST = 'If it runs a workflow that the person whose access ended created or last changed, the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+
+/**
+ * The same for a completed plan that keeps its pause. Nothing takes it over (`planOf` answers
+ * `nothing_to_take_over`) and nothing reopens it, so it does not send anyone to a takeover of the
+ * plan; a new plan is the way to run it again, which the model offers rather than sets up unasked,
+ * after the workflow's takeover where it needs one (U-275).
+ */
+export const PAUSED_DONE_MODEL_TEXT = `completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan. ${PAUSED_DONE_WORKFLOW_FIRST}`;
+
+/** `task_update`'s refusal at a completed plan that keeps its pause (U-275). */
+export const PAUSED_DONE_UPDATE_REFUSAL = `Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan. ${PAUSED_DONE_WORKFLOW_FIRST}`;
+
+/** What the model reads for this paused plan: its own sentence once it is completed. */
+export function pausedModelText(t: { readonly status?: string | undefined }): string {
+  return t.status === 'completed' ? PAUSED_DONE_MODEL_TEXT : PAUSED_MODEL_TEXT;
+}
+
 /** Whether a plan is paused now: the switch is on and the row says so. */
 export function isPaused(t: { readonly paused_at?: number | null | undefined }): boolean {
   return planPauseOn() && t.paused_at !== undefined && t.paused_at !== null;

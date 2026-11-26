@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { parse } from 'svelte/compiler';
 import { marked } from 'marked';
 import { parseHTML } from 'linkedom';
 import {
@@ -479,9 +480,98 @@ describe('ChatView wiring', () => {
 		expect(contents).toStrictEqual(['gBlock.text', 'lg.text', 'msg.content']);
 	});
 
-	it('keeps the Allow/Deny branch on plain pre', () => {
+	it('keeps the Allow/Deny branch on plain text', () => {
 		// That branch is immune because it never parses markdown at all; losing
-		// the <pre> would quietly opt the guard prompts into rendering.
-		expect(source).toMatch(/<pre[^>]*>\{pendingPermission\.question\}<\/pre>/);
+		// that would quietly opt the guard prompts into rendering. The question
+		// goes, split into its head and its lines, to the question field, and the
+		// field shows every part as a text node.
+		// Read as Svelte parses it, not as text: a comment, a space inside a tag,
+		// a formatter's line breaks or attribute order then neither hide markup
+		// from the guard nor trip it.
+		const ast = parse(source, { modern: true });
+		const card = svelteNodes(ast.fragment).filter((n) => n.type === 'IfBlock' && code(source, n['test']) === 'pendingPermission&&!inBatchMode');
+		expect(card).toHaveLength(1);
+		const inCard = svelteNodes(card[0]);
+		// Which question is the engine's own is decided by its marker, and by nothing else.
+		const consts = inCard.filter((n) => n.type === 'ConstTag').map((n) => code(source, n['declaration']));
+		for (const decl of [
+			"constisPermissionGuard=pendingPermission.consent==='guard'",
+			"constisDeepConsent=pendingPermission.consent==='deep'",
+			'constsplit=splitPromptHead(pendingPermission.question,pendingPermission.segments)',
+		]) expect(consts.filter((c) => c.startsWith(decl.slice(0, decl.indexOf('=') + 1)))).toEqual([decl]);
+		// The engine's own confirmation is the first branch, and it holds the field and nothing else.
+		const branch = inCard.filter((n) => n.type === 'IfBlock' && code(source, n['test']) === 'isPermissionGuard||isDeepConsent');
+		expect(branch).toHaveLength(1);
+		const shown = (branch[0]!['consequent'] as SvelteNode & { nodes: SvelteNode[] }).nodes
+			.filter((n) => n.type !== 'Comment' && !(n.type === 'Text' && !String(n['data']).trim()))
+			.map((n) => n.type === 'Component' ? `${String(n['name'])}:${(n['attributes'] as SvelteNode[]).map((a) => code(source, a)).sort().join(',')}` : code(source, n));
+		expect(shown).toEqual([
+			'{@constsplit=splitPromptHead(pendingPermission.question,pendingPermission.segments)}',
+			'PromptQuestionField:bind:tooLow={promptTooLow},head={split.head},lines={split.lines}',
+		]);
+		// The card renders markup once, inside the other branch: the model's own question.
+		const otherBranch = svelteNodes(branch[0]!['alternate']);
+		const html = inCard.filter((n) => n.type === 'HtmlTag');
+		expect(html).toHaveLength(1);
+		expect(otherBranch).toContain(html[0]);
+		// Nor any other way to markup in the card: no further component, snippet, action or binding.
+		expect(inCard.filter((n) => n.type === 'Component').map((n) => n['name'])).toEqual(['PromptQuestionField']);
+		expect(inCard.filter((n) => n.type === 'RenderTag').map((n) => code(source, n))).toEqual(['{@renderpromptOrigin(pendingPermission.origin)}']);
+		expect(inCard.filter((n) => /^(Svelte|UseDirective|AttachTag)/.test(n.type))).toEqual([]);
+		expect(inCard.filter((n) => n.type === 'BindDirective').map((n) => n['name'])).toEqual(['tooLow']);
+		const origin = svelteNodes(ast).filter((n) => n.type === 'SnippetBlock' && code(source, n['expression']) === 'promptOrigin');
+		expect(origin).toHaveLength(1);
+		expect(svelteNodes(origin[0]!['body']).filter((n) => /^(HtmlTag|RenderTag|Component|Svelte|UseDirective|AttachTag)/.test(n.type))).toEqual([]);
+		// Nowhere else in the view is there markup but the chat error's own links: a
+		// second card under another condition cannot render the question.
+		const allHtml = svelteNodes(ast).filter((n) => n.type === 'HtmlTag');
+		expect(allHtml).toHaveLength(2);
+		expect(allHtml.filter((n) => n !== html[0]).map((n) => code(source, n['expression']).slice(0, 18))).toEqual(['chatError.replace(']);
+
+		// The field: plain elements and text, and a script that only measures and scrolls.
+		const fieldSource = readFileSync(new URL('../components/PromptQuestionField.svelte', import.meta.url), 'utf-8');
+		const field = parse(fieldSource, { modern: true });
+		const inField = svelteNodes(field);
+		expect(inField.filter((n) => /^(HtmlTag|RenderTag|Component|Svelte|UseDirective|AttachTag|ImportExpression)/.test(n.type))).toEqual([]);
+		// Its markup as a whole, classes included: every line and the head shown as text, none
+		// hidden, clipped or left out, no further element or attribute, no stylesheet of its own.
+		// A change here is a change to the boundary and is made on purpose, by updating this line.
+		const markup = (field.fragment.nodes as unknown as SvelteNode[])
+			.filter((n) => n.type !== 'Comment' && !(n.type === 'Text' && !String(n['data']).trim()))
+			.map((n) => code(fieldSource, n)).join('');
+		expect(markup).toBe("<divdata-prompt-questionclass='flexmin-h-0min-w-0flex-1flex-coltext-smtext-text-mutedfont-sansleading-relaxed'>{#ifhead.length>0}<divdata-prompt-headclass='shrink-0whitespace-pre-wrap[overflow-wrap:anywhere]'>{#eachheadasseg,i(i)}{#ifseg.kind==='value'}<spandata-prompt-valueclass='text-text'>{seg.text}</span>{:else}{seg.text}{/if}{/each}</div>{/if}<divclass='relativeflexmin-h-0flex-1flex-col'><predata-prompt-fieldbind:this={field}onscroll={schedule}class='min-h-0flex-1max-h-64overflow-y-autoscrollbar-thinwhitespace-pre-wrapfont-sans[overflow-wrap:anywhere]'>{#eachlinesasline,i(i)}<spandata-prompt-lineclass='block'>{#ifline===''}<br/>{:else}{line}{/if}</span>{/each}</pre>{#ifbelow>0}<divdata-prompt-fadebind:this={fade}class='pointer-events-noneabsoluteinset-x-0bottom-0h-8bg-gradient-to-tfrom-bg-subtleto-transparent'></div>{/if}</div>{#ifbelow>0}<divclass='flexshrink-0justify-endpt-1'><buttondata-prompt-read-moretype='button'onclick={readOn}class='whitespace-nowraprounded-[var(--radius-sm)]borderborder-borderbg-bgpx-2py-0.5text-xstext-text-mutedhover:text-text'>{label}<spanaria-hidden='true'>↓</span></button></div>{/if}</div>");
+		expect(field.css).toBeNull();
+		// What it shows are the props as given: nothing in the script derives or reassigns them.
+		expect(inField.filter((n) => n.type === 'VariableDeclarator' && code(fieldSource, n).includes('$props(')).map((n) => code(fieldSource, n)))
+			.toEqual(['{head,lines,tooLow=$bindable(false)}:Props=$props()']);
+		const names = (n: SvelteNode): string[] => svelteNodes(n).filter((x) => x.type === 'Identifier').map((x) => String(x['name']));
+		expect(inField.filter((n) => (n.type === 'VariableDeclarator' && !code(fieldSource, n).includes('$props(') && names(n['id'] as SvelteNode).some((x) => x === 'head' || x === 'lines'))
+			|| (n.type === 'AssignmentExpression' && names(n['left'] as SvelteNode).some((x) => x === 'head' || x === 'lines')))).toEqual([]);
+		expect(inField.filter((n) => n.type === 'ImportDeclaration').map((n) => (n['source'] as SvelteNode)['value']).sort())
+			.toEqual(['../i18n.svelte.js', '../utils/pipeline-status.js', '../utils/prompt-head.js', 'svelte']);
+		// Every DOM call is named, none is computed, and no property is written: a
+		// way to markup (innerHTML, setHTMLUnsafe, a parser) cannot slip in under a known name.
+		const members = inField.filter((n) => n.type === 'MemberExpression');
+		expect(members.filter((n) => n['computed'])).toEqual([]);
+		const called = inField.filter((n) => n.type === 'CallExpression' && (n['callee'] as SvelteNode).type === 'MemberExpression')
+			.map((n) => ((n['callee'] as SvelteNode)['property'] as SvelteNode)['name']);
+		expect([...new Set(called)].sort()).toEqual(['addEventListener', 'closest', 'disconnect', 'floor', 'getBoundingClientRect', 'map', 'max', 'observe', 'querySelectorAll', 'removeEventListener', 'scrollBy']);
+		expect(inField.filter((n) => n.type === 'AssignmentExpression' && (n['left'] as SvelteNode).type !== 'Identifier')).toEqual([]);
 	});
 });
+
+type SvelteNode = { type: string; start: number; end: number; [key: string]: unknown };
+/** Every node under `root`, the template's and the script's alike, comments included as their own kind. */
+function svelteNodes(root: unknown, out: SvelteNode[] = []): SvelteNode[] {
+	if (Array.isArray(root)) { for (const child of root) svelteNodes(child, out); return out; }
+	if (!root || typeof root !== 'object') return out;
+	const node = root as SvelteNode;
+	if (typeof node.type === 'string') out.push(node);
+	for (const [key, value] of Object.entries(node)) if (key !== 'parent' && key !== 'metadata') svelteNodes(value, out);
+	return out;
+}
+/** A node's source without comments, whitespace or a choice of quotes, so a formatter run changes nothing. */
+function code(source: string, node: unknown): string {
+	const n = node as SvelteNode;
+	return source.slice(n.start, n.end).replace(/<!--[\s\S]*?-->/g, '').replace(/\s+/g, '').replace(/"/g, "'");
+}

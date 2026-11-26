@@ -75,10 +75,10 @@ describe('prompt origin — a workflow step names itself in its own confirmation
       parentPrompt: { parentPromptUser },
     });
 
-    await stepPromptUser()('⚠ bash: remote shell access — "ssh …"', ['Allow', 'Deny']);
+    await stepPromptUser()('⚠ Command: remote shell access — "ssh …"', ['Allow', 'Deny']);
 
     expect(parentPromptUser).toHaveBeenCalledWith(
-      '⚠ bash: remote shell access — "ssh …"',
+      '⚠ Command: remote shell access — "ssh …"',
       ['Allow', 'Deny'],
       expect.objectContaining({
         workflowName: 'bexio Triage Phase 1-3',
