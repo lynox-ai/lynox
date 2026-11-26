@@ -434,6 +434,10 @@ vi.mock('../core/engine.js', () => ({
     // `not.toBe(403)`, so a route that threw read as a route that answered.
     this.getEngineDb = vi.fn().mockReturnValue(null);
     this.getDataStore = vi.fn().mockReturnValue(null);
+    // The owner sessions' generation: the auth gate asks it on every cookie, and a stub without it
+    // throws, which the gate takes as "cannot be read" and refuses every owner session.
+    this.getOwnerSessions = vi.fn().mockReturnValue(null);
+    this.liveOwnerGeneration = vi.fn().mockReturnValue(0);
     this.getApiStore = mockGetApiStore;
     // R2b subject-graph surface — null by default (flag off); route tests swap in.
     // getSubjectStore is also read by GET /api/config (has_subject_graph capability).
@@ -4767,6 +4771,118 @@ describe('LynoxHTTPApi', () => {
         expect(next.status).toBe(409);
         await next.text();
         expect(mockSessionAbort).not.toHaveBeenCalled();
+      });
+    });
+
+    // A shell command can work silently for longer than the stale window; taken over in the
+    // middle of it, the run was lost.
+    it('does not take over a dropped run whose shell command is still within its own limit', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-working-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        await onStream({ type: 'tool_call', name: 'bash', input: { command: 'sleep 150', timeout_ms: 180_000 }, agent: 'main', toolUseId: 'tu-sleep' });
+        // The response that made the call ends before the call runs; that alone releases nothing.
+        await onStream({ type: 'turn_end', stop_reason: 'tool_use', usage: {}, agent: 'main' });
+        (slots.get('tool-working-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        const next = await jsonFetch('/api/sessions/tool-working-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+        // Its result arrives: the run is silent again past the window, and now it is taken over.
+        await onStream({ type: 'tool_result', name: 'bash', result: 'done', agent: 'main', toolUseId: 'tu-sleep' });
+        (slots.get('tool-working-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        mockSessionRun.mockResolvedValueOnce('second response');
+        const after = await jsonFetch('/api/sessions/tool-working-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+        });
+        expect(after.status).toBe(200);
+        await after.text();
+        expect(mockSessionAbort).toHaveBeenCalled();
+      });
+    });
+
+    it('takes over a dropped run whose tool hangs past its own limit', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-hung-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        const realNow = Date.now.bind(Date);
+        const opened = realNow();
+        await onStream({ type: 'tool_call', name: 'http_request', input: { url: 'https://example.com' }, agent: 'main', toolUseId: 'tu-hang' });
+        (slots.get('tool-hung-1') as { lastEventAt: number }).lastEventAt = opened - 61_000;
+        // The request's own limit is a minute: 30 seconds in, it still holds the run.
+        let ahead = 30_000;
+        const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ahead);
+        try {
+          const held = await jsonFetch('/api/sessions/tool-hung-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(held.status).toBe(409);
+          await held.text();
+          expect(mockSessionAbort).not.toHaveBeenCalled();
+          // 66 seconds in, it is past its limit and the margin.
+          ahead = 66_000;
+          mockSessionRun.mockResolvedValueOnce('second response');
+          const next = await jsonFetch('/api/sessions/tool-hung-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(next.status).toBe(200);
+          await next.text();
+          expect(mockSessionAbort).toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    // A run that waits on a person does not spend its tool's limit: the wait is added to it.
+    it('does not count a wait on a person against a tool\'s limit after the stream dropped', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-wait-1', 'own-then-work', async ({ prompts, slots, drop, questionId }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        const realNow = Date.now.bind(Date);
+        let ahead = 0;
+        const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ahead);
+        try {
+          await onStream({ type: 'tool_call', name: 'http_request', input: { url: 'https://example.com' }, agent: 'main', toolUseId: 'tu-wait' });
+          // The person answers 100 seconds later; the run works on.
+          ahead = 100_000;
+          expect(prompts.answerUser(questionId!, 'lynox', OWNER_PRINCIPAL)).toBe(true);
+          const slot = slots.get('tool-wait-1') as { parked: () => boolean; lastEventAt: number };
+          for (let i = 0; i < 1000 && slot.parked(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+          expect(slot.parked(), 'positive control: the run is no longer parked').toBe(false);
+          // 130 seconds in: past the request's own minute, but not past it plus the wait.
+          ahead = 130_000;
+          slot.lastEventAt = Date.now() - 61_000;
+          const held = await jsonFetch('/api/sessions/tool-wait-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(held.status).toBe(409);
+          await held.text();
+          expect(mockSessionAbort).not.toHaveBeenCalled();
+          // 170 seconds in, it is past both, and the run is taken over.
+          ahead = 170_000;
+          slot.lastEventAt = Date.now() - 61_000;
+          mockSessionRun.mockResolvedValueOnce('second response');
+          const next = await jsonFetch('/api/sessions/tool-wait-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(next.status).toBe(200);
+          await next.text();
+          expect(mockSessionAbort).toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
       });
     });
 
@@ -12172,6 +12288,80 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, another helper to a helper as another mandate, and the owner\'s own by none', async () => {
+      const AT = '2026-11-10T00:00:00.000Z';
+      const rows = [
+        { id: 'trg-anna', title: 'Preise beobachten', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT },
+        { id: 'trg-bea', title: 'Wochenbericht', created_by: 'owner', mandate_editor: 'mandate:bea@example.com', mandate_editor_id: 'grant-b', mandate_edited_at: AT },
+        { id: 'trg-taken', title: 'Übernommen', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT,
+          covered_created_by: 'mandate:anna@example.com', covered_created_id: 'grant-a', covered_created_at: AT },
+        // The owner took over the change a helper made last: the same line, said as taken over.
+        { id: 'trg-edit-taken', title: 'Geändert, übernommen', created_by: 'owner', mandate_editor: 'mandate:bea@example.com', mandate_editor_id: 'grant-b', mandate_edited_at: AT,
+          covered_edited_by: 'mandate:bea@example.com', covered_edited_id: 'grant-b', covered_edited_at: AT },
+        { id: 'trg-own', title: 'Eigener', created_by: 'owner' },
+        { id: 'trg-old', title: 'Alt' },
+        // A helper's mark from before grant ids were stored: whose grant it was is not known.
+        { id: 'trg-legacy', title: 'Ohne Grant', created_by: 'mandate:anna@example.com' },
+      ];
+      const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' };
+      const reads: string[] = [];
+      // A helper's read is recorded in the trail before it is answered, so the trail takes rows too.
+      let trail: { displayNameOf: (id: string) => string | null; record: () => void } | null = { displayNameOf: (id) => { reads.push(id); return shown[id] ?? null; }, record: () => undefined };
+      type Lines = { triggers: Array<{ id: string; setup?: unknown }> };
+      const setupOf = async (): Promise<{ text: string; byId: Record<string, unknown> }> => {
+        const res = await jsonFetch('/api/triggers');
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        return { text, byId: Object.fromEntries((JSON.parse(text) as Lines).triggers.map((t) => [t.id, t.setup])) };
+      };
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => rows }), getWorkerLoop: () => null, getAuditLog: () => trail }, async () => {
+          const owner = await setupOf();
+          expect(owner.byId).toEqual({
+            'trg-anna': [{ kind: 'set_up_by', name: 'Anna A.', takenOver: false }],
+            'trg-bea': [{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }],
+            'trg-taken': [{ kind: 'set_up_by', name: 'Anna A.', takenOver: true }],
+            'trg-edit-taken': [{ kind: 'last_changed_by', name: 'Bea B.', takenOver: true }],
+            'trg-own': [],
+            'trg-old': [],
+            'trg-legacy': [{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }],
+          });
+          // Two triggers of grant-a, one request: the trail is read once per grant.
+          expect([...reads].sort()).toEqual(['grant-a', 'grant-b']);
+          // A helper reads its own grant's name, and another grant as another mandate: not its own,
+          // never whose. (Whether the row's own fields still carry the other address is the
+          // route's field question, not the setup lines'.)
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com', mandateId: 'grant-b' }) as RequestPrincipal);
+          const bea = await setupOf();
+          expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
+          expect(bea.byId['trg-taken']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: true }]);
+          expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
+          // Without a grant id it cannot be told to be hers or another's: it says neither.
+          expect(bea.byId['trg-legacy']).toEqual([{ kind: 'set_up_by', name: 'some mandate', takenOver: false }]);
+          expect(bea.text).not.toContain('Anna A.');
+          expect(JSON.stringify(Object.values(bea.byId))).not.toContain('anna@example.com');
+          // A session no scope names (a mandate without a grant): no lines at all, no read of the
+          // trail, and no display name anywhere in the answer.
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
+          const readsBefore = reads.length;
+          const none = await setupOf();
+          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-edit-taken', 'trg-own', 'trg-old', 'trg-legacy']) expect(none.byId[id]).toEqual([]);
+          expect(reads.length).toBe(readsBefore);
+          for (const name of Object.values(shown)) expect(none.text).not.toContain(name);
+          // A trail that cannot be read costs the owner the names, not the list: the address stands in.
+          api.setPrincipalResolverForTesting(resolver);
+          trail = { displayNameOf: () => { throw new Error('trail down'); }, record: () => undefined };
+          expect((await setupOf()).byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+          // No trail on this instance: the same.
+          trail = null;
+          expect((await setupOf()).byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com', takenOver: false }]);
+        });
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+      }
+    });
+
     it('GET /api/triggers gives a bulk run\'s trigger the host its run works on, null without one or when its run cannot be read, and no other trigger the field', async () => {
       const bulk = [
         { id: 'bulk-ext', title: 'Bulk run r-ext', effect: 'bulk_apply', bulk_run_id: 'r-ext' },
@@ -12388,13 +12578,14 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('GET /api/triggers adds the two flags, the pause\'s, and whether its workflow waits for a stamp, and nothing else to a row', async () => {
+    it('GET /api/triggers adds the two flags, the pause\'s, whether its workflow waits for a stamp, and its setup lines, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
       // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's
-      // (`triggerForRoute`), on by default since the takeover is in the view.
+      // (`triggerForRoute`), on by default since the takeover is in the view. `setup` names
+      // the helpers in the stored marks, by the approval card's rule (its own test above).
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
-        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'recipients_unconfirmed', 'running', 'stoppable', 'title', 'workflow_awaits_stamp']);
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'recipients_unconfirmed', 'running', 'setup', 'stoppable', 'title', 'workflow_awaits_stamp']);
       });
     });
 
@@ -13226,7 +13417,7 @@ describe('LynoxHTTPApi', () => {
       expect(card!.setup).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
     });
 
-    it('names another grant to a mandate by its address only, and the owner sees both names, on the same entry', async () => {
+    it('names another grant to a mandate as another mandate, neither by name nor by address, and the owner sees both names, on the same entry', async () => {
       const log = new AuditLog(qDb.getDb());
       for (const [email, display, mandateId] of [['anna@example.com', 'Anna A.', 'grant-a'], ['bea@example.com', 'Bea B.', 'grant-b']] as const) {
         log.record({ principal: { kind: 'mandate', email, display, mandateId }, action: 'x', phase: 'read', correlationId: `c-${mandateId}` });
@@ -13238,8 +13429,9 @@ describe('LynoxHTTPApi', () => {
       const text = await res.text();
       const mine = (JSON.parse(text) as { entries: Card[] }).entries;
       expect(mine.map((e) => e.id)).toEqual([id]);
-      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
       expect(text).not.toContain('Anna A.');
+      expect(text).not.toContain('anna@example.com');
       // Counter-witness: the same entry, the same trail, read by the owner.
       as(OWNER_PRINCIPAL);
       const theirs = (await list('all')).entries.find((e) => e.id === id)!;
@@ -13787,6 +13979,155 @@ describe('LynoxHTTPApi', () => {
         const ok = await start(id, { judgeRuleHash: shown['judgeRuleHash'], costCapUsd: 1.5 });
         expect(ok.status).toBe(200);
         expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
+      });
+
+      it('starts a run whose rule came from an artifact only while the artifact holds the planned text', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const sha = createHash('sha256').update(text, 'utf8').digest('hex');
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: sha, title: 'Regeln' } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const engineRef = (api as unknown as { engine: { getArtifactStore: ReturnType<typeof vi.fn> } }).engine;
+        const store = engineRef.getArtifactStore() as { get: ReturnType<typeof vi.fn> };
+        type Refusal = { error: string; code?: string; title?: string };
+        // Edited and renamed after the plan: refused by its code, named by the planned title, and
+        // the run waits as it was.
+        store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 2, title: 'Umbenannt', content: text.replace('keine', 'wenige'), type: 'markdown' });
+        const refused = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+        expect(refused.status).toBe(409);
+        expect((await refused.json()) as Refusal).toEqual({
+          code: 'rule_source_changed', title: 'Regeln',
+          error: "This run's rule has changed since it was planned. The change may not be yours. Read the rule under Artifacts, then ask lynox in the chat to plan the run again.",
+        });
+        expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        // Gone: its own code, still named by the planned title.
+        store.get.mockReturnValueOnce(null);
+        const gone = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+        expect(gone.status).toBe(409);
+        expect(((await gone.json()) as Refusal)).toMatchObject({ code: 'rule_source_gone', title: 'Regeln' });
+        // No store right now: its code, and neither a title nor anything the store said.
+        engineRef.getArtifactStore.mockReturnValueOnce(null);
+        const unreadable = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+        expect(unreadable.status).toBe(409);
+        expect((await unreadable.json()) as Refusal).toEqual({
+          code: 'rule_source_unreadable',
+          error: "Saved artifacts cannot be read on this instance right now, so lynox cannot check this run's rule. Nothing was judged. Try again later.",
+        });
+        expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        // The same text: the start goes on to the checks it always had, and starts.
+        store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 2, content: text, type: 'markdown' });
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 })).status).toBe(200);
+      });
+
+      it('answers a start with a rule hash other than the planned one as a changed run, without reading the artifact', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex') } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const engineRef = (api as unknown as { engine: { getArtifactStore: ReturnType<typeof vi.fn> } }).engine;
+        const store = engineRef.getArtifactStore() as { get: ReturnType<typeof vi.fn> };
+        store.get.mockClear();
+        try {
+          // The artifact was edited too: the wrong hash is what the owner is told about.
+          store.get.mockReturnValue({ id: 'a1b2c3d4', version: 2, content: text.replace('keine', 'wenige'), type: 'markdown' });
+          const res = await start(id, { judgeRuleHash: 'not-the-planned-hash', costCapUsd: 1.5 });
+          expect(res.status).toBe(409);
+          const body = (await res.json()) as { error: string; code?: string };
+          expect(body.error).toBe('The bulk run changed since it was shown — reload it and check again.');
+          expect(body.code).not.toBe('rule_source_changed');
+          expect(store.get).not.toHaveBeenCalled();
+          expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        } finally {
+          store.get.mockReset();
+          store.get.mockReturnValue(null);
+        }
+      });
+
+      it('once judging began, the run judges by its planned text: a halt resumes after the artifact changed, without reading it', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex') } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const engineRef = (api as unknown as { engine: { getArtifactStore: ReturnType<typeof vi.fn> } }).engine;
+        const store = engineRef.getArtifactStore() as { get: ReturnType<typeof vi.fn> };
+        store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 1, content: text, type: 'markdown' });
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 })).status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.phase).toBe('planned');
+        // Judging, not halted: a second start is refused for its phase, not for the artifact.
+        store.get.mockClear();
+        store.get.mockReturnValue({ id: 'a1b2c3d4', version: 2, content: text.replace('keine', 'wenige'), type: 'markdown' });
+        try {
+          const again = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+          expect(again.status).toBe(409);
+          expect(((await again.json()) as { error: string; code?: string }).error).toBe('The bulk run is not in a phase that allows this.');
+          // Halted at its spend limit mid-judging, the artifact edited meanwhile: the owner resumes
+          // it, and the judge goes on with the text the run was started with.
+          bulkLedger.halt(id, BULK_HALT_REASONS.costCap);
+          new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
+          const resumed = await start(id, { judgeRuleHash: hash, costCapUsd: 3 });
+          expect(resumed.status).toBe(200);
+          expect(bulkLedger.getJudgeRuleForOwner(id)!.rule).toBe(text);
+          expect(bulkLedger.getJudgeRuleForOwner(id)!.hash).toBe(hash);
+          expect(store.get).not.toHaveBeenCalled();
+        } finally {
+          store.get.mockReset();
+          store.get.mockReturnValue(null);
+        }
+      });
+
+      it('an access never reads a rule taken from an artifact nor where it came from: not on the run\'s page, and it cannot start or resume the run', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex'), title: 'Regelwerk Shop' } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const owner = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+        // Control: the owner is shown the text as planned, and where it came from by its planned title.
+        expect((owner['judgeRule'] as { rule: string }).rule).toBe(text);
+        expect(owner['ruleFromArtifact']).toEqual({ title: 'Regelwerk Shop' });
+        const self = api as unknown as { _principalOf: (req: unknown) => unknown };
+        const orig = self._principalOf;
+        self._principalOf = () => ({ kind: 'mandate', email: 'helper@example.ch', mandateId: 'M-1' });
+        try {
+          const page = await jsonFetch(`/api/bulk/runs/${id}`);
+          const body = await page.text();
+          // The page answers the access, without the rule and without the artifact it came from.
+          expect(page.status).toBe(200);
+          expect(body).not.toContain('sachlich');
+          expect(body).not.toContain('Regelwerk');
+          const shown = JSON.parse(body) as Record<string, unknown>;
+          expect([shown['judgeRule'], shown['ruleFromArtifact']]).toEqual([null, null]);
+          const started = await start(id, { judgeRuleHash: bulkLedger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1.5 });
+          expect(started.status).toBe(403);
+          expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        } finally {
+          self._principalOf = orig;
+        }
       });
 
       // The link domains the owner allows a judged list run's verdicts to add (PRD
@@ -19944,7 +20285,11 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getKnowledgeStore: () => ({
           listActive, listPending, listPendingMasked, listSourcesMasked,
-          getBlock: (id: string) => ({ content: `block:${id}`, charLimit: 100 }),
+          // Likewise the blocks: the export reads them masked, never as stored.
+          getBlock: () => { throw new Error('export must use getBlockMasked'); },
+          getBlockMasked: (id: string) => `block:${id}`,
+          // Nothing rejected or superseded is held, so the block can read complete.
+          countRejectedOrSuperseded: () => 0,
         }),
         getKnowledgeLayer: () => null,
         getCRM: () => null,
@@ -25788,10 +26133,11 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   describe('the positive list (PRD cp-admin-line §3.1)', () => {
     type Row = { method: string; path: string; scope: 'admin' | 'user'; stance: unknown; cpAdmin: boolean };
     const table = (): Row[] => (api as unknown as { routeStancesForTesting: () => Row[] }).routeStancesForTesting();
-    // The five calls the control plane makes with its admin bearer.
-    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke', 'GET /api/admin/workspace/status'];
+    // The six calls the control plane makes with its admin bearer; the sixth ends the owner's
+    // sessions, or re-asserts their generation after a restore.
+    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke', 'GET /api/admin/workspace/status', 'POST /api/admin/owner-sessions/end'];
 
-    it('names exactly the five routes the control plane calls, all admin routes without a stance', () => {
+    it('names exactly the six routes the control plane calls, all admin routes without a stance', () => {
       const marked = table().filter((r) => r.cpAdmin);
       expect(marked.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...CP_ROUTES].sort());
       for (const r of marked) expect([r.path, r.scope, r.stance]).toEqual([r.path, 'admin', undefined]);

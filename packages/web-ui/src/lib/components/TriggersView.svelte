@@ -12,13 +12,16 @@
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, pausedTitleLine, pausedWhoText, planTitle, refusalText, takeoverLines, writtenByMember, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
-	import { blockedReasonParts, hostLabels, type BlockedReason } from '../utils/blocked-reason.js';
+	import { blockedReasonParts, holdsNextRun, hostLabels, type BlockedReason } from '../utils/blocked-reason.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
 	import MarkedLine from './MarkedLine.svelte';
 	import { FoldGroup } from '../utils/fold-group.svelte.js';
 	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { approvalSetupKind, approvalSetupName, type ApprovalSetupLine } from './approvals.js';
+	import { visibleText } from '../visible-text.js';
+	import { localSchedule, monthDay } from '../utils/cron-human.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -49,6 +52,11 @@
 		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
 		created_by?: string;
 		edited_by?: string;
+		// The same, as the lines shown under the title: a helper that set it up or changed it
+		// last, named as the session may read it — by name, or to a helper another helper's mark
+		// as "another person with delegated access" (`GET /api/triggers`). Only the marks on the trigger itself, not on the workflow it
+		// runs. Empty for the owner's own.
+		setup?: ApprovalSetupLine[];
 		// The last mandate that changed the trigger, kept after the owner changes it again.
 		mandate_editor?: string;
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
@@ -499,29 +507,20 @@
 		}
 	}
 
-	// Render a UTC cron in the user's local time so "0 7 * * *" (created locally
-	// as 09:00 in CEST) displays back as "Täglich um 09:00" instead of "07:00".
-	function utcHmToLocal(mmStr: string, hhStr: string): string {
-		const mm = parseInt(mmStr, 10);
-		const hh = parseInt(hhStr, 10);
-		if (Number.isNaN(mm) || Number.isNaN(hh)) return `${hhStr}:${mmStr.padStart(2, '0')}`;
-		const d = new Date();
-		d.setUTCHours(hh, mm, 0, 0);
-		const pad = (n: number) => n.toString().padStart(2, '0');
-		return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-	}
-
+	// A UTC cron as the reader lives it: hour, day and weekday in local time (`localSchedule`).
+	const WEEKDAY_KEYS = ['tasks.sunday', 'tasks.monday', 'tasks.tuesday', 'tasks.wednesday', 'tasks.thursday', 'tasks.friday', 'tasks.saturday'] as const;
 	function cronToHuman(cron: string): string {
-		if (cron === '0 * * * *') return t('tasks.every_hour');
-		const m = cron.match(/^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/);
-		if (!m) return cron;
-		const local = utcHmToLocal(m[1] ?? '0', m[2] ?? '0');
-		const day = m[3];
-		const weekday = m[4];
-		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
-		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${local}`;
-		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${local}`;
-		return `${t('tasks.daily_at')} ${local}`;
+		const s = localSchedule(cron);
+		switch (s.kind) {
+			case 'hourly': return t('tasks.every_hour');
+			case 'daily': return `${t('tasks.daily_at')} ${s.time}`;
+			case 'weekly': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${s.time}`;
+			case 'weekly_utc': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${s.time} UTC`;
+			case 'monthly': return tf('tasks.monthly_on_day', { day: monthDay(s.day, getLocale()), time: s.time });
+			case 'monthly_last': return tf('tasks.monthly_last_day', { time: s.time });
+			case 'monthly_utc': return tf('tasks.monthly_on_day_utc', { day: monthDay(s.day, getLocale()), time: s.time });
+			case 'raw': return s.cron;
+		}
 	}
 
 	function typeLabel(trigger: Trigger): string {
@@ -646,6 +645,11 @@
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
 							</div>
+							<!-- Who set it up or changed it last, when that was a helper, worded as on an
+							     approval card (U-202). The owner's own trigger has none. -->
+							{#each trigger.setup ?? [] as line, i (i)}
+								<p class="mt-0.5 text-xs text-text-muted break-words" data-trigger-setup={line.kind}>{tf(`approvals.setup.${approvalSetupKind(line, viewer)}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
+							{/each}
 							<!-- A helper has no takeover button: who lets the plan run again is said here,
 							     visibly. A bulk run never reaches this pause (it has no helper's mark). -->
 							{#if viewer === 'mandate' && pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}
@@ -653,7 +657,7 @@
 							{/if}
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
-									<span class="flex items-center gap-1">
+									<span class="flex items-center gap-1" data-trigger-schedule>
 										<Icon name="clock" size="xs" />
 										{cronToHuman(trigger.schedule_cron)}
 									</span>
@@ -682,12 +686,15 @@
 									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
-							<!-- Why its run does not do its work, with the way out (a watch the policy keeps from its
-							     page, U-392). The host is set apart as a value, as the plan views set apart what
-							     someone else wrote. -->
+							<!-- Why its run does not do its work, with the way out: a watch the policy keeps from its
+							     page, or the cause its last failed run stored. Only causes lynox itself knows, said in
+							     lynox's own sentences; the run's result text is never shown here. The host is set
+							     apart as a value, as the plan views set apart what someone else wrote. -->
 							{#if trigger.blocked_reason}
 								{@const parts = blockedReasonParts(trigger.blocked_reason, t)}
+								{#if parts.before !== '' || parts.host !== null}
 								<p class="mt-1 text-xs text-warning break-words" data-blocked-reason={trigger.blocked_reason.kind}>{parts.before}{#if parts.host !== null}<bdi data-foreign-value class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono">{#each hostLabels(parts.host) as label, i (i)}<span class="inline-block max-w-full [overflow-wrap:anywhere]">{label}</span><wbr />{/each}</bdi>{/if}{parts.after}</p>
+								{/if}
 							{/if}
 							<!-- A confirmed watch names its page too: its escalation leaves the address out when
 							     someone the owner let in set it up, and points here (PRD B6). -->
@@ -777,8 +784,9 @@
 							     has already been answered as started. Not at a paused plan either: it
 							     would be refused, and the way out is the takeover, which the badge and
 							     the takeover button (or, to a helper, the line under the badge) say. -->
-							<!-- Nor where the policy keeps a watch from its page: the run would read nothing. -->
-							{#if !held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !trigger.blocked_reason}
+							<!-- Nor where the policy keeps a watch from its page: the run would read nothing. A
+							     failed run's stored cause keeps it: the next run may read the page. -->
+							{#if !held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !holdsNextRun(trigger.blocked_reason)}
 								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
 							<!-- Not at a plan that waits for its takeover: next to its badge the switch

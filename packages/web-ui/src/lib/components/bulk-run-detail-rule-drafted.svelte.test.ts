@@ -115,6 +115,15 @@ describe('a judged run says lynox wrote its rule', () => {
 		expect(box!.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
+	it('says where the owner approves that a rule taken from an artifact came from it, its title set apart', async () => {
+		await render({ ...judged, ruleFromArtifact: { title: 'Regeln » Shop' } });
+		const origin = target.querySelector('[data-testid="bulk-approve-rule"] [data-testid="bulk-rule-from-artifact"]')!;
+		const boxes = [...origin.querySelectorAll('[data-foreign-value]')];
+		expect(boxes).toHaveLength(1);
+		expect((origin.textContent ?? '').replace(boxes[0]!.textContent ?? '', '{title}')).toBe(t('bulk.approve.rule_from_artifact'));
+		expect(drafted()).toEqual([]);
+	});
+
 	it('reads in English as approved', async () => {
 		setLocale('en');
 		await render(judged);
@@ -136,5 +145,104 @@ describe('a judged run says lynox wrote its rule', () => {
 		await render(judged);
 		expect(target.querySelector('[data-testid="bulk-approve-rule"]')).toBeNull();
 		expect(drafted()).toEqual([]);
+	});
+});
+
+// Judging again after a halt goes on with the same rule: the owner sees it as at the first start,
+// with a sentence that says it goes on.
+describe('a judged run that judges again shows its rule as at the start', () => {
+	const halted = (haltKey: string): Partial<BulkRunDetailData> => ({ ...judged, phase: 'planned', haltKey, haltReason: haltKey, checksum: null, total: 1, costCapUsd: 1 });
+
+	it('shows the rule and the restart\'s sentence where the owner judges again after a halt', async () => {
+		await render(halted('unavailable'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')?.textContent).toContain(RULE);
+		expect(drafted()).toEqual([t('bulk.restart.rule_drafted')]);
+		expect(target.textContent).toContain(t('bulk.restart.judge'));
+	});
+
+	it('shows them too where judging again needs a higher cost cap', async () => {
+		await render(halted('costCap'));
+		// The page is at judging again with a new cap, not plain judging again.
+		expect(target.textContent).toContain(t('bulk.restart.cap_whole'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')?.textContent).toContain(RULE);
+		expect(drafted()).toEqual([t('bulk.restart.rule_drafted')]);
+	});
+
+	it('control: a run without a judge that reads again shows no rule and no sentence', async () => {
+		await render({ phase: 'planned', haltKey: 'unavailable', haltReason: 'unavailable', checksum: null, total: 1 });
+		expect(target.textContent).toContain(t('bulk.restart.read'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
+		expect(drafted()).toEqual([]);
+	});
+
+	it('control: a judged run that reads on in its list shows no rule yet, as at its first start', async () => {
+		await render({ ...halted('unavailable'), listFirstPage: 'p2' });
+		expect(target.textContent).toContain(t('bulk.restart.list'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
+		expect(drafted()).toEqual([]);
+	});
+
+	it('shows a mandate neither the rule nor the sentence where the run would judge again', async () => {
+		viewer = 'mandate';
+		await render(halted('unavailable'));
+		// The page reached the mandate's view, not an empty one.
+		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
+		expect(drafted()).toEqual([]);
+	});
+
+	it('shows a mandate no artifact title either where the run would judge again', async () => {
+		viewer = 'mandate';
+		await render({ ...halted('unavailable'), ruleFromArtifact: { title: 'Regeln » Shop' } });
+		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
+		expect(target.querySelector('[data-testid="bulk-rule-from-artifact"]')).toBeNull();
+		expect(target.textContent).not.toContain('Regeln » Shop');
+	});
+
+	it('reads in English as approved where judging goes on', async () => {
+		setLocale('en');
+		await render(halted('unavailable'));
+		expect(drafted()).toEqual(['lynox wrote this rule. Check that it says what you want before you continue the judging.']);
+	});
+
+	it('without an artifact keeps the very element it had, under the rule', async () => {
+		await render(halted('unavailable'));
+		const box = target.querySelector('[data-testid="bulk-restart-rule"]')!;
+		// As before the artifact case came in: one paragraph, its test id and classes, the restart's own sentence.
+		expect(box.lastElementChild?.outerHTML).toBe(`<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">${t('bulk.restart.rule_drafted')}</p>`);
+		expect(box.querySelector('[data-testid="bulk-rule-from-artifact"]')).toBeNull();
+	});
+
+	it('says where judging goes on that a rule taken from an artifact came from it, its title set apart', async () => {
+		await render({ ...halted('unavailable'), ruleFromArtifact: { title: 'Regeln » Shop' } });
+		const origin = target.querySelector('[data-testid="bulk-restart-rule"] [data-testid="bulk-rule-from-artifact"]')!;
+		const boxes = [...origin.querySelectorAll('[data-foreign-value]')];
+		expect(boxes).toHaveLength(1);
+		expect(boxes[0]!.textContent).toContain('Regeln » Shop');
+		expect((origin.textContent ?? '').replace(boxes[0]!.textContent ?? '', '{title}')).toBe(t('bulk.restart.rule_from_artifact'));
+		expect(drafted()).toEqual([]);
+	});
+
+	it('says so without a title where the artifact had none, also in English', async () => {
+		await render({ ...halted('costCap'), ruleFromArtifact: {} });
+		const origin = (): string => target.querySelector('[data-testid="bulk-restart-rule"] [data-testid="bulk-rule-from-artifact"]')?.textContent ?? '';
+		expect(origin()).toBe(t('bulk.restart.rule_from_artifact_untitled'));
+		expect(drafted()).toEqual([]);
+		unmount(component!);
+		component = undefined;
+		setLocale('en');
+		await render({ ...halted('unavailable'), ruleFromArtifact: {} });
+		expect(origin()).toBe('This rule was taken word for word from a saved artifact when the run was planned. Check that it says what you want before you continue the judging.');
+		unmount(component!);
+		component = undefined;
+		await render({ ...halted('unavailable'), ruleFromArtifact: { title: 'Shop rules' } });
+		const box = target.querySelector('[data-testid="bulk-restart-rule"] [data-testid="bulk-rule-from-artifact"] [data-foreign-value]')!;
+		expect(origin().replace(box.textContent ?? '', '{title}')).toBe('This rule was taken word for word from {title} when the run was planned. Check that it says what you want before you continue the judging.');
+	});
+
+	it('control: a judged run whose rule did not reach the page shows no empty box', async () => {
+		await render({ ...halted('unavailable'), judgeRule: null });
+		expect(target.textContent).toContain(t('bulk.restart.judge'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
 	});
 });

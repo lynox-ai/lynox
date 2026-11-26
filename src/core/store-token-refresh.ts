@@ -81,6 +81,13 @@ const lastAttempt = new Map<string, number>();
 const lastMisnamed = new Set<string>();
 /** Profiles whose last refresh ended the connection: inside the window a caller hears that, not `not-run`. */
 const lastDead = new Set<string>();
+/**
+ * Profiles whose last refresh found the connection unable to be renewed as it stands: inside the
+ * window they read `ineligible` again while the pass still says so, not `not-run`. A token found
+ * due at the attach is refreshed there first; without this, the 401 it then gets would ask
+ * again inside the window and read `not-run`, and the request would never say to connect again.
+ */
+const lastIneligible = new Set<string>();
 
 /**
  * A connect of `profileId` is about to mint its exchange pass. `false` when a refresh of the same
@@ -107,6 +114,7 @@ export function resetStoreRefreshForTests(): void {
   lastAttempt.clear();
   lastMisnamed.clear();
   lastDead.clear();
+  lastIneligible.clear();
 }
 
 /** Hold `profileId` as if a refresh of it ran, until the returned function is called. For tests. */
@@ -335,6 +343,10 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
       logLine(profileId, 'not started: the last refresh ended this connection');
       return Promise.resolve('dead');
     }
+    if (trigger === 'unauthorized' && lastIneligible.has(profileId) && connectionStillIneligible(profileId, ctx)) {
+      logLine(profileId, 'not started: the connection still cannot be renewed as it stands');
+      return Promise.resolve('ineligible');
+    }
     logLine(profileId, `not started: one refresh per ${String(STORE_REFRESH_WINDOW_MS / 1000)} s, the last at ${new Date(last).toISOString()}`);
     return Promise.resolve('not-run');
   }
@@ -349,6 +361,8 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
       else lastMisnamed.delete(profileId);
       if (outcome === 'dead') lastDead.add(profileId);
       else lastDead.delete(profileId);
+      if (outcome === 'ineligible') lastIneligible.add(profileId);
+      else lastIneligible.delete(profileId);
       return outcome;
     })
     // run-group-starter: reports no spend, and the request that started it awaits it; its one outward call,
@@ -365,6 +379,49 @@ function clientStillMisnamed(profileId: string, ctx: StoreRefreshContext): boole
   if (oauth === undefined || presetId === undefined || OAUTH_PRESETS.get(presetId) === undefined) return false;
   const client = presetClientKeys(presetId);
   return oauth.client_id_key !== client.id || oauth.client_secret_key !== client.secret;
+}
+
+/**
+ * Whether the profile still cannot be renewed as it stands, as its last refresh found it.
+ *
+ * The same checks as steps 5 and 6 of {@link storeRefreshPassFor} (binding, access token, digest,
+ * refresh token and client in the vault), for a profile whose client and refresh slot are still
+ * the preset's own; a copy, so that the pass and its order of checks stay where the guards pin
+ * them. Kept equal by the test "the window's check and the refresh pass agree on each criterion"
+ * (`store-token-refresh.test.ts`). A connect or a slot filled inside the window reads renewable.
+ * Asked only for a 401's renewal, never for a token found due: one value is read, the access token
+ * the request already sent, for its digest; for the refresh token and the client it only asks
+ * whether they are there (`holds`, no `secretAccess` event, where the store has it). It writes,
+ * logs and sends nothing, mints no pass and asks the control plane nothing. Two differences from
+ * the pass. An empty value counts as there for `holds` and as missing for the pass, so such a
+ * profile reads `not-run` here, never ended. And it asks only what is written below: that a key
+ * to check the binding with is there, that the preset exists and names a store host, the client
+ * and refresh slot names, then steps 5 and 6. Any other check of the pass changed inside these
+ * 60 s (the exchange switch, for one) reads "connect again" where the pass would read that nothing
+ * ran. That is a wording only, and the connect it asks for is checked on its own.
+ */
+export function connectionStillIneligible(profileId: string, ctx: StoreRefreshContext): boolean {
+  const digestOf = ctx.toolContext.storeBindingDigest;
+  const profile = ctx.toolContext.apiStore?.get(profileId);
+  const oauth = profile?.auth?.oauth;
+  const presetId = oauth?.preset_id;
+  if (!digestOf || profile === undefined || oauth === undefined || presetId === undefined || OAUTH_PRESETS.get(presetId) === undefined) return false;
+  const host = presetStoreHost(profile);
+  if (host === null) return false;
+  const client = presetClientKeys(presetId);
+  if (oauth.client_id_key !== client.id || oauth.client_secret_key !== client.secret) return false;
+  if (oauth.refresh_token_key !== undefined && oauth.refresh_token_key !== refreshTokenKey(profile.id)) return false;
+  const bound = profile.oauth_grant?.store_binding;
+  if (typeof bound !== 'string') return true;
+  const access = ctx.secretStore.resolve(accessTokenKey(profile.id));
+  if (!access) return true;
+  const digest = digestOf(profile.id, `https://${host}`, access);
+  if (digest === null) return false;
+  if (!sameDigest(digest, bound)) return true;
+  // Only whether they are there: a store that can say so without reading the value does.
+  const store = ctx.secretStore;
+  const there = (name: string): boolean => (store.holds !== undefined ? store.holds(name) : Boolean(store.resolve(name)));
+  return !there(refreshTokenKey(profile.id)) || !there(client.id) || !there(client.secret);
 }
 
 /**

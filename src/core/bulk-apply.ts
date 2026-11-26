@@ -479,9 +479,10 @@ async function applyRunEffect(
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
       if (cur !== 'foreign' && (sameImage(cur, t.after, htmlFields) || (savedForm && sameInSavedForm(cur, t.after, htmlFields)))) {
-        // Found as planned: either a loop of this run wrote it and died before recording it
-        // (the target is marked sent), or someone else set the value, and the run sends
-        // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
+        // Found as planned: a send of this run may have written it (one still unclear, or on a
+        // local run a writer that threw after its write), or someone else set the value; the run
+        // sends nothing to it, and the ledger tells the two apart ({@link
+        // BulkLedger.recordApplied}, `found_unsent`). What is there is
         // also what an undo must expect.
         // Found only under the HTML comparison is not counted as a rewrite: the comparison explains
         // the store's form of the planned description, as for a read-back.
