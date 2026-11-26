@@ -40,7 +40,8 @@ describe('applyModifications (shared workflow-step mutation)', () => {
     expect(s[1]!.input_from).toEqual(['fetch']);
     // The placeholder names the step whole, as a run of the stored plan reads it (`step-id.test.ts`).
     expect(s[1]!.task).toBe('Send {{fetch}}');
-    // The check a save runs on the plan as a run names it finds nothing to refuse.
+    // The placeholder check a save runs finds nothing to refuse (every id here has the shape, so the
+    // plan as a run names it is the plan as stored).
     expect(templateRefIssue(runStepIds(s))).toBeNull();
   });
 

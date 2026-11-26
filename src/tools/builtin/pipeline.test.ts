@@ -1126,6 +1126,27 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(agents[0]!['input_from']).toBeUndefined();
   });
 
+  it('a run whose copy dropped step a still reads {{a.result}} as step a, not as a stored step a.result', async () => {
+    // The remove check reads the placeholder before hidden characters are stripped; after the strip it
+    // is `{{a.result}}` in a copy without step a. Read against the stored ids it still means step a.
+    const agent = makePipelineAgent();
+    const pipelineId = seedStoredPipeline([
+      { id: 'a', task: 'step a' },
+      { id: 'a.result', task: 'step R' },
+      { id: 'send', task: 'Send it', input_from: ['a.result'] },
+    ]);
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({
+      workflow_id: pipelineId,
+      modifications: [{ step_id: 'a', action: 'remove' }, { step_id: 'send', action: 'update_task', value: 'Send {{a\u200B.result}}' }],
+    }, agent);
+    const agents = (mockRunManifest.mock.calls[0]![0] as Record<string, unknown>)['agents'] as Array<Record<string, unknown>>;
+    expect(agents.map(x => x['id'])).toEqual(['step-2', 'send']);
+    // The placeholder keeps naming step a; moved, it would read the stored step a.result (`{{step-2}}`).
+    expect(agents[1]!['task']).toBe('Send {{a.result}}');
+    expect(agents[1]!['input_from']).toEqual(['step-2']);
+  });
+
   it('applies update_task modification', async () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();
