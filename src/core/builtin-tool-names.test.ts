@@ -247,7 +247,7 @@ describe('every tool the engine can build is classified by where its result come
    */
   const MARKS_ITS_RESULT: Readonly<Record<string, { readonly file: string; readonly wraps: number }>> = {
     inbox_read: { file: 'integrations/mail/tools/inbox-read.ts', wraps: 2 },
-    mail_reply: { file: 'integrations/mail/tools/mail-reply.ts', wraps: 1 },
+    mail_reply: { file: 'integrations/mail/tools/mail-reply.ts', wraps: 2 },
     mail_send: { file: 'integrations/mail/tools/mail-send.ts', wraps: 1 },
     recall_tool_result: { file: 'tools/builtin/recall-tool-result.ts', wraps: 1 },
     set_thread_context: { file: 'tools/builtin/set-thread-context.ts', wraps: 2 },

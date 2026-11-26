@@ -39,8 +39,10 @@ function ambiguityText(store: SubjectStore, candidateIds: readonly string[]): st
     .map(id => store.getSubject(id)?.name)
     .filter((n): n is string => typeof n === 'string');
   const head = 'The customer name matches more than one entry. Use the full name to say which one.';
+  // Each name in its own block after its own label: a stored name can hold a line break, and in
+  // one shared block it would read as two matches.
   return names.length > 0
-    ? `${head} The stored names of the matches:\n${wrapUntrustedData(names.join('\n'), 'set_thread_context')}`
+    ? `${head} The stored names of the matches:${names.map((n, i) => `\nMatch ${String(i + 1)}: ${wrapUntrustedData(n, 'set_thread_context')}`).join('')}`
     : `${head} (${String(candidateIds.length)} entries)`;
 }
 

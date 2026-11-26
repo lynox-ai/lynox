@@ -50,6 +50,14 @@ export interface MailReplyToolInput {
 }
 
 /**
+ * An error whose text the mail provider (or a server behind it) wrote: the sentence is lynox's,
+ * the text follows in one marked block.
+ */
+function errorWithText(head: string, text: string): string {
+  return `${head} The error text:\n${wrapUntrustedData(text, 'mail_reply')}`;
+}
+
+/**
  * mail_reply needs more than a bare MailRegistry — it looks up account types
  * (to enforce the receive-only hard block) and derives the sending account
  * from the original recipient. The MailContext bundles everything.
@@ -173,8 +181,8 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
       } catch (err: unknown) {
         // A confirmation nobody can answer ends the run; as text, the model would work around it.
         if (isInputRequired(err)) throw err;
-        if (err instanceof MailError) return `mail_reply error (${err.code}): ${err.message}`;
-        return `mail_reply error: ${getErrorMessage(err)}`;
+        if (err instanceof MailError) return errorWithText(`mail_reply error (${err.code}).`, err.message);
+        return errorWithText('mail_reply error.', getErrorMessage(err));
       }
     },
   };
@@ -331,7 +339,7 @@ export async function prepareReply(
   try {
     sendingAddress = await resolveSendingAddress(sendProvider);
   } catch (err) {
-    return { ok: false, message: `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, message: errorWithText('mail_reply error: could not read the sending address. Nothing was sent.', err instanceof Error ? err.message : String(err)) };
   }
 
   // Reply-all: union with original To + Cc, minus our own address and

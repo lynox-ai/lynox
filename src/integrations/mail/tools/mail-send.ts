@@ -181,8 +181,9 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
             // in the preview already.
             return 'mail_send cancelled by user.';
           case 'provider_error':
-            // The mail server's own text: marked, since the server (or a relay) chose it.
-            return `mail_send error: the mail provider refused or failed the send. Its message:\n${wrapUntrustedData(result.message, 'mail_send')}`;
+            // The provider's or the mail server's own text: marked, since the server (or a relay)
+            // chose it. The sentence says only that sending failed: on one path nothing was sent yet.
+            return `mail_send error: the mail could not be sent. The error text:\n${wrapUntrustedData(result.message, 'mail_send')}`;
         }
       }
 

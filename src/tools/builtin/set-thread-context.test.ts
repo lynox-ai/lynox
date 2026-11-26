@@ -246,8 +246,8 @@ describe('set_thread_context tool (Context-Hierarchy Scoping — Slice A2)', () 
     subjects.findOrCreate({ kind: 'organization', name: 'Müller Bau AG', aliases: ['Müller'] });
     subjects.findOrCreate({ kind: 'organization', name: 'Müller Handel AG', aliases: ['MÜLLER'] });
     const res = await setThreadContextTool.handler({ customer: 'müller' }, agent);
-    expect(blockBodies(res)).toEqual(['Müller Bau AG\nMüller Handel AG']);
-    expect(outsideBlocks(res)).toBe('The customer name matches more than one entry. Use the full name to say which one. The stored names of the matches:\n[block]');
+    expect(blockBodies(res)).toEqual(['Müller Bau AG', 'Müller Handel AG']);
+    expect(outsideBlocks(res)).toBe('The customer name matches more than one entry. Use the full name to say which one. The stored names of the matches:\nMatch 1: [block]\nMatch 2: [block]');
     expect(threads.getThread(THREAD)?.primary_subject_id ?? null).toBeNull();
   });
 
