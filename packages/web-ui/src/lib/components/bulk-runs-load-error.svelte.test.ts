@@ -92,7 +92,7 @@ beforeEach(() => {
 			return reply(answers.runs, { runs: listed });
 		}
 		if (u.endsWith('/merges')) return reply(answers.merges, { merges: [] });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(?:&changed=1)?$/.exec(u);
 		if (page) targetLimits.push(Number(page[2]));
 		if (page) return reply(targetQueue.shift() ?? answers.targets, { targets: served.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(answers.run, detailRun);

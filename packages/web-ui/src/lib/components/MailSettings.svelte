@@ -487,7 +487,7 @@
 								<!-- Background polling failed. Without this the mailbox just goes
 								     quiet and nobody learns why. -->
 								<div class="mt-1 text-[11px] text-danger">
-									{friendlyMailError(account.lastError.code, undefined)}
+									{friendlyMailError(account.lastError.code, undefined, { background: true })}
 								</div>
 							{/if}
 							{#if account.warning === 'needs_mailbox_scope'}

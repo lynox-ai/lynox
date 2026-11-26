@@ -65,6 +65,8 @@ import {
   type MigrationChunkType,
   type EncryptedChunk,
   MIGRATION_CHUNK_TYPES,
+  MIGRATION_MAX_CHUNKS,
+  MIGRATION_MAX_TOTAL_BYTES,
 } from './migration-crypto.js';
 
 // ── Types ──
@@ -281,6 +283,8 @@ function regateFlatProfiles(apisDir: string, mode: 'check' | 'strip', replaced: 
 
 /** State of an in-progress migration session. */
 interface MigrationSession {
+  /** Random, handed to the source in the handshake; an abort must name it. */
+  id: string;
   keypair: EphemeralKeypair;
   challengeNonce: Buffer;
   transferKey: Buffer | null;
@@ -295,11 +299,11 @@ interface MigrationSession {
 /** Migration session timeout — 30 minutes from handshake start. */
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
-/** Maximum number of chunks to accept (prevents memory DoS). */
-const MAX_CHUNKS = 64;
+/** Maximum number of chunks to accept (prevents memory DoS); the source checks the same bound. */
+const MAX_CHUNKS = MIGRATION_MAX_CHUNKS;
 
-/** Maximum total plaintext size across all chunks (500 MB). */
-const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
+/** Maximum total plaintext size across all chunks (500 MiB); the source checks the same bound. */
+const MAX_TOTAL_BYTES = MIGRATION_MAX_TOTAL_BYTES;
 
 /**
  * Ceiling for the reassembled flat-file memory bundle. A legitimate tree is
@@ -415,7 +419,9 @@ export class MigrationImporter {
     const signature = signHandshake(serverPubKey, signingKey);
     zeroize(signingKey); // Key material no longer needed
 
+    const id = randomBytes(16).toString('hex');
     this.session = {
+      id,
       keypair,
       challengeNonce,
       transferKey: null,
@@ -429,7 +435,24 @@ export class MigrationImporter {
       serverPubKey,
       signature,
       challengeNonce: challengeNonce.toString('hex'),
+      acceptsPlainStores: this.acceptPlainStores,
+      sessionId: id,
     };
+  }
+
+  /**
+   * End the session the source names, if it has not received a manifest yet: the source stopped
+   * before sending its data, and a new attempt should not wait for the session to expire.
+   * Synchronous, so nothing can set a manifest between the check and the cleanup.
+   * - `aborted`: the session was this one and had no manifest; it is gone.
+   * - `none`: there is no session, or another one (a newer attempt's) — left as it is.
+   * - `in-transfer`: the session has its manifest; a running transfer is not cut off.
+   */
+  abortBeforeManifest(sessionId: string): 'aborted' | 'none' | 'in-transfer' {
+    if (!this.isActive || !this.session || this.session.id !== sessionId) return 'none';
+    if (this.session.manifest !== null) return 'in-transfer';
+    this.cleanup();
+    return 'aborted';
   }
 
   /**
@@ -503,8 +526,8 @@ export class MigrationImporter {
         // ranking them is the difference between a diagnosis and a guess.
         throw new Error(
           `Unknown chunk type ${JSON.stringify(String(chunk.type).slice(0, 64))} in the `
-          + `manifest. Most likely this export was written by a newer lynox than this `
-          + `instance — upgrade this instance before restoring. Otherwise the manifest is `
+          + `manifest. Most likely this export was written by a newer lynox than the target `
+          + `instance — update the target instance before migrating. Otherwise the manifest is `
           + `corrupt. Either way, restoring now would silently leave out everything this `
           + `build cannot place.`,
         );
@@ -1328,6 +1351,9 @@ export class MigrationImporter {
     for (const [store, parts] of byStore) {
       if (!isPlainStore(store)) throw new Error(`Disallowed database name: "${store}"`);
       const first = parts.find(c => !c.meta.name.includes(':part') || c.meta.name.endsWith(':part0'))!;
+      // The same list `setManifest` checked before any chunk arrived (the meta is the manifest's),
+      // so this cannot refuse what it let through; the refusal's "None of the data was
+      // transferred" holds only there, before the chunks.
       const columns = checkPlainColumns(store, first.meta.columns);
       const payload = reassemble(parts);
       try {

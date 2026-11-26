@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  STEP_TASK_HEAD, awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stepHeading, templateText, timeoutText, visible,
+  awaitsLineKey, awaitsStampRefusal, confirmOutcome, modeKey, offersStamp, onFailureKey, stampChanges, stillOffLine, parseStampPreview, templateText, timeoutText, visible,
 } from './workflow-stamp.js';
 
 /** An answer of `GET /api/workflows/:id/stamp-preview` as the contract (242 r1) describes it. */
@@ -30,7 +30,7 @@ describe('parseStampPreview — what the view may show, or nothing', () => {
     expect(p.steps.map((s) => s.id)).toEqual(['fetch', 'post']);
     expect(p.steps[1]).toMatchObject({ tool: 'http_request', inputTemplate: { url: 'https://other.example/{{params.month}}' }, inputFrom: ['fetch'] });
     expect(p.contract).toEqual(['POST https://api.example.com/v1/reports']);
-    expect(p.parameters).toEqual([{ name: 'month', required: true, default: null }]);
+    expect(p.parameters).toEqual([{ name: 'month', required: true, default: null, allowed: null }]);
     expect(p.changedBy).toBe('mandate');
     expect(p.awaitsStamp).toBe(true);
   });
@@ -53,6 +53,39 @@ describe('parseStampPreview — what the view may show, or nothing', () => {
     expect(parseStampPreview(preview({ contract: { methods: ['POST'] } }))).toBeNull();
     expect(parseStampPreview(preview({ contract: null }))!.contract).toBeNull();
     expect(parseStampPreview(preview({ contract: undefined }))!.contract).toBeNull();
+  });
+});
+
+describe('parseStampPreview — what a contract allows for a parameter (U-451)', () => {
+  const withAllowed = (allowed: unknown): Record<string, unknown> => preview({ parameters: [{ name: 'month', required: true, default: null, allowed }] });
+
+  it('reads every rule whole, and a parameter without one as having none', () => {
+    const all = { enum: ['May', 3, true], regex: '[a-z]+', min: 1, max: 9 };
+    expect(parseStampPreview(withAllowed(all))!.parameters[0]!.allowed).toEqual(all);
+    expect(parseStampPreview(withAllowed({ enum: [] }))!.parameters[0]!.allowed).toEqual({ enum: [], regex: null, min: null, max: null });
+    expect(parseStampPreview(withAllowed(null))!.parameters[0]!.allowed).toBeNull();
+    expect(parseStampPreview(withAllowed(undefined))!.parameters[0]!.allowed).toBeNull();
+  });
+
+  it.each([
+    ['a list that is not an array', { enum: 'May' }],
+    ['a list with a value no parameter can be', { enum: ['May', { x: 1 }] }],
+    ['a pattern that is not text', { regex: 5 }],
+    ['a list with a value no parameter can equal', { enum: [{ v: 1 }] }],
+    ['a bound that is not a number', { min: [1] }],
+    ['a bound given as text', { min: '1' }],
+    ['an upper bound that is not a number', { max: { n: 1 } }],
+    ['rules that set nothing', {}],
+    ['rules that are not an object', 'May'],
+  ])('refuses the whole answer for %s, instead of dropping the rule', (_label, allowed) => {
+    expect(parseStampPreview(withAllowed(allowed))).toBeNull();
+  });
+
+  it('a changed rule is a changed setting', () => {
+    const before = parseStampPreview(withAllowed({ enum: ['May'] }))!;
+    const after = parseStampPreview(withAllowed({ enum: ['June'] }))!;
+    expect(stampChanges(before, after).settings).toBe(true);
+    expect(stampChanges(before, parseStampPreview(withAllowed({ enum: ['May'] }))!).settings).toBe(false);
   });
 });
 
@@ -170,26 +203,103 @@ describe('visible — what changes how text reads is printed, not applied', () =
     expect(visible('ok\u{E0100}\u{E01EF}')).toBe('ok<U+E0100><U+E01EF>');
   });
 
-  it('applies to the recorded call and the step heading', () => {
+  it('applies to the recorded call', () => {
     expect(templateText({ url: 'https://a\u202Eb/' })).toContain('<U+202E>');
-    expect(stepHeading({ id: 'x\u202E', task: 'send\u202E' })).toEqual({ id: 'x<U+202E>', head: 'send<U+202E>' });
+  });
+
+  it('prints every format character and the blanks that render as empty space, one real character of each kind', () => {
+    // Built from code points, so the source holds no raw invisible character.
+    const c = (cp: number): string => String.fromCodePoint(cp);
+    const cases: Array<[string, number]> = [
+      ['soft hyphen (Cf)', 0x00ad],
+      ['Arabic number sign (Cf)', 0x0600],
+      ['invisible times (Cf)', 0x2062],
+      ['musical format control (Cf, astral)', 0x1d173],
+      ['interlinear annotation anchor (Cf)', 0xfff9],
+      ['Braille pattern blank', 0x2800],
+      ['halfwidth Hangul filler', 0xffa0],
+      ['Hangul choseong filler', 0x115f],
+      ['Mongolian free variation selector (default-ignorable)', 0x180b],
+      ['Khmer inherent vowel (default-ignorable)', 0x17b4],
+      ['unassigned default-ignorable', 0xfff0],
+      ['noncharacter', 0xfdd0],
+      ['line separator', 0x2028],
+      ['C0 control', 0x0001],
+      ['C1 control (next line)', 0x0085],
+    ];
+    for (const [what, cp] of cases) {
+      const tag = `<U+${cp.toString(16).toUpperCase().padStart(4, '0')}>`;
+      expect(visible(`a${c(cp)}b`), what).toBe(`a${tag}b`);
+    }
+    // CONTROL: visible letters, a space, a no-break space, an emoji, and the tab and line breaks of
+    // a multi-line text stay as they are.
+    expect(visible(`a b${c(0x00a0)}c ${c(0x1f600)}\td\r\ne`)).toBe(`a b${c(0x00a0)}c ${c(0x1f600)}\td\r\ne`);
   });
 });
 
-describe('stepHeading — there is no step name, so id and the start of the task', () => {
-  it('keeps a short task whole and flattens its whitespace', () => {
-    expect(stepHeading({ id: 'a', task: '  Read\n the   report ' })).toEqual({ id: 'a', head: 'Read the report' });
+describe('modeKey, onFailureKey — a sentence for each value the engine knows, none guessed', () => {
+  it('names every mode and failure strategy the engine stores', () => {
+    expect(modeKey('interactive')).toBe('workflow_library.stamp.mode_interactive');
+    expect(modeKey('autonomous')).toBe('workflow_library.stamp.mode_autonomous');
+    expect(onFailureKey('stop')).toBe('workflow_library.stamp.on_failure_stop');
+    expect(onFailureKey('continue')).toBe('workflow_library.stamp.on_failure_continue');
+    // notify runs as continue does and reports to no one: it carries continue's name.
+    expect(onFailureKey('notify')).toBe('workflow_library.stamp.on_failure_continue');
   });
 
-  it('cuts a long task at the limit and marks the cut', () => {
-    const head = stepHeading({ id: 'a', task: 'x'.repeat(STEP_TASK_HEAD + 5) }).head;
-    expect(head).toBe(`${'x'.repeat(STEP_TASK_HEAD)}…`);
-    expect(stepHeading({ id: 'a', task: 'x'.repeat(STEP_TASK_HEAD) }).head).toBe('x'.repeat(STEP_TASK_HEAD));
+  it('has no sentence for another value, an inherited name among them', () => {
+    for (const v of ['Autonomous', 'halt', '', 'constructor', 'toString', '__proto__']) {
+      expect(modeKey(v), v).toBeNull();
+      expect(onFailureKey(v), v).toBeNull();
+    }
+  });
+});
+
+describe('stampChanges — what moved between the version shown and the one loaded after it', () => {
+  const p = (over: Record<string, unknown> = {}) => parseStampPreview(preview(over))!;
+  const steps = (...s: Array<Record<string, unknown>>) => ({ steps: s });
+  const fetch = { id: 'fetch', task: 'Read the report', tool: null, inputTemplate: null, tools: ['web_search'], model: 'fast', inputFrom: [] };
+  const post = { id: 'post', task: 'Send it', tool: 'http_request', inputTemplate: { url: 'https://other.example/x' }, tools: ['http_request'], model: null, inputFrom: ['fetch'] };
+
+  it('marks nothing when the two are alike', () => {
+    expect(stampChanges(p(), p())).toEqual({ settings: false, steps: new Set(), removed: [] });
   });
 
-  it('never cuts inside a character made of two code units', () => {
-    const head = stepHeading({ id: 'a', task: `${'x'.repeat(STEP_TASK_HEAD - 1)}😀tail` }).head;
-    expect(head).toBe(`${'x'.repeat(STEP_TASK_HEAD - 1)}😀…`);
+  it('marks exactly the step whose content changed, by its position in the new version', () => {
+    const c = stampChanges(p(steps(fetch, post)), p(steps(fetch, { ...post, inputTemplate: { url: 'https://evil.example/x' } })));
+    expect([...c.steps]).toEqual([1]);
+    expect(c.settings).toBe(false);
+  });
+
+  it('a step that is new is changed, and one that is gone is named by its id', () => {
+    const c = stampChanges(p(steps(fetch, post)), p(steps({ ...fetch, id: 'read' }, post)));
+    expect([...c.steps]).toEqual([0]);
+    expect(c.removed).toEqual(['fetch']);
+  });
+
+  it('a step that only moved is not marked', () => {
+    expect([...stampChanges(p(steps(fetch, post)), p(steps(post, fetch))).steps]).toEqual([]);
+  });
+
+  it('a change of mode, failure strategy, limits, parameters or contract marks the settings, not a step', () => {
+    for (const over of [{ mode: 'interactive' }, { onFailure: 'continue' }, { limits: { maxSteps: 6 } }, { parameters: [] }, { contract: null }]) {
+      const c = stampChanges(p(), p(over));
+      expect(c.settings, JSON.stringify(over)).toBe(true);
+      expect([...c.steps], JSON.stringify(over)).toEqual([]);
+    }
+  });
+
+  it('a change between two values with one name (continue, notify) marks nothing', () => {
+    expect(stampChanges(p({ onFailure: 'continue' }), p({ onFailure: 'notify' })).settings).toBe(false);
+    // An unknown value is compared as it came.
+    expect(stampChanges(p({ onFailure: 'halt' }), p({ onFailure: 'Halt' })).settings).toBe(true);
+  });
+
+  it('compares what the caller says a step shows', () => {
+    const before = p();
+    const after = p();
+    const notes = new Map([[before, 'on A'], [after, 'on B']]);
+    expect([...stampChanges(before, after, (q, i) => `${i === 1 ? notes.get(q) : ''}`).steps]).toEqual([1]);
   });
 });
 

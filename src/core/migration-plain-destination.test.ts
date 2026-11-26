@@ -22,11 +22,13 @@ import {
 } from './migration-crypto.js';
 import { strictDecrypt } from './strict-decrypt.js';
 import {
-  ENCRYPTED_COLUMNS, PLAIN_COLUMNS, countEncryptedPlainColumns, encodePlainPayload, encryptStoredText, patchWalHeader,
+  ENCRYPTED_COLUMNS, PLAIN_COLUMNS, countEncryptedPlainColumns, decodePlainPayload, encodePlainPayload, isListedValue, encryptStoredText, patchWalHeader,
   reencryptColumns, reencryptImage, reencryptLedgers,
   type ListedLedgerCell, type ListedValue, type PlainColumn, type PlainHeader, type PlainStore,
 } from './migration-rekey.js';
 import type { MigrationCeiling } from './migration-ceiling.js';
+import { MAX_HEALTH_BYTES, NoPlainForm, choosePlainPaths, plainFormRefusal, plainOffer, readDestinationHealth, rewriteLedgersForPlain, rewriteStoreForPlain } from './migration-plain-source.js';
+import { MigrationExporter } from './migration-export.js';
 
 const SRC = 'source-vault-key-for-the-plaintext-path-2026';
 const DST = 'destination-vault-key-for-the-plaintext-path-2026';
@@ -124,14 +126,32 @@ function seedStores(dir: string, vault: string): Written {
 }
 
 /**
- * What the source will do, on an in-memory copy: decrypt every column of the set
- * strictly, list what fails and what reads `enc:` as plaintext, and name what the image lacks.
+ * The source's rewrite (`rewriteStoreForPlain`) over a copy of the store, split into its header
+ * and image. With `skip`, an older source that encrypted those columns but neither decrypted nor
+ * named them: then the fixture below does the source's work and leaves them out.
  */
 function plainImage(path: string, store: PlainStore, vault: string, opts: { drop?: string[]; skip?: string[] } = {}): { image: Buffer; columns: PlainColumn[]; header: PlainHeader<ListedValue> } {
   const file = new Database(path);
-  const bytes = file.serialize();
+  let bytes = file.serialize();
   file.close();
+  if ((opts.drop ?? []).length > 0) {
+    const d = new Database(patchWalHeader(bytes));
+    for (const t of opts.drop ?? []) d.exec(`DROP TABLE "${t}"`);
+    bytes = d.serialize();
+    d.close();
+  }
+  if ((opts.skip ?? []).length === 0) {
+    const r = rewriteStoreForPlain(bytes, store, { key: keyOf(store, vault) });
+    const { header, body } = decodePlainPayload(r.payload, store, isListedValue);
+    return { image: body, columns: r.columns, header };
+  }
+  return olderSourceImage(bytes, store, vault, opts.skip ?? []);
+}
+
+/** An older source: decrypts the set except `skip`, which it neither decrypts nor names. */
+function olderSourceImage(bytes: Buffer, store: PlainStore, vault: string, skip: string[]): { image: Buffer; columns: PlainColumn[]; header: PlainHeader<ListedValue> } {
   const db = new Database(patchWalHeader(bytes));
+  const opts = { skip };
   for (const t of opts.drop ?? []) db.exec(`DROP TABLE "${t}"`);
   const key = keyOf(store, vault);
   const columns: PlainColumn[] = [];
@@ -1025,5 +1045,431 @@ describe('the image is the source\'s and is opened as untrusted', () => {
       expect(() => reencryptLedgers(ledgerFile({ table: 'people', dupRow: { EMAIL: 'd@example.org' } }), NONE, { key: deriveEngineEncKey(DST) }))
         .toThrow(/names a contact column in another case/);
     });
+  });
+});
+
+// ── The source half, through the real exporter ──
+
+describe('the source sends its stores as plaintext when the destination takes them', () => {
+  const FILE = 'merge-2026-11-16T00-00-00-000Z-abc123.json';
+  /** A merge ledger as the merge runner writes it, with its contact cells under `key` (or `plainEmail` left in plain). */
+  function writeLedger(dir: string, key: Buffer, opts: { plainEmail?: boolean } = {}): void {
+    mkdirSync(join(dir, 'sweeps'), { recursive: true });
+    const ledger = {
+      version: 1, phase: 'merge', createdAt: '2026-11-16T00:00:00.000Z',
+      entry: {
+        dupId: 'd', canonicalId: 'c', kind: 'person', ownerUserId: 'u', dupArchivedAtWas: null, dupMergedIntoWas: null,
+        canonicalAliasesWas: '[]', canonicalParentWasDup: false, repoints: [], memorySubjects: { dupRows: [], canonicalMemoryIdsBefore: [] }, cooccurrences: [],
+        detail: { table: 'people', dupRow: { subject_id: 'd', email: opts.plainEmail ? 'd@example.org' : encryptStoredText('d@example.org', key), phone: encryptStoredText('+41 1', key) }, canonicalRow: { subject_id: 'c', email: encryptStoredText('c@example.org', key), phone: '' } },
+      },
+      dataStore: [], threadAnchors: [], applied: true,
+    };
+    writeFileSync(join(dir, 'sweeps', FILE), JSON.stringify(ledger, null, 2));
+  }
+
+  /** Export from `src` with `options`, import into `dst`; the manifest and both reports. */
+  function migrate(src: string, dst: string, options: Parameters<MigrationExporter['export']>[2], ceiling: MigrationCeiling = ROOMY) {
+    const imp = importer(dst, ceiling);
+    const exporter = new MigrationExporter({ lynoxDir: src, vaultKey: SRC });
+    const exported = exporter.export(handshake(imp), undefined, options);
+    imp.setManifest(exported.manifest);
+    for (const c of exported.chunks) imp.receiveChunk(c);
+    try { return { manifest: exported.manifest, source: exported.plain, report: imp.restore() }; } finally { imp.cleanup(); }
+  }
+  const typeOf = (m: MigrationManifest, store: string): string | undefined => m.chunks.find(c => c.name === store || c.name === `${store}:part0`)?.type;
+
+  it('has no plaintext form for ledgers whose header would be over the size the destination reads', () => {
+    const src = tmp();
+    const key = keyOf('engine.db', SRC);
+    writeLedger(src, key);
+    const files = { [FILE]: readFileSync(join(src, 'sweeps', FILE), 'utf-8') };
+    const fits = rewriteLedgersForPlain(files, key);
+    expect(fits).not.toBeNull();
+    const headerBytes = fits!.payload.readUInt32BE(0);
+    expect(rewriteLedgersForPlain(files, key, undefined, headerBytes)).not.toBeNull();
+    expect(rewriteLedgersForPlain(files, key, undefined, headerBytes - 1)).toBeNull();
+  });
+
+  it('sends a store raw when it has no plaintext form, and the destination takes it', () => {
+    const src = tmp(); const dst = tmp();
+    seedStores(src, SRC);
+    const d = new Database(join(src, 'engine.db'));
+    d.exec("UPDATE memories SET text = x'01' WHERE rowid = (SELECT min(rowid) FROM memories)");
+    d.close();
+    const { manifest, source } = migrate(src, dst, { plain: { ceiling: ROOMY } });
+    expect(typeOf(manifest, 'engine.db')).toBe('sqlite_db');
+    expect(typeOf(manifest, 'history.db')).toBe('sqlite_db_plain');
+    expect(source?.stores.find(s => s.store === 'engine.db')).toMatchObject({ path: 'raw', reason: 'no-plain-form' });
+  });
+
+  it('sends every store raw when the plaintext form alone would take the export over its own bounds, and plain at them', () => {
+    const src = tmp(); const dst = tmp();
+    seedStores(src, SRC);
+    const sizeOf = (m: MigrationManifest): { count: number; total: number } => ({ count: m.totalChunks, total: m.chunks.reduce((n, c) => n + c.originalSize, 0) });
+    const plain = sizeOf(new MigrationExporter({ lynoxDir: src, vaultKey: SRC }).export(handshake(importer(tmp())), undefined, { plain: { ceiling: ROOMY } }).manifest);
+    const raw = sizeOf(new MigrationExporter({ lynoxDir: src, vaultKey: SRC }).export(handshake(importer(tmp()))).manifest);
+    expect(plain.total).toBeGreaterThan(raw.total);
+
+    const exportWith = (maxTotalBytes: number) => new MigrationExporter({ lynoxDir: src, vaultKey: SRC, bounds: { maxChunks: 64, maxTotalBytes } })
+      .export(handshake(importer(dst)), undefined, { plain: { ceiling: ROOMY } });
+    const under = exportWith(plain.total - 1);
+    expect(typeOf(under.manifest, 'engine.db')).toBe('sqlite_db');
+    expect(typeOf(under.manifest, 'history.db')).toBe('sqlite_db');
+    expect(under.plain?.stores.map(s => [s.path, s.reason])).toEqual([['raw', 'bounds'], ['raw', 'bounds']]);
+    const at = exportWith(plain.total);
+    expect(typeOf(at.manifest, 'engine.db')).toBe('sqlite_db_plain');
+    // Over the bounds raw too: the export refuses, as it does without the offer.
+    expect(() => exportWith(raw.total - 1)).toThrow(/does not fit one migration/);
+  });
+
+  it('sends a plaintext store and ledgers in several parts, the meta on the first, and the destination reads them back', () => {
+    const src = tmp(); const dst = tmp();
+    const written = seedStores(src, SRC);
+    writeLedger(src, keyOf('engine.db', SRC));
+    // Fill both outside the set, so each plaintext form needs more than one chunk.
+    const filler = 'f'.repeat(9 * MIB);
+    const d = new Database(join(src, 'engine.db'));
+    d.exec('CREATE TABLE filler (v TEXT)');
+    d.prepare('INSERT INTO filler (v) VALUES (?)').run(filler);
+    d.close();
+    const ledgerPath = join(src, 'sweeps', FILE);
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as Record<string, unknown>;
+    // Written as the merge runner writes a ledger, so its re-encrypted form keeps the raw size.
+    writeFileSync(ledgerPath, JSON.stringify({ ...ledger, pad: filler }, null, 2));
+
+    const { manifest, report } = migrate(src, dst, { plain: { ceiling: ROOMY } });
+    const parts = (type: string) => manifest.chunks.filter(c => c.type === type && (c.name.startsWith('engine.db') || c.name.startsWith('sweeps')));
+    expect(parts('sqlite_db_plain').length).toBeGreaterThan(1);
+    expect(parts('sweeps').length).toBeGreaterThan(1);
+    expect(parts('sqlite_db_plain').filter(c => c.columns !== undefined).map(c => c.name)).toEqual(['engine.db:part0']);
+    expect(parts('sweeps').filter(c => c.ledgerForm !== undefined).map(c => c.name)).toEqual(['sweeps:part0']);
+    expect(report.databasesRestored).toContain('engine.db');
+    const rows = written.get('engine.db:memories.text')!;
+    expect(strictDecrypt(readColumn(dst, 'engine.db', 'memories', 'text')[0] as string, keyOf('engine.db', DST))).toEqual({ ok: true, kind: 'decrypted', text: rows[0]!.text });
+    const back = JSON.parse(readFileSync(join(dst, 'sweeps', FILE), 'utf-8')) as { entry: { detail: { dupRow: { email: string } } } };
+    expect(strictDecrypt(back.entry.detail.dupRow.email, keyOf('engine.db', DST))).toEqual({ ok: true, kind: 'decrypted', text: 'd@example.org' });
+  });
+
+  it('decrypts the set in memory and the destination reads every value back under its own key', () => {
+    const src = tmp(); const dst = tmp();
+    const written = seedStores(src, SRC);
+    writeLedger(src, keyOf('engine.db', SRC));
+    const { manifest, source, report } = migrate(src, dst, { plain: { ceiling: ROOMY } });
+
+    expect(typeOf(manifest, 'engine.db')).toBe('sqlite_db_plain');
+    expect(typeOf(manifest, 'history.db')).toBe('sqlite_db_plain');
+    expect(manifest.chunks.find(c => c.type === 'sweeps')?.ledgerForm).toBe('plain');
+    for (const store of ['engine.db', 'history.db'] as const) {
+      for (const [table, cols] of PLAIN_COLUMNS[store]) {
+        for (const column of cols) {
+          const rows = written.get(`${store}:${table}.${column}`);
+          if (!rows) continue;
+          const stored = readColumn(dst, store, table, column);
+          rows.forEach((r, i) => {
+            if (r.kind === 'plain' || r.kind === 'notnull') expect(strictDecrypt(stored[i] as string, keyOf(store, DST)), `${store} ${table}.${column}`).toEqual({ ok: true, kind: 'decrypted', text: r.text });
+          });
+        }
+      }
+    }
+    const ledger = JSON.parse(readFileSync(join(dst, 'sweeps', FILE), 'utf-8')) as { entry: { detail: { dupRow: { email: string } } } };
+    expect(strictDecrypt(ledger.entry.detail.dupRow.email, keyOf('engine.db', DST))).toEqual({ ok: true, kind: 'decrypted', text: 'd@example.org' });
+    // The source's counts: what decrypted and what did not, per store.
+    const count = (store: PlainStore, kinds: Array<Row['kind']>): number => [...PLAIN_COLUMNS[store]]
+      .flatMap(([t, cs]) => [...cs].flatMap(c => written.get(`${store}:${t}.${c}`) ?? [])).filter(r => kinds.includes(r.kind)).length;
+    expect(source?.stores).toEqual([
+      { store: 'engine.db', path: 'plain', decrypted: count('engine.db', ['plain', 'notnull']), failed: count('engine.db', ['other']) },
+      { store: 'history.db', path: 'plain', decrypted: count('history.db', ['plain', 'notnull']), failed: count('history.db', ['other']) },
+    ]);
+    expect(source?.ledgers).toEqual({ path: 'plain', decrypted: 3, failed: 0 });
+    expect(report.encryptedColumns?.find(r => r.what === 'engine.db')).toMatchObject({ path: 'plain', failedOnSource: count('engine.db', ['other']) });
+  });
+
+  it('sends every store raw, as today, when the destination does not take plaintext', () => {
+    const src = tmp(); const dst = tmp();
+    seedStores(src, SRC);
+    writeLedger(src, keyOf('engine.db', SRC));
+    const { manifest, source } = migrate(src, dst, undefined);
+    expect(typeOf(manifest, 'engine.db')).toBe('sqlite_db');
+    expect(typeOf(manifest, 'history.db')).toBe('sqlite_db');
+    expect(manifest.chunks.find(c => c.type === 'sweeps')?.ledgerForm).toBeUndefined();
+    expect(source).toBeUndefined();
+  });
+
+  it('sends a store raw when the destination\'s numbers say it does not fit, and the destination takes that choice', () => {
+    const src = tmp(); const dst = tmp();
+    seedStores(src, SRC);
+    const tight: MigrationCeiling = { import_limit_mb: 0.5, baseline_mb: 0, k: 1, rest_factor: 0 };
+    const { manifest, source } = migrate(src, dst, { plain: { ceiling: tight } }, tight);
+    expect(typeOf(manifest, 'engine.db')).toBe('sqlite_db');
+    expect(source?.stores.find(s => s.store === 'engine.db')).toMatchObject({ path: 'raw', reason: 'memory' });
+  });
+
+  it('sends engine.db raw together with its ledgers when the ledgers cannot take the plaintext form', () => {
+    const src = tmp(); const dst = tmp();
+    seedStores(src, SRC);
+    // A cell in plain in the raw ledger: re-encrypted on the destination it would no longer match the raw size.
+    writeLedger(src, keyOf('engine.db', SRC), { plainEmail: true });
+    const { manifest, source } = migrate(src, dst, { plain: { ceiling: ROOMY } });
+    expect(typeOf(manifest, 'engine.db')).toBe('sqlite_db');
+    expect(typeOf(manifest, 'history.db')).toBe('sqlite_db_plain');
+    expect(manifest.chunks.find(c => c.type === 'sweeps')?.ledgerForm).toBeUndefined();
+    expect(source?.stores.find(s => s.store === 'engine.db')).toMatchObject({ path: 'raw', reason: 'ledgers' });
+    expect(source?.ledgers?.path).toBe('raw');
+  });
+
+  it('exports after an export that was killed left its snapshot file behind', () => {
+    const src = tmp(); const dst = tmp();
+    seedStores(src, SRC);
+    writeFileSync(join(src, 'engine.db.migration-tmp'), 'left behind');
+    const { manifest } = migrate(src, dst, { plain: { ceiling: ROOMY } });
+    expect(typeOf(manifest, 'engine.db')).toBe('sqlite_db_plain');
+    expect(existsSync(join(src, 'engine.db.migration-tmp'))).toBe(false);
+  });
+
+  it('writes no plaintext of the set to a file on the source', () => {
+    const src = tmp(); const dst = tmp();
+    seedStores(src, SRC);
+    const started = Date.now() - 1000;
+    migrate(src, dst, { plain: { ceiling: ROOMY } });
+    const canary = Buffer.from('secret one');
+    const hits: string[] = [];
+    const scan = (dir: string, depth: number): void => {
+      let names: string[];
+      try { names = readdirSync(dir); } catch { return; }
+      for (const n of names) {
+        const p = join(dir, n);
+        let st;
+        try { st = statSync(p); } catch { continue; }
+        if (st.isDirectory()) { if (depth > 0 && p !== dst) scan(p, depth - 1); continue; }
+        if (!st.isFile() || st.mtimeMs < started || st.size > 64 * MIB) continue;
+        try { if (readFileSync(p).includes(canary)) hits.push(p); } catch { /* unreadable */ }
+      }
+    };
+    scan(src, 3);
+    scan(tmpdir(), 1);
+    expect(hits).toEqual([]);
+    // Control: the destination's stores hold the same values, as ciphertext; the source's snapshot form would show them.
+    const control = rewriteStoreForPlain(readFileSync(join(src, 'engine.db')), 'engine.db', { key: keyOf('engine.db', SRC) });
+    expect(control.payload.includes(canary)).toBe(true);
+  });
+});
+
+describe('the source\'s rewrite of a store image', () => {
+  it('names a table or column of the set that the image lacks as absent, and rewrites the rest', () => {
+    const src = tmp();
+    seedStores(src, SRC);
+    const d = new Database(join(src, 'engine.db'));
+    d.exec('DROP TABLE entry_sources');
+    d.close();
+    const r = rewriteStoreForPlain(readFileSync(join(src, 'engine.db')), 'engine.db', { key: keyOf('engine.db', SRC) });
+    expect(r.columns).toContainEqual({ table: 'entry_sources', column: 'text', absent: true });
+    expect(r.columns).toContainEqual({ table: 'memories', column: 'text' });
+    expect(r.columns.filter(c => c.absent)).toHaveLength(1);
+  });
+
+  /** engine.db of a seeded source with `sql` run on it; its image. */
+  function changed(sql: string): Buffer {
+    const src = tmp();
+    seedStores(src, SRC);
+    const d = new Database(join(src, 'engine.db'));
+    d.exec(sql);
+    d.close();
+    return readFileSync(join(src, 'engine.db'));
+  }
+  const firstMemory = '(SELECT min(rowid) FROM memories)';
+
+  it('has no plaintext form for a store with a BLOB in a column of the set, or a value at a rowid at or below 0', () => {
+    const key = keyOf('engine.db', SRC);
+    expect(() => rewriteStoreForPlain(changed(`UPDATE memories SET text = x'01' WHERE rowid = ${firstMemory}`), 'engine.db', { key })).toThrow(NoPlainForm);
+    expect(() => rewriteStoreForPlain(changed(`UPDATE memories SET rowid = -5 WHERE rowid = ${firstMemory}`), 'engine.db', { key })).toThrow(NoPlainForm);
+    expect(() => rewriteStoreForPlain(changed(`UPDATE memories SET rowid = 0 WHERE rowid = ${firstMemory}`), 'engine.db', { key })).toThrow(NoPlainForm);
+    // Control: a row at or below 0 without a value is no reason, and the rest is rewritten.
+    expect(rewriteStoreForPlain(changed(`UPDATE memories SET text = '', rowid = -5 WHERE rowid = ${firstMemory}`), 'engine.db', { key }).counts.decrypted).toBeGreaterThan(0);
+  });
+
+  it('has no plaintext form for a table whose row key cannot name one row: a NULL key, a key or rowid beyond 2^53', () => {
+    const key = keyOf('engine.db', SRC);
+    expect(() => rewriteStoreForPlain(changed(`UPDATE memories SET id = NULL WHERE rowid = ${firstMemory}`), 'engine.db', { key })).toThrow(NoPlainForm);
+    expect(() => rewriteStoreForPlain(changed(`UPDATE memories SET rowid = 9007199254740993 WHERE rowid = ${firstMemory}`), 'engine.db', { key })).toThrow(NoPlainForm);
+    expect(() => rewriteStoreForPlain(changed(`UPDATE memories SET rowid = -9007199254740993 WHERE rowid = ${firstMemory}`), 'engine.db', { key })).toThrow(NoPlainForm);
+    // Control: at 2^53 - 1 the key still reads back as itself.
+    expect(rewriteStoreForPlain(changed(`UPDATE memories SET rowid = 9007199254740991 WHERE rowid = ${firstMemory}`), 'engine.db', { key }).counts.decrypted).toBeGreaterThan(0);
+    // A composite key's integer part beyond 2^53 (history.db wire_snapshots.turn_index).
+    const src = tmp();
+    seedStores(src, SRC);
+    const h = new Database(join(src, 'history.db'));
+    const rows = (h.prepare('SELECT count(*) AS n FROM wire_snapshots').get() as { n: number }).n;
+    expect(rows).toBeGreaterThan(0);
+    h.exec('UPDATE wire_snapshots SET turn_index = 9007199254740993 WHERE rowid = (SELECT min(rowid) FROM wire_snapshots)');
+    h.close();
+    expect(() => rewriteStoreForPlain(readFileSync(join(src, 'history.db')), 'history.db', { key: keyOf('history.db', SRC) })).toThrow(NoPlainForm);
+  });
+
+  it('has no plaintext form when its header would be over the size the destination reads', () => {
+    const key = keyOf('engine.db', SRC);
+    const image = changed('SELECT 1');
+    const fits = rewriteStoreForPlain(image, 'engine.db', { key });
+    const headerBytes = fits.payload.readUInt32BE(0);
+    expect(rewriteStoreForPlain(image, 'engine.db', { key, maxHeaderBytes: headerBytes }).payload.equals(fits.payload)).toBe(true);
+    expect(() => rewriteStoreForPlain(image, 'engine.db', { key, maxHeaderBytes: headerBytes - 1 })).toThrow(NoPlainForm);
+  });
+});
+
+describe('the source chooses each store\'s path the way the destination judges it', () => {
+  const at = (mb: number): number => mb * MIB;
+  const base = (over: Partial<Parameters<typeof choosePlainPaths>[0]> = {}): Parameters<typeof choosePlainPaths>[0] => ({
+    ceiling: { import_limit_mb: 100, baseline_mb: 0, k: 2, rest_factor: 0 },
+    stores: [{ store: 'engine.db', plainBytes: at(10), rawBytes: at(10) }, { store: 'history.db', plainBytes: at(10), rawBytes: at(10) }],
+    otherBytes: 0, otherDatabaseBytes: 0, sweeps: null, sweepsCapBytes: 64 * MIB, ...over,
+  });
+
+  it('takes the plaintext path just under the bound and the raw path just over', () => {
+    // bundle 20 + (k-1) * 10 = 30 MiB.
+    expect(choosePlainPaths(base({ ceiling: { import_limit_mb: 30, baseline_mb: 0, k: 2, rest_factor: 0 } })).get('engine.db')).toEqual({ path: 'plain' });
+    expect(choosePlainPaths(base({ ceiling: { import_limit_mb: 29.99, baseline_mb: 0, k: 2, rest_factor: 0 } })).get('engine.db')).toEqual({ path: 'raw', reason: 'memory' });
+  });
+
+  it('moves one store to the raw path and keeps the other on the plaintext path when that fits', () => {
+    const paths = choosePlainPaths(base({
+      ceiling: { import_limit_mb: 60, baseline_mb: 0, k: 2, rest_factor: 0 },
+      stores: [{ store: 'engine.db', plainBytes: at(40), rawBytes: at(5) }, { store: 'history.db', plainBytes: at(5), rawBytes: at(5) }],
+    }));
+    expect(paths.get('engine.db')).toEqual({ path: 'raw', reason: 'memory' });
+    expect(paths.get('history.db')).toEqual({ path: 'plain' });
+  });
+
+  it('keeps engine.db raw when its ledgers have no plaintext form or exceed the sweeps cap', () => {
+    expect(choosePlainPaths(base({ sweeps: { rawBytes: 10, plainBytes: null } })).get('engine.db')).toEqual({ path: 'raw', reason: 'ledgers' });
+    expect(choosePlainPaths(base({ sweeps: { rawBytes: 10, plainBytes: 64 * MIB + 1 } })).get('engine.db')).toEqual({ path: 'raw', reason: 'ledgers' });
+    expect(choosePlainPaths(base({ sweeps: { rawBytes: 10, plainBytes: 64 * MIB } })).get('engine.db')).toEqual({ path: 'plain' });
+  });
+
+  it('counts the ledgers at the larger of their two forms in the bundle, as the destination does', () => {
+    // Raw ledgers 10 MiB, their plaintext form 1 MiB. Bundle with the raw size: 10 + 10 + 10 = 30, rest 10;
+    // peak = 30 + 10 + (k - 1) * 10 = 50 at k 2. Counted at the travelling form it would read 41.
+    const sweeps = { rawBytes: at(10), plainBytes: at(1) };
+    const ceiling = (limit: number) => ({ import_limit_mb: limit, baseline_mb: 0, k: 2, rest_factor: 1 });
+    expect(choosePlainPaths(base({ ceiling: ceiling(50), sweeps })).get('engine.db')).toEqual({ path: 'plain' });
+    expect(choosePlainPaths(base({ ceiling: ceiling(49.9), sweeps })).get('engine.db')).toEqual({ path: 'raw', reason: 'memory' });
+  });
+
+  it('a store without a plaintext form takes the raw path', () => {
+    expect(choosePlainPaths(base({ stores: [{ store: 'history.db', plainBytes: null, rawBytes: 1 }] })).get('history.db')).toEqual({ path: 'raw', reason: 'no-plain-form' });
+  });
+});
+
+describe('the source judges a store by its raw size before building its plaintext form', () => {
+  const ceiling = (over: Partial<MigrationCeiling> = {}): MigrationCeiling => ({ import_limit_mb: 100, baseline_mb: 0, k: 2, rest_factor: 1, ...over });
+  const input = (over: Partial<Parameters<typeof plainFormRefusal>[0]> = {}): Parameters<typeof plainFormRefusal>[0] => ({
+    ceiling: ceiling(), rawBytes: 10 * MIB, othersBytes: 20 * MIB, restBytes: 20 * MIB, maxTotalBytes: 500 * MIB,
+    source: { limitMb: 1e9, rssMb: 200, rssNowMb: 200, baseMb: 80, k: 5, formedBytes: 0 }, ...over,
+  });
+
+  it('allows a store at the destination\'s bound and refuses one byte over it', () => {
+    // headroom = 100 - 20 - 1 * 20 = 60 MiB; at k 2 the largest store is 30 MiB.
+    expect(plainFormRefusal(input({ rawBytes: 30 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ rawBytes: 30 * MIB + 1 }))).toBe('memory');
+  });
+
+  it('allows a store at the source\'s own bound and refuses one byte over it, whatever the destination announces', () => {
+    const vast = ceiling({ import_limit_mb: 1e12 });
+    expect(plainFormRefusal(input({ ceiling: vast, rawBytes: 480 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ ceiling: vast, rawBytes: 480 * MIB + 1 }))).toBe('bounds');
+  });
+
+  it('allows a store whose rewrite fits this instance\'s own memory and refuses one byte more, whatever the destination announces', () => {
+    // 200 MiB resident + 80 MiB fixed + 5 * 100 MiB = 780 MiB.
+    const vast = ceiling({ import_limit_mb: 1e12 });
+    const own = { limitMb: 780, rssMb: 200, rssNowMb: 200, baseMb: 80, k: 5, formedBytes: 0 };
+    expect(plainFormRefusal(input({ ceiling: vast, source: own, rawBytes: 100 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ ceiling: vast, source: own, rawBytes: 100 * MIB + 1 }))).toBe('source-memory');
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, rssMb: 200.001 }, rawBytes: 100 * MIB }))).toBe('source-memory');
+    // The fixed part counts on its own: a thousandth of a MiB more of it is over.
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, baseMb: 80.001 }, rawBytes: 100 * MIB }))).toBe('source-memory');
+    // A store judged after others counts them too: 50 MiB let through leave room for 50 more.
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, formedBytes: 50 * MIB }, rawBytes: 50 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, formedBytes: 50 * MIB }, rawBytes: 50 * MIB + 1 }))).toBe('source-memory');
+    // Memory grown since the first rewrite counts too, for this store alone: the joint line would
+    // let 50 MiB through, the memory now does not.
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, formedBytes: 50 * MIB, rssNowMb: 450 }, rawBytes: 50 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, formedBytes: 50 * MIB, rssNowMb: 450.001 }, rawBytes: 50 * MIB }))).toBe('source-memory');
+  });
+
+  it('counts the source\'s fixed part even for a tiny store', () => {
+    // A store of 1 byte next to 700 MiB resident fits under 780 only without the fixed part.
+    const vast = ceiling({ import_limit_mb: 1e12 });
+    expect(plainFormRefusal(input({ ceiling: vast, source: { limitMb: 780, rssMb: 700, rssNowMb: 700, baseMb: 80, k: 5, formedBytes: 0 }, rawBytes: 1 }))).toBe('source-memory');
+    expect(plainFormRefusal(input({ ceiling: vast, source: { limitMb: 781, rssMb: 700, rssNowMb: 700, baseMb: 80, k: 5, formedBytes: 0 }, rawBytes: 1 }))).toBeNull();
+  });
+
+  it('refuses when it cannot judge its own memory', () => {
+    for (const source of [{ limitMb: Number.NaN, rssMb: 1, baseMb: 80, k: 5 }, { limitMb: 1e9, rssMb: -1, baseMb: 80, k: 5 }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 0.5 }, { limitMb: 1e9, rssMb: 1, baseMb: Number.NaN, k: 5 }, { limitMb: 1e9, rssMb: 1, baseMb: -1, k: 5 }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 5, formedBytes: Number.NaN }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 5, formedBytes: -1 }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 5, rssNowMb: Number.NaN }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 5, rssNowMb: -1 }].map((x) => ({ formedBytes: 0, rssNowMb: 1, ...x }))) {
+      expect(plainFormRefusal(input({ rawBytes: 1, source }))).toBe('source-memory');
+    }
+  });
+
+  it('refuses on numbers it cannot judge', () => {
+    expect(plainFormRefusal(input({ rawBytes: 1, ceiling: ceiling({ k: 0.5 }) }))).toBe('memory');
+    expect(plainFormRefusal(input({ rawBytes: 1, ceiling: ceiling({ import_limit_mb: Number.NaN }) }))).toBe('memory');
+  });
+
+  it('is never stricter than the later choice: what it refuses, choosePlainPaths would send raw', () => {
+    // A store whose plaintext form is its raw size (the smallest it can be) and that the check
+    // refuses is judged raw by the choice too; one the check allows at the bound is judged plain.
+    const c = ceiling();
+    const choice = (rawBytes: number) => choosePlainPaths({
+      ceiling: c, stores: [{ store: 'engine.db', plainBytes: rawBytes, rawBytes }],
+      otherBytes: 20 * MIB, otherDatabaseBytes: 0, sweeps: null, sweepsCapBytes: 64 * MIB,
+    }).get('engine.db');
+    expect(choice(30 * MIB)).toEqual({ path: 'plain' });
+    expect(choice(30 * MIB + 1)).toEqual({ path: 'raw', reason: 'memory' });
+  });
+
+  it('a store\'s plaintext form is not smaller than its raw snapshot, which the check relies on', () => {
+    const src = tmp();
+    seedStores(src, SRC);
+    for (const store of ['engine.db', 'history.db'] as const) {
+      const image = readFileSync(join(src, store));
+      const r = rewriteStoreForPlain(image, store, { key: keyOf(store, SRC) });
+      expect(r.counts.decrypted).toBeGreaterThan(0);
+      expect(r.payload.length).toBeGreaterThan(image.length);
+    }
+  });
+});
+
+describe('the source reads the destination\'s offer as untrusted input', () => {
+  const health = { migration: { import_limit_mb: 1536, baseline_mb: 191, k: 7.1, rest_factor: 1.944 } };
+  it('takes the plaintext path only on acceptsPlainStores === true and four finite numbers above 0', () => {
+    expect(plainOffer({ acceptsPlainStores: true }, health)).toEqual(health.migration);
+    for (const flag of [undefined, false, 'true', 1, null]) expect(plainOffer({ acceptsPlainStores: flag }, health), String(flag)).toBeNull();
+    expect(plainOffer(null, health)).toBeNull();
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '7', null, undefined]) {
+      expect(plainOffer({ acceptsPlainStores: true }, { migration: { ...health.migration, k: bad } }), String(bad)).toBeNull();
+    }
+    expect(plainOffer({ acceptsPlainStores: true }, {})).toBeNull();
+    expect(plainOffer({ acceptsPlainStores: true }, null)).toBeNull();
+  });
+
+  it('reads the health body within its size cap and its timeout, and nothing else', async () => {
+    const ok = (body: string, status = 200) => async (): Promise<Response> => new Response(body, { status });
+    expect(await readDestinationHealth(ok(JSON.stringify(health)), 'https://t')).toEqual(health);
+    expect(await readDestinationHealth(ok('{not json'), 'https://t')).toBeNull();
+    expect(await readDestinationHealth(ok(JSON.stringify(health), 503), 'https://t')).toBeNull();
+    expect(await readDestinationHealth(ok(`{"pad":"${'x'.repeat(MAX_HEALTH_BYTES)}"}`), 'https://t')).toBeNull();
+    // Just under the cap still reads.
+    const under = `{"pad":"${'x'.repeat(MAX_HEALTH_BYTES - 20)}"}`;
+    expect(await readDestinationHealth(ok(under), 'https://t')).toEqual(JSON.parse(under));
+    expect(await readDestinationHealth(async () => { throw new Error('connect'); }, 'https://t')).toBeNull();
+    // A destination that accepts the connection and never answers: the timeout ends the wait.
+    const hang = (_u: string, init: RequestInit): Promise<Response> => new Promise((_, reject) => {
+      init.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+    });
+    expect(await readDestinationHealth(hang, 'https://t', 50)).toBeNull();
+  });
+
+  it('the destination answers its handshake with whether it takes plaintext stores', () => {
+    const d = tmp();
+    expect(new MigrationImporter({ lynoxDir: d, vaultKey: DST }).startHandshake(TOKEN).acceptsPlainStores).toBe(false);
+    expect(new MigrationImporter({ lynoxDir: tmp(), vaultKey: DST, acceptPlainStores: true }).startHandshake(TOKEN).acceptsPlainStores).toBe(true);
   });
 });
