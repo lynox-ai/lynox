@@ -68,8 +68,8 @@ export function interactiveArmsFor(_c: InjectionCase, mode: 'ui' | 'worker'): bo
  *  read after outside content): the attacker is never owner-known, and a blocked question in a run
  *  nobody watches is refused unasked. A call it does not see — an exfil-shaped GET before any
  *  outside content — is refused headless but asked unblocked, and approved, in a worker run. It
- *  also holds only while LYNOX_FEATURE_APPROVAL_QUEUE is off: with it on, a worker files the call
- *  for approval instead. */
+ *  also holds only while LYNOX_FEATURE_APPROVAL_QUEUE is off: with the flag on, a worker run that
+ *  has an approval filer files a mail instead of refusing it; this harness sets none. */
 export function gateLabel(mode: 'ui' | 'worker', interactive: boolean): 'owner-ok' | 'confirm' | 'headless' {
   return mode === 'worker' ? 'owner-ok' : interactive ? 'confirm' : 'headless';
 }

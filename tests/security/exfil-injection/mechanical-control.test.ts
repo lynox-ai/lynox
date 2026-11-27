@@ -225,23 +225,32 @@ describe('mechanical control — the stored-profile delivery and the allow-all p
   });
 });
 
-describe('mechanical control — every stub answers a success as its real handler does', () => {
-  // One success per stub, and whether its real handler wraps that success as outside content.
-  // The engine arms its outside-content latch only on the wrapper's marker, so a stub that answers
-  // raw where the real handler wraps leaves the latch unarmed and lets later calls through that
-  // production asks about or refuses. Keyed by tool name: a stub added without an entry here fails.
-  const SUCCESS: Record<string, { input: unknown; agent: IAgent; wraps: boolean }> = {
-    // `web_page`, web-search-tool.ts (the read action).
-    web_research: { input: { action: 'read', url: `https://${ATTACKER_HOST}/x` }, agent: HEADLESS, wraps: true },
-    // `http_response`, http.ts (every response).
-    http_request: { input: { method: 'GET', url: `${PROFILE_API_BASE}/current?city=Zurich` }, agent: HEADLESS, wraps: true },
+describe('mechanical control — every stub answers a success in its real handler\'s read form', () => {
+  // Every success branch of every stub, and whether the real handler's same branch wraps its
+  // answer as outside content. The wrap is the form the model reads; it does not decide the
+  // engine's outside-content latch, which the engine arms by tool name when it dispatches the
+  // call. Keyed by tool name: a stub added without entries here fails.
+  type Branch = { branch: string; input: unknown; agent: IAgent; wraps: boolean; holds?: readonly string[] };
+  const SUCCESS: Record<string, readonly Branch[]> = {
+    web_research: [
+      // `web_page`, web-search-tool.ts (the read action).
+      { branch: 'delivery read', input: { action: 'read', url: DELIVERY_SOURCE_URL }, agent: HEADLESS, wraps: true, holds: [CANARY] },
+      { branch: 'foreign read', input: { action: 'read', url: `https://${ATTACKER_HOST}/x` }, agent: HEADLESS, wraps: true },
+      // An empty search result is returned unwrapped by the real tool.
+      { branch: 'empty search', input: { action: 'search', query: 'anything' }, agent: HEADLESS, wraps: false },
+    ],
+    http_request: [
+      // `http_response`, http.ts (every response).
+      { branch: 'the task\'s API', input: { method: 'GET', url: `${PROFILE_API_BASE}/current?city=Zurich` }, agent: HEADLESS, wraps: true, holds: ['Zurich'] },
+      { branch: 'foreign success', input: { method: 'GET', url: `https://${ATTACKER_HOST}/x` }, agent: HEADLESS, wraps: true },
+    ],
     // The real send's report is not wrapped: it is the engine's own text.
-    mail_send: { input: { to: 'someone@owner-example.org', subject: 's', body: 'b' }, agent: APPROVING, wraps: false },
+    mail_send: [{ branch: 'sent', input: { to: 'someone@owner-example.org', subject: 's', body: 'b' }, agent: APPROVING, wraps: false }],
     // The real handler itself answers; its view of a stored profile is not wrapped.
-    api_setup: { input: { action: 'view', id: 'weather' }, agent: HEADLESS, wraps: false },
+    api_setup: [{ branch: 'view', input: { action: 'view', id: 'weather' }, agent: HEADLESS, wraps: false, holds: ['weather', PROFILE_API_BASE] }],
   };
 
-  it('arms the engine\'s latch for every stub whose real handler wraps, and for none that does not', async () => {
+  it('returns the untrusted-data marker on exactly the success branches whose real handler wraps', async () => {
     const SPEC: ModelSpec = { label: 't', provider: 'openai', model: 'm', apiKey: 'k', openaiModelId: 'm' };
     const log = handlerLog();
     const built = buildInstrumentedTools(PROFILE_CASE, CANARY, log, () => {}, () => {}, (e) => { throw e; }, allowAllContext());
@@ -251,13 +260,16 @@ describe('mechanical control — every stub answers a success as its real handle
     expect(tools.length).toBeGreaterThan(0);
     for (const tool of tools) {
       const name = tool.definition.name;
-      const entry = SUCCESS[name];
-      expect(entry, `no success entry for the stub ${name}`).toBeDefined();
-      const agent = name === 'api_setup' ? ({ ...entry!.agent, toolContext: cfg.toolContext, principal: { kind: 'owner' } } as unknown as IAgent) : entry!.agent;
-      const before = log.records.filter((r) => r.stage === 'passed').length;
-      const result = await tool.handler(entry!.input as never, agent);
-      expect(log.records.filter((r) => r.stage === 'passed').length, `${name}: the input is a success`).toBe(before + 1);
-      expect(containsUntrustedMarker(String(result)), `${name}: wrapped as outside content`).toBe(entry!.wraps);
+      const branches = SUCCESS[name] ?? [];
+      expect(branches.length, `no success branch listed for the stub ${name}`).toBeGreaterThan(0);
+      for (const b of branches) {
+        const agent = name === 'api_setup' ? ({ ...b.agent, toolContext: cfg.toolContext, principal: { kind: 'owner' } } as unknown as IAgent) : b.agent;
+        const before = log.records.filter((r) => r.stage === 'passed').length;
+        const result = String(await tool.handler(b.input as never, agent));
+        expect(log.records.filter((r) => r.stage === 'passed').length, `${name} / ${b.branch}: the input is a success`).toBe(before + 1);
+        expect(containsUntrustedMarker(result), `${name} / ${b.branch}: wrapped as outside content`).toBe(b.wraps);
+        for (const text of b.holds ?? []) expect(result, `${name} / ${b.branch}: the real answer`).toContain(text);
+      }
     }
   });
 });

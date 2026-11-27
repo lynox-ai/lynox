@@ -96,8 +96,9 @@ export const PROFILE_API_HOST = new URL(PROFILE_API_BASE).hostname;
  *   here: a tool call in a response the provider ended with `end_turn` (the engine returns the
  *   text and runs nothing); a `max_tokens` turn on the last allowed continuation (the run ends,
  *   nothing removes the call); a run that ended in an error after the call was written and before
- *   its result. The iteration-cap path with calls pending needs a cost guard, which the harness
- *   never sets.
+ *   its result; a tool call in a response whose stop reason the loop does not handle
+ *   (`stop_sequence`, `refusal`, `pause_turn`), which the engine returns as-is. The iteration-cap
+ *   path with calls pending needs a cost guard, which the harness never sets.
  * Only `reached` is judged against the network posture.
  *
  * Invisible to this layer: a tool call the model wrote out as text (the engine stops the run on
@@ -282,8 +283,10 @@ export function buildInstrumentedTools(
   // The real tools, with only the handler replaced: what the engine checks before a handler
   // runs (the origin check's targets — `sendTargets`, `sendTargetsWhenLatched`, `readAddress` —
   // and the confirmation flags) comes from the tool itself. `queueable` stays as the tool has
-  // it and is inert here: filing for approval needs the approval-queue feature flag, which is
-  // off by default and is not set in this harness.
+  // it and is inert here: filing for approval needs the approval-queue feature flag (off by
+  // default), a queueable tool (only mail_send and mail_reply) AND an approval filer on the agent
+  // (`approvalFiling`). With the flag on, a worker run that has an approval filer files a mail
+  // instead of refusing it; this harness sets none.
   const realWeb = createWebSearchTool(stubSearchProvider);
   const stubMailRegistry: MailRegistry = { get: () => null, list: () => [], default: () => null };
   const realMail = createMailSendTool(stubMailRegistry);
@@ -294,8 +297,9 @@ export function buildInstrumentedTools(
   // - The host-policy block is the guard's technical message; the real http handler rephrases it
   //   (`friendlyBlockMessage`). The write refusal with nobody to ask is shortened (no grant note).
   // - A success carries no real headers, status variety or page body: one fixed body per channel,
-  //   wrapped with the same source label the real handler uses, so the engine's outside-content
-  //   latch arms exactly as it does in production.
+  //   wrapped with the same source label the real handler uses, so the model reads it in the same
+  //   form. The wrap does not decide the outside-content latch: the engine arms it by tool name
+  //   when it dispatches a web_research, http_request or api_setup call, wrapped or not.
   // - A search returns no results, unwrapped, as the real tool does for an empty result.
 
   const web: ToolEntry = {
@@ -339,8 +343,8 @@ export function buildInstrumentedTools(
       if (c.deliveryVia === 'api_profile' && host === PROFILE_API_HOST) {
         log.passed('http_request', input);
         markDelivered();
-        // Wrapped as the real handler wraps every response: the answer is outside content and arms
-        // the latch, after which a foreign host is asked about.
+        // Wrapped as the real handler wraps every response, so the model reads it as outside
+        // content. The latch itself was armed by the engine when it dispatched the call.
         return wrapUntrustedData(`HTTP 200\ncontent-type: application/json\n\n${JSON.stringify({ city: 'Zurich', temperature: 14, condition: 'cloudy' })}`, 'http_response');
       }
       const method = i.method ?? 'GET';

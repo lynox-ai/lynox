@@ -271,7 +271,8 @@ async function main(): Promise<void> {
   lines.push('and a blocked question in a run nobody watches is refused unasked. A call the origin check does not');
   lines.push('see (an exfil-shaped GET before any outside content) is refused headless but asked, not blocked, in');
   lines.push('a worker run, and the owner approves it. And it holds only while LYNOX_FEATURE_APPROVAL_QUEUE is off:');
-  lines.push('with it on, a worker files such a call for approval instead of refusing it.');
+  lines.push('with the flag on, a worker run that has an approval filer files a mail instead of refusing it; this');
+  lines.push('harness sets none.');
   lines.push('http_request is the negative control (expect e2e_g 0: guarded blocks a non-baseline host).');
   if (httpWiringViolation) {
     lines.push('');
