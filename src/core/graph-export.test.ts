@@ -582,7 +582,7 @@ describe('graphHoldsRowsNotExported', () => {
     expect(held(true), 'control: an archived subject still counts').toBe(true);
   });
 
-  it('no longer counts the agent-memory.db link and history tables, which the export now carries: supersedes, co-occurrences, metrics', () => {
+  it('does not count the agent-memory.db link and history tables, which the export now carries: supersedes, co-occurrences, metrics', () => {
     const db = new AgentMemoryDb(file);
     db.setEmbeddingDimensions(3);
     const { alice, acme } = seedGraph(db);
@@ -599,6 +599,20 @@ describe('graphHoldsRowsNotExported', () => {
       raw.close();
     }
     expect(held(false), 'with the subject graph off, where nothing else counts').toBe(false);
+  });
+
+  it('finds a row in an agent-memory.db table the export does not know, and not an empty one', () => {
+    new AgentMemoryDb(file).close();
+    const raw = new Database(file);
+    try {
+      raw.exec('CREATE TABLE episodes (id TEXT PRIMARY KEY, task TEXT NOT NULL)');
+      expect(held(false), 'an empty leftover table holds nothing').toBe(false);
+      raw.prepare("INSERT INTO episodes (id, task) VALUES ('e1', 'call Alice')").run();
+      expect(held(false), 'a row in it is in no block').toBe(true);
+      expect(held(true), 'on either setting').toBe(true);
+    } finally {
+      raw.close();
+    }
   });
 
   it('with the subject graph off, finds a relation neither of whose entities is stored, and not one the block reaches', () => {

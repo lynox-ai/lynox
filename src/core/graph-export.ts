@@ -343,11 +343,15 @@ export function readMemoryTextsForExport(opts: {
   return { 'agent-memory.db': legacyHalf, 'engine.db': engineHalf, mayBeIncomplete: incomplete };
 }
 
+/** The agent-memory.db tables the export carries, in the graph block or in `knowledge_graph.memories`. */
+const AGENT_MEMORY_EXPORTED_TABLES = ['entities', 'relations', 'mentions', 'memories', 'cooccurrences', 'supersedes', 'metrics'] as const;
+
 /**
  * Whether the stores hold graph rows that no block of the export carries, counted, never read:
  *  - engine.db subjects the graph block does not list: with the subject graph on, archived ones
  *    and those of a kind it maps to no entity; with it off, every subject, since the block is
  *    then read from agent-memory.db;
+ *  - any row in an agent-memory.db table this build does not export (one an older schema kept);
  *  - with the subject graph on, agent-memory.db entities and relations, since the block is then
  *    read from engine.db; with it off, relations neither of whose entities is stored, since the
  *    block collects relations through their entities.
@@ -374,6 +378,16 @@ export function graphHoldsRowsNotExported(opts: {
   try {
     legacy = new Database(opts.agentMemoryFile, { readonly: true, fileMustExist: true });
     if (agentMemoryVersionOn(legacy) > AGENT_MEMORY_SCHEMA_VERSION) return true;
+    // A file this build can read may still hold a table it no longer knows (an older schema keeps
+    // what a later one dropped, as v1's `episodes`): any row in one is in no block.
+    const known = [...AGENT_MEMORY_EXPORTED_TABLES, 'schema_version'];
+    const other = legacy.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN (${known.map(() => '?').join(', ')})`,
+    ).all(...known) as Array<{ name: string }>;
+    for (const t of other) {
+      const row = legacy.prepare(`SELECT EXISTS (SELECT 1 FROM "${t.name.replaceAll('"', '""')}") AS e`).get() as { e: number };
+      if (row.e === 1) return true;
+    }
     const graphRows = opts.subjectGraph
       ? '(SELECT COUNT(*) FROM entities) + (SELECT COUNT(*) FROM relations)'
       : '(SELECT COUNT(*) FROM relations r WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE e.id IN (r.from_entity_id, r.to_entity_id)))';
