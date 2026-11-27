@@ -1001,7 +1001,8 @@ export class KnowledgeStore {
 
   /**
    * The entries still stored that no other list here returns: rejected by the owner, or
-   * superseded by a newer one (`supersededBy` names it). Each carries its `status`. MASKED, as
+   * retired (`superseded`; `supersededBy` names a successor where one was recorded, and is null
+   * where the entry was retired without one). Each carries its `status`. MASKED, as
    * the active list is: the reader is the data export, a file that gets stored and forwarded.
    * Newest change first, capped at 500 like the other lists.
    */

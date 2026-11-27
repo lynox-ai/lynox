@@ -48,14 +48,18 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     const c = ks.write({ text: 'Orders above 500 need a second signature', subjectName: 'Lager', sourceChannel: 'agent', sourceUntrusted: false });
     expect([a, b, c].some((r) => r.deduped === true), 'fixture: three separate entries').toBe(false);
     const db = engine.getDb();
+    // A key-shaped value in the rejected entry, built at runtime (this repo is public).
+    const key = `ghp_${'a1B2c3D4e5'.repeat(4)}`;
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(`The invoice address is in Bern, token ${key}`), b.id);
     db.prepare("UPDATE knowledge_entries SET status = 'rejected', updated_at = '2026-01-01 00:00:01' WHERE id = ?").run(b.id);
     db.prepare("UPDATE knowledge_entries SET status = 'superseded', superseded_by = ?, updated_at = '2026-01-01 00:00:02' WHERE id = ?").run(a.id, c.id);
     db.prepare("UPDATE knowledge_entries SET status = 'pending_review' WHERE id = ?").run(a.id);
     const listed = ks.listRejectedOrSupersededMasked();
     expect(listed.map(e => [e.id, e.status, e.supersededBy, e.text]), 'newest change first; the pending one is not listed').toEqual([
       [c.id, 'superseded', a.id, 'Orders above 500 need a second signature'],
-      [b.id, 'rejected', null, 'The invoice address is in Bern'],
+      [b.id, 'rejected', null, listed[1]?.text],
     ]);
+    expect(listed[1]?.text, 'masked').toMatch(/^The invoice address is in Bern, token (?!ghp_)/);
     expect(ks.listRejectedOrSupersededMasked(1).map(e => e.id), 'the limit holds').toEqual([c.id]);
   });
 

@@ -15213,7 +15213,8 @@ export class LynoxHTTPApi {
         // an entry; this is a file that gets stored and forwarded.
         const pending = store.listPendingMasked(ENTRY_CAP);
         // Rejected and superseded entries are still stored, so they are part of what is held: each
-        // with its `status`, a superseded one with `supersededBy`, masked like the rest.
+        // with its `status` and `supersededBy` as stored (null where no successor was recorded),
+        // masked like the rest.
         const retired = store.listRejectedOrSupersededMasked(ENTRY_CAP);
         // The wording each conversation used for an entry, masked like the rest: a source can
         // hold words the entry itself does not carry.
