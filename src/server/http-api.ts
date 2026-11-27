@@ -474,8 +474,8 @@ export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'chang
  * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
  * the push had to shorten the name.
  *
- * `chatExists` decides whether the escalation's chat still stands; without it, or once the chat
- * is deleted, the trigger links to no chat.
+ * `chatExists` decides whether the escalation's chat still stands and has something in it;
+ * without it, once the chat is deleted, or while it is empty, the trigger links to no chat.
  */
 export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal, chatExists?: (threadId: string) => boolean): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat'> & { last_escalation_kind?: 'question' | 'alert' | undefined; paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
   // The stored run cause leaves only as `blocked_reason`, parsed (`storedRunCause`), never as stored.
@@ -9876,10 +9876,13 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
-      // A trigger links to its escalation's chat only while that chat stands (a deleted one is gone).
+      // A trigger links to its escalation's chat only while that chat stands (a deleted one is gone)
+      // and holds a message: a run's question whose write failed after its thread was created
+      // leaves an empty chat, and a link there would show nothing of the question.
       // Only the owner is shown the chat, so only the owner's list looks it up.
       const threadsForList = isOwnerPrincipal(principal) ? engine.getThreadStore() : null;
-      const chatExists = (threadId: string): boolean => threadsForList?.getThread(threadId) !== undefined;
+      const chatExists = (threadId: string): boolean =>
+        threadsForList?.getThread(threadId) !== undefined && threadsForList.getMessageCount(threadId) > 0;
       // Who set each trigger up or changed it last, when that was a mandate: lines as on an
       // approval card, named by the same rule (in these lines a mandate sees another address's
       // grant as another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
