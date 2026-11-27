@@ -7,7 +7,7 @@
 	import { trySaveArtifact, saveFailureText } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
-	import { shownTextOfHtml, copyableText } from '../utils/artifact-copy.js';
+	import { withoutHidden } from '../stores/contained-way-out.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
@@ -146,15 +146,12 @@
 		const body = clean.replace(/<!-{2}\s*type:\s*markdown\s*-->\s*/i, '').trim();
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
-		// No `style` and no `class`: neither can hide text in the card, so the text "Copy text" takes
-		// from it is the text the card shows.
-		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string, { FORBID_ATTR: ['style', 'class'] });
+		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
 		const encodedMd = btoa(unescape(encodeURIComponent(body)));
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
-		const shown = shownTextOfHtml(rendered);
-		const copyAttr = shown ? ` data-copy="${btoa(unescape(encodeURIComponent(shown)))}"` : '';
-		const actions = artifactActionBtns(displayTitle, shown ? { lines: null } : null);
-		return `<div class="artifact-container artifact-md artifact-collapsed"${OWN_MARK} data-md="${encodedMd}"${copyAttr} data-title="${safeTitle}" data-artifact-type="markdown"${idAttr}>
+		// No copy button: rendered markdown can still hide text that a copy would carry.
+		const actions = artifactActionBtns(displayTitle, null);
+		return `<div class="artifact-container artifact-md artifact-collapsed"${OWN_MARK} data-md="${encodedMd}" data-title="${safeTitle}" data-artifact-type="markdown"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon('markdown')}</span>
 				<span class="artifact-label">Markdown</span>
@@ -201,7 +198,8 @@
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
 		// The button copies the whole file; when the preview shows less, the button says how much.
 		const more = lines.length > DATA_PREVIEW_LINES;
-		const actions = artifactActionBtns(displayTitle, body !== '' ? { lines: more ? lines.length : null } : null);
+		// A file of nothing but invisible characters gets no button: there would be nothing to copy.
+		const actions = artifactActionBtns(displayTitle, withoutHidden(body).text.trim() !== '' ? { lines: more ? lines.length : null } : null);
 		const moreLine = more
 			? `<p class="artifact-data-more">${escapeHtml(tf('artifacts.lines_shown', { shown: String(DATA_PREVIEW_LINES), n: String(lines.length) }))}</p>`
 			: '';
@@ -435,17 +433,16 @@
 	/** Quick export: share (mobile) / download (desktop) the artifact's SOURCE
 	 *  file, dispatched by embedded data. Full print/download live in the gallery
 	 *  big view. Reuses the iOS-aware download handlers (Web Share on iOS). */
-	/** The text a card's copy button takes: the shown text of a markdown card, the file of a data
-	 *  card. An HTML card has no copy button. */
+	/** The text a card's copy button takes: the file of a data card. Markdown and HTML cards have
+	 *  no copy button. */
 	function copyTextOf(container: HTMLElement): string {
-		if (container.dataset['raw'] !== undefined) return decodeB64(container.dataset['raw'] ?? '');
-		if (container.dataset['md'] !== undefined) return decodeB64(container.dataset['copy'] ?? '');
-		return '';
+		return container.dataset['raw'] !== undefined ? decodeB64(container.dataset['raw'] ?? '') : '';
 	}
 
 	async function handleCopyText(container: HTMLElement, target: Element) {
-		const lines = target.closest('[data-lines]')?.getAttribute('data-lines') ?? null;
-		const { text, removed } = copyableText(copyTextOf(container));
+		// Only the button this view built: message markup can carry a `data-lines` of its own.
+		const lines = target.closest(`[data-action="copy"][${OWN_ATTR}]`)?.getAttribute('data-lines') ?? null;
+		const { text, removed } = withoutHidden(copyTextOf(container));
 		try {
 			if (!text) throw new Error('nothing to copy');
 			await navigator.clipboard.writeText(text);
