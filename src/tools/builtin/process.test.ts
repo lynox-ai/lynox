@@ -572,6 +572,8 @@ describe('save_workflow — workflow_id source', () => {
     );
 
     const parsed = JSON.parse(result) as { workflow_id: string; source: string; steps: number };
+    // A promoted copy is a done call.
+    expect(saveWorkflowFailure(result)).toBeNull();
     expect(parsed.source).toBe('workflow_id');
     expect(parsed.steps).toBe(2);
     // A new id — the original plan is untouched.
@@ -636,6 +638,8 @@ describe('save_workflow — workflow_id source', () => {
 
     const parsed = JSON.parse(result) as { workflow_id: string; already_reusable: boolean };
     expect(parsed.already_reusable).toBe(true);
+    // An already reusable workflow is a done call, not a refusal.
+    expect(saveWorkflowFailure(result)).toBeNull();
     expect(parsed.workflow_id).toBe('tmpl-1');
     // The stored name is left out: it can be text a prior turn brought in from outside.
     expect(Object.keys(parsed).sort()).toEqual(['already_reusable', 'next', 'steps', 'workflow_id']);

@@ -80,6 +80,7 @@ describe('save_workflow: a call that saved nothing is recorded as failed', () =>
 describe('saveWorkflowFailure', () => {
   const SENT = 'SENT_q7';
 
+  // Every reason is a fixed phrase; the answers carry SENT where a caller's or provider's text sits.
   it('gives each kind of answer its fixed reason and no text from the answer', () => {
     const cases: Array<[string, string]> = [
       [SESSION_PARAM_NAME_REFUSAL, 'not saved: a parameter name outside the accepted form'],
@@ -92,7 +93,6 @@ describe('saveWorkflowFailure', () => {
     ];
     for (const [answer, reason] of cases) {
       expect(saveWorkflowFailure(answer), answer).toBe(reason);
-      expect(saveWorkflowFailure(answer)).not.toContain(SENT);
     }
   });
 
