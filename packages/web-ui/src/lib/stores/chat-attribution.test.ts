@@ -678,3 +678,28 @@ describe('worstStatus', () => {
 		expect(worstStatus('done', 'done')).toBe('done');
 	});
 });
+
+describe('recordToolResult — a call that returned without doing what was asked', () => {
+	it('marks a soft failure as unsuccessful, still done, and not an error', () => {
+		const state: AttributionState = {};
+		recordToolCall(state, { name: 'api_setup', input: {} });
+		const { call } = recordToolResult(state, { name: 'api_setup', result: 'Error: nothing was saved.', softFailure: true });
+		expect(call).toEqual(expect.objectContaining({ status: 'done', unsuccessful: true }));
+	});
+
+	it('control: a plain result is done without the mark', () => {
+		const state: AttributionState = {};
+		recordToolCall(state, { name: 'api_setup', input: {} });
+		const { call } = recordToolResult(state, { name: 'api_setup', result: 'Saved.' });
+		expect(call?.status).toBe('done');
+		expect(call?.unsuccessful).toBeUndefined();
+	});
+
+	it('an error stays an error, without the mark, whatever else the event says', () => {
+		const state: AttributionState = {};
+		recordToolCall(state, { name: 'bash', input: {} });
+		const { call } = recordToolResult(state, { name: 'bash', result: 'boom', isError: true, softFailure: true });
+		expect(call?.status).toBe('error');
+		expect(call?.unsuccessful).toBeUndefined();
+	});
+});

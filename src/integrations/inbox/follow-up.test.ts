@@ -195,8 +195,33 @@ describe('follow-up mails in a known thread (part 1b)', () => {
   it('a sensitive follow-up does not put its categories into the item audit', async () => {
     const id = seedReplied();
     await hook()(ACCOUNT.id, envelope({ subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' }));
-    const reopened = inbox.listAuditForItem(id).find((a) => a.action === 'reopened_on_reply')!;
-    expect(JSON.parse(reopened.payloadJson)).toEqual({ trigger: 'inbound_mail', message_id: '<follow@x>' });
+    const raised = inbox.listAuditForItem(id).find((a) => a.action === 'raised_on_sensitive_follow_up')!;
+    expect(JSON.parse(raised.payloadJson)).not.toHaveProperty('sensitive_categories');
+    expect(inbox.sensitiveCategoriesAtIngest(inbox.getItem(id)!)).toEqual([]);
+  });
+
+  it('tells the notifier when the follow-up that opens the item is flagged, and not otherwise', async () => {
+    seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: false });
+
+    mail.close();
+    mail = new MailStateDb({ path: ':memory:' });
+    mail.upsertAccount(ACCOUNT);
+    inbox = new InboxStateDb(mail.getConnection());
+    notifyNewItem.mockClear();
+    seedReplied();
+    await hook()(ACCOUNT.id, envelope({ subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' }));
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: true });
+  });
+
+  it('tells the notifier the item is flagged when its own mail was, even for a plain follow-up', async () => {
+    const id = seedReplied();
+    inbox.appendAudit({ itemId: id, action: 'classified', actor: 'rule_engine', payloadJson: JSON.stringify({ sensitive_categories: ['health'] }) });
+    await hook()(ACCOUNT.id, envelope());
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: true });
   });
 
   it('notifies for a reopened requires_user item, not for another bucket', async () => {
@@ -266,6 +291,44 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     });
     await h(ACCOUNT.id, envelope({ from: [{ address: 'me@acme.example' }], messageId: '<own2@x>' }));
     expect(inbox.getItem(id)!.userAction).toBe('replied');
+  });
+
+  it('a copy from another account connected here is our own mail: stored as sent, the item stays replied', async () => {
+    const id = seedReplied();
+    const asked: string[] = [];
+    const h = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: {
+        resolve: accounts.resolve,
+        isOwnAddress: (a) => { asked.push(a); return a === 'support@acme.example'; },
+      },
+    });
+    await h(ACCOUNT.id, envelope({ from: [{ address: 'Support@Acme.Example' }], messageId: '<shared@x>' }));
+    expect(asked, 'asked with the lower-cased sender').toEqual(['support@acme.example']);
+    expect(stored('<shared@x>').direction).toBe('outbound');
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
+    expect(notifyNewItem).not.toHaveBeenCalled();
+    // Control: a sender the resolver does not know is a customer, and reopens the item.
+    await h(ACCOUNT.id, envelope({ from: [{ address: 'customer@example.com' }], messageId: '<cust@x>' }));
+    expect(stored('<cust@x>').direction).toBe('inbound');
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+  });
+
+  // The copy check asks only whether the address is a connected account, never the domains the
+  // own-group exception reads: a sender under an account's domain is still a customer.
+  it('a sender under the domain of a connected account is not our own mail', async () => {
+    const id = seedReplied();
+    const h = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: {
+        resolve: accounts.resolve,
+        addresses: () => ['support@acme.example', 'colleague@acme.example'],
+        isOwnAddress: (a) => a === 'support@acme.example',
+      },
+    });
+    await h(ACCOUNT.id, envelope({ from: [{ address: 'colleague@acme.example' }], messageId: '<coll@x>' }));
+    expect(stored('<coll@x>').direction).toBe('inbound');
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
   });
 
   it('a message dated exactly at the reply does not open the item', async () => {
@@ -423,5 +486,398 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(inbox.getItem(id)!.userAction).toBe('replied');
     const replied = inbox.listAuditForItem(id).filter((a) => a.action === 'replied');
     expect(JSON.parse(replied.at(-1)!.payloadJson)).toMatchObject({ matchedBy: 'thread_message_id' });
+  });
+});
+
+describe('a flagged follow-up brings its item back to where the owner sees it', () => {
+  const OTP = { subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' };
+
+  function seed(bucket: InboxBucket, action?: 'archived' | 'replied', snoozeUntil?: Date, unsnoozeOnReply = true): string {
+    const id = inbox.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket, confidence: 0.9,
+      reasonDe: 'Newsletter', classifiedAt: new Date('2026-11-03T08:00:00Z'),
+      classifierVersion: 'v1', messageId: '<first@x>', subject: 'Bestellung 1043', fromAddress: 'kunde@example.com',
+    });
+    inbox.insertThreadMessage({
+      accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com',
+      subject: 'Bestellung 1043', direction: 'inbound', inboxItemId: id,
+    });
+    if (action !== undefined) inbox.updateUserAction(id, action, new Date('2026-11-03T09:00:00Z'));
+    if (snoozeUntil !== undefined) inbox.setSnooze(id, snoozeUntil, null, unsnoozeOnReply);
+    return id;
+  }
+  const open = (): string[] => inbox.listOpenItems({ bucket: 'requires_user', limit: 50, offset: 0 }).map((i) => i.id);
+  const raises = (id: string) => inbox.listAuditForItem(id).filter((a) => a.action === 'raised_on_sensitive_follow_up');
+
+  it('raises a handled item to "requires you", counts it there and pushes, flagged', async () => {
+    const id = seed('auto_handled');
+    expect(open()).toEqual([]);
+    await hook()(ACCOUNT.id, envelope(OTP));
+    expect(inbox.getItem(id)!.bucket).toBe('requires_user');
+    expect(open()).toEqual([id]);
+    expect(inbox.countItemsByBucket().requires_user).toBe(1);
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: true });
+  });
+
+  it('leaves a handled item where it is for a follow-up that is not flagged (control)', async () => {
+    const id = seed('auto_handled');
+    await hook()(ACCOUNT.id, envelope());
+    expect(inbox.getItem(id)!.bucket).toBe('auto_handled');
+    expect(open()).toEqual([]);
+    expect(raises(id)).toHaveLength(0);
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  for (const mode of ['skip', 'mask', 'allow'] as const) {
+    it(`raises under ${mode}`, async () => {
+      const id = seed('auto_handled');
+      await hook(mode)(ACCOUNT.id, envelope(OTP));
+      expect(open()).toEqual([id]);
+    });
+  }
+
+  it('shows an item the owner archived again: the user action no longer hides it', async () => {
+    const id = seed('auto_handled', 'archived');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    expect(open()).toEqual([id]);
+  });
+
+  for (const unsnoozeOnReply of [true, false]) {
+    it(`shows a snoozed item now, not when it wakes, and pushes (unsnooze on reply: ${String(unsnoozeOnReply)})`, async () => {
+      const id = seed('requires_user', undefined, new Date(Date.now() + 86_400_000), unsnoozeOnReply);
+      expect(open()).toEqual([]);
+      await hook()(ACCOUNT.id, envelope(OTP));
+      expect(inbox.getItem(id)!.snoozeUntil).toBeUndefined();
+      expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up');
+      expect(open()).toEqual([id]);
+      expect(raises(id)).toHaveLength(1);
+      expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('raises a draft_ready item too, and never lowers one', async () => {
+    const id = seed('draft_ready');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    expect(inbox.getItem(id)!.bucket).toBe('requires_user');
+    expect(inbox.raiseToRequiresUser(id, 'default', new Date())).toBe(false);
+    expect(inbox.getItem(id)!.bucket).toBe('requires_user');
+  });
+
+  it('writes one audit entry and one push, however often a flagged message arrives', async () => {
+    const id = seed('auto_handled');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    await hook()(ACCOUNT.id, envelope(OTP));
+    await hook()(ACCOUNT.id, envelope({ ...OTP, messageId: '<follow2@x>', date: new Date('2026-11-05T09:00:00Z') }));
+    expect(raises(id)).toHaveLength(1);
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(messageIds()).toEqual(['<first@x>', '<follow2@x>', '<follow@x>']);
+  });
+
+  it('leaves an item open in "requires you" alone: no audit entry, no push', async () => {
+    const id = seed('requires_user');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    expect(raises(id)).toHaveLength(0);
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  it('records the verdict the item had before: bucket, user action, snooze and categories', async () => {
+    const until = new Date(Date.now() + 86_400_000);
+    const id = seed('auto_handled', 'archived', until);
+    inbox.appendAudit({ itemId: id, action: 'classified', actor: 'classifier', payloadJson: JSON.stringify({ sensitive_categories: ['iban'] }) });
+    await hook()(ACCOUNT.id, envelope(OTP));
+    expect(JSON.parse(raises(id)[0]!.payloadJson)).toEqual({
+      trigger: 'inbound_mail',
+      message_id: '<follow@x>',
+      prior_bucket: 'auto_handled',
+      prior_classifier_version: 'v1',
+      prior_reason_de: 'Newsletter',
+      prior_user_action: 'archived',
+      prior_snooze_until: until.toISOString(),
+      prior_sensitive_categories: ['iban'],
+      follow_up_sensitive_categories: expect.arrayContaining([expect.any(String)]),
+    });
+  });
+
+  it('raises once when two flagged messages arrive together, while one waits on its automatic-reply check', async () => {
+    const id = seed('auto_handled');
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const confirm = vi.fn(async () => { await gate; return false; });
+    const graph = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: { resolve: (a: string) => (a === ACCOUNT.id ? { address: ACCOUNT.address, displayName: ACCOUNT.displayName, authType: 'oauth_microsoft' as const } : null) },
+      confirmAutoReply: confirm,
+    });
+    const first = graph(ACCOUNT.id, envelope({ ...OTP, messageId: '<a@x>' }));
+    const second = graph(ACCOUNT.id, envelope({ ...OTP, messageId: '<b@x>' }));
+    release();
+    await Promise.all([first, second]);
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(raises(id)).toHaveLength(1);
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(open()).toEqual([id]);
+  });
+
+  it('raises once when the message that woke a snoozed item is overtaken by another flagged one', async () => {
+    const id = seed('auto_handled', undefined, new Date(Date.now() + 86_400_000), true);
+    let releaseA: () => void = () => {};
+    const gateA = new Promise<void>((r) => { releaseA = r; });
+    const confirm = vi.fn(async (_a: string, env: MailEnvelope) => { if (env.messageId === '<a@x>') await gateA; return false; });
+    const graph = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: { resolve: (a: string) => (a === ACCOUNT.id ? { address: ACCOUNT.address, displayName: ACCOUNT.displayName, authType: 'oauth_microsoft' as const } : null) },
+      confirmAutoReply: confirm,
+    });
+    const first = graph(ACCOUNT.id, envelope({ ...OTP, messageId: '<a@x>' }));
+    await graph(ACCOUNT.id, envelope({ ...OTP, messageId: '<b@x>' }));
+    releaseA();
+    await first;
+    expect(raises(id)).toHaveLength(1);
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(open()).toEqual([id]);
+  });
+
+  it('marks a raised item with why it is back, until the owner acts on it or snoozes it', async () => {
+    const id = seed('auto_handled', 'archived');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    // The classifier's reason stays: the agent reads it as the first mail's, and the list says why
+    // the item is back from the version alone.
+    expect(inbox.getItem(id)).toMatchObject({ classifierVersion: 'sensitive-follow-up', reasonDe: 'Newsletter' });
+    inbox.updateUserAction(id, 'archived');
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up:seen');
+  });
+
+  it('ends the mark on a snooze too, and a later plain reopen does not bring it back', async () => {
+    const id = seed('auto_handled', 'archived');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    inbox.setSnooze(id, new Date(Date.now() + 60_000), null);
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up:seen');
+    inbox.setSnooze(id, null, null);
+    inbox.updateUserAction(id, 'replied', new Date('2026-11-04T10:00:00Z'));
+    await hook()(ACCOUNT.id, envelope({ messageId: '<plain@x>', date: new Date('2026-11-05T10:00:00Z') }));
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up:seen');
+  });
+
+  it('keeps the mark when an owner action is cleared rather than set', async () => {
+    const id = seed('auto_handled', 'archived');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    inbox.updateUserAction(id, null);
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up');
+  });
+
+  it('an undo of a bulk action does not put a raised item back out of view', async () => {
+    const id = seed('auto_handled', 'archived');
+    inbox.insertBulkActionLog({ bulkId: 'b1', itemId: id, priorUserAction: 'archived', priorUserActionAt: new Date('2026-11-03T09:00:00Z'), action: 'archived' });
+    await hook()(ACCOUNT.id, envelope(OTP));
+    expect(inbox.undoBulkAction('b1')).toBe(1);
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    expect(open()).toEqual([id]);
+  });
+
+  it('an undo still puts back an item the bulk action left as it was (control)', () => {
+    const id = seed('auto_handled', 'replied');
+    inbox.insertBulkActionLog({ bulkId: 'b2', itemId: id, priorUserAction: 'replied', priorUserActionAt: new Date('2026-11-03T09:00:00Z'), action: 'archived' });
+    inbox.updateUserAction(id, 'archived', new Date());
+    expect(inbox.undoBulkAction('b2')).toBe(1);
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
+  });
+
+  it('does not raise for our own mail coming back into the thread, or for a message older than the owner\'s action', async () => {
+    const id = seed('auto_handled', 'archived');
+    await hook()(ACCOUNT.id, envelope({ ...OTP, from: [{ address: ACCOUNT.address, name: 'Me' }], messageId: '<own@x>' }));
+    await hook()(ACCOUNT.id, envelope({ ...OTP, messageId: '<old@x>', date: new Date('2026-11-03T08:30:00Z') }));
+    expect(raises(id)).toHaveLength(0);
+    expect(inbox.getItem(id)!.bucket).toBe('auto_handled');
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+});
+
+describe('a snooze set to wake on a reply wakes for the messages that may reopen an item', () => {
+  const later = () => new Date(Date.now() + 86_400_000);
+  /** An open item, snoozed by the owner to wake on a reply. */
+  function seedSnoozed(tenantId?: string): string {
+    const id = inbox.insertItem({
+      ...(tenantId !== undefined ? { tenantId } : {}),
+      accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'Kundin fragt nach der Lieferung', classifiedAt: new Date('2026-11-03T08:00:00Z'),
+      classifierVersion: 'v1', messageId: '<first@x>', subject: 'Bestellung 1043', fromAddress: 'kunde@example.com',
+    });
+    inbox.insertThreadMessage({
+      ...(tenantId !== undefined ? { tenantId } : {}),
+      accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com',
+      subject: 'Bestellung 1043', direction: 'inbound', inboxItemId: id,
+    });
+    inbox.setSnooze(id, later(), null, /* unsnoozeOnReply */ true, false, tenantId);
+    return id;
+  }
+  const woke = (id: string, tenantId?: string) => inbox.getItem(id, tenantId)!.snoozeUntil === undefined;
+  const wakeAudits = (id: string, tenantId?: string) =>
+    inbox.listAuditForItem(id, tenantId).filter((a) => a.action === 'unsnoozed_on_reply');
+
+  it('a new message from the customer wakes it, with one audit naming the message', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope());
+    expect(woke(id)).toBe(true);
+    const audits = wakeAudits(id);
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(audits[0]!.payloadJson)).toEqual({ trigger: 'inbound_mail', message_id: '<follow@x>' });
+  });
+
+  it('an automatic reply does not wake it', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope({ isAutoReply: true, messageId: '<ooo@x>', snippet: 'Ich bin bis Montag abwesend.' }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+    expect(messageIds()).toContain('<ooo@x>');
+  });
+
+  it('our own mail coming back into the thread does not wake it', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope({ from: [{ address: ACCOUNT.address }], messageId: '<own@x>' }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('a redelivered message does not wake it', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope({ messageId: '<first@x>' }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('a message without a Message-ID does not wake it', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope({ messageId: undefined }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('a message dated before the owner\'s reply does not wake it', async () => {
+    const id = seedSnoozed();
+    inbox.updateUserAction(id, 'replied', new Date('2026-11-03T09:00:00Z'));
+    await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-03T08:30:00Z') }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('an item of another tenant wakes in its own tenant, and its audit is written there', async () => {
+    const id = seedSnoozed('tenant-b');
+    await hook()(ACCOUNT.id, envelope());
+    expect(woke(id, 'tenant-b')).toBe(true);
+    expect(wakeAudits(id, 'tenant-b')).toHaveLength(1);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('a snooze set not to wake on a reply stays for a new message (control)', async () => {
+    const id = seedSnoozed();
+    const until = later();
+    inbox.setSnooze(id, until, null, /* unsnoozeOnReply */ false);
+    await hook()(ACCOUNT.id, envelope());
+    expect(inbox.getItem(id)!.snoozeUntil?.getTime()).toBe(until.getTime());
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  /** A Graph account, whose envelope does not say whether a mail is an automatic reply. */
+  function graphHook(confirm: (accountId: string, env: MailEnvelope) => Promise<boolean>) {
+    return createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: { resolve: (a: string) => (a === ACCOUNT.id ? { address: ACCOUNT.address, displayName: ACCOUNT.displayName, authType: 'oauth_microsoft' as const } : null) },
+      confirmAutoReply: confirm,
+    });
+  }
+  function gate(): { wait: Promise<void>; release: () => void } {
+    let release: () => void = () => {};
+    const wait = new Promise<void>((r) => { release = r; });
+    return { wait, release };
+  }
+
+  it('on Graph, a message the check finds to be an automatic reply does not wake it; one the check cannot answer does', async () => {
+    const id = seedSnoozed();
+    await graphHook(async () => true)(ACCOUNT.id, envelope({ messageId: '<ooo@x>' }));
+    expect(woke(id)).toBe(false);
+    await graphHook(async () => { throw new Error('fetch failed'); })(ACCOUNT.id, envelope({ messageId: '<unknown@x>' }));
+    expect(woke(id)).toBe(true);
+    expect(wakeAudits(id)).toHaveLength(1);
+  });
+
+  it('a snooze the owner sets again while the message waits on its check is kept', async () => {
+    const id = seedSnoozed();
+    const g = gate();
+    const pending = graphHook(async () => { await g.wait; return false; })(ACCOUNT.id, envelope());
+    const until = later();
+    inbox.setSnooze(id, until, null, /* unsnoozeOnReply */ false);
+    g.release();
+    await pending;
+    expect(inbox.getItem(id)!.snoozeUntil?.getTime()).toBe(until.getTime());
+    expect(wakeAudits(id)).toHaveLength(0);
+    expect(messageIds()).toContain('<follow@x>');
+  });
+
+  it('a snooze that runs out while the message waits on its check is left to its reminder', async () => {
+    const id = seedSnoozed();
+    const g = gate();
+    const pending = graphHook(async () => { await g.wait; return false; })(ACCOUNT.id, envelope());
+    inbox.setSnooze(id, new Date(Date.now() - 1000), null, /* unsnoozeOnReply */ true, /* notifyOnUnsnooze */ true);
+    g.release();
+    await pending;
+    expect(inbox.getItem(id)!.snoozeUntil).toBeDefined();
+    expect(inbox.getItem(id)!.notifyOnUnsnooze).toBe(true);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('two messages arriving together wake it once, with one audit', async () => {
+    const id = seedSnoozed();
+    const g = gate();
+    const hookG = graphHook(async (_a, env) => { if (env.messageId === '<a@x>') await g.wait; return false; });
+    const first = hookG(ACCOUNT.id, envelope({ messageId: '<a@x>' }));
+    await hookG(ACCOUNT.id, envelope({ messageId: '<b@x>' }));
+    g.release();
+    await first;
+    expect(woke(id)).toBe(true);
+    expect(wakeAudits(id).map((a) => JSON.parse(a.payloadJson).message_id)).toEqual(['<b@x>']);
+  });
+
+  it('a flagged message waiting on its check does not raise an item another message has already woken into view', async () => {
+    const id = seedSnoozed();
+    const g = gate();
+    const hookG = graphHook(async (_a, env) => { if (env.messageId === '<otp@x>') await g.wait; return false; });
+    const flagged = hookG(ACCOUNT.id, envelope({ messageId: '<otp@x>', subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' }));
+    await hookG(ACCOUNT.id, envelope({ messageId: '<plain@x>' }));
+    expect(woke(id)).toBe(true);
+    g.release();
+    await flagged;
+    expect(inbox.listAuditForItem(id).filter((a) => a.action === 'raised_on_sensitive_follow_up')).toHaveLength(0);
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  it('a flagged message that wakes a snooze set after another message reopened the item raises it to the top and pushes', async () => {
+    const id = seedReplied();
+    const g = gate();
+    const hookG = graphHook(async (_a, env) => { if (env.messageId === '<otp@x>') await g.wait; return false; });
+    const flagged = hookG(ACCOUNT.id, envelope({ messageId: '<otp@x>', date: new Date('2026-11-05T09:00:00Z'), subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' }));
+    await hookG(ACCOUNT.id, envelope({ messageId: '<plain@x>' }));
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    notifyNewItem.mockClear();
+    inbox.setSnooze(id, later(), null, /* unsnoozeOnReply */ true);
+    g.release();
+    await flagged;
+    expect(woke(id)).toBe(true);
+    expect(inbox.listAuditForItem(id).filter((a) => a.action === 'raised_on_sensitive_follow_up')).toHaveLength(1);
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up');
+    expect(inbox.getItem(id)!.mailDate?.toISOString()).toBe('2026-11-05T09:00:00.000Z');
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('when the audit cannot be written, the snooze and the message stay as they were', async () => {
+    const id = seedSnoozed();
+    const until = inbox.getItem(id)!.snoozeUntil!.getTime();
+    vi.spyOn(inbox, 'appendAudit').mockImplementation(() => { throw new Error('disk full'); });
+    await expect(hook()(ACCOUNT.id, envelope())).rejects.toThrow('disk full');
+    vi.restoreAllMocks();
+    expect(inbox.getItem(id)!.snoozeUntil?.getTime()).toBe(until);
+    expect(messageIds()).not.toContain('<follow@x>');
   });
 });

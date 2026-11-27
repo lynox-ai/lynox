@@ -86,7 +86,12 @@ export interface AutonomousValidationIssue {
   message: string;
 }
 
-export function findAutonomousViolations(steps: InlinePipelineStep[]): AutonomousValidationIssue[] {
+/**
+ * `locked`: the save runs in a locked turn (a mandate's), where `ask_secret` stores nothing, so
+ * making the pipeline interactive would not get its step a key either (U-185). Only that tool's
+ * text differs.
+ */
+export function findAutonomousViolations(steps: InlinePipelineStep[], locked = false): AutonomousValidationIssue[] {
   const issues: AutonomousValidationIssue[] = [];
   for (const step of steps) {
     const tool = stepUsesHumanInTheLoopTool(step);
@@ -94,7 +99,9 @@ export function findAutonomousViolations(steps: InlinePipelineStep[]): Autonomou
       issues.push({
         stepId: step.id,
         tool,
-        message: `Step "${step.id}" uses ${tool}, but the pipeline is marked autonomous. Either remove the human-in-the-loop tool from this step or change the pipeline mode to 'interactive'.`,
+        message: locked && tool === 'ask_secret'
+          ? `Step "${step.id}" uses ask_secret, which stores nothing in this session, so the step cannot get a key from it. Remove ask_secret from this step; the key has to be stored by the owner of this instance.`
+          : `Step "${step.id}" uses ${tool}, but the pipeline is marked autonomous. Either remove the human-in-the-loop tool from this step or change the pipeline mode to 'interactive'.`,
       });
     }
   }

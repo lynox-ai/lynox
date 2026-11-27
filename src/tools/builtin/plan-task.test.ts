@@ -71,7 +71,7 @@ describe('planTaskTool', () => {
   });
 
   it('should return approved on Proceed', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       { summary: 'Test plan', steps: ['Step 1'] },
@@ -82,15 +82,32 @@ describe('planTaskTool', () => {
     expect(promptUser).toHaveBeenCalledOnce();
   });
 
-  it('should accept y/yes as approval', async () => {
-    for (const answer of ['y', 'yes', 'Y', 'YES']) {
+  it('approves on the proceed key only: a word typed in its place is the change asked for', async () => {
+    for (const answer of ['y', 'yes', 'Y', 'YES', 'ja', 'Proceed', 'Ausführen', 'Run', ' proceed', 'PROCEED']) {
       const promptUser = vi.fn().mockResolvedValue(answer);
       const agent = makeAgent({ promptUser });
       const result = await planTaskTool.handler(
         { summary: 'Test', steps: ['Step'] },
         agent,
       );
-      expect(JSON.parse(result)).toMatchObject({ approved: true });
+      expect(JSON.parse(result), answer).toEqual({ approved: false, feedback: `The plan was not approved. Instead of answering with a button, the user wrote: ${answer}` });
+    }
+  });
+
+  it('offers the plan keys, marked as the engine\'s own confirmation', async () => {
+    const promptUser = vi.fn().mockResolvedValue('cancel');
+    await planTaskTool.handler({ summary: 'Test', steps: ['Step'] }, makeAgent({ promptUser }));
+    expect(promptUser.mock.calls[0]![1]).toEqual(['proceed', 'adjust', 'cancel']);
+    expect(promptUser.mock.calls[0]![2]).toMatchObject({ consent: 'plan' });
+  });
+
+  it('a cancel and a dismissal are not taken for feedback', async () => {
+    const cancelled = JSON.parse(await planTaskTool.handler({ summary: 'Test', steps: ['Step'] }, makeAgent({ promptUser: vi.fn().mockResolvedValue('cancel') }))) as { feedback: string };
+    expect(cancelled.feedback).toBe('User canceled the plan.');
+    for (const unanswered of ['', '__dismissed__']) {
+      const r = JSON.parse(await planTaskTool.handler({ summary: 'Test', steps: ['Step'] }, makeAgent({ promptUser: vi.fn().mockResolvedValue(unanswered) }))) as { approved: boolean; feedback: string };
+      expect(r.approved).toBe(false);
+      expect(r.feedback, JSON.stringify(unanswered)).toMatch(/The plan got no answer/);
     }
   });
 
@@ -107,7 +124,7 @@ describe('planTaskTool', () => {
   });
 
   it('should return rejected on Cancel', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       { summary: 'Test', steps: ['Step'] },
@@ -119,7 +136,7 @@ describe('planTaskTool', () => {
   });
 
   it('should return feedback on Adjust', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Adjust');
+    const promptUser = vi.fn().mockResolvedValue('adjust');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       { summary: 'Test', steps: ['Step'] },
@@ -139,13 +156,13 @@ describe('planTaskTool', () => {
     );
     const parsed = JSON.parse(result) as { approved: boolean; feedback: string };
     expect(parsed.approved).toBe(false);
-    expect(parsed.feedback).toBe('Use PostgreSQL instead');
+    expect(parsed.feedback).toBe('The plan was not approved. Instead of answering with a button, the user wrote: Use PostgreSQL instead');
   });
 
   // --- Business-friendly presentation ---
 
   it('should present phases as numbered steps', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
     await planTaskTool.handler(
       {
@@ -171,7 +188,7 @@ describe('planTaskTool', () => {
   });
 
   it('should mark user steps with [your input needed]', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
     await planTaskTool.handler(
       {
@@ -192,7 +209,7 @@ describe('planTaskTool', () => {
   });
 
   it('should show context findings', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const agent = makeAgent({ promptUser });
     await planTaskTool.handler(
       {
@@ -213,7 +230,7 @@ describe('planTaskTool', () => {
   });
 
   it('should end with "Shall I proceed?"', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
     await planTaskTool.handler({ summary: 'Test' }, agent);
     const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
@@ -234,7 +251,7 @@ describe('planTaskTool', () => {
     prompt.split('\n').filter((l) => !l.startsWith('>') && l.trim() !== '');
 
   it('keeps a forged cost line inside the quote and the real one outside', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
 
     await planTaskTool.handler(
@@ -263,7 +280,7 @@ describe('planTaskTool', () => {
   });
 
   it('keeps a forged "your input" line out of the system section', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
 
     await planTaskTool.handler(
@@ -284,7 +301,7 @@ describe('planTaskTool', () => {
   });
 
   it('quotes every line of a multi-line value without flattening it', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
 
     await planTaskTool.handler(
@@ -319,7 +336,7 @@ describe('planTaskTool', () => {
     // has to run on a plan that actually HAS system lines: a plan without
     // phases produces no cost line and no "your input" line, which is why an
     // earlier version of this test passed while the separator was missing.
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
 
     await planTaskTool.handler(
@@ -347,7 +364,7 @@ describe('planTaskTool', () => {
   // --- Workflow bridge (D4 — decoupled: plan_task never executes) ---
 
   it('should create a stored workflow on phased plan approval', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       {
@@ -406,7 +423,7 @@ describe('planTaskTool', () => {
 
   it('creates the plan under the principal of the turn, approved or auto-approved (engine.db v45)', async () => {
     const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
-    for (const promptUser of [undefined, vi.fn().mockResolvedValue('Proceed')]) {
+    for (const promptUser of [undefined, vi.fn().mockResolvedValue('proceed')]) {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-plan-author-'));
       const history = new RunHistory(join(dir, 'h.db'));
       const engine = new EngineDb(join(dir, 'engine.db'));
@@ -429,7 +446,7 @@ describe('planTaskTool', () => {
   });
 
   it('should not create a workflow for flat steps', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       { summary: 'Simple task', steps: ['Do it'] },
@@ -442,7 +459,7 @@ describe('planTaskTool', () => {
   });
 
   it('should not create a workflow on cancel', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       {
@@ -458,7 +475,7 @@ describe('planTaskTool', () => {
   });
 
   it('should list user steps in response', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       {
@@ -499,7 +516,7 @@ describe('planTaskTool', () => {
 
 describe('plan_task — decoupled from execution (D4/D9)', () => {
   it('never executes — returns only { approved, workflow_id } on approval', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       {
@@ -547,7 +564,7 @@ describe('plan_task — decoupled from execution (D4/D9)', () => {
   });
 
   it('does not create a workflow when the plan is canceled', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const promptUser = vi.fn().mockResolvedValue('cancel');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       {
@@ -579,6 +596,15 @@ describe('plan_task schema (D2 mechanism)', () => {
 });
 
 describe('phasesToPipelineSteps', () => {
+  it('gives a phase named like a reserved step id another id', () => {
+    const steps = phasesToPipelineSteps([
+      { name: 'Params', steps: ['Collect'] },
+      { name: 'Constructor', steps: ['Build'], depends_on: ['Params'] },
+    ]);
+    expect(steps.map(s => s.id)).toEqual(['params-2', 'constructor-2']);
+    expect(steps[1]!.input_from).toEqual(['params-2']);
+  });
+
   it('should convert phases to pipeline steps with dependencies', () => {
     const steps = phasesToPipelineSteps([
       { name: 'Fetch Data', steps: ['Call API', 'Parse JSON'] },
@@ -747,11 +773,15 @@ describe('plan_task auto-planning fallback', () => {
     const counters = {
       httpRequests: 0, writeBytes: 0, costUSD: 0,
     };
-    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
+    const charged = vi.fn();
+    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters, chargeExternalCost: charged } as never, mockConfig);
     agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
 
     await planTaskTool.handler({ summary: 'Create a research report' }, agent);
 
+    // The run's cost ceiling sees it too. Kills: a debit that skips the run's guard.
+    expect(charged).toHaveBeenCalledOnce();
+    expect(charged.mock.calls[0]![0] as number).toBeCloseTo(0.003, 6);
     // Local session cap sees the planning spend...
     expect(counters.costUSD).toBeCloseTo(0.003, 6);
     // ...and it is debited to the tenant balance.
@@ -815,11 +845,14 @@ describe('plan_task auto-planning fallback', () => {
     const counters = {
       httpRequests: 0, writeBytes: 0, costUSD: 0,
     };
-    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
+    const capOnly = vi.fn();
+    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters, chargeExternalCapOnlyCost: capOnly }, mockConfig);
     agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
 
     await planTaskTool.handler({ summary: 'Create a research report' }, agent);
     expect(mockPlanDAG).toHaveBeenCalledTimes(1);
+    // The run's ceiling counts the bound as cap-only. Kills: an aborted bound that skips the run's guard.
+    expect(capOnly).toHaveBeenCalledWith(upperBoundUsd);
     // The BOUND, exactly — not the estimate.
     expect(counters.costUSD).toBe(upperBoundUsd);
     expect(onAfterRun, 'the aborted call must not reach the tenant debit').not.toHaveBeenCalled();
@@ -841,7 +874,7 @@ describe('plan_task auto-planning fallback', () => {
     // planDAG throws an AbortError for a stop (dag-planner.test.ts); the handler must let it
     // through rather than go on to ask about a plan nobody made.
     mockPlanDAG.mockRejectedValueOnce(new DOMException('plan_task was stopped before a plan was made', 'AbortError'));
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const agent = makeAgent({ promptUser }, mockConfig);
 
     await expect(planTaskTool.handler({ summary: 'Sync the shop' }, agent)).rejects.toMatchObject({ name: 'AbortError' });
@@ -859,7 +892,7 @@ describe('plan_task auto-planning fallback', () => {
       ],
       reasoning: 'r', estimatedCost: 0.01, actualCostUsd: 0,
     });
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const agent = makeAgent({ promptUser }, mockConfig);
 
     const result = await planTaskTool.handler({ summary: 'Sync the shop' }, agent);
@@ -877,7 +910,7 @@ describe('plan_task auto-planning fallback', () => {
   it('should skip auto-plan when planDAG returns null', async () => {
     mockPlanDAG.mockResolvedValueOnce(null);
 
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const agent = makeAgent({ promptUser }, mockConfig);
     const result = await planTaskTool.handler(
       { summary: 'Simple task' },

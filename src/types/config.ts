@@ -39,6 +39,9 @@ export interface AbortScope {
 
 export interface AgentConfig {
   name:             string;
+  /** The instance's configured language (`config.language`), from which the agent's
+   *  confirmation dialogs take theirs (`noticeLanguage`). */
+  language?:        string | undefined;
   model:            string;
   systemPrompt?:    string | undefined;
   tools?:           ToolEntry[] | undefined;
@@ -99,6 +102,27 @@ export interface AgentConfig {
    * A spawned child carries its parent's.
    */
   principal?:          import('../core/request-principal.js').RequestPrincipal | undefined;
+  /** Who this agent's writes are recorded as (`IAgent.writeAuthor`). Absent: unknown. */
+  writeAuthor?:        string | null | undefined;
+  /** Which send targets the owner named (`IAgent.ownerKnown`). Absent: none, every target is foreign. */
+  ownerKnown?:         import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
+  /** Where a target this agent sends to comes from when the owner did not name it (`IAgent.sendOrigin`). */
+  sendOrigin?:         import('../core/origin-notices.js').SendOrigin | undefined;
+  /** The language of the questions this agent asks in its own words. Absent: the engine's default. */
+  noticeLanguage?:     import('../core/notice-language.js').NoticeLanguage | undefined;
+  /** The thread's record that the conversation read content from outside (`IAgent.conversationLatch`). */
+  conversationLatch?:  import('../core/conversation-latch.js').ConversationLatch | undefined;
+  /** Told of every send this agent refused in a run nobody watches (`IAgent.onOriginRefused`). */
+  onOriginRefused?:    ((refusal: import('../core/origin-notices.js').OriginRefusal) => void) | undefined;
+  /**
+   * A workflow step's own `fail_step` tool (runtime-adapter.ts, `createFailStepTool`), when this
+   * agent runs a step. Matched by IDENTITY of this entry, never by its name: it passes the
+   * mandate lock (it has no effect beyond ending its own step), it runs alone in the model
+   * response that calls it (the other calls of that response are skipped, not run), and it is
+   * not handed on to children (`getAvailableTools`). A different tool that happens to carry the
+   * same name gets none of the three. Absent for every agent that is not a step agent.
+   */
+  stepFailTool?:       import('./tools.js').ToolEntry | undefined;
   /**
    * Sink for this agent's own tool calls — the ONE owner of tool-call
    * persistence. The agent calls it with the run id it is currently working
@@ -200,6 +224,8 @@ export interface AgentConfig {
    * issues the call. Undefined for ad-hoc Agents built outside a Session.
    */
   toolResultBlobStore?: import('../core/tool-result-blob-store.js').ToolResultBlobStore | undefined;
+  /** The conversation's search results; the session and a spawning parent pass theirs. */
+  searchResultAddresses?: import('../core/search-result-addresses.js').SearchResultAddresses | undefined;
   /**
    * Eager-persist hook fired at every stable point in the agent loop (after
    * assistant message, after tool_results). Lets the Session checkpoint
@@ -722,8 +748,12 @@ export interface LynoxUserConfig {
    * inside. It does NOT gate: the LLM provider call (separate client), push
    * notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, or
    * a shell command outside sidecar mode (in sidecar mode with the egress
-   * proxy, a shell command reaches only the exact host names this policy lets
-   * http_request reach; src/shell-sidecar/egress.ts) — each is its own
+   * proxy, a shell command reaches only what src/shell-sidecar/egress.ts
+   * registers: under allow-all and no policy every host, until a tool round
+   * starts after the conversation took in foreign content; then, and under
+   * guarded, exact host names this policy names plus hosts the owner typed,
+   * and under guarded before that round a connected API's host;
+   * under allow-list the list; under deny-all none) — each is its own
    * separately-configured egress surface. A cross-integration air-gap is a separate control.
    *
    * ⚠ What that costs you if you have already set 'deny-all': a connected

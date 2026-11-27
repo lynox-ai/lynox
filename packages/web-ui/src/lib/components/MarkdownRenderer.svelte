@@ -6,14 +6,17 @@
 	import { goto } from '$app/navigation';
 	import { trySaveArtifact, saveFailureText } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
+	import { withoutHidden } from '../stores/contained-way-out.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
 	import { parseFences, type CodeFence } from '../utils/code-fences.js';
-	import { OWN_MARK, resolveOwnAction } from '../utils/markdown-actions.js';
+	import { OWN_ATTR, OWN_MARK, resolveOwnAction } from '../utils/markdown-actions.js';
+	import { attachArtifactFrame, artifactFrameFor } from '../utils/artifact-frame-host.js';
+	import { untrack } from 'svelte';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
 	import { mermaidConfig } from '../utils/mermaid-config.js';
@@ -22,9 +25,11 @@
 		content: string;
 		/** When true, defer artifact iframe rendering (show code instead). */
 		streaming?: boolean;
+		/** The chat this renders in only reads: a copied text is on its way to a new chat. */
+		containedChat?: boolean;
 	}
 
-	let { content, streaming = false }: Props = $props();
+	let { content, streaming = false, containedChat = false }: Props = $props();
 
 	let highlightedHtml = $state('');
 
@@ -115,7 +120,9 @@
 	}
 
 	function extractTitle(code: string): { title: string; clean: string } {
-		const match = code.match(/<!--\s*title:\s*(.+?)\s*-->/);
+		// `<!-{2}` instead of `<!--` in these patterns: the same match, but a module parser that
+		// reads `<!--` as the start of an HTML-like comment refuses the file (the component tests).
+		const match = code.match(/<!-{2}\s*title:\s*(.+?)\s*-->/);
 		if (match) return { title: match[1]!, clean: code.replace(match[0], '').trim() };
 		const titleTag = code.match(/<title>(.+?)<\/title>/);
 		if (titleTag) return { title: titleTag[1]!, clean: code };
@@ -125,7 +132,7 @@
 
 	/** Detect whether an artifact fence body is explicitly typed as markdown. */
 	function isMarkdownArtifact(code: string): boolean {
-		return /<!--\s*type:\s*markdown\s*-->/i.test(code);
+		return /<!-{2}\s*type:\s*markdown\s*-->/i.test(code);
 	}
 
 	/** Build a markdown-typed artifact: same collapsed-pill chrome as the iframe
@@ -136,18 +143,20 @@
 	 *  original text (not the rendered HTML). */
 	function buildMarkdownArtifact(code: string, artifactId = ''): string {
 		const { title, clean } = extractTitle(code);
-		const body = clean.replace(/<!--\s*type:\s*markdown\s*-->\s*/i, '').trim();
+		const body = clean.replace(/<!-{2}\s*type:\s*markdown\s*-->\s*/i, '').trim();
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
 		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
 		const encodedMd = btoa(unescape(encodeURIComponent(body)));
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
+		// No copy button: rendered markdown can still hide text that a copy would carry.
+		const actions = artifactActionBtns(displayTitle, null);
 		return `<div class="artifact-container artifact-md artifact-collapsed"${OWN_MARK} data-md="${encodedMd}" data-title="${safeTitle}" data-artifact-type="markdown"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon('markdown')}</span>
 				<span class="artifact-label">Markdown</span>
 				<span class="artifact-title">${safeTitle}</span>
-				${artifactActionBtns()}
+				${actions}
 			</div>
 			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
 		</div>`;
@@ -164,9 +173,12 @@
 
 	/** Return the data-artifact type if the fence body is marked as one. */
 	function artifactDataType(code: string): string | null {
-		const m = code.match(/<!--\s*type:\s*(csv|tsv|json|text)\s*-->/i);
+		const m = code.match(/<!-{2}\s*type:\s*(csv|tsv|json|text)\s*-->/i);
 		return m ? m[1]!.toLowerCase() : null;
 	}
+
+	/** How many lines of a data card the preview shows. */
+	const DATA_PREVIEW_LINES = 60;
 
 	/** Build a data-file artifact: a code preview plus a download button that
 	 *  produces a real Blob with the right extension and MIME type. The full
@@ -177,37 +189,53 @@
 		const { title, clean } = extractTitle(code);
 		// Anchored: only strip the leading marker we ourselves prepended, never
 		// a literal `<!-- type: … -->` that happens to sit inside the data.
-		const body = clean.replace(/^<!--\s*type:\s*\w+\s*-->\s*/i, '').trim();
-		const safeTitle = escapeHtml(title || 'Data');
+		const body = clean.replace(/^<!-{2}\s*type:\s*\w+\s*-->\s*/i, '').trim();
+		const displayTitle = title || 'Data';
+		const safeTitle = escapeHtml(displayTitle);
 		const encodedRaw = btoa(unescape(encodeURIComponent(body)));
 		const lines = body.split('\n');
-		const preview = escapeHtml(lines.slice(0, 60).join('\n')) + (lines.length > 60 ? '\n…' : '');
+		const preview = escapeHtml(lines.slice(0, DATA_PREVIEW_LINES).join('\n')) + (lines.length > DATA_PREVIEW_LINES ? '\n…' : '');
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
+		// The button copies the whole file; when the preview shows less, the button says how much.
+		const more = lines.length > DATA_PREVIEW_LINES;
+		// A file of nothing but invisible characters gets no button: there would be nothing to copy.
+		const actions = artifactActionBtns(displayTitle, withoutHidden(body).text.trim() !== '' ? { lines: more ? lines.length : null } : null);
+		const moreLine = more
+			? `<p class="artifact-data-more">${escapeHtml(tf('artifacts.lines_shown', { shown: String(DATA_PREVIEW_LINES), n: String(lines.length) }))}</p>`
+			: '';
 		return `<div class="artifact-container artifact-data artifact-collapsed"${OWN_MARK} data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}" data-artifact-type="${type}"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(type)}</span>
 				<span class="artifact-label">${meta.label}</span>
 				<span class="artifact-title">${safeTitle}</span>
-				${artifactActionBtns()}
+				${actions}
 			</div>
 			<pre class="artifact-data-body"><code>${preview}</code></pre>
+			${moreLine}
 		</div>`;
 	}
 
-	function buildArtifact(code: string): string {
+	/** An artifact card's markup, and for an HTML artifact the document its frame shows. */
+	interface BuiltArtifact {
+		readonly markup: string;
+		readonly frame: string | null;
+	}
+
+	function buildArtifact(code: string): BuiltArtifact {
 		// The inline card threads the already-saved gallery id in as a marker.
 		// Pull it out and strip it from the body so it can't leak into the
 		// rendered prose / data preview, then hand it to the builder so the pill
 		// links to the existing entry instead of re-saving a duplicate.
 		const { artifactId, src } = resolveArtifactRender(code);
-		if (isMarkdownArtifact(src)) return buildMarkdownArtifact(src, artifactId);
+		if (isMarkdownArtifact(src)) return { markup: buildMarkdownArtifact(src, artifactId), frame: null };
 		const dataType = artifactDataType(src);
-		if (dataType) return buildDataArtifact(src, dataType, artifactId);
+		if (dataType) return { markup: buildDataArtifact(src, dataType, artifactId), frame: null };
 		const { title, clean } = extractTitle(src);
-		// PRD-LIGHT-MODE PR 2a — srcdoc is sandboxed; CSS-vars from parent don't
-		// inherit into the iframe document. Read the theme at render time and
-		// inject matching styles. Theme-flip invalidates richCache (downstream
-		// $effect on getResolvedTheme) so srcdoc is regenerated.
+		// PRD-LIGHT-MODE PR 2a — the frame document runs on the sandboxed frame
+		// endpoint; CSS-vars from parent don't inherit into it. Read the theme at
+		// render time and inject matching styles. Theme-flip clears richCache and
+		// frameCache (downstream $effect on getResolvedTheme), so the frame
+		// document is rebuilt and gets a new frame element.
 		// ⚠ NOTHING about the frame's head is composed here any more — not the
 		// policy, not the viewport, not the default colours or the overflow fix.
 		// A mutation round emptied the head string this used to build and nothing
@@ -219,35 +247,59 @@
 		// a concern that can be dropped. `utils/artifact-frame.ts` holds the
 		// measurement and the reason.
 		const fullHtml = buildArtifactBubbleFrame(clean, getResolvedTheme(), RESIZE_CODE);
+		// `data-html` is for the share and download actions only. The frame never reads it: its
+		// document comes from memory (`frameCache`), because message markup can carry a
+		// `data-html` of its own.
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
-		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
-		const typeMatch = src.match(/<!--\s*type:\s*([a-z]+)\s*-->/i);
+		// No copy button: what the frame shows cannot be read from the source (a stylesheet can hide
+		// text, a script can replace it), so a copy could carry text the user never saw.
+		const actions = artifactActionBtns(displayTitle, null);
+		const typeMatch = src.match(/<!-{2}\s*type:\s*([a-z]+)\s*-->/i);
 		const typeKey = typeMatch ? typeMatch[1]!.toLowerCase() : 'html';
 		const typeLabel = typeKey.toUpperCase();
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
 
-		return `<div class="artifact-container artifact-collapsed"${OWN_MARK} data-html="${encoded}" data-title="${safeTitle}" data-artifact-type="${typeKey}"${idAttr}>
+		// The frame itself is not markup: the slot below is filled after the render by
+		// `attachFrames`, with a frame on the sandboxed endpoint. The slot carries OWN_MARK,
+		// which the sanitizer strips from message markup, so a message cannot forge one.
+		const markup = `<div class="artifact-container artifact-collapsed"${OWN_MARK} data-html="${encoded}" data-title="${safeTitle}" data-artifact-type="${typeKey}"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(typeKey)}</span>
 				<span class="artifact-label">${typeLabel}</span>
 				<span class="artifact-title">${safeTitle}</span>
-				${artifactActionBtns()}
+				${actions}
 			</div>
-			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" scrolling="no" loading="lazy"></iframe>
+			<div class="artifact-frame-slot"${OWN_MARK}></div>
 		</div>`;
+		return { markup, frame: fullHtml };
 	}
+
+	/** The copy button of a card: `null` for none, `lines` set when it copies more lines than the
+	 *  card shows. */
+	type CopyButton = { readonly lines: number | null } | null;
 
 	/** The shared, minimal artifact-pill actions: expand → the coherent gallery
 	 *  big-view (the ONE full view — renders every type incl. interactive HTML),
 	 *  share/export the source file, and the collapse chevron. Full print +
 	 *  download options live in the gallery view. On mobile the export button
 	 *  uses the iOS share glyph (it opens the native share sheet). Every builder
-	 *  (html/svg, markdown, data) uses this so the pill is identical everywhere. */
-	function artifactActionBtns(): string {
+	 *  (html/svg, markdown, data) uses this; only a data card adds the copy button. */
+	function artifactActionBtns(title: string, copy: CopyButton): string {
 		const shareIcon = isIosSafari() ? ICON_SHARE : ICON_DOWNLOAD;
-		return `<button class="artifact-btn"${OWN_MARK} data-action="expand" title="Expand">${ICON_EXPAND}</button>
+		// The copy button names what it does in words, not only with an icon: it is the way to take
+		// a text from lynox into a new chat, and a chat that only reads says to copy it first. It
+		// shows on the closed card too, so the way out needs no opening.
+		let copyBtn = '';
+		if (copy) {
+			const n = copy.lines === null ? null : String(copy.lines);
+			const label = n === null ? t('artifacts.copy_text') : tf('artifacts.copy_lines', { n });
+			const name = n === null ? tf('artifacts.copy_text_aria', { title }) : tf('artifacts.copy_lines_aria', { n, title });
+			const linesAttr = n === null ? '' : ` data-lines="${n}"`;
+			copyBtn = `<button type="button" class="artifact-btn artifact-copy"${OWN_MARK} data-action="copy"${linesAttr} aria-label="${escapeHtml(name)}">${ICON_COPY}<span class="artifact-copy-label">${escapeHtml(label)}</span></button>`;
+		}
+		return `${copyBtn}<button class="artifact-btn"${OWN_MARK} data-action="expand" title="Expand">${ICON_EXPAND}</button>
 				<button class="artifact-btn"${OWN_MARK} data-action="share" title="Share">${shareIcon}</button>
 				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>`;
 	}
@@ -258,6 +310,7 @@
 	// iOS-style share glyph (arrow rising out of a tray) — used on iOS where the
 	// download buttons route through the native share sheet.
 	const ICON_SHARE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 10V2M8 2L5.5 4.5M8 2l2.5 2.5M3.5 7.5H3a1 1 0 00-1 1V13a1 1 0 001 1h10a1 1 0 001-1V8.5a1 1 0 00-1-1h-.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+	const ICON_COPY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" stroke="currentColor" stroke-width="1.3"/></svg>`;
 	const ICON_EXPAND = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_SAVE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2h8l3 3v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/><path d="M5 2v4h5V2M5 14v-4h6v4" stroke="currentColor" stroke-width="1.2"/></svg>`;
 	// Chevron — the universal expand/collapse affordance on the pill row;
@@ -293,7 +346,7 @@
 	// viewport-unit scan is cached (`vu`) since style text doesn't change after
 	// load, so each ResizeObserver tick only re-reads scrollHeight/innerHeight
 	// instead of re-walking the whole DOM. (String backslashes are doubled so the
-	// emitted srcdoc carries a valid `\d`/`\b` regex literal.)
+	// script written into the frame document carries a valid `\d`/`\b` regex literal.)
 	/**
 	 * The resize script's CODE, not a markup string. It is inserted as a
 	 * `script` element's `textContent` (see `injectIntoArtifactFrame`), so the
@@ -333,6 +386,7 @@
 		if (hit.kind === 'toggle') {
 			container.classList.toggle('artifact-collapsed');
 			const expanded = !container.classList.contains('artifact-collapsed');
+			rememberOpen(container, expanded);
 			// Keep the chevron button's aria-expanded in sync for screen readers.
 			container.querySelector('.artifact-chevron')?.setAttribute('aria-expanded', String(expanded));
 			if (expanded) {
@@ -342,9 +396,13 @@
 			return;
 		}
 
+		// Copying does not open the card: it takes the text and leaves the card as it is.
+		if (hit.action === 'copy') { void handleCopyText(container, e.target as Element); return; }
+
 		// Artifact toolbar actions. Auto-expand if collapsed.
 		if (container.classList.contains('artifact-collapsed')) {
 			container.classList.remove('artifact-collapsed');
+			rememberOpen(container, true);
 			requestAnimationFrame(() => resizeArtifactFrame(container));
 		}
 		if (hit.action === 'expand') void handleOpenBig(container);
@@ -370,6 +428,32 @@
 		// The placeholder refusal is said as such; every other failure keeps the general text.
 		if (!result.artifact) { addToast(saveFailureText(result, 'Open failed'), 'error'); return; }
 		await goto(`/app/artifacts?id=${encodeURIComponent(result.artifact.id)}`);
+	}
+
+	/** The text a card's copy button takes: the file of a data card. Markdown and HTML cards have
+	 *  no copy button. */
+	function copyTextOf(container: HTMLElement): string {
+		return container.dataset['raw'] !== undefined ? decodeB64(container.dataset['raw'] ?? '') : '';
+	}
+
+	async function handleCopyText(container: HTMLElement, target: Element) {
+		// Only the button this view built: message markup can carry a `data-lines` of its own.
+		const lines = target.closest(`[data-action="copy"][${OWN_ATTR}]`)?.getAttribute('data-lines') ?? null;
+		const { text, removed } = withoutHidden(copyTextOf(container));
+		try {
+			if (!text) throw new Error('nothing to copy');
+			await navigator.clipboard.writeText(text);
+		} catch {
+			addToast(t('common.copy_failed'), 'error', 4000);
+			return;
+		}
+		const parts: string[] = [];
+		if (lines !== null) parts.push(tf('artifacts.copied_lines', { n: lines }));
+		else parts.push(removed || containedChat ? t('artifacts.copied') : t('common.copied'));
+		if (removed) parts.push(t('artifacts.copy_removed_hidden'));
+		// In a chat that only reads, the copied text is on its way to a new chat: say where it goes.
+		if (containedChat) parts.push(t('artifacts.copy_paste_hint'));
+		addToast(parts.join(' '), 'success', parts.length > 1 ? 4000 : 1500);
 	}
 
 	/** Quick export: share (mobile) / download (desktop) the artifact's SOURCE
@@ -491,24 +575,22 @@
 			// A deck legitimately reports a collapsed height — only bail on a bad
 			// height for the normal (non-deck) flow path.
 			if (!deck && (typeof h !== 'number' || h <= 0)) return;
-			const iframes = document.querySelectorAll('.artifact-frame') as NodeListOf<HTMLIFrameElement>;
-			for (const iframe of iframes) {
-				if (iframe.contentWindow === e.source) {
-					// Remember the content's intrinsic width so fullscreen can fit-to-width
-					// a wide doc (e.g. an A4-print artifact) instead of clipping it.
-					if (typeof w === 'number' && w > 0) {
-						iframe.dataset['cw'] = String(w);
-					}
-					if (deck) {
-						// 100vh slide-decks: size by 16:9 of the rendered width instead of
-						// the collapsed scrollHeight (old Math.max(h,200) clamped to 200px).
-						const deckW = iframe.clientWidth || iframe.getBoundingClientRect().width;
-						iframe.style.height = `${deckFrameHeight(deckW, window.innerHeight)}px`;
-					} else {
-						iframe.style.height = `${Math.max(h, 200)}px`;
-					}
-					break;
-				}
+			// The frame is found by the message's source in the registry of frames the app
+			// attached, never by a scan of the page, and only this view's own frames are sized.
+			const iframe = artifactFrameFor(e.source);
+			if (!iframe || !rootEl?.contains(iframe)) return;
+			// Remember the content's intrinsic width so fullscreen can fit-to-width
+			// a wide doc (e.g. an A4-print artifact) instead of clipping it.
+			if (typeof w === 'number' && w > 0) {
+				iframe.dataset['cw'] = String(w);
+			}
+			if (deck) {
+				// 100vh slide-decks: size by 16:9 of the rendered width instead of
+				// the collapsed scrollHeight (old Math.max(h,200) clamped to 200px).
+				const deckW = iframe.clientWidth || iframe.getBoundingClientRect().width;
+				iframe.style.height = `${deckFrameHeight(deckW, window.innerHeight)}px`;
+			} else {
+				iframe.style.height = `${Math.max(h, 200)}px`;
 			}
 		}
 		window.addEventListener('message', handleMessage);
@@ -521,6 +603,8 @@
 	// reuse the stable HTML without recreating iframes.
 
 	const richCache = new Map<string, string>();
+	/** The frame document of each cached HTML artifact, by the same key as `richCache`. */
+	const frameCache = new Map<string, string>();
 
 	/** A rich block (diagram, artifact, full HTML document) is cached by its language and code. */
 	function richKey(f: CodeFence): string {
@@ -532,10 +616,33 @@
 			|| (f.lang === 'html' && (f.code.includes('<!DOCTYPE') || f.code.includes('<html')));
 	}
 
+	/** One render: the markup per fence, plus, in document order, the frame documents of its frame
+	 *  slots and the keys of its artifact cards. */
+	interface FenceRender {
+		readonly results: string[];
+		readonly frames: string[];
+		readonly cards: string[];
+	}
+
 	/** What each fence becomes: a cached rich block, a placeholder while one is pending, or
 	 *  highlighted code. Never rejects. */
-	async function renderFences(fences: readonly CodeFence[]): Promise<string[]> {
-		return Promise.all(fences.map(async (f) => {
+	async function renderFences(fences: readonly CodeFence[]): Promise<FenceRender> {
+		const frames: string[] = [];
+		const cards: string[] = [];
+		const seen = new Map<string, number>();
+		// Collected in fence order, which is the order the slots and cards appear in the
+		// rendered markup: the n-th slot gets the n-th frame document.
+		for (const f of fences) {
+			if (!isRich(f) || f.lang === 'mermaid') continue;
+			const key = richKey(f);
+			if (!richCache.has(key)) continue;
+			const n = seen.get(key) ?? 0;
+			seen.set(key, n + 1);
+			cards.push(`${n}:${key}`);
+			const frame = frameCache.get(key);
+			if (frame !== undefined) frames.push(frame);
+		}
+		const results = await Promise.all(fences.map(async (f) => {
 			if (isRich(f)) {
 				const cached = richCache.get(richKey(f));
 				if (cached) return cached;
@@ -550,41 +657,167 @@
 				return `<pre><code class="language-${f.lang}">${escapeHtml(f.code)}</code></pre>`;
 			}
 		}));
+		return { results, frames, cards };
 	}
+
+	// ── Frames and card state after each render ──────────────
+
+	let rootEl = $state<HTMLDivElement | undefined>(undefined);
+	/** Frame documents and card keys of the render that is on screen. */
+	let shownFrames: readonly string[] = [];
+	let shownCards: readonly string[] = [];
+	/** The frames attached after the last render, by slot index. */
+	let attached: { html: string; iframe: HTMLIFrameElement }[] = [];
+	/** Cards the user opened, by card key: a re-render rebuilds the markup, the state stays. */
+	const openCards = new Set<string>();
+	/** Each render gets a number; a result is shown only if no later render started. */
+	let renderSeq = 0;
+
+	function ownCards(root: HTMLElement): HTMLElement[] {
+		return Array.from(root.querySelectorAll<HTMLElement>(`.artifact-container[${OWN_ATTR}]`));
+	}
+
+	function rememberOpen(container: HTMLElement, open: boolean): void {
+		if (!rootEl) return;
+		const i = ownCards(rootEl).indexOf(container);
+		const key = shownCards[i];
+		if (key === undefined) return;
+		if (open) openCards.add(key);
+		else openCards.delete(key);
+	}
+
+	/**
+	 * Put a frame into every slot of the render on screen and restore the cards' open state.
+	 *
+	 * The n-th slot carrying OWN_MARK gets the n-th frame document of the render. If the counts
+	 * differ, something on the page is not what this view built, and no slot gets a frame.
+	 *
+	 * A slot whose document did not change gets its previous frame element back (it reloads on
+	 * insertion, the browser gives a moved frame a new window). The previous frames are matched
+	 * by their document, not by their position: when a block before it changes, a frame keeps
+	 * its element even if its slot moved to another index. Equal documents are matched in the
+	 * order they appear. A frame element only ever shows one document (`attachArtifactFrame`),
+	 * so a slot with a new document gets a new element. That one starts at the last measured
+	 * height of the frame that held the same position, if no other slot kept that frame, so a
+	 * re-render (e.g. a theme flip, which changes every document) does not collapse the card to
+	 * the default height.
+	 */
+	function attachFrames(root: HTMLElement): void {
+		const slots = Array.from(root.querySelectorAll<HTMLElement>(`.artifact-frame-slot[${OWN_ATTR}]`));
+		const frames = slots.length === shownFrames.length ? shownFrames : [];
+		// The previous frames by document, in the order they appeared.
+		const byHtml = new Map<string, { html: string; iframe: HTMLIFrameElement }[]>();
+		for (const a of attached) {
+			const list = byHtml.get(a.html);
+			if (list) list.push(a);
+			else byHtml.set(a.html, [a]);
+		}
+		// First pass: every slot whose document had a frame takes that frame back.
+		const kept = new Map<number, { html: string; iframe: HTMLIFrameElement }>();
+		const claimed = new Set<HTMLIFrameElement>();
+		slots.forEach((_slot, i) => {
+			const html = frames[i];
+			if (html === undefined) return;
+			const prev = byHtml.get(html)?.shift();
+			if (!prev) return;
+			kept.set(i, prev);
+			claimed.add(prev.iframe);
+		});
+		const next: { html: string; iframe: HTMLIFrameElement }[] = [];
+		slots.forEach((slot, i) => {
+			const html = frames[i];
+			if (html === undefined) return;
+			const prev = kept.get(i);
+			if (prev) {
+				// Already in place: appending it again would reload it.
+				if (prev.iframe.parentElement !== slot) slot.appendChild(prev.iframe);
+				attachArtifactFrame(prev.iframe, html);
+				next.push(prev);
+				return;
+			}
+			const iframe = document.createElement('iframe');
+			iframe.className = 'artifact-frame';
+			iframe.setAttribute('sandbox', 'allow-scripts');
+			iframe.setAttribute('scrolling', 'no');
+			iframe.setAttribute('loading', 'lazy');
+			const before = attached[i];
+			if (before && !claimed.has(before.iframe)) {
+				iframe.style.height = before.iframe.style.height;
+				const cw = before.iframe.dataset['cw'];
+				if (cw !== undefined) iframe.dataset['cw'] = cw;
+			}
+			slot.appendChild(iframe);
+			attachArtifactFrame(iframe, html);
+			next.push({ html, iframe });
+		});
+		// A render with no slots at all (the placeholders while a block is rebuilt, e.g. after a
+		// theme flip) keeps the last frames, so the rebuilt ones can start at their height.
+		if (slots.length > 0) attached = next;
+
+		const cards = ownCards(root);
+		if (cards.length !== shownCards.length) return;
+		cards.forEach((card, i) => {
+			const open = openCards.has(shownCards[i]!);
+			card.classList.toggle('artifact-collapsed', !open);
+			card.querySelector('.artifact-chevron')?.setAttribute('aria-expanded', String(open));
+		});
+	}
+
+	// Runs after the DOM update of each render (a user effect runs after the template's).
+	$effect(() => {
+		void (highlightedHtml || baseHtml);
+		const root = rootEl;
+		if (!root) return;
+		untrack(() => attachFrames(root));
+	});
+
+	function show(seq: number, html: string, r: FenceRender | null): void {
+		if (seq !== renderSeq) return;
+		shownFrames = r ? r.frames : [];
+		shownCards = r ? r.cards : [];
+		highlightedHtml = html;
+	}
+
+	/** The theme the cached blocks were built for. */
+	let renderedTheme: ResolvedTheme | null = null;
 
 	/*
 	 * PRD-LIGHT-MODE PR 2a — theme-reactive re-render.
 	 *
-	 * Mermaid SVGs, Shiki-highlighted HTML, and iframe srcdoc all bake the
+	 * Mermaid SVGs, Shiki-highlighted HTML, and artifact frame documents all bake the
 	 * theme palette into their output. When the user toggles theme:
-	 *   1. richCache.clear() drops cached SVGs + iframe srcdocs.
+	 *   1. richCache.clear() drops cached SVGs + frame documents.
 	 *   2. the fences are rendered again (theme is read via getResolvedTheme()).
 	 *   3. highlightedHtml is reassigned, Svelte re-renders.
 	 *
 	 * Reading getResolvedTheme() inside the $effect tracks it as a dep, so
 	 * the effect re-fires on theme change without any explicit subscription.
+	 * The flip is compared with the theme the blocks were BUILT for, not with mermaid's: a
+	 * message with an HTML artifact and no diagram has to re-render too.
 	 */
 	$effect(() => {
 		const html = baseHtml;
 		const theme = getResolvedTheme();
-		// Touch theme so $effect tracks it.
-		void theme;
 		// On theme change, clear caches so re-render picks up new palette.
-		if (mermaidInitTheme !== null && mermaidInitTheme !== theme) {
+		if (renderedTheme !== null && renderedTheme !== theme) {
 			richCache.clear();
+			frameCache.clear();
 		}
+		renderedTheme = theme;
 		// Fences are found on the parsed fragment, never by a pattern over the sanitized string.
 		const parsed = parseFences(html, document);
 		const fences = parsed.fences;
 
 		if (fences.length === 0) {
-			highlightedHtml = html;
+			show(++renderSeq, html, null);
 			return;
 		}
 
-		// Immediate render — uses cached rich blocks or falls back to shiki
-		void renderFences(fences).then((results) => {
-			highlightedHtml = parsed.render(results);
+		// Immediate render — uses cached rich blocks or falls back to shiki. It can resolve
+		// after the debounced render below; the render number keeps it from overwriting that.
+		const immediate = ++renderSeq;
+		void renderFences(fences).then((r) => {
+			show(immediate, parsed.render(r.results), r);
 		});
 
 		// Debounce uncached rich blocks (prevents iframe flash during streaming)
@@ -601,12 +834,18 @@
 		// keep the 400 ms debounce to coalesce late fence closings.
 		const delay = workset.every((f) => f.lang === 'artifact' && isMarkdownArtifact(f.code)) ? 0 : 400;
 
+		// run-group-starter: a browser render debounce, cleared by the effect's teardown.
 		const timer = setTimeout(async () => {
 			for (const f of workset) {
 				const key = richKey(f);
 				try {
 					if (f.lang === 'mermaid') richCache.set(key, await renderMermaid(f.code));
-					else richCache.set(key, buildArtifact(f.code)); // artifact + html full docs
+					else {
+						// artifact + html full docs
+						const built = buildArtifact(f.code);
+						if (built.frame !== null) frameCache.set(key, built.frame);
+						richCache.set(key, built.markup);
+					}
 				} catch (err) {
 					// Failed mermaid would otherwise show a perma-placeholder
 					// because renderFences falls back to placeholder for any
@@ -629,7 +868,9 @@
 				}
 			}
 			if (baseHtml === html) {
-				highlightedHtml = parsed.render(await renderFences(fences));
+				const seq = ++renderSeq;
+				const r = await renderFences(fences);
+				show(seq, parsed.render(r.results), r);
 			}
 		}, delay);
 
@@ -639,14 +880,14 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div onclick={handleContainerClick} class="markdown-root prose prose-invert max-w-none min-w-0
+<div bind:this={rootEl} onclick={handleContainerClick} class="markdown-root prose prose-invert max-w-none min-w-0
 	prose-pre:bg-bg-muted prose-pre:border prose-pre:border-border prose-pre:rounded-[var(--radius-md)] prose-pre:overflow-x-auto
 	prose-code:text-accent-text prose-code:text-xs prose-code:font-mono
 	prose-a:text-accent-text prose-a:underline prose-a:decoration-accent-text/40 prose-a:underline-offset-2 hover:prose-a:decoration-accent-text
 	prose-headings:text-text prose-headings:font-medium prose-headings:tracking-tight
 	prose-p:leading-relaxed prose-li:leading-relaxed
 	prose-strong:text-text prose-strong:font-semibold">
-	<!-- eslint-disable-next-line svelte/no-at-html-tags -- baseHtml: renderSanitizedMarkdown (marked, DOMPurify, then link and table wrapping on the sanitized DOM). highlightedHtml: baseHtml re-parsed into an inert template, each whole fence element replaced by markup this file builds (Shiki output, escaped code, mermaid SVG at mermaid's default strict level with its action buttons (static icons, base64 source), mermaid error and reloading cards (escaped message and source), artifact cards with escaped values, sanitized markdown or a sandboxed iframe, static i18n strings), then serialized once (utils/code-fences.ts) -->
+	<!-- eslint-disable-next-line svelte/no-at-html-tags -- baseHtml: renderSanitizedMarkdown (marked, DOMPurify, then link and table wrapping on the sanitized DOM). highlightedHtml: baseHtml re-parsed into an inert template, each whole fence element replaced by markup this file builds (Shiki output, escaped code, mermaid SVG at mermaid's default strict level with its action buttons (static icons, base64 source), mermaid error and reloading cards (escaped message and source), artifact cards with escaped values, sanitized markdown or an empty frame slot that `attachFrames` fills with a frame on the sandboxed endpoint, static i18n strings), then serialized once (utils/code-fences.ts) -->
 	{@html highlightedHtml || baseHtml}
 </div>
 
@@ -1066,6 +1307,14 @@
 		line-height: 0;
 		transition: color 0.15s, border-color 0.15s;
 	}
+	div :global(.artifact-copy) {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		line-height: 1;
+		font-size: 0.75rem;
+		padding: 0.25rem 0.5rem;
+	}
 	div :global(.artifact-btn:hover) {
 		color: var(--color-text);
 		border-color: var(--color-border);
@@ -1106,11 +1355,22 @@
 	   icon/type/title/chevron make up the pill. */
 	div :global(.artifact-collapsed .artifact-frame),
 	div :global(.artifact-collapsed .artifact-md-body),
-	div :global(.artifact-collapsed .artifact-data-body) {
+	div :global(.artifact-collapsed .artifact-data-body),
+	div :global(.artifact-collapsed .artifact-data-more) {
 		display: none;
 	}
-	div :global(.artifact-collapsed .artifact-btn) {
+	/* The copy button stays on the closed card: the way out of a chat that only reads must be
+	   found without opening the card. The pill may wrap at 390px for it. */
+	div :global(.artifact-collapsed .artifact-btn:not(.artifact-copy)) {
 		display: none;
+	}
+	div :global(.artifact-collapsed .artifact-toolbar) {
+		flex-wrap: wrap;
+	}
+	div :global(.artifact-data-more) {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+		padding: 0.25rem 0.75rem 0.5rem;
 	}
 
 	div :global(.hidden) {

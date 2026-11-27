@@ -28,6 +28,8 @@ export type FailReason =
   | 'budget_exceeded'
   /** The model archived a mail a person forwarded (`forwarded.ts`); it is shown instead. */
   | 'forwarded_by_person'
+  /** The model filed a mail the sensitive check flagged (`mask`/`allow`) as handled; it is shown instead. */
+  | 'sensitive_content'
   /** A description rule would have filed a sensitive mail as handled; it is shown instead. */
   | 'rule_withheld_sensitive'
   /** A description rule would have filed the mail as handled, but the classifier does not see it

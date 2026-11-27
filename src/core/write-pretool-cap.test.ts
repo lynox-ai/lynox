@@ -113,7 +113,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
     const path = join(ws, 'data.csv');
     const shown = async (): Promise<string> => {
       const agent = agentWith();
-      agent.promptUser = vi.fn().mockResolvedValue('Allow');
+      agent.promptUser = vi.fn().mockResolvedValue('allow');
       const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
       try {
         await call(agent, 'write_file', { path, content: 'new text' });
@@ -271,7 +271,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
     const path = join(ws, 'pipe.csv');
     fifoWithLateWriter(path);
     const agent = agentWith();
-    agent.promptUser = vi.fn().mockResolvedValue('Allow');
+    agent.promptUser = vi.fn().mockResolvedValue('allow');
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       const started = Date.now();

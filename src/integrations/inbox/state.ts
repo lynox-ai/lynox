@@ -26,8 +26,11 @@ import type {
   InboxRuleAction,
   InboxRuleMatcherKind,
   InboxRuleSource,
+  InboxRuleWithheld,
+  InboxRuleWithheldReason,
   InboxUserAction,
 } from '../../types/index.js';
+import { INBOX_RULE_WITHHELD_REASONS } from '../../types/index.js';
 import { sanitizeHeader, stripHtmlAndInvisibles } from './classifier/sanitize.js';
 import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 
@@ -63,6 +66,8 @@ export interface InboxItemInput {
   inReplyTo?: string | undefined;
   /** The rule that filed the item (v20). */
   matchedRuleId?: string | undefined;
+  /** The rule that named the item but was not applied (v24). Never set with `matchedRuleId`. */
+  ruleWithheld?: { id: string; name: string | undefined; reason: InboxRuleWithheldReason } | undefined;
 }
 
 /**
@@ -262,6 +267,10 @@ interface ItemRow {
   notified_at: number | null;
   // v20 — null on items no rule filed
   matched_rule_id: string | null;
+  // v24 — null on items no rule was withheld on (and the id null once that rule is deleted)
+  rule_withheld_id: string | null;
+  rule_withheld_name: string | null;
+  rule_withheld_reason: string | null;
 }
 
 interface AuditRow {
@@ -313,6 +322,17 @@ interface ThreadMessageRow {
 
 // ── Row → domain mappers ───────────────────────────────────────────────────
 
+function isRuleWithheldReason(value: string): value is InboxRuleWithheldReason {
+  return (INBOX_RULE_WITHHELD_REASONS as ReadonlyArray<string>).includes(value);
+}
+
+/** The withheld rule of a row; the reason column is the marker (the id is cleared on delete). */
+function rowToRuleWithheld(row: ItemRow): InboxRuleWithheld | null {
+  const reason = row.rule_withheld_reason;
+  if (reason === null || reason === undefined || !isRuleWithheldReason(reason)) return null;
+  return { id: row.rule_withheld_id ?? null, name: row.rule_withheld_name ?? null, reason };
+}
+
 function rowToItem(row: ItemRow): InboxItem {
   return {
     id: row.id,
@@ -341,6 +361,7 @@ function rowToItem(row: ItemRow): InboxItem {
     notifyOnUnsnooze: row.notify_on_unsnooze === 1,
     notifiedAt: row.notified_at !== null ? new Date(row.notified_at) : undefined,
     ...(row.matched_rule_id !== null && row.matched_rule_id !== undefined ? { matchedRuleId: row.matched_rule_id } : {}),
+    ruleWithheld: rowToRuleWithheld(row),
   };
 }
 
@@ -416,6 +437,14 @@ const MAX_LIST_LIMIT = 500;
  */
 export const MAX_ITEM_BODY_CHARS = 8 * 1024;
 
+/**
+ * The classifier version of an item a flagged follow-up raised to "requires you"
+ * (`raiseToRequiresUser`): the list shows why it is back while it has this value. The owner's next
+ * action or snooze turns it into {@link RAISED_SEEN_CLASSIFIER_VERSION}.
+ */
+export const RAISED_CLASSIFIER_VERSION = 'sensitive-follow-up';
+export const RAISED_SEEN_CLASSIFIER_VERSION = 'sensitive-follow-up:seen';
+
 export class InboxStateDb {
   constructor(private readonly db: Database.Database) {}
 
@@ -431,6 +460,10 @@ export class InboxStateDb {
    * than corrupting.
    */
   insertItem(input: InboxItemInput): string {
+    // An item is either filed by a rule or names one that was withheld, never both.
+    if (input.matchedRuleId !== undefined && input.ruleWithheld !== undefined) {
+      throw new Error('insertItem: matchedRuleId and ruleWithheld are exclusive');
+    }
     const id = nextId('inb');
     const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
     const unsnoozeOnReply = input.unsnoozeOnReply ?? true;
@@ -441,8 +474,9 @@ export class InboxStateDb {
            bucket, confidence, reason_de, classified_at, classifier_version,
            unsnooze_on_reply,
            from_address, from_name, subject, mail_date, snippet,
-           message_id, in_reply_to, matched_rule_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           message_id, in_reply_to, matched_rule_id,
+           rule_withheld_id, rule_withheld_name, rule_withheld_reason
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (tenant_id, account_id, thread_key) DO NOTHING`,
       )
       .run(
@@ -465,6 +499,9 @@ export class InboxStateDb {
         input.messageId ?? null,
         input.inReplyTo ?? null,
         input.matchedRuleId ?? null,
+        input.ruleWithheld?.id ?? null,
+        input.ruleWithheld?.name ?? null,
+        input.ruleWithheld?.reason ?? null,
       ) as { changes: number };
     if (result.changes > 0) return id;
     // Race lost — another job inserted first. Return that row's id.
@@ -584,6 +621,35 @@ export class InboxStateDb {
     return row ? rowToItem(row) : null;
   }
 
+  /**
+   * The item of this account and tenant that a mail answers, by a Message-ID the mail names as
+   * its parent: the item's own mail or a message the thread store holds for it (a follow-up).
+   * Unlike the two lookups above this one is scoped to the account and tenant: the Message-ID
+   * comes from the sender's headers, and a mail must not join a thread it was not delivered into.
+   * Only called for a server without thread ids, where an item filed from a mail with a
+   * Message-ID has that Message-ID as its thread key; the query seeks the indexed thread key and
+   * also requires the Message-ID, so an item keyed otherwise (a mail without one) is never named.
+   */
+  findItemByParentMessageId(accountId: string, messageId: string, tenantId: string = DEFAULT_TENANT_ID): InboxItem | null {
+    if (!messageId) return null;
+    const own = this.db
+      .prepare<[string, string, string, string], ItemRow>(
+        'SELECT * FROM inbox_items WHERE tenant_id = ? AND account_id = ? AND thread_key = ? AND message_id = ? LIMIT 1',
+      )
+      .get(tenantId, accountId, messageId, messageId);
+    if (own) return rowToItem(own);
+    const inThread = this.db
+      .prepare<[string, string, string], ItemRow>(
+        `SELECT i.* FROM inbox_thread_messages t
+           JOIN inbox_items i
+             ON i.tenant_id = t.tenant_id AND i.account_id = t.account_id AND i.thread_key = t.thread_key
+          WHERE t.tenant_id = ? AND t.account_id = ? AND t.message_id = ?
+          ORDER BY i.classified_at DESC LIMIT 1`,
+      )
+      .get(tenantId, accountId, messageId);
+    return inThread ? rowToItem(inThread) : null;
+  }
+
   /** Whether the thread store already holds this message for this account. */
   hasThreadMessage(tenantId: string, accountId: string, messageId: string): boolean {
     const row = this.db
@@ -609,6 +675,29 @@ export class InboxStateDb {
           WHERE id = ? AND tenant_id = ? AND user_action = 'replied'`,
       )
       .run(mailDate.getTime(), at.getTime(), id, tenantId) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /**
+   * Brings an item back to where the owner sees it, for a flagged message that arrived in its
+   * thread: "requires you", no user action, not snoozed, with the message's date at the top of its
+   * list. Only ever raises: an item that is open in "requires you" already is left alone, so the
+   * same state reached twice writes nothing. Returns whether the row changed.
+   */
+  raiseToRequiresUser(id: string, tenantId: string, mailDate: Date, at: Date = new Date()): boolean {
+    const now = at.getTime();
+    const result = this.db
+      .prepare<[number, number, string, string, number], unknown>(
+        `UPDATE inbox_items
+            SET bucket = 'requires_user', user_action = NULL, user_action_at = NULL,
+                snooze_until = NULL, snooze_condition = NULL, notify_on_unsnooze = 0,
+                classifier_version = '${RAISED_CLASSIFIER_VERSION}',
+                mail_date = ?, classified_at = ?
+          WHERE id = ? AND tenant_id = ?
+            AND NOT (bucket = 'requires_user' AND user_action IS NULL
+                     AND (snooze_until IS NULL OR snooze_until <= ?))`,
+      )
+      .run(mailDate.getTime(), now, id, tenantId, now) as { changes: number };
     return result.changes > 0;
   }
 
@@ -998,39 +1087,64 @@ export class InboxStateDb {
    * older than `now - withinMs` are NOT reverted; callers surface this
    * as 410 Gone to the UI.
    */
-  undoBulkAction(
+  undoBulkAction(bulkId: string, now: Date = new Date(), withinMs: number = 60_000): number {
+    return this.undoBulkActionCounted(bulkId, now, withinMs).total;
+  }
+
+  /**
+   * {@link undoBulkAction} with what it did: `total` log rows taken, `reverted` items put back,
+   * `skipped` items left as they are because they changed since the bulk action.
+   */
+  undoBulkActionCounted(
     bulkId: string,
     now: Date = new Date(),
     withinMs: number = 60_000,
-  ): number {
+  ): { total: number; reverted: number; skipped: number } {
     const earliest = now.getTime() - withinMs;
     const rows = this.db
-      .prepare<[string, number], { id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null }>(
-        `SELECT id, item_id, prior_user_action, prior_user_action_at
+      .prepare<[string, number], { id: string; tenant_id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null; action: string }>(
+        `SELECT id, tenant_id, item_id, prior_user_action, prior_user_action_at, action
          FROM inbox_user_action_log
          WHERE bulk_id = ? AND undone_at IS NULL AND performed_at >= ?`,
       )
       .all(bulkId, earliest);
-    if (rows.length === 0) return 0;
+    if (rows.length === 0) return { total: 0, reverted: 0, skipped: 0 };
     const undoMs = now.getTime();
     const flipUndone = this.db.prepare(
       `UPDATE inbox_user_action_log SET undone_at = ? WHERE id = ?`,
     );
+    // Only an item still as the bulk action left it: one that changed since (a flagged message
+    // brought it back to "requires you") is not put back out of view.
     const restoreAction = this.db.prepare(
-      `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ?`,
+      `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ? AND user_action IS ?`,
     );
+    let reverted = 0;
     const txn = this.db.transaction(() => {
       for (const row of rows) {
         flipUndone.run(undoMs, row.id);
-        restoreAction.run(
+        const r = restoreAction.run(
           row.prior_user_action,
           row.prior_user_action_at,
           row.item_id,
-        );
+          row.action,
+        ) as { changes: number };
+        reverted += r.changes;
+        // The item's audit says it was put back: the action log is pruned after minutes, and a
+        // later count of the mail since the owner last dealt with the thread reads the audit.
+        if (r.changes > 0) {
+          this.appendAudit({
+            tenantId: row.tenant_id,
+            itemId: row.item_id,
+            action: 'undo',
+            actor: 'user',
+            payloadJson: JSON.stringify({ intent: 'bulk_undo', bulk_id: bulkId, undid: row.action, restored: row.prior_user_action }),
+            createdAt: now,
+          });
+        }
       }
     });
     txn();
-    return rows.length;
+    return { total: rows.length, reverted, skipped: rows.length - reverted };
   }
 
   /**
@@ -1089,10 +1203,14 @@ export class InboxStateDb {
     tenantId: string = DEFAULT_TENANT_ID,
   ): boolean {
     const result = this.db
-      .prepare<[string | null, number | null, string, string], unknown>(
-        `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ? AND tenant_id = ?`,
+      .prepare<[string | null, number | null, string | null, string, string], unknown>(
+        // The owner's next action ends the "back here" of a raised item (`RAISED_CLASSIFIER_VERSION`).
+        `UPDATE inbox_items SET user_action = ?, user_action_at = ?,
+           classifier_version = CASE WHEN ? IS NOT NULL AND classifier_version = '${RAISED_CLASSIFIER_VERSION}'
+             THEN '${RAISED_SEEN_CLASSIFIER_VERSION}' ELSE classifier_version END
+         WHERE id = ? AND tenant_id = ?`,
       )
-      .run(action, action === null ? null : (at ?? new Date()).getTime(), id, tenantId) as { changes: number };
+      .run(action, action === null ? null : (at ?? new Date()).getTime(), action, id, tenantId) as { changes: number };
     return result.changes > 0;
   }
 
@@ -1132,7 +1250,9 @@ export class InboxStateDb {
     const result = this.db
       .prepare<[number, string | null, number, number, string, string], unknown>(
         `UPDATE inbox_items
-         SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?, notify_on_unsnooze = ?
+         SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?, notify_on_unsnooze = ?,
+             classifier_version = CASE WHEN classifier_version = '${RAISED_CLASSIFIER_VERSION}'
+               THEN '${RAISED_SEEN_CLASSIFIER_VERSION}' ELSE classifier_version END
          WHERE id = ? AND tenant_id = ?`,
       )
       .run(
@@ -1282,6 +1402,22 @@ export class InboxStateDb {
       )
       .run(id, tenantId, input.itemId, input.action, input.actor, input.payloadJson, createdAt);
     return id;
+  }
+
+  /**
+   * The categories the sensitive check found in an item's own mail, from its audit: every branch
+   * that files a flagged mail records them there. A reader withholds the item's mail by this, and a
+   * push names no sender or subject for it.
+   */
+  sensitiveCategoriesAtIngest(item: Pick<InboxItem, 'id' | 'tenantId'>): string[] {
+    const found = new Set<string>();
+    for (const entry of this.listAuditForItem(item.id, item.tenantId)) {
+      let payload: unknown;
+      try { payload = JSON.parse(entry.payloadJson); } catch { continue; }
+      const cats = (payload as { sensitive_categories?: unknown } | null)?.sensitive_categories;
+      if (Array.isArray(cats)) for (const c of cats) if (typeof c === 'string' && c.length > 0) found.add(c);
+    }
+    return [...found];
   }
 
   listAuditForItem(
@@ -1533,6 +1669,28 @@ export class InboxStateDb {
     }).immediate();
   }
 
+  /** Rules the agent proposed that wait for the owner's confirmation, over all accounts of a tenant. */
+  countPendingRules(tenantId: string = DEFAULT_TENANT_ID): number {
+    const { n } = this.db
+      .prepare<[string], { n: number }>(
+        'SELECT COUNT(*) AS n FROM inbox_rules WHERE tenant_id = ? AND confirmed_at IS NULL',
+      )
+      .get(tenantId) as { n: number };
+    return n;
+  }
+
+  /** The same waiting rules, per account of the tenant; an account with none is left out. */
+  countPendingRulesByAccount(tenantId: string = DEFAULT_TENANT_ID): Record<string, number> {
+    const rows = this.db
+      .prepare<[string], { account_id: string; n: number }>(
+        'SELECT account_id, COUNT(*) AS n FROM inbox_rules WHERE tenant_id = ? AND confirmed_at IS NULL GROUP BY account_id ORDER BY account_id',
+      )
+      .all(tenantId);
+    const out: Record<string, number> = {};
+    for (const r of rows) out[r.account_id] = r.n;
+    return out;
+  }
+
   /** How many rules of one kind an account has, waiting ones included. */
   countRulesOfKind(accountId: string, kind: InboxRuleMatcherKind, tenantId: string = DEFAULT_TENANT_ID): number {
     const { n } = this.db
@@ -1584,7 +1742,8 @@ export class InboxStateDb {
     return rows.map(rowToRule);
   }
 
-  /** Deletes a rule and clears it from the items it filed; its name stays in their audit. */
+  /** Deletes a rule and clears it from the items it filed; its name stays in their audit. On the
+   *  items it was withheld on, its id is cleared and its name and the reason stay. */
   deleteRule(id: string, tenantId: string = DEFAULT_TENANT_ID): boolean {
     return this.db.transaction((): boolean => {
       const result = this.db
@@ -1593,6 +1752,9 @@ export class InboxStateDb {
       if (result.changes === 0) return false;
       this.db
         .prepare('UPDATE inbox_items SET matched_rule_id = NULL WHERE tenant_id = ? AND matched_rule_id = ?')
+        .run(tenantId, id);
+      this.db
+        .prepare('UPDATE inbox_items SET rule_withheld_id = NULL WHERE tenant_id = ? AND rule_withheld_id = ?')
         .run(tenantId, id);
       return true;
     })();

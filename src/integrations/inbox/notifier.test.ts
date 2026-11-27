@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { NotificationRouter, type NotificationMessage } from '../../core/notification-router.js';
-import { createInboxNotifier, isInQuietHours, sanitisePushText } from './notifier.js';
+import { FLAGGED_PUSH_TEXT, createInboxNotifier, isInQuietHours, sanitisePushText } from './notifier.js';
 import type { InboxItem } from '../../types/index.js';
 
 function fakeItem(over: Partial<InboxItem> = {}): InboxItem {
@@ -45,10 +45,45 @@ describe('sanitisePushText', () => {
 
   it('strips Unicode bidi/format overrides (no RTL spoofing)', () => {
     // U+202E = RIGHT-TO-LEFT OVERRIDE — without this filter, a sender
-    // name like "evil‮gro.acme" reverse-renders as "acme.gro.live"
+    // name like "evil\u202Egro.acme" reverse-renders as "acme.gro.live"
     // in the OS toast and can pretend to be a known contact.
-    expect(sanitisePushText('evil‮gro.acme')).toBe('evilgro.acme');
-    expect(sanitisePushText('zwj‍joiner')).toBe('zwjjoiner');
+    expect(sanitisePushText('evil\u202Egro.acme')).toBe('evilgro.acme');
+    expect(sanitisePushText('zwj\u200Djoiner')).toBe('zwjjoiner');
+  });
+});
+
+describe('createInboxNotifier — a mail the sensitive check flagged', () => {
+  function capture(language?: string): { sent: NotificationMessage[]; notifier: ReturnType<typeof createInboxNotifier> } {
+    const router = new NotificationRouter();
+    const sent: NotificationMessage[] = [];
+    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return 'delivered' as const; } });
+    return { sent, notifier: createInboxNotifier({ router, language: () => language }) };
+  }
+  const item = fakeItem({ fromName: 'Praxis Dr. Muster', fromAddress: 'praxis@muster.example', subject: 'Ihr Befund 482917', reasonDe: 'Enthält Gesundheitsdaten' });
+
+  it('says the fixed German text, with neither sender, subject nor reason', async () => {
+    const { sent, notifier } = capture('de');
+    expect(await notifier.notifyNewItem(item, { flagged: true })).toBe(true);
+    expect(sent[0]?.title).toBe('Inbox');
+    expect(sent[0]?.body).toBe('Neue Mail mit vertraulichem Inhalt. Absender und Betreff siehst du in lynox.');
+    for (const leak of ['Praxis', 'muster.example', 'Befund', '482917', 'Gesundheit']) expect(sent[0]?.body).not.toContain(leak);
+    expect(sent[0]?.data).toEqual({ itemId: 'inb_test' });
+  });
+
+  it('says the fixed English text on an English instance', async () => {
+    const { sent, notifier } = capture('en');
+    await notifier.notifyNewItem(item, { flagged: true });
+    expect(sent[0]?.body).toBe('New mail with confidential content. Sender and subject are in lynox.');
+    expect(sent[0]?.body).toBe(FLAGGED_PUSH_TEXT.en);
+  });
+
+  it('leaves an item that is not flagged as it was: sender and subject', async () => {
+    for (const language of ['de', 'en']) {
+      const { sent, notifier } = capture(language);
+      await notifier.notifyNewItem(item, { flagged: false });
+      await notifier.notifyNewItem(item);
+      expect(sent.map((m) => m.body)).toEqual(['Praxis Dr. Muster: Ihr Befund 482917']);
+    }
   });
 });
 
