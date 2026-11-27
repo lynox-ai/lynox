@@ -67,7 +67,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// behaviour tests. A copy in the component would be a second rule with no
 		// test, and the source assertions here cannot see what a copy does.
 		expect(SCRIPT).toContain(
-			"import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
+			"import { awaitsConfirmation, displaySafe, instructionOf, markHidden, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
 		);
 		expect(SCRIPT).toContain("import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';");
 		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'showsInstruction', 'showsWatchAddress', 'showsWatchTarget', 'watchOf', 'awaitsOwnerStamp', 'listedLine', 'listedNote', 'stampable', 'usesConnections']) {

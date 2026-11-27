@@ -32,13 +32,15 @@ const runner = vi.hoisted(() => ({
   // The stamp was taken over other steps than the ones the workflow has now.
   staleStamp: { value: false },
 }));
-const budget = vi.hoisted(() => ({ refuse: false, released: 0 }));
+const budget = vi.hoisted(() => ({ refuse: false, released: 0, releasedUSD: 0 }));
 vi.mock('./session-budget.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('./session-budget.js')>();
   return {
     ...real,
     reservePersistentBudget: (usd: number) => budget.refuse ? { allowed: false, reason: 'monthly cap reached', reservedUSD: 0 } : real.reservePersistentBudget(usd),
     releasePersistentBudget: (usd: number) => { budget.released++; real.releasePersistentBudget(usd); },
+    // The worker gives an admission's reservation back by the object it was issued as.
+    releaseReservation: (r: Parameters<typeof real.releaseReservation>[0]) => { budget.released++; budget.releasedUSD += r.reservedUSD; real.releaseReservation(r); },
   };
 });
 vi.mock('./saved-workflow-runner.js', () => ({ runGuardedSavedWorkflow: (...args: unknown[]) => runner.run(...args) }));
@@ -79,6 +81,7 @@ describe('the webhook drain', () => {
     runner.staleStamp.value = false;
     budget.refuse = false;
     budget.released = 0;
+    budget.releasedUSD = 0;
     dir = mkdtempSync(join(tmpdir(), 'lynox-webhook-drain-'));
     history = new RunHistory(join(dir, 'history.db'));
     engineDb = new EngineDb(join(dir, 'engine.db'));
@@ -168,6 +171,23 @@ describe('the webhook drain', () => {
     expect([after.status, after.next_run_at, after.enabled]).toEqual([before.status, before.next_run_at, before.enabled]);
     expect(after.last_run_status).toBe('success');
     expect(eventOf(t, id).runId).toBe('run-1');
+  });
+
+  it('gives the budget reservation back once the event\'s run settled', async () => {
+    const { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } = await import('./session-budget.js');
+    configurePersistentBudget({ costProvider: { getCostByDay: () => [] }, dailyCapUSD: 100, monthlyCapUSD: 1000 });
+    try {
+      let heldWhileRunning = 0;
+      runner.run.mockImplementationOnce(() => { heldWhileRunning = getReservedInFlight(); return Promise.resolve({ ok: true, status: 'completed', runId: 'run-1' }); });
+      const t = sharedTrigger();
+      const id = deliver(t);
+      await loop.tick();
+      await settled(t, id, 'done');
+      expect(heldWhileRunning, 'positive control: the run was held').toBeGreaterThan(0);
+      await vi.waitFor(() => { expect(getReservedInFlight(), 'the hold is back').toBe(0); });
+    } finally {
+      resetPersistentBudget();
+    }
   });
 
   // The run is held as an event's start, so a workflow its steps start never says it was
@@ -664,9 +684,18 @@ describe('the webhook drain', () => {
     const t = sharedTrigger();
     const id = deliver(t);
     const spy = vi.spyOn(WorkerLoop.prototype as unknown as { takeLease: (id: string) => string }, 'takeLease').mockImplementationOnce(() => { throw new Error('database is locked'); });
-    await loop.tick();
-    expect(spy).toHaveBeenCalled();
-    expect(budget.released).toBe(1);
+    // A real hold, so the release is measured in money and not only counted as a call.
+    const { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } = await import('./session-budget.js');
+    configurePersistentBudget({ costProvider: { getCostByDay: () => [] }, dailyCapUSD: 100, monthlyCapUSD: 1000 });
+    try {
+      await loop.tick();
+      expect(spy).toHaveBeenCalled();
+      expect(budget.released).toBe(1);
+      expect(budget.releasedUSD, 'positive control: a real hold was taken').toBeGreaterThan(0);
+      expect(getReservedInFlight(), 'the hold is back').toBe(0);
+    } finally {
+      resetPersistentBudget();
+    }
     expect(eventOf(t, id).state).toBe('received');
   });
 
@@ -1047,7 +1076,7 @@ describe('the ledger\'s moves', () => {
   it('gets the index on a database that ran the drain columns before it existed', () => {
     const db = engineDb.getDb();
     // Every later version goes too: the migrations run from the highest one recorded.
-    db.exec('ALTER TABLE triggers DROP COLUMN last_run_member_notes; DROP INDEX IF EXISTS idx_bulk_runs_superseded; ALTER TABLE bulk_runs DROP COLUMN superseded_by; ALTER TABLE triggers DROP COLUMN last_escalation_chat_kind; ALTER TABLE triggers DROP COLUMN last_escalation_thread_id; ALTER TABLE triggers DROP COLUMN last_escalation_case; ALTER TABLE bulk_targets DROP COLUMN refusal_detail; ALTER TABLE bulk_targets DROP COLUMN target_title; DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause; ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62; DROP INDEX IF EXISTS idx_audit_log_poll_fold; DROP INDEX IF EXISTS idx_audit_log_ts; ALTER TABLE audit_log DROP COLUMN poll_last; ALTER TABLE audit_log DROP COLUMN poll_count;');
+    db.exec('ALTER TABLE triggers DROP COLUMN last_run_member_notes; ALTER TABLE bulk_runs DROP COLUMN phase_before_undo; DROP INDEX IF EXISTS idx_bulk_runs_superseded; ALTER TABLE bulk_runs DROP COLUMN superseded_by; ALTER TABLE triggers DROP COLUMN last_escalation_chat_kind; ALTER TABLE triggers DROP COLUMN last_escalation_thread_id; ALTER TABLE triggers DROP COLUMN last_escalation_case; ALTER TABLE bulk_targets DROP COLUMN refusal_detail; ALTER TABLE bulk_targets DROP COLUMN target_title; DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause; ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62; DROP INDEX IF EXISTS idx_audit_log_poll_fold; DROP INDEX IF EXISTS idx_audit_log_ts; ALTER TABLE audit_log DROP COLUMN poll_last; ALTER TABLE audit_log DROP COLUMN poll_count;');
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'));
     expect(engineDb.getDb().prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbound_events_state_received'`).get()).toBeDefined();

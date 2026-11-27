@@ -286,7 +286,7 @@ const TRIGGER_READ_COLS =
 /**
  * The stored lines of a last run; a malformed or empty value is none, never a throw. A run end
  * stores its lines as an array, each read as it was recorded, so a line that holds `\n• ` itself
- * stays one line. The entry the v79 migration split off a result (`{"migrated": …}`) holds every
+ * stays one line. The entry the v80 migration split off a result (`{"migrated": …}`) holds every
  * line after the first, joined as recorded: it alone is read as those lines, so a repeat compares
  * line by line, and read back joined it is the same text.
  */
