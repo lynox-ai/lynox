@@ -8,7 +8,7 @@ import { AgentMemoryDb, AGENT_MEMORY_SCHEMA_VERSION } from './agent-memory-db.js
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
-import { readHeldGraph } from './graph-export.js';
+import { MEMORY_TEXTS_RELATIONSHIPS_NOTE, MEMORY_TEXT_EXPORT_CAP, UNREADABLE_MEMORY_TEXT, graphHoldsRowsNotExported, readHeldGraph, readMemoryTextsForExport } from './graph-export.js';
 import { EXPORT_RELATIONS_PER_ENTITY } from './knowledge-layer.js';
 
 /**
@@ -118,23 +118,18 @@ describe('readHeldGraph', () => {
     }
   });
 
-  it('marks the block while remembered texts or mentions are stored, which it does not carry', async () => {
+  it('does not mark the graph for stored remembered texts, which the export now reads on its own', async () => {
     const db = new AgentMemoryDb(file);
     db.setEmbeddingDimensions(3);
     seedGraph(db);
     db.createMemory({ text: 'Alice prefers mornings', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
     db.close();
-
-    const legacy = await readHeldGraph({ agentMemoryFile: file, engineDb, subjectGraph: false });
-    expect(legacy.entities, 'the graph is still read').toHaveLength(2);
-    expect(legacy.stats.memoryCount).toBe(1);
-    expect(legacy.mayBeIncomplete, 'a text in agent-memory.db').toBe(true);
-  });
-
-  it('marks the block while engine.db holds remembered texts', async () => {
     engineDb.getDb().prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active) VALUES ('m1', 'held', 'knowledge', 'global', 'global', 0)").run();
+
     const held = await readHeldGraph({ agentMemoryFile: file, engineDb, subjectGraph: false });
-    expect(held.mayBeIncomplete, 'a text in engine.db, even one no longer active').toBe(true);
+    expect(held.entities, 'the graph is still read').toHaveLength(2);
+    expect(held.stats.memoryCount).toBe(1);
+    expect(held.mayBeIncomplete, 'the texts are carried by readMemoryTextsForExport').toBe(false);
   });
 
   it('reads a fresh instance that never held graph data as complete', async () => {
@@ -146,11 +141,6 @@ describe('readHeldGraph', () => {
       mayBeIncomplete: false,
     });
     expect(existsSync(file), 'nothing was created').toBe(false);
-  });
-
-  it('marks the block when engine.db is not open, since its texts cannot be counted', async () => {
-    const held = await readHeldGraph({ agentMemoryFile: file, engineDb: null, subjectGraph: false });
-    expect(held.mayBeIncomplete).toBe(true);
   });
 
   it('reads a file stamped with an older schema and marks the block', async () => {
@@ -184,18 +174,6 @@ describe('readHeldGraph', () => {
     const held = await readHeldGraph({ agentMemoryFile: file, engineDb, subjectGraph: false });
     expect(held.entities).toEqual([]);
     expect(held.mayBeIncomplete).toBe(true);
-  });
-
-  it('keeps what it read when a text count fails, and marks the block', async () => {
-    const db = new AgentMemoryDb(file);
-    seedGraph(db);
-    db.close();
-    const closed = new EngineDb(join(dir, 'closed.db'));
-    closed.close();
-
-    const held = await readHeldGraph({ agentMemoryFile: file, engineDb: closed, subjectGraph: false });
-    expect(held.entities, 'the graph is still read').toHaveLength(2);
-    expect(held.mayBeIncomplete, 'a count that fails cannot show there are none').toBe(true);
   });
 
   it('marks the block when an entity reaches the per-entity relation limit', async () => {
@@ -235,7 +213,7 @@ describe('readHeldGraph', () => {
     db.close();
     const held = await readHeldGraph({ agentMemoryFile: file, engineDb, subjectGraph: true });
     expect(held.stats.memoryCount).toBe(1);
-    expect(held.mayBeIncomplete, 'the text itself is not in the block').toBe(true);
+    expect(held.mayBeIncomplete, 'the subject graph was read in full').toBe(false);
   });
 
   it('keeps the subject graph and marks the block when the memory count fails', async () => {
@@ -276,5 +254,387 @@ describe('readHeldGraph', () => {
     const held = await readHeldGraph({ agentMemoryFile: file, engineDb: null, subjectGraph: true });
     expect(held.entities, 'the legacy file is still read').toHaveLength(2);
     expect(held.mayBeIncomplete).toBe(true);
+  });
+});
+
+describe('readMemoryTextsForExport', () => {
+  let dir: string;
+  let file: string;
+  let engineDb: EngineDb;
+  const mask = (t: string): string => t.replaceAll('hunter2', '[masked]');
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-memory-texts-'));
+    file = join(dir, 'agent-memory.db');
+    engineDb = new EngineDb(join(dir, 'engine.db'), 'memory-texts-test-key');
+  });
+
+  afterEach(() => {
+    engineDb.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A legacy store with an active text, a text it replaced, and a mention of an entity. */
+  function seedLegacy(): { oldId: string; newId: string; entity: string } {
+    const db = new AgentMemoryDb(file);
+    db.setEmbeddingDimensions(3);
+    const oldId = db.createMemory({ text: 'Alice used password hunter2', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
+    const newId = db.createMemory({ text: 'Alice prefers mornings', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [0, 1, 0] });
+    db.supersedMemory(oldId, newId);
+    const entity = db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    db.createMention(newId, entity);
+    db.close();
+    return { oldId, newId, entity };
+  }
+
+  it('reads every remembered text and mention of agent-memory.db, a replaced one included, masked, without the embedding', () => {
+    const { oldId, newId, entity } = seedLegacy();
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    const memories = texts['agent-memory.db'].memories;
+    expect(memories.map(m => [m['id'], m['text'], m['is_active']]).sort()).toEqual([
+      [oldId, 'Alice used password [masked]', 0],
+      [newId, 'Alice prefers mornings', 1],
+    ].sort());
+    expect(memories.every(m => !('embedding' in m)), 'the embedding is left out').toBe(true);
+    expect(texts['agent-memory.db'].mentions.map(m => [m['memory_id'], m['entity_id']])).toEqual([[newId, entity]]);
+    expect(texts.mayBeIncomplete, 'read in full').toBe(false);
+  });
+
+  it('reads the texts still in the -wal of a file left without a checkpoint, and changes neither file nor its schema stamp', () => {
+    const writer = new AgentMemoryDb(file);
+    writer.setEmbeddingDimensions(3);
+    writer.createMemory({ text: 'Dora prefers tea', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
+    // A crash image: main file and -wal as the process left them, without the checkpoint a
+    // clean close runs. A connection that may write checkpoints the -wal into the main file
+    // when it closes; one opened read-only cannot.
+    const image = join(dir, 'image.db');
+    copyFileSync(file, image);
+    copyFileSync(`${file}-wal`, `${image}-wal`);
+    writer.close();
+    expect(statSync(`${image}-wal`).size, 'fixture: the text is in the -wal').toBeGreaterThan(0);
+    const before = fileState(image);
+    const mtime = statSync(image).mtimeMs;
+
+    const texts = readMemoryTextsForExport({ agentMemoryFile: image, engineDb, mask });
+    expect(texts['agent-memory.db'].memories.map(m => m['text']), 'the row in the -wal is read').toEqual(['Dora prefers tea']);
+    const after = fileState(image);
+    expect(after.main, 'main file unchanged: no checkpoint ran').toBe(before.main);
+    expect(after.wal, 'the -wal is unchanged').toBe(before.wal);
+    expect(statSync(image).mtimeMs, 'the main file was not written').toBe(mtime);
+    expect(after.version, 'the schema stamp is unchanged').toBe(before.version);
+  });
+
+  it('leaves a newer agent-memory.db unread and unmigrated, marks the block, and still reads engine.db', () => {
+    seedLegacy();
+    const stamp = new Database(file);
+    stamp.prepare('INSERT INTO schema_version (version) VALUES (?)').run(AGENT_MEMORY_SCHEMA_VERSION + 1);
+    stamp.close();
+    engineDb.getDb().prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('e1', ?, 'knowledge', 'global', 'global')").run(engineDb.enc('Bob is in Bern'));
+    const before = fileState(file);
+
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(texts['agent-memory.db'], 'a newer schema is not guessed at').toEqual({ memories: [], mentions: [] });
+    expect(texts['engine.db'].memories.map(m => m['text'])).toEqual(['Bob is in Bern']);
+    expect(texts.mayBeIncomplete).toBe(true);
+    const after = fileState(file);
+    expect(after.main).toBe(before.main);
+    expect(after.version, 'not migrated').toBe(AGENT_MEMORY_SCHEMA_VERSION + 1);
+  });
+
+  it('reads engine.db texts decrypted and masked, their subjects, and every relationship, masked and marked by its source', () => {
+    const subjects = new SubjectStore(engineDb);
+    const bob = subjects.createSubject({ kind: 'person', name: 'Bob' });
+    const globex = subjects.createSubject({ kind: 'organization', name: 'Globex' });
+    const raw = engineDb.getDb();
+    raw.prepare("INSERT INTO memories (id, text, namespace, subject_id, scope_type, scope_id, is_active, embedding) VALUES ('e1', ?, 'knowledge', ?, 'global', 'global', 0, x'00')").run(engineDb.enc('Bob uses hunter2'), bob);
+    raw.prepare("INSERT INTO memory_subjects (memory_id, subject_id) VALUES ('e1', ?)").run(bob);
+    new RelationshipStore(engineDb).createRelationship({ fromSubjectId: bob, toSubjectId: globex, kind: 'works_at', description: 'Bob told hunter2 at Globex' });
+    raw.prepare("UPDATE relationships SET notes = 'note with hunter2', source_memory_id = 'e1'").run();
+    expect(String((raw.prepare("SELECT text FROM memories WHERE id = 'e1'").get() as { text: string }).text).startsWith('enc:'), 'fixture: stored encrypted').toBe(true);
+
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(texts['engine.db'].memories.map(m => [m['id'], m['text'], m['is_active'], 'embedding' in m])).toEqual([['e1', 'Bob uses [masked]', 0, false]]);
+    expect(texts['engine.db'].memory_subjects.map(m => [m['memory_id'], m['subject_id']])).toEqual([['e1', bob]]);
+    expect(texts['engine.db'].relationships.map(r => [r['from_subject_id'], r['to_subject_id'], r['description'], r['notes'], r['source_deleted']]),
+      'its source e1 is no longer active').toEqual([[bob, globex, 'Bob told [masked] at Globex', 'note with [masked]', 1]]);
+    expect(texts['engine.db'].relationships_note).toBe(MEMORY_TEXTS_RELATIONSHIPS_NOTE);
+    expect(texts.mayBeIncomplete).toBe(false);
+  });
+
+  it('carries a relationship between subjects the graph block does not list', () => {
+    const subjects = new SubjectStore(engineDb);
+    const hosting = subjects.createSubject({ kind: 'service', name: 'Hosting' });
+    const misc = subjects.createSubject({ kind: 'other', name: 'Misc' });
+    new RelationshipStore(engineDb).createRelationship({ fromSubjectId: hosting, toSubjectId: misc, kind: 'related_to', description: 'Hosting relates to Misc' });
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(texts['engine.db'].relationships.map(r => [r['description'], r['source_deleted']])).toEqual([['Hosting relates to Misc', 0]]);
+  });
+
+  it('writes a text stored as something other than text as the marker, and marks the block', () => {
+    engineDb.getDb().prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('e3', x'656e633a41414141', 'knowledge', 'global', 'global')").run();
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(texts['engine.db'].memories.map(m => m['text'])).toEqual([UNREADABLE_MEMORY_TEXT]);
+    expect(texts.mayBeIncomplete).toBe(true);
+  });
+
+  it('writes a text it cannot decrypt as the marker, never as ciphertext, and marks the block', () => {
+    const ciphertext = engineDb.enc('Carol lives in Basel');
+    engineDb.close();
+    // Read with another key: the stored value does not decrypt.
+    engineDb = new EngineDb(join(dir, 'engine.db'), 'another-key');
+    engineDb.getDb().prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('e2', ?, 'knowledge', 'global', 'global')").run(ciphertext);
+
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(texts['engine.db'].memories.map(m => m['text'])).toEqual([UNREADABLE_MEMORY_TEXT]);
+    const out = JSON.stringify(texts);
+    expect(out.includes(ciphertext.slice(4, 24)), 'no part of the ciphertext is written').toBe(false);
+    expect(out.includes('enc:'), 'no ciphertext prefix is written').toBe(false);
+    expect(texts.mayBeIncomplete).toBe(true);
+  });
+
+  it('cuts a table at the cap and marks the block; one row under it is read in full', () => {
+    const raw = engineDb.getDb();
+    for (let i = 0; i < 3; i++) {
+      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES (?, ?, 'knowledge', 'global', 'global')").run(`e${String(i)}`, engineDb.enc(`text ${String(i)}`));
+    }
+    const at = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, cap: 2 });
+    expect(at['engine.db'].memories).toHaveLength(2);
+    expect(at.mayBeIncomplete, 'more rows than the cap').toBe(true);
+
+    const under = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, cap: 3 });
+    expect(under['engine.db'].memories).toHaveLength(3);
+    expect(under.mayBeIncomplete, 'exactly the cap: every row was read').toBe(false);
+    expect(MEMORY_TEXT_EXPORT_CAP, 'the default cap').toBe(20_000);
+  });
+
+  it('cuts every table at the cap, mentions, subjects and relationships included', () => {
+    seedLegacy();
+    const legacy = new AgentMemoryDb(file);
+    const second = legacy.createEntity({ canonicalName: 'Bob', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    const [first] = (legacy as unknown as { db: Database.Database }).db.prepare('SELECT id FROM memories').all() as Array<{ id: string }>;
+    legacy.createMention(first!.id, second);
+    legacy.close();
+    const subjects = new SubjectStore(engineDb);
+    const a = subjects.createSubject({ kind: 'person', name: 'A' });
+    const b = subjects.createSubject({ kind: 'person', name: 'B' });
+    const raw = engineDb.getDb();
+    for (const id of ['x1', 'x2']) {
+      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES (?, 't', 'knowledge', 'global', 'global')").run(id);
+      raw.prepare('INSERT INTO memory_subjects (memory_id, subject_id) VALUES (?, ?)').run(id, a);
+    }
+    const rels = new RelationshipStore(engineDb);
+    rels.createRelationship({ fromSubjectId: a, toSubjectId: b, kind: 'knows', description: '' });
+    rels.createRelationship({ fromSubjectId: b, toSubjectId: a, kind: 'knows', description: '' });
+
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, cap: 1 });
+    expect([
+      texts['agent-memory.db'].memories.length, texts['agent-memory.db'].mentions.length,
+      texts['engine.db'].memories.length, texts['engine.db'].memory_subjects.length, texts['engine.db'].relationships.length,
+    ], 'each table holds two rows and is cut to one').toEqual([1, 1, 1, 1, 1]);
+    expect(texts.mayBeIncomplete).toBe(true);
+  });
+
+  it('marks the block without engine.db, and still reads agent-memory.db', () => {
+    seedLegacy();
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb: null, mask });
+    expect(texts['agent-memory.db'].memories).toHaveLength(2);
+    expect(texts['engine.db']).toEqual({ memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE });
+    expect(texts.mayBeIncomplete, 'what engine.db holds was not read').toBe(true);
+  });
+
+  it('keeps the tables it could read when one cannot be read, and marks the block', () => {
+    seedLegacy();
+    const drop = new Database(file);
+    drop.exec('DROP TABLE mentions');
+    drop.close();
+    const closed = new EngineDb(join(dir, 'closed.db'), 'memory-texts-test-key');
+    closed.close();
+
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb: closed, mask });
+    expect(texts['agent-memory.db'].memories, 'the texts are still read').toHaveLength(2);
+    expect(texts['agent-memory.db'].mentions).toEqual([]);
+    expect(texts['engine.db'].memories).toEqual([]);
+    expect(texts.mayBeIncomplete).toBe(true);
+  });
+
+  it('reads a fresh instance that holds no texts as complete, and creates no agent-memory.db', () => {
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(texts).toEqual({
+      'agent-memory.db': { memories: [], mentions: [] },
+      'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE },
+      mayBeIncomplete: false,
+    });
+    expect(existsSync(file)).toBe(false);
+  });
+});
+
+describe('graphHoldsRowsNotExported', () => {
+  let dir: string;
+  let file: string;
+  let engineDb: EngineDb;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-not-exported-'));
+    file = join(dir, 'agent-memory.db');
+    engineDb = new EngineDb(join(dir, 'engine.db'), 'not-exported-test-key');
+  });
+
+  afterEach(() => {
+    engineDb.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const held = (subjectGraph: boolean, db: EngineDb | null = engineDb) => graphHoldsRowsNotExported({ agentMemoryFile: file, engineDb: db, subjectGraph });
+
+  it('finds nothing left out when every source is empty, on either setting', () => {
+    new AgentMemoryDb(file).close();
+    expect(held(true), 'subject graph on').toBe(false);
+    expect(held(false), 'subject graph off').toBe(false);
+  });
+
+  it('with the subject graph on, finds an agent-memory.db entity, which the block then does not read', () => {
+    const db = new AgentMemoryDb(file);
+    db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    db.close();
+    expect(held(true)).toBe(true);
+    expect(held(false), 'with it off the block reads agent-memory.db').toBe(false);
+  });
+
+  it('with the subject graph on, finds an agent-memory.db relation on its own', () => {
+    const db = new AgentMemoryDb(file);
+    seedGraph(db);
+    db.close();
+    const raw = new Database(file);
+    raw.exec('PRAGMA foreign_keys = OFF; DELETE FROM entities');
+    const left = raw.prepare('SELECT (SELECT COUNT(*) FROM entities) AS e, (SELECT COUNT(*) FROM relations) AS r').get();
+    raw.close();
+    expect(left, 'fixture: no entity, one relation').toEqual({ e: 0, r: 1 });
+    expect(held(true), 'a relation with no entity left').toBe(true);
+  });
+
+  it('with the subject graph on, finds an archived subject', () => {
+    const subjects = new SubjectStore(engineDb);
+    const bob = subjects.createSubject({ kind: 'person', name: 'Bob' });
+    expect(held(true), 'fixture: a listed subject is exported').toBe(false);
+    subjects.archiveSubject(bob);
+    expect(held(true)).toBe(true);
+  });
+
+  it('with the subject graph on, finds a subject of a kind the block maps to no entity', () => {
+    new SubjectStore(engineDb).createSubject({ kind: 'service', name: 'Hosting' });
+    expect(held(true), 'service').toBe(true);
+    engineDb.getDb().prepare("UPDATE subjects SET kind = 'other'").run();
+    expect(held(true), 'other').toBe(true);
+  });
+
+  it('with the subject graph off, finds any subject, since the block then reads agent-memory.db', () => {
+    new SubjectStore(engineDb).createSubject({ kind: 'person', name: 'Bob' });
+    expect(held(false)).toBe(true);
+  });
+
+  it('finds the engine.db tables no block carries, one at a time: supersedes, subject co-occurrences, subject mints', () => {
+    const subjects = new SubjectStore(engineDb);
+    const a = subjects.createSubject({ kind: 'person', name: 'A' });
+    const b = subjects.createSubject({ kind: 'person', name: 'B' });
+    const raw = engineDb.getDb();
+    expect(held(true), 'fixture: listed subjects only').toBe(false);
+
+    raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('o', 't', 'knowledge', 'global', 'global'), ('n', 't', 'knowledge', 'global', 'global')").run();
+    expect(held(true), 'fixture: memories are carried').toBe(false);
+    raw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason) VALUES ('n', 'o', 'newer')").run();
+    expect(held(true), 'supersedes').toBe(true);
+    raw.prepare('DELETE FROM supersedes').run();
+
+    raw.prepare('INSERT INTO subject_cooccurrences (subject_a_id, subject_b_id) VALUES (?, ?)').run(a, b);
+    expect(held(true), 'subject_cooccurrences').toBe(true);
+    raw.prepare('DELETE FROM subject_cooccurrences').run();
+
+    raw.prepare("INSERT INTO subject_mints (subject_id, thread_id) VALUES (?, 't1')").run(a);
+    expect(held(true), 'subject_mints').toBe(true);
+    raw.prepare('DELETE FROM subject_mints').run();
+    expect(held(true), 'all removed again').toBe(false);
+  });
+
+  it('finds the agent-memory.db tables no block carries, with the subject graph off where nothing else counts: supersedes and co-occurrences', () => {
+    const db = new AgentMemoryDb(file);
+    db.setEmbeddingDimensions(3);
+    const { alice, acme } = seedGraph(db);
+    const o = db.createMemory({ text: 'old', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
+    const n = db.createMemory({ text: 'new', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [0, 1, 0] });
+    db.close();
+    expect(held(false), 'fixture: entities, relations and texts are carried with the subject graph off').toBe(false);
+    const raw = new Database(file);
+    try {
+      raw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason, created_at) VALUES (?, ?, 'newer', '2026-01-01')").run(n, o);
+      // With the subject graph on the seeded entities count already; the table counts on either
+      // setting, so the setting where nothing else counts is the one that proves it.
+      expect(held(false), 'supersedes').toBe(true);
+      raw.prepare('DELETE FROM supersedes').run();
+
+      raw.prepare("INSERT INTO cooccurrences (entity_a_id, entity_b_id, last_seen_at) VALUES (?, ?, '2026-01-01')").run(alice, acme);
+      expect(held(false), 'cooccurrences').toBe(true);
+      raw.prepare('DELETE FROM cooccurrences').run();
+      expect(held(false), 'all removed again').toBe(false);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('with the subject graph off, finds a relation neither of whose entities is stored, and not one the block reaches', () => {
+    const db = new AgentMemoryDb(file);
+    const { alice } = seedGraph(db);
+    db.close();
+    const raw = new Database(file);
+    try {
+      raw.exec('PRAGMA foreign_keys = OFF');
+      raw.prepare('DELETE FROM entities WHERE id = ?').run(alice);
+      expect(held(false), 'one entity left: the block reaches the relation through it').toBe(false);
+      raw.exec('DELETE FROM entities');
+      expect(raw.prepare('SELECT COUNT(*) AS n FROM relations').get(), 'fixture: the relation is still stored').toEqual({ n: 1 });
+      expect(held(false), 'no entity left: the block cannot reach it').toBe(true);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('answers true when a count cannot be taken: no engine.db, a closed one, a missing table, a newer or broken file', () => {
+    expect(held(false, null), 'no engine.db').toBe(true);
+    const closed = new EngineDb(join(dir, 'closed.db'), 'not-exported-test-key');
+    closed.close();
+    expect(held(false, closed), 'closed engine.db').toBe(true);
+
+    const db = new AgentMemoryDb(file);
+    db.close();
+    const drop = new Database(file);
+    drop.exec('DROP TABLE relations');
+    drop.close();
+    expect(held(true), 'agent-memory.db without its relations table').toBe(true);
+
+    rmSync(file);
+    new AgentMemoryDb(file).close();
+    const stamp = new Database(file);
+    stamp.prepare('INSERT INTO schema_version (version) VALUES (?)').run(AGENT_MEMORY_SCHEMA_VERSION + 1);
+    stamp.close();
+    expect(held(true), 'a newer agent-memory.db').toBe(true);
+
+    rmSync(file);
+    writeFileSync(file, 'not a database');
+    expect(held(true), 'a file that is not a database').toBe(true);
+  });
+
+  it('counts the rows still in a -wal and changes neither file', () => {
+    const writer = new AgentMemoryDb(file);
+    writer.createEntity({ canonicalName: 'Eve', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    const image = join(dir, 'image.db');
+    copyFileSync(file, image);
+    copyFileSync(`${file}-wal`, `${image}-wal`);
+    writer.close();
+    expect(statSync(`${image}-wal`).size, 'fixture: the entity is in the -wal').toBeGreaterThan(0);
+    const before = fileState(image);
+
+    expect(graphHoldsRowsNotExported({ agentMemoryFile: image, engineDb, subjectGraph: true }), 'the row in the -wal is counted').toBe(true);
+    const after = fileState(image);
+    expect(after.main, 'main file unchanged: no checkpoint ran').toBe(before.main);
+    expect(after.wal, 'the -wal is unchanged').toBe(before.wal);
   });
 });
