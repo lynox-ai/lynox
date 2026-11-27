@@ -74,19 +74,19 @@ describe('the status line of a review dialog', () => {
 	it('a line cut to three lines says so with a button, and opened it is whole and scrolls with the rest', async () => {
 		const long = 'Ein langer Grund. '.repeat(30);
 		await show(long, { scroll: 200, client: 60 });
-		expect(line().className.split(/\s+/)).toContain('line-clamp-3');
+		expect(line().className.split(/\s+/)).toContain('[@media(min-height:30rem)]:line-clamp-3');
 		expect(more()?.textContent?.trim()).toBe('Mehr anzeigen');
 		expect(more()?.getAttribute('aria-expanded')).toBe('false');
 		expect(sticks()).toBe(true);
 		more()!.click();
 		await settle();
-		expect(line().className.split(/\s+/)).not.toContain('line-clamp-3');
+		expect(line().className.split(/\s+/)).not.toContain('[@media(min-height:30rem)]:line-clamp-3');
 		expect(more()?.textContent?.trim()).toBe('Weniger anzeigen');
 		expect(more()?.getAttribute('aria-expanded')).toBe('true');
 		expect(sticks()).toBe(false);
 		more()!.click();
 		await settle();
-		expect(line().className.split(/\s+/)).toContain('line-clamp-3');
+		expect(line().className.split(/\s+/)).toContain('[@media(min-height:30rem)]:line-clamp-3');
 		expect(sticks()).toBe(true);
 	});
 

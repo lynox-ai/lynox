@@ -5,9 +5,9 @@
 	// schedule waits for this stamp). While it is short it stays in sight as the review scrolls, so
 	// the reason and what it marks are read together. A long line is cut to three lines, says so,
 	// and opens in place; opened, it scrolls with the rest, or it would cover the review. Where the
-	// frame is low (a phone held sideways, a page zoomed in), nothing stays: the whole frame
-	// scrolls, as without this line, and everything in it stays reachable. Same query as
-	// DIALOG_FOOT_CLASS (utils/dialog-sticky.ts).
+	// frame is low (a phone held sideways, a page zoomed in), nothing stays and nothing is cut: the
+	// whole frame scrolls, as without this line, and everything in it stays reachable. Same query
+	// as DIALOG_FOOT_CLASS (utils/dialog-sticky.ts).
 	let { text, testid, el = $bindable(null) }: {
 		text: string;
 		testid: string;
@@ -45,7 +45,7 @@
 	class="-mx-5 px-5 pb-3 bg-bg border-border {open ? '' : '[@media(min-height:30rem)]:sticky [@media(min-height:30rem)]:-top-5 [@media(min-height:30rem)]:z-10 [@media(min-height:30rem)]:pt-2 [@media(min-height:30rem)]:mb-3 [@media(min-height:30rem)]:border-b'}"
 >
 	<div class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs">
-		<p bind:this={el} role="status" data-testid={testid} class="break-words {open ? '' : 'line-clamp-3'}">{text}</p>
+		<p bind:this={el} role="status" data-testid={testid} class="break-words {open ? '' : '[@media(min-height:30rem)]:line-clamp-3'}">{text}</p>
 		{#if clipped || open}
 			<button
 				type="button"

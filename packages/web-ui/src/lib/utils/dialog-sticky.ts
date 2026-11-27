@@ -4,7 +4,7 @@
 // whole frame scrolls and the buttons come last, as before. Their labels are fixed words, so the
 // foot cannot grow past the frame. Same query as DialogStatusLine.svelte.
 export const DIALOG_FOOT_CLASS =
-	'flex items-center justify-end gap-2 mt-5 -mx-5 px-5 py-3 bg-bg border-border ' +
+	'flex items-center justify-end gap-2 mt-5 -mx-5 -mb-5 px-5 pt-3 pb-5 bg-bg border-border ' +
 	'[@media(min-height:30rem)]:sticky [@media(min-height:30rem)]:-bottom-5 [@media(min-height:30rem)]:z-10 [@media(min-height:30rem)]:border-t';
 
 // The height a part takes over the review while it stays in sight; 0 while it scrolls with it.
