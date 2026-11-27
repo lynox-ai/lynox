@@ -36,7 +36,7 @@ import { HAIKU, getApiKey } from './setup.js';
 const RUNS = Number(process.env['PLACE_RUNS'] ?? 3);
 const STORE = 'acme-demo.myshopify.com';
 const PRODUCT_STORE = {
-  getByHostname: (h: string) => h === STORE ? { base_url: `https://${STORE}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: STORE.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products'] } } : undefined,
+  getByHostname: (h: string) => h === STORE ? { base_url: `https://${STORE}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: STORE.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products'], store_binding: 'bound' } } : undefined,
 };
 
 const PRODUCTS = JSON.stringify({

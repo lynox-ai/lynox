@@ -16,7 +16,7 @@ import {
   type MailSendResult,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, recipientFieldTargets, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, parseAddressList, previewAddressList, recipientFieldTargets, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
@@ -31,6 +31,7 @@ import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 import { currentCallFiling, currentCallOwnerKnownFor, currentCallTargetOrigin } from '../../../core/call-connection.js';
 import { UNATTENDED_BLOCK_ANSWER } from '../../../core/prompt-store.js';
 import { noticeLanguage } from '../../../core/notice-language.js';
+import { wrapUntrustedData } from '../../../core/data-boundary.js';
 import { originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originUnreadable, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
 import { normalizeMailTarget } from '../../../core/send-target.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
@@ -49,6 +50,14 @@ export interface MailReplyToolInput {
 }
 
 /**
+ * An error whose text the mail provider (or a server behind it) wrote: the sentence is lynox's,
+ * the text follows in one marked block.
+ */
+function errorWithText(head: string, text: string): string {
+  return `${head} The error text:\n${wrapUntrustedData(text, 'mail_reply')}`;
+}
+
+/**
  * mail_reply needs more than a bare MailRegistry — it looks up account types
  * (to enforce the receive-only hard block) and derives the sending account
  * from the original recipient. The MailContext bundles everything.
@@ -58,8 +67,8 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
     outwardWrite: () => 'reply',
     // A reply reads the mail it answers before it writes: that read is a row of its own.
     outwardRead: (input) => namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)], ['uid', input.uid]]),
-    // Only the recipients the call names: the `to` and `cc` overrides, parsed with this tool's
-    // own parser. The default recipients (the original sender, and everyone on reply_all) come
+    // Only the recipients the call names: the `to` and `cc` overrides, parsed with the same
+    // parser the send uses. The default recipients (the original sender, and everyone on reply_all) come
     // from the mail being answered, which the input does not hold.
     sendTargets: (input) => recipientFieldTargets([input.to, input.cc], parseAddressList),
     definition: {
@@ -129,8 +138,14 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           try { agent.onOriginRefused?.({ targets, noun: 'mail', origin }); } catch { /* the refusal stands */ }
           return text;
         };
+        // What the model reads: the sender of the mail being answered is that sender's own text, so
+        // the sentence says only that it came from content lynox read, and the sender follows in a
+        // marked block. The owner's question above still names the sender (`originAsk`).
+        const shownOrigin: SendOrigin = { kind: 'readContent' };
+        const withSender = (text: string): string =>
+          `${text}\n\nThat content is the mail being answered. Its sender, as the mail gives it:\n${wrapUntrustedData(prepared.filing.original.from, 'mail_reply')}`;
         if (unnamed.length > 0 && agent.principal.kind !== 'owner') {
-          return refused(originRefusedMandate(targets, origin, 'mail'));
+          return refused(withSender(originRefusedMandate(targets, shownOrigin, 'mail')));
         }
         const lang = agent.noticeLanguage ?? noticeLanguage(undefined);
         // A reply whose one unnamed recipient is the address it goes to by default says so in its
@@ -153,11 +168,11 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
             : originAsk('mail_reply', input, 'mail', targets, origin, lang);
         const question = unnamed.length > 0 ? pv`${prepared.preview}\n\n${ask}` : prepared.preview;
         const answer = await agent.promptUser(question, ['Yes', 'No'], unnamed.length > 0 ? { blocked: true } : undefined);
-        if (answer === UNATTENDED_BLOCK_ANSWER) return refused(originRefusedUnattended(targets, origin));
+        if (answer === UNATTENDED_BLOCK_ANSWER) return refused(withSender(originRefusedUnattended(targets, shownOrigin)));
         if (!isApproval(answer)) {
           // A no to the question where a recipient comes from is said as such, so the model does
           // not try another recipient.
-          return unnamed.length > 0 ? originDenied(targets, origin, 'mail') : 'mail_reply cancelled by user.';
+          return unnamed.length > 0 ? withSender(originDenied(targets, shownOrigin, 'mail')) : 'mail_reply cancelled by user.';
         }
 
         // Owner-named in the log only when the dispatcher checked every recipient and found it
@@ -166,8 +181,8 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
       } catch (err: unknown) {
         // A confirmation nobody can answer ends the run; as text, the model would work around it.
         if (isInputRequired(err)) throw err;
-        if (err instanceof MailError) return `mail_reply error (${err.code}): ${err.message}`;
-        return `mail_reply error: ${getErrorMessage(err)}`;
+        if (err instanceof MailError) return errorWithText(`mail_reply error (${err.code}).`, err.message);
+        return errorWithText('mail_reply error.', getErrorMessage(err));
       }
     },
   };
@@ -250,9 +265,11 @@ export async function prepareReply(
   // RFC 3834 says: "Automatic responses SHOULD NOT be issued in response
   // to any message which contains an Auto-Submitted header field, where
   // that field has any value other than 'no'." We enforce this as a
-  // hard block — no confirmation can override it. Prevents mail loops.
+  // hard block — no confirmation can override it. Prevents mail loops. The same holds for the
+  // autoresponder headers and delivery reports `automaticMail` reads (automatic-mail.ts).
   if (original.envelope.isAutoReply) {
-    return { ok: false, message: `mail_reply blocked: original message has Auto-Submitted header (auto-generated/auto-replied). ` +
+    return { ok: false, message: `mail_reply blocked: original message was sent automatically ` +
+      `(an Auto-Submitted, autoresponder or Precedence header, or a delivery report). ` +
       `RFC 3834 forbids automatic replies to automated messages to prevent mail loops. ` +
       `If this is a real message that needs a response, use mail_send instead.` };
   }
@@ -305,7 +322,14 @@ export async function prepareReply(
     const sender = original.envelope.replyTo[0] ?? original.envelope.from[0];
     toAddrs = sender ? [sender] : [];
   }
-  if (toAddrs.length === 0) return { ok: false, message: 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.' };
+  if (toAddrs.length === 0) {
+    return {
+      ok: false,
+      message: input.to
+        ? 'mail_reply error: the "to" override holds no valid address (each needs an @; a value with a line break or control character is dropped). Nothing was sent.'
+        : 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.',
+    };
+  }
 
   // The address the reply goes out from, read from the same source the
   // provider sends from — not from the stored account row, which can lag
@@ -315,7 +339,7 @@ export async function prepareReply(
   try {
     sendingAddress = await resolveSendingAddress(sendProvider);
   } catch (err) {
-    return { ok: false, message: `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, message: errorWithText('mail_reply error: could not read the sending address. Nothing was sent.', err instanceof Error ? err.message : String(err)) };
   }
 
   // Reply-all: union with original To + Cc, minus our own address and
@@ -484,28 +508,6 @@ export async function commitReply(
     });
   } catch { /* reconcile is best-effort — never fail an already-sent reply */ }
   return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;
-}
-
-function parseAddressList(input: string | undefined): MailAddress[] {
-  if (!input) return [];
-  return input
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0)
-    .map(parseAddress)
-    .filter((a): a is MailAddress => a !== null);
-}
-
-function parseAddress(raw: string): MailAddress | null {
-  const angle = raw.match(/^\s*(?:"?([^"<]*?)"?\s*)?<([^>]+)>\s*$/);
-  if (angle) {
-    const name = angle[1]?.trim();
-    const address = angle[2]?.trim();
-    if (!address || !address.includes('@')) return null;
-    return name ? { name, address } : { address };
-  }
-  if (raw.includes('@')) return { address: raw };
-  return null;
 }
 
 /** Accept yes/ja/ok/1/y as approval — anything else is denial. */

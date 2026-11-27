@@ -235,14 +235,14 @@ describe('checkMarkup: the domain rule', () => {
 
 describe('checkMarkup: hidden characters', () => {
   it('refuses a hidden character the before-image does not hold, written or as an entity', () => {
-    expect(reason('<p>ab</p>', '<p>a​b</p>')).toBe('hidden_char');
+    expect(reason('<p>ab</p>', '<p>a\u200Bb</p>')).toBe('hidden_char');
     expect(reason('<p>ab</p>', '<p>a&#x200B;b</p>')).toBe('hidden_char');
-    expect(reason('<p>ab</p>', '<p>ab</p><!--​-->')).toBe('comment_added');
+    expect(reason('<p>ab</p>', '<p>ab</p><!--\u200B-->')).toBe('comment_added');
   });
 
   it('counts per code point: as often as the before-image holds it passes, once more does not', () => {
-    expect(reason('<p>a​b</p>', '<p>neu a​b</p>')).toBe('ok');
-    expect(reason('<p>a​b</p>', '<p>a​b​c</p>')).toBe('hidden_char');
+    expect(reason('<p>a\u200Bb</p>', '<p>neu a\u200Bb</p>')).toBe('ok');
+    expect(reason('<p>a\u200Bb</p>', '<p>a\u200Bb\u200Bc</p>')).toBe('hidden_char');
   });
 });
 
@@ -344,13 +344,13 @@ describe('checkMarkup: what the page makes of the value (refuter round 1)', () =
   });
 
   it('allows the places real text puts a hidden character, across the whole field, not per text', () => {
-    const cut = Array.from({ length: 20 }, () => `<p>${'a­b'.repeat(30)}</p>`).join('');
+    const cut = Array.from({ length: 20 }, () => `<p>${'a\u00ADb'.repeat(30)}</p>`).join('');
     expect(reason('<p>plain</p>', cut)).toBe('hidden_char');
-    expect(reason('<p>Silben­trennung</p>', '<p>Neue Silben­trennung und Baum­wolle</p>')).toBe('ok');
+    expect(reason('<p>Silben\u00ADtrennung</p>', '<p>Neue Silben\u00ADtrennung und Baum\u00ADwolle</p>')).toBe('ok');
     expect(reason('<ul><li>✔️ Bio</li></ul>', '<ul><li>✔️ Bio</li><li>✔️ Fair</li></ul>')).toBe('ok');
-    expect(reason('<p>Familie</p>', '<p>Familie \u{1F468}‍\u{1F469}‍\u{1F467}</p>')).toBe('ok');
+    expect(reason('<p>Familie</p>', '<p>Familie \u{1F468}\u200D\u{1F469}\u200D\u{1F467}</p>')).toBe('ok');
     // Outside those places, one more is one too many.
-    expect(reason('<p>ab</p>', '<p>a­ b</p>')).toBe('hidden_char');
+    expect(reason('<p>ab</p>', '<p>a\u00AD b</p>')).toBe('hidden_char');
   });
 
   it('takes a host with a trailing dot as the host', () => {

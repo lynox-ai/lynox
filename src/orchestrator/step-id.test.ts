@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isStepIdShape, runStepIds, shownRunStepId, stepRunNames, storedSteps, shownStepId, stepIdIssue, stepIdRefusal, storedStepOrder, STEP_ID_MAX } from './step-id.js';
+import { resolveTaskTemplate } from './context.js';
 import { RunHistory } from '../core/run-history.js';
 import { EngineDb } from '../core/engine-db.js';
 import { createToolContext } from '../core/tool-context.js';
@@ -28,7 +29,7 @@ describe('the shape of a step id', () => {
   });
 
   it('refuses capitals, a space, an umlaut, a dot, a brace, a leading "#", a line break, a hidden character, the empty id and 41 characters', () => {
-    for (const id of ['Fetch', 'fetch orders', 'prüfung', 'a.b', '{a}', '#1', 'a\nb', 'a​b', '', 'x'.repeat(STEP_ID_MAX + 1)]) {
+    for (const id of ['Fetch', 'fetch orders', 'prüfung', 'a.b', '{a}', '#1', 'a\nb', 'a\u200Bb', '', 'x'.repeat(STEP_ID_MAX + 1)]) {
       expect(isStepIdShape(id), JSON.stringify(id)).toBe(false);
     }
     expect(isStepIdShape(undefined)).toBe(false);
@@ -45,8 +46,8 @@ describe('the shape of a step id', () => {
 
   it('shows a stored id outside the shape by its position, or by the note alone', () => {
     expect(shownStepId('fetch', 1)).toBe('fetch');
-    expect(shownStepId('Fetch Orders', 1)).toBe('#2 (id outside the allowed form)');
-    expect(shownStepId('Fetch Orders')).toBe('(id outside the allowed form)');
+    expect(shownStepId('Fetch Orders', 1)).toBe('#2 (lynox does not show its id)');
+    expect(shownStepId('Fetch Orders')).toBe('(lynox does not show its id)');
   });
 
   it('reads a stored workflow\'s step order, and nothing from a row that does not parse', () => {
@@ -206,7 +207,7 @@ describe('a stored id outside the shape, where the model reads it', () => {
     const out = await diagnoseWorkflowTool.handler({ run_id: 'run-o' }, { toolContext: ctx, principal: OWNER_PRINCIPAL } as unknown as IAgent);
     expect(out).toContain('[completed] fetch (');
     // A run from before run names recorded the stored id: shown by its position, with the name runs use now.
-    expect(out).toContain('[failed] #2 (id outside the allowed form; runs as "step-2") (');
+    expect(out).toContain('[failed] #2 (lynox does not show its id; runs as "step-2") (');
     expect(out).not.toContain('Approve');
   });
 
@@ -220,7 +221,7 @@ describe('a stored id outside the shape, where the model reads it', () => {
     const ctx = createToolContext({});
     ctx.runHistory = history;
     const out = await diagnoseWorkflowTool.handler({ run_id: 'run-n' }, { toolContext: ctx, principal: OWNER_PRINCIPAL } as unknown as IAgent);
-    expect(out).toContain('[failed] #2 (id outside the allowed form; runs as "step-2") (');
+    expect(out).toContain('[failed] #2 (lynox does not show its id; runs as "step-2") (');
     expect(out).not.toContain('Approve');
   });
 
@@ -239,9 +240,9 @@ describe('a stored id outside the shape, where the model reads it', () => {
     ctx.runHistory = history;
     const out = await diagnoseWorkflowTool.handler({ run_id: 'run-g' }, { toolContext: ctx, principal: OWNER_PRINCIPAL } as unknown as IAgent);
     // Quoted is only what update_workflow_steps takes as step_id: the position, the note after it.
-    expect(out).toContain('Gate rejected step "#2" (id outside the allowed form; runs as "step-2"), reason:');
-    expect(out).toContain('Gate rejected step "#2" (id outside the allowed form; runs as "step-2")\n');
-    expect(out).toContain('Gate timed out for step "#3" (id outside the allowed form; runs as "step-3")');
+    expect(out).toContain('Gate rejected step "#2" (lynox does not show its id; runs as "step-2"), reason:');
+    expect(out).toContain('Gate rejected step "#2" (lynox does not show its id; runs as "step-2")\n');
+    expect(out).toContain('Gate timed out for step "#3" (lynox does not show its id; runs as "step-3")');
     expect(out).not.toContain('Approve');
     expect(out).not.toContain('Second Old');
   });
@@ -270,6 +271,64 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
     // `{{Fetch it.all.result}}` starts with both `Fetch it.` and `Fetch it.all.`: the longer one is meant.
     const out = runStepIds([{ id: 'Fetch it', task: 'a' }, { id: 'Fetch it.all', task: '{{Fetch it.all.result}} {{Fetch it.result}}' }]);
     expect(out[1]!.task).toBe('{{step-2.result}} {{step-1.result}}');
+  });
+
+  it('leaves {{a.result}} on step a where a stored id reads as a plus a context key, so it reads what it read before run names', () => {
+    const out = runStepIds([
+      { id: 'a', task: 'A' },
+      { id: 'a.result', task: 'R' },
+      { id: 'a.costUsd', task: 'C' },
+      { id: 'send', task: 'Send {{a.result}} at {{a.costUsd}}', input_from: ['a', 'a.result', 'a.costUsd'] },
+    ]);
+    // The steps and their references still run under their names.
+    expect(out.map(s => s.id)).toEqual(['a', 'step-2', 'step-3', 'send']);
+    expect(out[3]!.input_from).toEqual(['a', 'step-2', 'step-3']);
+    expect(out[3]!.task).toBe('Send {{a.result}} at {{a.costUsd}}');
+    const ctx = { a: { result: 'from a', costUsd: 0.5 }, 'step-2': { result: 'from a.result', costUsd: 1 }, 'step-3': { result: 'from a.costUsd', costUsd: 2 } };
+    expect(resolveTaskTemplate(out[3]!.task, ctx)).toBe('Send from a at 0.5');
+  });
+
+  it('leaves such a placeholder alone also in a run whose copy dropped step a', () => {
+    const stored = [{ id: 'a', task: 'A' }, { id: 'a.result', task: 'R' }, { id: 'send', task: '{{a.result}}', input_from: ['a.result'] }];
+    const out = runStepIds([stored[1]!, stored[2]!], stepRunNames(stored), stored.map(s => s.id));
+    expect(out.map(s => s.id)).toEqual(['step-2', 'send']);
+    expect(out[1]!.task).toBe('{{a.result}}');
+  });
+
+  it('moves {{foo.result}} to a stored step foo.result where no step foo exists, as before the rule', () => {
+    const out = runStepIds([{ id: 'foo.result', task: 'R' }, { id: 'send', task: 'Send {{foo.result}}', input_from: ['foo.result'] }]);
+    expect(out.map(s => s.id)).toEqual(['step-1', 'send']);
+    // The placeholder names the step whole, as it did before run names; it now names its run name.
+    expect(out[1]!.task).toBe('Send {{step-1}}');
+  });
+
+  it('reads the head against step ids, not against other stored ids that begin with it', () => {
+    // foo.result and foo.costUsd both begin with `foo.`, but neither is a step foo: both placeholders move.
+    const out = runStepIds([
+      { id: 'foo.result', task: 'R' },
+      { id: 'foo.costUsd', task: 'C' },
+      { id: 'send', task: '{{foo.result.result}} {{foo.costUsd.result}}', input_from: ['foo.result', 'foo.costUsd'] },
+    ]);
+    expect(out[2]!.task).toBe('{{step-1.result}} {{step-2.result}}');
+  });
+
+  it('moves {{Fetch it.result}} to step "Fetch it", not to a stored step "Fetch it.result", where both ids are outside the shape', () => {
+    const out = runStepIds([{ id: 'Fetch it', task: 'A' }, { id: 'Fetch it.result', task: 'R' }, { id: 'send', task: '{{Fetch it.result}}', input_from: ['Fetch it', 'Fetch it.result'] }]);
+    expect(out.map(s => s.id)).toEqual(['step-1', 'step-2', 'send']);
+    expect(out[2]!.task).toBe('{{step-1.result}}');
+  });
+
+  it('moves {{Fetch it.result}} to step "Fetch it" also in a run whose copy dropped that step', () => {
+    const stored = [{ id: 'Fetch it', task: 'A' }, { id: 'Fetch it.result', task: 'R' }, { id: 'send', task: '{{Fetch it.result}}', input_from: ['Fetch it', 'Fetch it.result'] }];
+    const out = runStepIds([stored[1]!, stored[2]!], stepRunNames(stored));
+    expect(out[1]!.task).toBe('{{step-1.result}}');
+  });
+
+  it('still moves {{a.b.result}} to step a.b, whose id reads as no context key', () => {
+    const out = runStepIds([{ id: 'a', task: 'A' }, { id: 'a.b', task: 'B' }, { id: 'send', task: 'Send {{a.b.result}}', input_from: ['a', 'a.b'] }]);
+    expect(out[2]!.task).toBe('Send {{step-2.result}}');
+    const ctx = { a: { result: 'from a', costUsd: 0 }, 'step-2': { result: 'from a.b', costUsd: 0 } };
+    expect(resolveTaskTemplate(out[2]!.task, ctx)).toBe('Send from a.b');
   });
 
   it('takes the next free name, step-<n>a, where step-<n> is already a stored id', () => {
@@ -302,7 +361,7 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
     const stored = storedSteps({ manifest_json: JSON.stringify({ steps: [{ id: 'fetch', task: 'a', input_from: 5 }, { id: OLD, task: 'b', input_from: ['fetch', 3] }] }) })!;
     expect(stored.map(st => st.input_from)).toEqual([undefined, ['fetch']]);
     expect(() => stepRunNames(stored)).not.toThrow();
-    expect(shownRunStepId('step-2', stored)).toBe('#2 (id outside the allowed form; runs as "step-2")');
+    expect(shownRunStepId('step-2', stored)).toBe('#2 (lynox does not show its id; runs as "step-2")');
   });
 
   it('names a hand-damaged row whose id is no text without failing', () => {
@@ -328,11 +387,11 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
 
   it('shows a run name of such a step with its stored position and the bridge, and an old run\'s id by its position', () => {
     const stored = [{ id: 'fetch', task: 'a' }, { id: OLD, task: 'b' }];
-    expect(shownRunStepId('step-2', stored)).toBe('#2 (id outside the allowed form; runs as "step-2")');
-    expect(shownRunStepId(OLD, stored)).toBe('#2 (id outside the allowed form; runs as "step-2")');
+    expect(shownRunStepId('step-2', stored)).toBe('#2 (lynox does not show its id; runs as "step-2")');
+    expect(shownRunStepId(OLD, stored)).toBe('#2 (lynox does not show its id; runs as "step-2")');
     expect(shownRunStepId('fetch', stored)).toBe('fetch');
-    expect(shownRunStepId(OLD, undefined)).toBe('(id outside the allowed form)');
-    expect(shownStepId(OLD, 1)).toBe('#2 (id outside the allowed form)');
+    expect(shownRunStepId(OLD, undefined)).toBe('(lynox does not show its id)');
+    expect(shownStepId(OLD, 1)).toBe('#2 (lynox does not show its id)');
   });
 
   it('gives back a plan with no id outside the shape as it was', () => {

@@ -602,9 +602,6 @@ const FIXTURES: Fixture[] = [
     return [
       { site: 'task_update#change', branch: 'trigger', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, title: 'Wochenbericht' }; },
         build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
-      // Only a field a trigger does not carry: the mark is written, the update changes nothing.
-      { site: 'task_update#change', branch: 'trigger, only a field it does not take', wrote: 'part', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
-        build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
       { site: 'task_update#change', branch: 'to-do, complete', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, status: 'completed' }; },
         build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.complete') },
       { site: 'task_update#change', branch: 'to-do, update', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
@@ -666,7 +663,7 @@ const FIXTURES: Fixture[] = [
       return {
         ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
         secretStore: { obj: vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), reads: VAULT_READS },
-        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+        promptUser: async () => 'allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
     } },
   // The vault keeps the value through the delete: nothing emptied, nothing saved, no change proven.
@@ -678,7 +675,7 @@ const FIXTURES: Fixture[] = [
       return {
         ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
         secretStore: { obj: keeps, reads: VAULT_READS },
-        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+        promptUser: async () => 'allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
     } },
   // A vault with no delete: nothing can be emptied, so nothing is proven, and the call refuses.
@@ -690,7 +687,7 @@ const FIXTURES: Fixture[] = [
       return {
         ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
         secretStore: { obj: noDelete, reads: VAULT_READS },
-        promptUser: async () => 'Allow', spy: 'ctx.apiStore.saveRefusal', cleanup: () => setDataDir(null),
+        promptUser: async () => 'allow', spy: 'ctx.apiStore.saveRefusal', cleanup: () => setDataDir(null),
       };
     } },
   { site: 'api_setup#save', branch: 'empties token slots, then the save is refused', wrote: 'part', row: { verb: 'change', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
@@ -702,13 +699,13 @@ const FIXTURES: Fixture[] = [
       return {
         ctx: { apiStore: { obj: store, reads: API_READS } },
         secretStore: { obj: vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), reads: VAULT_READS },
-        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+        promptUser: async () => 'allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
     } },
   { site: 'api_setup#save', branch: 'create, nothing to empty', row: { verb: 'create', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'create', profile: PROFILE },
     build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(null), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; } },
   { site: 'api_setup#delete', branch: 'delete', row: { verb: 'delete', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'delete', id: 'test-api' },
-    build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'Allow', spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) }; } },
+    build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'allow', spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) }; } },
   // On engine.db, as in production: the row names the profile by its opaque id, never by the slug.
   { site: 'api_setup#refine', branch: 'refine on engine.db', row: { verb: 'change', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'mueller-crm', refine: { addNotes: ['x'] } },
     build: () => {
@@ -728,7 +725,7 @@ const FIXTURES: Fixture[] = [
     build: () => {
       setDataDir(tmp('lynox-iw-api-'));
       const { store } = apiStoreOnDb(MUELLER);
-      return { ctx: { apiStore: { obj: store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'Allow', target: `api_profiles profile=${store.trailIdOf('mueller-crm')!}`, spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) };
+      return { ctx: { apiStore: { obj: store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'allow', target: `api_profiles profile=${store.trailIdOf('mueller-crm')!}`, spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) };
     } },
 ];
 

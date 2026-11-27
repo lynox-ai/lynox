@@ -311,6 +311,8 @@ describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
     expect(items[0]?.bucket).toBe('requires_user');
     expect(items[0]?.classifierVersion).toBe('sensitive-prefilter');
     expect(items[0]?.reasonDe).toContain('OTP/2FA');
+    // A sensitive skip without a rule withholds none.
+    expect(items[0]?.ruleWithheld).toBeNull();
 
     const audit = inbox.listAuditForItem(items[0]!.id);
     expect(audit[0]?.actor).toBe('rule_engine');
@@ -335,7 +337,7 @@ describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
     it(`an auto_handled rule does not silence a sensitive mail (mode ${mode})`, async () => {
       const ruleId = inbox.insertRule({
         accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
-        bucket: 'auto_handled', action: 'archive', source: 'on_demand',
+        bucket: 'auto_handled', action: 'archive', source: 'on_demand', name: 'Kunde Mustermann',
       });
       const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: mode });
       const outcome = await hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'OTP 482917' }));
@@ -347,7 +349,10 @@ describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
       expect(queue.enqueue).not.toHaveBeenCalled();
       const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
       expect(payload['rule_withheld']).toBe(ruleId);
+      expect(payload['fail_reason']).toBe('rule_withheld_sensitive');
+      expect(payload['rule_name']).toBe('Kunde Mustermann');
       expect(payload['sensitive_mode']).toBe(mode);
+      expect(item.ruleWithheld).toEqual({ id: ruleId, name: 'Kunde Mustermann', reason: 'rule_withheld_sensitive' });
     });
   }
 
@@ -361,8 +366,37 @@ describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
     const item = inbox.listItems()[0]!;
     expect(item.bucket).toBe('requires_user');
     expect(item.matchedRuleId).toBe(ruleId);
+    expect(item.ruleWithheld).toBeNull();
     const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
     expect(payload['rule_name']).toBe('Kunde Mustermann');
+  });
+
+  it('a withheld rule without a name is named by its id alone, and the name is the one it had then', async () => {
+    const ruleId = inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'auto_handled', action: 'archive', source: 'on_demand',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'OTP 482917' }));
+    const item = inbox.listItems()[0]!;
+    expect(item.ruleWithheld).toEqual({ id: ruleId, name: null, reason: 'rule_withheld_sensitive' });
+    const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
+    expect('rule_name' in payload).toBe(false);
+  });
+
+  it('a follow-up in the thread of a withheld item leaves what was withheld as it was', async () => {
+    const ruleId = inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'auto_handled', action: 'archive', source: 'on_demand', name: 'Kunde Mustermann',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'OTP 482917' }));
+    // The same thread again, now not sensitive: the item is not classified again.
+    expect(await hook(ACCOUNT.id, envelope({ uid: 2, messageId: '<m2@x>', subject: 'Your code', snippet: 'Danke.' }))).toBe('duplicate');
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]!.ruleWithheld).toEqual({ id: ruleId, name: 'Kunde Mustermann', reason: 'rule_withheld_sensitive' });
+    expect(items[0]!.matchedRuleId).toBeUndefined();
   });
 
   it('an auto_handled rule still files a mail that is not sensitive', async () => {
