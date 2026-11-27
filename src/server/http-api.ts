@@ -114,7 +114,9 @@ import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orchestrator/run-source.js';
 import { runAsPlanOf } from '../core/plan-run-context.js';
-import { MEMBER_CONNECTION_PREFIX } from '../core/member-connection-notes.js';
+import { MEMBER_CONNECTION_PREFIX, lastRunResultFor } from '../core/member-connection-notes.js';
+import { noticeLanguage } from '../core/notice-language.js';
+import { WORKER_NOTICES } from '../core/worker-notices.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
@@ -477,9 +479,15 @@ export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'chang
  * `chatExists` decides whether the escalation's chat still stands and has something in it;
  * without it, once the chat is deleted, or while it is empty, the trigger links to no chat.
  */
-export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal, chatExists?: (threadId: string) => boolean): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat'> & { last_escalation_kind?: 'question' | 'alert' | undefined; paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal, chatExists?: (threadId: string) => boolean): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat' | 'last_run_cause' | 'last_run_member_notes'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat'> & { last_escalation_kind?: 'question' | 'alert' | undefined; paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
   // The stored run cause leaves only as `blocked_reason`, parsed (`storedRunCause`), never as stored.
-  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_escalation_case: escalationCase, last_escalation_chat: escalationChat, last_run_cause: _cause, ...stored } = trigger;
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_escalation_case: escalationCase, last_escalation_chat: escalationChat, last_run_cause: _cause, last_run_member_notes: memberNotes, ...shaped } = trigger;
+  // The last run's member-connection lines never leave as a column: the owner reads them under the
+  // result, anyone else a fixed sentence in place of a result that has them (`lastRunResultFor`).
+  const owner = isOwnerPrincipal(principal);
+  const lastRunResult = memberNotes === undefined || memberNotes.length === 0 ? shaped.last_run_result
+    : lastRunResultFor(trigger, owner, WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates);
+  const stored = { ...shaped, last_run_result: lastRunResult };
   // Whether a wakeup reached the owner, why it did not, the step to take then (their push
   // subscription) and the chat it points to are the owner's: a mandate reading them would be
   // told about the owner's devices as if they were its own, and could act on neither. An absent

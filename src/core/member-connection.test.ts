@@ -360,10 +360,10 @@ describe('the run\'s member-connection notes', () => {
 
   it('memberNotesRepeat: only a last run that halted on the same lines', () => {
     const notes = ['Connection not used: x'];
-    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_result: 'done\n• Connection not used: x' }, notes)).toBe(true);
-    expect(memberNotesRepeat({ last_run_status: 'success', last_run_result: 'done\n• Connection not used: x' }, notes)).toBe(false);
-    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_result: 'done\n• Connection not used: y' }, notes)).toBe(false);
-    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_result: 'done' }, [])).toBe(false);
+    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_member_notes: ['Connection not used: x'] }, notes)).toBe(true);
+    expect(memberNotesRepeat({ last_run_status: 'success', last_run_member_notes: ['Connection not used: x'] }, notes)).toBe(false);
+    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_member_notes: ['Connection not used: y'] }, notes)).toBe(false);
+    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_member_notes: [] }, [])).toBe(false);
     expect(memberNotesRepeat({}, notes)).toBe(false);
   });
 });

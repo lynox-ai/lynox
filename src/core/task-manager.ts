@@ -1189,7 +1189,7 @@ export class TaskManager {
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined; cause?: RunCause | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined; cause?: RunCause | undefined; memberNotes?: readonly string[] | undefined }): boolean {
     // Written with the status on every run end, cleared when this run has none: a cause is never
     // older than the status it explains.
     const lastRunCause = opts?.cause === undefined ? null : JSON.stringify(opts.cause);
@@ -1228,6 +1228,7 @@ export class TaskManager {
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,
         lastRunStatus: status,
         lastRunCause,
+        lastRunMemberNotes: opts?.memberNotes,
         nextRunAt: undefined,
         retryCount: undefined,
       });
@@ -1324,6 +1325,7 @@ export class TaskManager {
       lastRunResult: truncatedResult,
       lastRunStatus: status,
       lastRunCause,
+      lastRunMemberNotes: opts?.memberNotes,
       nextRunAt,
       retryCount,
     });

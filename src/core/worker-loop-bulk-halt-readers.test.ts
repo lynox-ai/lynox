@@ -17,13 +17,14 @@ const CLOSING = 'Lösen kann das nur der Inhaber.';
 
 function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant' }) {
   const recorded: string[] = [];
+  const recordedNotes: (readonly string[] | undefined)[] = [];
   const sent: NotificationMessage[] = [];
   const planner = opts.plannedBy === 'mandate' ? { kind: 'mandate', mandateId: 'grant-1' }
     // A run a mandate planned before the ledger kept its grant: the planner names no grant.
     : opts.plannedBy === 'mandate-without-grant' ? { kind: 'mandate', email: 'member@example.invalid' } : null;
   const engine = {
     config: { language: 'de' },
-    getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn((_id: string, result: string) => { recorded.push(result); return true; }) })),
+    getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn((_id: string, result: string, _status: string, o?: { memberNotes?: readonly string[] }) => { recorded.push(result); recordedNotes.push(o?.memberNotes); return true; }) })),
     getBulkLedger: vi.fn(() => ({
       getRunForApply: vi.fn(() => ({ phase: 'approved', haltReason: opts.reason, targetSystem: 'api:acme.myshopify.com', delegatedPlanner: planner })),
     })),
@@ -37,7 +38,7 @@ function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'manda
   const end = (summary: string, said?: string): void => {
     (loop as unknown as { recordAndNotify: (t: TriggerRecord, s: string, e: boolean, said?: string) => void }).recordAndNotify(task, summary, false, said);
   };
-  return { recorded, sent, end };
+  return { recorded, recordedNotes, sent, end };
 }
 
 const COUNTS = ' 2 von 5 Zielen geschrieben.';
@@ -58,7 +59,7 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.sent[1]!.title).toBe(h.sent[0]!.title);
   });
 
-  it('leaves the owner\'s member-connection lines out of every grant\'s push; the owner\'s push and the history keep them', async () => {
+  it('leaves the owner\'s member-connection lines out of every grant\'s push; the owner\'s push and the stored lines keep them', async () => {
     const h = harness({ reason: R.storeAccessEnded, plannedBy: 'mandate' });
     const summary = `${BULK_NOTICES.de.halted('apply', R.storeAccessEnded)}${COUNTS}`;
     // The owner's wording of a refused member connection: another member's provider and profile,
@@ -72,8 +73,10 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.sent[0]).toMatchObject({ audience: 'owner', body: `${summary}\n• ${NOTE.de}` });
     expect(h.sent[1]).toMatchObject({ audience: 'all_mandates', body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}` });
     expect(h.sent[1]!.body).not.toContain('eva@kanzlei.example');
-    expect(h.recorded).toHaveLength(1);
-    expect(h.recorded[0]).toContain(NOTE.en);
+    // The result is stored without the lines; the lines are stored beside it, for the owner's reads.
+    expect(h.recorded).toEqual([`lynox konnte den Zugang zum Shop nicht erneuern.${COUNTS}`]);
+    const storedLines = [NOTE.en];
+    expect(h.recordedNotes).toEqual([storedLines]);
   });
 
   it('builds every grant\'s push from the sentence in the owner\'s language, as before the lines were left out', async () => {

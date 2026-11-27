@@ -1700,6 +1700,21 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (78);
    ALTER TABLE bulk_runs ADD COLUMN superseded_by TEXT REFERENCES bulk_runs(id) ON DELETE SET NULL;
    CREATE INDEX IF NOT EXISTS idx_bulk_runs_superseded ON bulk_runs(superseded_by);`,
+  // v79: the member-connection lines of a trigger's last run, apart from its result (a JSON array
+  // of the lines as recorded; NULL: none). The owner reads them under the result; anyone else
+  // reads a fixed sentence in place of a result that has them (`lastRunResultFor`).
+  // A result recorded before carries its lines under it (`result\n• line…`), and a trigger that
+  // does not run again would keep them in reach of every reader. So each such result is split at
+  // its first `\n• `: what follows goes into the column as one entry. The owner reads the same
+  // text as before (`lastRunResultFor` puts it back with the same separator); anyone else reads
+  // the sentence. Not a success: a run that noted lines never ends as one (`withMemberNotes`
+  // halts it), so a successful reply with a list of its own stays as it is.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (79);
+   ALTER TABLE triggers ADD COLUMN last_run_member_notes TEXT;
+   UPDATE triggers SET
+     last_run_member_notes = json_array(substr(last_run_result, instr(last_run_result, char(10) || '• ') + 3)),
+     last_run_result = substr(last_run_result, 1, instr(last_run_result, char(10) || '• ') - 1)
+   WHERE instr(last_run_result, char(10) || '• ') > 0 AND last_run_status IS NOT 'success';`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */
