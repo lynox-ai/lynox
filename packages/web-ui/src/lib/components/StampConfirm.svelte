@@ -10,6 +10,7 @@
 	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
 	import MarkedLine from './MarkedLine.svelte';
 	import { tierName } from '../utils/tier-words.js';
+	import { isCustomSchedule } from '../utils/cron-human.js';
 	import WatchAddress from './WatchAddress.svelte';
 	import WholeValue from './WholeValue.svelte';
 	import { setApart, shownWhole } from '../utils/plan-takeover.js';
@@ -159,7 +160,8 @@
 			</div>
 		{/if}
 		{#if s.schedule_cron}
-			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {markHidden(cronText(s.schedule_cron))}</p>
+			<!-- A schedule of its own is decided on as it is: the label, then the expression set apart. -->
+			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {#if isCustomSchedule(s.schedule_cron)}{t('tasks.custom_schedule')}: <bdi class="font-mono" data-stamp-schedule-expr>{markHidden(s.schedule_cron)}</bdi>{:else}{markHidden(cronText(s.schedule_cron))}{/if}</p>
 		{/if}
 		{#if s.model_tier}
 			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {tierName(s.model_tier) ?? markHidden(s.model_tier)}</p>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { localSchedule, monthDay } from './cron-human.js';
+import { clockTime, isCustomSchedule, localSchedule, monthDay } from './cron-human.js';
 
 describe('a day of the month in a schedule line', () => {
 	it('is an English ordinal: st, nd, rd, and th for 11 to 13 and the rest', () => {
@@ -42,7 +42,7 @@ describe('a UTC schedule as the reader lives it', () => {
 	it('moves only the hour of a daily schedule, and leaves what it cannot read as it is', () => {
 		expect(localSchedule('30 23 * * *', ZURICH_WINTER)).toEqual({ kind: 'daily', time: '00:30' });
 		expect(localSchedule('0 * * * *', ZURICH_WINTER)).toEqual({ kind: 'hourly' });
-		for (const cron of ['*/5 * * * *', '0 9 * 1 *', '0 9 * * 7', '0 24 * * *', '60 9 * * *', '0 9 0 * *', '0 9 32 * *']) {
+		for (const cron of ['*/7 * * * *', '0 */5 * * *', '0 9 * 1 *', '0 9 * * 7', '0 24 * * *', '60 9 * * *', '0 9 0 * *', '0 9 32 * *']) {
 			expect(localSchedule(cron, ZURICH_WINTER)).toEqual({ kind: 'raw', cron });
 		}
 	});
@@ -78,5 +78,56 @@ describe('a schedule stays in UTC where one local day would not hold all year', 
 		expect(localSchedule('15 2 * * 0', -210)).toEqual({ kind: 'weekly', weekday: 6, time: '22:45' });
 		expect(localSchedule('0 0 * * 0', -720)).toEqual({ kind: 'weekly', weekday: 6, time: '12:00' });
 		expect(localSchedule('59 23 * * 6', 840)).toEqual({ kind: 'weekly', weekday: 0, time: '13:59' });
+	});
+});
+
+describe('a schedule by the minute or by the hour', () => {
+	const ZURICH_WINTER = 60;
+	const INDIA = 330;
+
+	it('says every minute, also as a step of one', () => {
+		expect(localSchedule('* * * * *', ZURICH_WINTER)).toEqual({ kind: 'every_minute' });
+		expect(localSchedule('*/1 * * * *', ZURICH_WINTER)).toEqual({ kind: 'every_minute' });
+	});
+
+	it('says every n minutes only where n divides the hour', () => {
+		expect(localSchedule('*/5 * * * *', ZURICH_WINTER)).toEqual({ kind: 'every_minutes', n: 5 });
+		expect(localSchedule('*/30 * * * *', ZURICH_WINTER)).toEqual({ kind: 'every_minutes', n: 30 });
+		for (const cron of ['*/7 * * * *', '*/45 * * * *', '*/0 * * * *', '*/60 * * * *']) {
+			expect(localSchedule(cron, ZURICH_WINTER)).toEqual({ kind: 'raw', cron });
+		}
+	});
+
+	it('says every n hours with the first two local times of the day, only where n divides the day', () => {
+		expect(localSchedule('15 */2 * * *', ZURICH_WINTER)).toEqual({ kind: 'every_hours', n: 2, times: ['01:15', '03:15'] });
+		expect(localSchedule('0 */6 * * *', INDIA)).toEqual({ kind: 'every_hours', n: 6, times: ['05:30', '11:30'] });
+		expect(localSchedule('0 */12 * * *', -480)).toEqual({ kind: 'every_hours', n: 12, times: ['04:00', '16:00'] });
+		for (const cron of ['0 */5 * * *', '0 */7 * * *', '0 */24 * * *', '60 */2 * * *']) {
+			expect(localSchedule(cron, ZURICH_WINTER)).toEqual({ kind: 'raw', cron });
+		}
+	});
+
+	it('says every hour with its times at a minute past, and plainly on the hour', () => {
+		expect(localSchedule('20 * * * *', ZURICH_WINTER)).toEqual({ kind: 'hourly_at', times: ['00:20', '01:20'] });
+		expect(localSchedule('0 */1 * * *', ZURICH_WINTER)).toEqual({ kind: 'hourly' });
+		expect(localSchedule('0 * * * *', ZURICH_WINTER)).toEqual({ kind: 'hourly' });
+	});
+
+	it('tells a schedule of its own from one said in words', () => {
+		expect(isCustomSchedule('*/7 3-5 * * 1')).toBe(true);
+		expect(isCustomSchedule('*/7 * * * *')).toBe(true);
+		expect(isCustomSchedule('*/5 * * * *')).toBe(false);
+		expect(isCustomSchedule('0 9 * * *')).toBe(false);
+	});
+});
+
+describe('a time of day as the language writes it', () => {
+	it('is the 24-hour clock with a leading zero in German', () => {
+		expect(['00:00', '08:05', '12:00', '23:59'].map((t) => clockTime(t, 'de'))).toEqual(['00:00', '08:05', '12:00', '23:59']);
+	});
+
+	it('is the 12-hour clock without a leading zero in English, midnight and noon as 12', () => {
+		expect(['00:00', '08:05', '11:59', '12:00', '13:30', '23:59'].map((t) => clockTime(t, 'en')))
+			.toEqual(['12:00 AM', '8:05 AM', '11:59 AM', '12:00 PM', '1:30 PM', '11:59 PM']);
 	});
 });

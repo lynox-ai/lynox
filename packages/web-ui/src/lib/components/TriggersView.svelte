@@ -21,7 +21,7 @@
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { approvalSetupKind, approvalSetupName, type ApprovalSetupLine } from './approvals.js';
 	import { visibleText } from '../visible-text.js';
-	import { localSchedule, monthDay } from '../utils/cron-human.js';
+	import { clockTime, isCustomSchedule, localSchedule, monthDay } from '../utils/cron-human.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -524,15 +524,22 @@
 	const WEEKDAY_KEYS = ['tasks.sunday', 'tasks.monday', 'tasks.tuesday', 'tasks.wednesday', 'tasks.thursday', 'tasks.friday', 'tasks.saturday'] as const;
 	function cronToHuman(cron: string): string {
 		const s = localSchedule(cron);
+		const at = (time: string): string => clockTime(time, getLocale());
 		switch (s.kind) {
+			case 'every_minute': return t('tasks.every_minute');
+			case 'every_minutes': return tf('tasks.every_n_minutes', { n: String(s.n) });
 			case 'hourly': return t('tasks.every_hour');
-			case 'daily': return `${t('tasks.daily_at')} ${s.time}`;
-			case 'weekly': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${s.time}`;
-			case 'weekly_utc': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${s.time} UTC`;
-			case 'monthly': return tf('tasks.monthly_on_day', { day: monthDay(s.day, getLocale()), time: s.time });
-			case 'monthly_last': return tf('tasks.monthly_last_day', { time: s.time });
-			case 'monthly_utc': return tf('tasks.monthly_on_day_utc', { day: monthDay(s.day, getLocale()), time: s.time });
-			case 'raw': return s.cron;
+			case 'hourly_at': return tf('tasks.every_hour_at', { t1: at(s.times[0]), t2: at(s.times[1]) });
+			case 'every_hours': return tf('tasks.every_n_hours', { n: String(s.n), t1: at(s.times[0]), t2: at(s.times[1]) });
+			case 'daily': return `${t('tasks.daily_at')} ${at(s.time)}`;
+			case 'weekly': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${at(s.time)}`;
+			case 'weekly_utc': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${at(s.time)} UTC`;
+			case 'monthly': return tf('tasks.monthly_on_day', { day: monthDay(s.day, getLocale()), time: at(s.time) });
+			case 'monthly_last': return tf('tasks.monthly_last_day', { time: at(s.time) });
+			case 'monthly_utc': return tf('tasks.monthly_on_day_utc', { day: monthDay(s.day, getLocale()), time: at(s.time) });
+			// The expression itself is no label: the card says it is a schedule of its own and shows
+			// the expression on hover; "next run" beside it says when.
+			case 'raw': return t('tasks.custom_schedule');
 		}
 	}
 
@@ -556,7 +563,11 @@
 	}
 
 	function fmtDate(iso: string): string {
-		return new Date(iso).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+		// The time is written by `clockTime`, as on the schedule line beside it, so a card has one form.
+		const d = new Date(iso);
+		const locale = getLocale();
+		const day = d.toLocaleDateString(locale === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric' });
+		return `${day}, ${clockTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`, locale)}`;
 	}
 
 	// A missing key renders with NO class, which reads as "no verdict" rather than as
@@ -673,7 +684,7 @@
 							{/if}
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
-									<span class="flex items-center gap-1" data-trigger-schedule>
+									<span class="flex items-center gap-1" data-trigger-schedule title={isCustomSchedule(trigger.schedule_cron) ? trigger.schedule_cron : undefined}>
 										<Icon name="clock" size="xs" />
 										{cronToHuman(trigger.schedule_cron)}
 									</span>

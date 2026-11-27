@@ -22,7 +22,11 @@ export function monthDay(day: number, locale: 'de' | 'en'): string {
  * months lack, and a time near midnight can fall on another day once the clocks change.
  */
 export type LocalSchedule =
+	| { kind: 'every_minute' }
+	| { kind: 'every_minutes'; n: number }
 	| { kind: 'hourly' }
+	| { kind: 'hourly_at'; times: [string, string] }
+	| { kind: 'every_hours'; n: number; times: [string, string] }
 	| { kind: 'daily'; time: string }
 	| { kind: 'weekly'; weekday: number; time: string }
 	| { kind: 'weekly_utc'; weekday: number; time: string }
@@ -32,6 +36,36 @@ export type LocalSchedule =
 	| { kind: 'raw'; cron: string };
 
 const pad = (n: number): string => n.toString().padStart(2, '0');
+
+/** Minutes after midnight as `HH:MM`. */
+const hhmm = (minutes: number): string => `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`;
+
+/**
+ * A time of day (`HH:MM`) as the reader's language writes it: German on the 24-hour clock with a
+ * leading zero ("08:00"), English on the 12-hour clock without one ("8:00 AM"), as the dates
+ * next to it are written. The one place a schedule line's times are formatted.
+ */
+export function clockTime(time: string, locale: 'de' | 'en'): string {
+	if (locale === 'de') return time;
+	const [h, m] = time.split(':').map(Number) as [number, number];
+	return `${h % 12 === 0 ? 12 : h % 12}:${pad(m)} ${h < 12 ? 'AM' : 'PM'}`;
+}
+
+/**
+ * The first two local times of the day of a run at `minute` past every `step`-th UTC hour, `step`
+ * dividing 24, moved by `offset` (local minus UTC, minutes).
+ */
+function firstTwo(minute: number, step: number, offset: number): [string, string] {
+	const local: number[] = [];
+	for (let hour = 0; hour < 24; hour += step) local.push((((hour * 60 + minute + offset) % 1440) + 1440) % 1440);
+	local.sort((a, b) => a - b);
+	return [hhmm(local[0]!), hhmm(local[1]!)];
+}
+
+/** Whether the line says the expression itself rather than words: the card shows a label instead. */
+export function isCustomSchedule(cron: string): boolean {
+	return localSchedule(cron, 0, [0]).kind === 'raw';
+}
 
 /**
  * This browser's offsets (local minus UTC, minutes) today and on the 1st and 15th of every month
@@ -55,6 +89,26 @@ function browserOffsets(): { now: number; year: number[] } {
  */
 export function localSchedule(cron: string, offsetMinutes?: number, yearOffsets?: number[]): LocalSchedule {
 	if (cron === '0 * * * *') return { kind: 'hourly' };
+	if (cron === '* * * * *') return { kind: 'every_minute' };
+	// Every n minutes, only where n divides the hour: otherwise the count starts again at each full
+	// hour, and the gap before it is shorter than n.
+	const minutes = /^\*\/(\d+)\s+\*\s+\*\s+\*\s+\*$/.exec(cron);
+	if (minutes) {
+		const n = Number(minutes[1]);
+		if (n === 1) return { kind: 'every_minute' };
+		return n >= 2 && n <= 59 && 60 % n === 0 ? { kind: 'every_minutes', n } : { kind: 'raw', cron };
+	}
+	// At a minute past every hour, or every n hours where n divides the day (otherwise the count
+	// starts again at midnight UTC). Said with the first two local times of the day.
+	const hours = /^(\d+)\s+(\*|\*\/\d+)\s+\*\s+\*\s+\*$/.exec(cron);
+	if (hours) {
+		const minute = Number(hours[1]);
+		const n = hours[2] === '*' ? 1 : Number(hours[2]!.slice(2));
+		if (minute > 59 || n < 1 || n > 23 || 24 % n !== 0) return { kind: 'raw', cron };
+		const offset = offsetMinutes ?? -new Date().getTimezoneOffset();
+		if (n === 1) return minute === 0 ? { kind: 'hourly' } : { kind: 'hourly_at', times: firstTwo(minute, 1, offset) };
+		return { kind: 'every_hours', n, times: firstTwo(minute, n, offset) };
+	}
 	const m = /^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/.exec(cron);
 	if (!m) return { kind: 'raw', cron };
 	const minute = Number(m[1]);
