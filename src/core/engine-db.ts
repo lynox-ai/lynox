@@ -1713,8 +1713,9 @@ const MIGRATIONS: string[] = [
   // into a halt), and other ends put lines of their own under the result in the same form (a
   // failed workflow's grant and write notes, a model's list), which stay as they are. A bulk run's
   // trigger is left alone too: its halt sentence can list items the same way. What this leaves as
-  // before: a failed run, or a bulk halt, whose result carries member lines keeps them in the result
-  // until the trigger's next run end writes the column.
+  // before: any end other than a halt (failed, timed out, stopped, interrupted, no status), and any
+  // bulk end, whose result carries member lines keeps them in the result until the trigger's next
+  // run end writes the column.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (79);
    ALTER TABLE triggers ADD COLUMN last_run_member_notes TEXT;
    UPDATE triggers SET

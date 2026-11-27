@@ -80,7 +80,7 @@ describe("a run's end with member lines, by reader", () => {
     expect(stored('a')).toEqual({ last_run_result: 'All done.', last_run_member_notes: null });
   });
 
-  it('the migration splits only a halted result with its lines: the owner reads it as before, a mandate the sentence', () => {
+  it('the migration splits only a halted result with its lines: the owner reads it as before, a mandate the sentence; other ends stay as before', () => {
     // A database from before: the column and its version taken back out, a result with its lines under it.
     const path = join(dir, 'old.db');
     new EngineDb(path, '').close();
@@ -143,6 +143,10 @@ describe("a run's end with member lines, by reader", () => {
       expect(read('listed')['last_run_result']).toBe(listed);
       for (const id of ['old', 'headless']) expect(readAsMandate(id)['last_run_result']).toBe(forMandatesHere());
       expect(readAsMandate('listed')['last_run_result']).toBe(listed);
+      // Left as before the upgrade, member lines too, until the trigger's next run end: an end other
+      // than a halt, and a result with no status.
+      expect(readAsMandate('failed')['last_run_result']).toBe(failedWithList);
+      expect(readAsMandate('unstated')['last_run_result']).toBe(`${REPLY}\n• ${LINE}`);
       // A failed workflow's grant note reaches the mandate as it did before the upgrade.
       expect(readAsMandate('workflow')['last_run_result']).toBe(grantNote);
       expect(readAsMandate('bulk-r1')['last_run_result']).toBe(bulkHalt);
