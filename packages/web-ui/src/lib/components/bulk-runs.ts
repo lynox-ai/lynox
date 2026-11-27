@@ -1372,7 +1372,8 @@ const BULK_BEFORE_WRITE: ReadonlySet<BulkPhase> = new Set(['planned', 'previewed
  *  Konflikte 0 · fehlgeschlagen 0“ before any write reads as a finished run. Once a target is
  *  written, in conflict or failed, the counts stand whatever the phase: each target in one class
  *  ({@link bulkHeadParts}), so they add up to the number of targets. An engine that sends no
- *  classes gets the overlapping counts it has. */
+ *  classes gets the overlapping counts it has, and an apply run among them also the targets taken
+ *  out, which no other count holds. */
 export function bulkHeadCounts(
 	step: BulkWorkingStep | null,
 	run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'total' | 'applied' | 'conflicts' | 'failed' | 'heads' | 'haltKey' | 'probe' | 'haltReason'> & { deselected?: number },

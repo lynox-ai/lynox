@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t, tf } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
-import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
+import { bulkHeadCounts, type BulkRunDetailData, type BulkTarget } from './bulk-runs.js';
 
 // A target the owner took out before approving stays named as taken out in every phase, not only
 // while approving: after „fertig“ and after a take-back it looked like the targets that were reset.
@@ -128,6 +128,17 @@ describe('a target the owner took out', () => {
 		expect(target.textContent).not.toContain(t('bulk.deselect.on'));
 	});
 
+	it('offers a mandate no button while approving, and names the owner on the target taken out', async () => {
+		viewer = 'mandate';
+		run = makeRun({ phase: 'previewed', applied: 0, undoable: 0 });
+		targets = [tgt(1, { written: false }), tgt(2, { written: false }), tgt(3, { deselected: true, written: false })];
+		await render();
+		expect(rowOf(3).textContent).toContain(t('bulk.deselect.taken_out_mandate'));
+		for (const seq of [1, 2, 3]) expect(rowOf(seq).querySelector('button')).toBeNull();
+		expect(target.textContent).not.toContain(t('bulk.deselect.off'));
+		expect(target.textContent).not.toContain(t('bulk.deselect.on'));
+	});
+
 	it('names the owner to a mandate', async () => {
 		viewer = 'mandate';
 		await render();
@@ -152,6 +163,11 @@ describe('the head of a run', () => {
 		const counts = target.querySelector('[data-testid="bulk-counts"]')!.textContent!;
 		expect(counts).toContain(tf('bulk.heads.deselected', { n: '1' }));
 		expect(counts.split(tf('bulk.heads.deselected', { n: '1' })).length - 1).toBe(1);
+	});
+
+	it('keeps an undo run\'s own line when an older engine sends no classes, also with a target taken out', () => {
+		const undo = { kind: 'undo' as const, phase: 'done' as const, total: 3, applied: 2, conflicts: 0, failed: 0, deselected: 1, haltKey: null, probe: null, haltReason: null };
+		expect(bulkHeadCounts(null, undo, { t, tf })).toBe(tf('bulk.head.counts_undo', { n: '3', a: '2', c: '0', f: '0' }));
 	});
 
 	it('has no taken-out part when nothing was taken out', async () => {
