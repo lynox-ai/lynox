@@ -9,6 +9,7 @@ import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type App
 import { stripHidden, stripHiddenInName } from './hidden-text.js';
 import { isStepIdShape, shownRunStepId, shownStepId, stepRunNames, storedSteps } from '../orchestrator/step-id.js';
 import { detectSensitiveContent } from '../integrations/inbox/sensitive-content.js';
+import { followUpsOf } from '../integrations/inbox/follow-ups.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
@@ -184,25 +185,9 @@ export interface ChatThreadMessage {
  * mail, as before.
  */
 export function followUpToAnswer(reader: ChatInboxReader, item: InboxItem): ChatThreadMessage | null {
-  const messages = reader.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit: 50 });
-  const own = item.messageId !== undefined ? messages.find((m) => m.messageId === item.messageId) : undefined;
-  const since = own?.mailDate?.getTime();
-  const reopenedBy = new Set<string>();
-  for (const a of reader.listAuditForItem(item.id, item.tenantId)) {
-    if (a.action !== 'reopened_on_reply' && a.action !== 'raised_on_sensitive_follow_up') continue;
-    try {
-      const id = (JSON.parse(a.payloadJson) as { message_id?: unknown }).message_id;
-      if (typeof id === 'string') reopenedBy.add(id);
-    } catch {
-      // An unreadable payload names no message.
-    }
-  }
-  return messages.find((m) =>
-    m.messageId !== item.messageId
-    && m.direction === 'inbound'
-    && (m.autoReply === false || (m.autoReply === undefined && reopenedBy.has(m.messageId)))
-    && !(since !== undefined && m.mailDate !== undefined && m.mailDate.getTime() < since),
-  ) ?? null;
+  // The rule the inbox list and reading pane start from (`follow-ups.ts`); they also leave out
+  // mail the owner dealt with since, which the chat needs not: it answers the newest one.
+  return followUpsOf(reader, item)[0] ?? null;
 }
 
 /**
@@ -569,15 +554,27 @@ export function resolveChatContext(
     for (const id of ref.ids.slice(0, MAX_BATCH_ITEMS)) {
       const item = inboxState.getItem(id);
       if (!item) continue;
-      const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
-      const from = item.fromName
-        ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
+      // As in the single 'mail' kind: a follow-up in the thread is what a reply answers, so its
+      // sender, subject, text and Message-ID take the place of the first mail's. It was not judged
+      // by the check the item's own mail passed, so it is checked here, on the snippet shown and on
+      // the body, which a writer may store masked differently.
+      const followUp = followUpToAnswer(inboxState, item);
+      const mail = followUp ?? item;
+      const followUpBody = followUp?.bodyMd ?? '';
+      const text = followUp ? (followUp.snippet || followUpBody) : (item.snippet ?? '');
+      const withheld = followUp
+        ? detectSensitiveContent({ subject: '', body: [followUp.subject, followUp.fromName ?? '', followUpBody, text].join('\n') }).categories
+        : [];
+      const hidden = withheld.length > 0;
+      const fromAddr = oneLine(mail.fromAddress, MAX_NAME_CHARS);
+      const from = mail.fromName && !hidden
+        ? `${oneLine(mail.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
         : fromAddr;
       const acct = oneLine(item.accountId, MAX_NAME_CHARS);
-      const uidRow = item.messageId
-        ? inboxState.getUidByMessageId(item.accountId, item.messageId)
+      const uidRow = mail.messageId
+        ? inboxState.getUidByMessageId(item.accountId, mail.messageId)
         : null;
-      const msgId = item.messageId ? oneLine(item.messageId, MAX_NAME_CHARS) : '';
+      const msgId = mail.messageId ? oneLine(mail.messageId, MAX_NAME_CHARS) : '';
       // Operational header — engine-generated, NOT sender-controlled, so it stays
       // in the trusted framing above the wrapped block. Same split as
       // `envelope.ts:83`, which calls it "Operational header — agent framing, NOT
@@ -587,12 +584,18 @@ export function resolveChatContext(
           `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}`
         : `account "${acct}" — locate via mail_search` +
           `${msgId ? ` (by the Message-ID below)` : ''}`;
-      const subject = oneLine(item.subject, MAX_NAME_CHARS);
-      const snippet = oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS);
+      const subject = hidden ? '' : oneLine(mail.subject, MAX_NAME_CHARS);
+      const snippet = hidden ? '' : oneLine(text, MAX_MAIL_SNIPPET_CHARS);
+      const which = followUp ? ' — a follow-up to the mail the inbox took in' : '';
+      const absent = hidden
+        ? ` — sender name, subject and snippet withheld: sensitive content (${[...new Set(withheld)].join(', ')})`
+        : followUp && text.length === 0
+          ? `${missingFieldNote({ from, subject })} — the inbox stored no text of it`
+          : missingFieldNote({ from, subject, snippet });
       lines.push(
         // Absence rides on the locator line — engine framing, same reason as the
         // single 'mail' kind: a placeholder inside the block is forgeable.
-        `${lines.length + 1}. ${locator}${missingFieldNote({ from, subject, snippet })}\n` +
+        `${lines.length + 1}. ${locator}${which}${absent}\n` +
         wrapChannelMessage({
           source: `mail:${acct}:inbox:${item.id}`,
           fields: {

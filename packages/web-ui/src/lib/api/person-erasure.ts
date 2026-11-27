@@ -55,6 +55,8 @@ export interface PersonErasurePreview {
 	blocksMentioning: Array<'profile' | 'playbook'>;
 	plan: string;
 	notCovered: PersonErasureNotCovered[];
+	/** Set-aside copies of the databases it deletes in (names only); `null` when they could not be listed. */
+	setAsideCopies?: Array<{ file: string; companions: string[] }> | null;
 }
 
 export interface PersonErasureResult {
@@ -66,6 +68,8 @@ export interface PersonErasureResult {
 	counts: { entries: number; memories: number; legacyEntities: number; subjects: number };
 	left: { entries: number; memories: number; legacyEntities: number; blocks: Array<'profile' | 'playbook'> };
 	notCovered: PersonErasureNotCovered[];
+	/** Set-aside copies of the databases it deletes in (names only); `null` when they could not be listed. */
+	setAsideCopies?: Array<{ file: string; companions: string[] }> | null;
 }
 
 /** What the panel shows for an answer. `erased` only for a 200 that says so. */

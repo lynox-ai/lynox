@@ -106,6 +106,7 @@ function makeParent(review: ChangesetWriter | undefined): IAgent {
     // A real agent always has one; a workflow run takes it as whom it is for (1055).
     principal: OWNER_PRINCIPAL,
     getAvailableTools: () => ctx.tools,
+    hasRunCostCeiling: () => false,
     currentThreadId: 't-1',
     userTimezone: 'UTC',
     changeset: review,

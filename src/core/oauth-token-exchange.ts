@@ -204,8 +204,9 @@ export function serializeTokenBody(params: Readonly<Record<string, string>>, bod
 export type TokenExchangeResult =
   /** The provider answered. `status` may still be an error — that is the caller's to read. */
   | { readonly ok: true; readonly status: number; readonly responseOk: boolean; readonly text: string }
-  /** Nothing usable came back. `message` is already the provider's or the transport's. */
-  | { readonly ok: false; readonly message: string };
+  /** Nothing usable came back. `message` is already the provider's or the transport's.
+   *  `unsentForPass`: refused before sending, because a store's exchange had no exchange pass. */
+  | { readonly ok: false; readonly message: string; readonly unsentForPass?: true };
 
 /**
  * POST the parameters and hand back what came out.
@@ -243,7 +244,7 @@ export async function exchangeToken(
   // exchange pass: the connect callback's, minted by `storeExchangePassFor`. Here, not in the
   // vetting: every exchange, the connect callback, `fetch_token` and a renewal, ends here.
   if (isShopifyAdminUrl(req.endpoint.url) && !(isStorePass(pass) && pass.kind === 'exchange')) {
-    return { ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` };
+    return { ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}`, unsentForPass: true };
   }
 
   const headers: Record<string, string> = {

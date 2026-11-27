@@ -7,6 +7,9 @@ import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapChannelMessage } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import type { ConsentAction } from '../../contract/prompt.js';
+import { GOOGLE_DIALOG } from '../../tools/dialog-text.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
@@ -239,17 +242,18 @@ export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<Dri
           // the only one that names the RECIPIENT, so it is the only one that
           // makes the decision an informed one. A value ending the line could
           // otherwise append a reassuring sentence the system never wrote.
+          const said = GOOGLE_DIALOG[agent.dialogLanguage ?? 'en'];
           let confirmMsg: PromptText = pv``;
+          let action: ConsentAction = 'upload';
           switch (input.action) {
-            case 'upload': confirmMsg = pv`Upload file "${input.file_name ?? 'unnamed'}" to Drive?`; break;
-            case 'create_doc': confirmMsg = pv`Create Google Doc "${input.file_name ?? 'Untitled'}"?`; break;
-            case 'move': confirmMsg = pv`Move file ${input.file_id ?? '(unknown)'} to folder ${input.target_folder_id ?? '(unknown)'}?`; break;
-            case 'share': confirmMsg = pv`Share file ${input.file_id ?? '(unknown)'} with ${input.email ?? '(unknown)'} as ${input.role ?? 'reader'}?`; break;
+            case 'upload': confirmMsg = said.upload(input.file_name ?? said.unnamed); action = 'upload'; break;
+            case 'create_doc': confirmMsg = said.createDoc(input.file_name ?? said.untitled); action = 'create'; break;
+            case 'move': confirmMsg = said.move(input.file_id ?? said.unknown, input.target_folder_id ?? said.unknown); action = 'move'; break;
+            case 'share': confirmMsg = said.share(input.file_id ?? said.unknown, input.email ?? said.unknown, input.role ?? 'reader'); action = 'share'; break;
           }
-          const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
-          if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-            return 'Action cancelled by user.';
-          }
+          // Only the `confirm` key goes ahead; its button names `action`, which decides nothing.
+          const consent = decideConsent('google', await agent.promptUser(confirmMsg, consentOptions('google'), consentMeta('google', undefined, action)));
+          if (consent !== 'confirm') return consentRefusal(consent, 'Action cancelled by user.');
         }
 
         switch (input.action) {

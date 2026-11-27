@@ -57,14 +57,14 @@ describe('the API page shows the files the import waits on', () => {
 	it('a file listed: the notice, the file name, why, and the id that deletes it', async () => {
 		serve({ profiles: [], importWaiting: [{ file: 'shop.json', reason: 'malformed', deleteId: 'shop' }] });
 		const box = await render();
-		expect(box?.textContent).toContain('Die API-Profile von vor der Umstellung auf engine.db sind noch nicht übernommen');
+		expect(box?.textContent).toContain('Die API-Verbindungen von vor der Umstellung auf engine.db sind noch nicht übernommen');
 		expect(box?.textContent).toContain('shop.json ist kein gültiges JSON. Löschen im Chat mit der ID shop.');
 	});
 
 	it('a file whose name is no id: removed by hand', async () => {
 		serve({ profiles: [], importWaiting: [{ file: 'my shop.json', reason: 'not_a_profile', deleteId: null }] });
 		const box = await render();
-		expect(box?.textContent).toContain('my shop.json ist kein lesbares API-Profil');
+		expect(box?.textContent).toContain('my shop.json ist keine lesbare API-Verbindung');
 		expect(box?.textContent).toContain('Der Dateiname ist keine ID: die Datei von Hand aus dem Ordner entfernen.');
 	});
 

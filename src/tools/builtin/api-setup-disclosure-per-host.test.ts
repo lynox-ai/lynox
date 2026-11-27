@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { CONSENT_UNRECOGNISED_SENTENCE } from '../../core/consent-ask.js';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -73,13 +74,28 @@ async function save(store: ApiStore, action: 'create' | 'update', profile: ApiPr
   const asked: string[] = [];
   const result = await apiSetupTool.handler({ action, profile }, agentFor(store, async (q) => {
     asked.push(flattenPrompt(q));
-    return 'Allow';
+    return 'allow';
   })) as string;
   return { result, asked };
 }
 
 const paragraphsNaming = (text: string, host: string): number =>
   text.split('\n\n').filter((p) => p.startsWith(`Custom endpoint outside lynox's listed sub-processors: ${host}.`)).length;
+
+describe('api_setup: the acceptance question approves only on its key', () => {
+  beforeEach(() => { lynoxDir = mkdtempSync(join(tmpdir(), 'lynox-disclosure-key-')); });
+  afterEach(() => { rmSync(lynoxDir, { recursive: true, force: true }); });
+
+  it('typed text saves nothing, and the refusal says why', async () => {
+    for (const answer of ['yes', 'Erlauben', 'y', 'Allow']) {
+      const store = new ApiStore();
+      const result = await apiSetupTool.handler({ action: 'create', profile: storeProfile(`https://acme.myshopify.com/admin/api/${PINNED}`) }, agentFor(store, async (q) =>
+        flattenPrompt(q).includes('needs your acceptance') ? answer : 'allow')) as string;
+      expect(result, answer).toBe(`Blocked: profile "shop" not saved — user declined. ${CONSENT_UNRECOGNISED_SENTENCE}`);
+      expect(store.get('shop'), answer).toBeUndefined();
+    }
+  });
+});
 
 describe('api_setup: the acceptance question names each host once', () => {
   beforeEach(() => { lynoxDir = mkdtempSync(join(tmpdir(), 'lynox-disclosure-per-host-')); });
@@ -178,7 +194,7 @@ describe('api_setup: a store profile is saved on the API version its provider pi
     store.register(storeProfile('https://acme.myshopify.com/admin/api/2026-04'));
     const result = await apiSetupTool.handler(
       { action: 'refine', id: 'shop', refine: { addNotes: ['Read products only.'] } },
-      agentFor(store, async () => 'Allow'),
+      agentFor(store, async () => 'allow'),
     ) as string;
     expect(result).toContain('Refined profile "shop"');
     expect(store.get('shop')?.notes).toContain('Read products only.');

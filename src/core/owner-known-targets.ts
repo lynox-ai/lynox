@@ -27,6 +27,12 @@ export type OwnerKnownVerdict = 'known' | 'foreign' | 'unreadable';
 /** The read-only face every holder gets: there is no way to add a target. */
 export interface OwnerKnownReader {
   known(target: SendTarget): OwnerKnownVerdict;
+  /**
+   * Every host the owner named in the typed words (and the counted instruction), in ASCII form,
+   * for the shell's egress set. Contacts and the send log are mail sources and name no host.
+   * A source that throws names nothing.
+   */
+  typedHosts?(): string[];
 }
 
 export interface OwnerKnownSources {
@@ -131,6 +137,18 @@ export class OwnerKnownTargets implements OwnerKnownReader {
       if (sentToOwnerKnown !== undefined && ask(() => sentToOwnerKnown(target.value))) return 'known';
     }
     return unreadable ? 'unreadable' : 'foreign';
+  }
+
+  typedHosts(): string[] {
+    const texts: string[] = this._instruction !== undefined ? [this._instruction] : [];
+    try {
+      if (this._sources.ownerTexts !== undefined) texts.push(...this._sources.ownerTexts());
+    } catch {
+      // Unreadable: the thread names nothing.
+    }
+    const hosts = new Set<string>();
+    for (const text of texts) for (const host of targetsInText(text).host) hosts.add(host);
+    return [...hosts];
   }
 }
 
