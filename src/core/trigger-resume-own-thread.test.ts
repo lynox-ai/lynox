@@ -38,6 +38,7 @@ const endTurn = (text: string) => ({
 });
 
 const EVA_TAG = 'mandate:eva@kanzlei.example';
+const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
 
 /** A plan Eva shaped and the owner stamped: it runs for Eva (`planOf`). */
 const plan: TriggerRecord = {
@@ -71,7 +72,7 @@ describe('a mandate\'s run that picks up an answer from a conversation it does n
    * Boots a real engine, opens the conversation `threadId` for `createdBy` with one turn in it,
    * and runs Eva's plan once after its question was answered there. Returns the thread store.
    */
-  async function resumeIn(threadId: string, createdBy: string) {
+  async function resumeIn(threadId: string, createdBy: string, start: 'schedule' | 'hand' = 'schedule') {
     const { Engine } = await import('./engine.js');
     const { WorkerLoop } = await import('./worker-loop.js');
     const engine = new Engine({ model: 'balanced', context: { id: 'resume-own', name: 'resume-own', source: 'cli', workspaceDir: '' } });
@@ -84,13 +85,14 @@ describe('a mandate\'s run that picks up an answer from a conversation it does n
 
     let dispatched = false;
     const recorded: string[] = [];
+    const statuses: string[] = [];
     const released: string[] = [];
     const manager = {
       getDueTriggers: () => (dispatched ? [] : (dispatched = true, [plan])),
       getExpiredWaitingTriggers: () => [], getWaitingTriggers: () => [], getAwaitingConsentUnreminded: () => [],
       endWait: () => false, claimLease: () => 'claimed', renewLease: () => true, releaseLease: () => {},
       getTrigger: (id: string) => (id === plan.id ? plan : undefined),
-      recordTaskRun: (_id: string, result: string) => { recorded.push(result); return false; },
+      recordTaskRun: (_id: string, result: string, status: string) => { recorded.push(result); statuses.push(status); return false; },
       setEnabled: () => true,
     } as unknown as TaskManager;
     const answered = {
@@ -110,21 +112,36 @@ describe('a mandate\'s run that picks up an answer from a conversation it does n
         return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
       },
     });
-    const router = { hasChannels: () => false, notify: vi.fn(async () => []) } as unknown as NotificationRouter;
+    const notify = vi.fn(async () => []);
+    const router = { hasChannels: () => true, notify } as unknown as NotificationRouter;
     const loop = new WorkerLoop(worker, router, 60_000);
     try {
-      await loop.tick();
+      if (start === 'hand') {
+        expect(await loop.runTriggerNow(plan.id, loop.claimHandRunMinter()(plan.id, EVA))).toEqual({ ok: true });
+      } else {
+        await loop.tick();
+      }
       for (let i = 0; i < 400 && recorded.length === 0; i++) await new Promise((r) => { setTimeout(r, 10); });
     } finally {
       loop.stop();
     }
     expect(recorded, 'the run ended').toHaveLength(1);
     const added = threads.listThreadsForExport({ limit: 1000 }).filter((t) => !before.has(t.id));
-    return { threads, added, recorded, released };
+    return { threads, added, recorded, statuses, released, notify };
   }
 
-  it('leaves the owner\'s conversation as it was, and writes the run into a new one of Eva\'s without the owner\'s question or answer', async () => {
-    const { threads, added, recorded, released } = await resumeIn('thread-owner', 'owner');
+  it('a scheduled pickup only the answer started does not run: nothing written anywhere, stopped, answer released, no push', async () => {
+    const { threads, added, recorded, statuses, released, notify } = await resumeIn('thread-owner', 'owner');
+    expect(threads.getMessages('thread-owner'), 'nothing appended to the owner\'s conversation').toHaveLength(2);
+    expect(added, 'no conversation opened for Eva').toHaveLength(0);
+    expect(statuses, 'recorded as stopped').toEqual(['stopped']);
+    expect(recorded[0]).toContain('was not handed on');
+    expect(released, 'the answer was released').toEqual(['prompt-1']);
+    expect(notify, 'no question pushed again').not.toHaveBeenCalled();
+  });
+
+  it('a start by hand goes on in a new conversation of Eva\'s, without the owner\'s question or answer', async () => {
+    const { threads, added, recorded, released, notify } = await resumeIn('thread-owner', 'owner', 'hand');
     expect(threads.getMessages('thread-owner'), 'nothing appended to the owner\'s conversation').toHaveLength(2);
     expect(added, 'one new conversation').toHaveLength(1);
     expect(added[0]!.created_by, 'opened for Eva').toBe(EVA_TAG);
@@ -133,7 +150,8 @@ describe('a mandate\'s run that picks up an answer from a conversation it does n
     expect(written.some((m) => m.includes('Last week.')), 'without the owner\'s answer').toBe(false);
     expect(written.some((m) => m.includes('Which week?')), 'without the owner\'s question').toBe(false);
     expect(recorded[0], 'and the run succeeded').toBe('Report written.');
-    expect(released, 'the answer was released').toEqual(['prompt-1']);
+    expect(released, 'the answer was released').toContain('prompt-1');
+    expect(notify, 'a run that runs pushes its end, so the no-push case above is not vacuous').toHaveBeenCalled();
   });
 
   it('control: continues in Eva\'s own conversation, with the answer', async () => {

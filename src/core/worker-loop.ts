@@ -167,6 +167,8 @@ const WAIT_EXPIRED_RESULT = 'The run asked a question and the wait ran out befor
 /** What a scheduled workflow run records when its question was withdrawn with the deleted chat it was asked in. */
 export const THREAD_DELETED_RESULT = 'Workflow ended without an answer: the conversation its question was asked in was deleted, and that was the only place to answer it';
 const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access, and that access ended before the run could continue.';
+/** A run only an answer started, for someone the answer's conversation does not belong to (`executeStandard`). */
+const ANSWER_NOT_HANDED_ON_RESULT = 'This task runs under a delegated access now, so an answer given in a chat of the owner was not handed on and the run did not continue. The next scheduled run asks again if it needs to.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 
@@ -2875,12 +2877,19 @@ export class WorkerLoop {
     // a run by hand of a mandate, or a mandate's plan, that picked up a question asked in the
     // owner's chat would write into that chat, or, in a new thread, put its question and answer
     // where the mandate reads them (a mandate reads every chat it opened, contained or not). The
-    // answer is released unread, as for an access that has ended, and the run goes on without it.
+    // answer is released unread, as for an access that has ended: a run by hand goes on without
+    // it, and a run that only the answer started is not made from scratch (it would redo what came
+    // before the question and ask it again); it is recorded as stopped, and the schedule stays.
     // The owner owns every conversation; a missing row is no one's.
     const threads = answered !== undefined ? this.engine.getThreadStore() : null;
     if (answered !== undefined && !isOwnerPrincipal(runAs) && !ownedBy(threads?.getThread(answered.session_id), runAs)) {
       this.engine.getPromptStore()?.releaseTrigger(answered.id);
       answered = undefined;
+      if (handStarter === undefined) {
+        this.#recordRun(this.engine.getTaskManager(), task.id, ANSWER_NOT_HANDED_ON_RESULT, 'stopped', undefined, { keepSchedule: true });
+        process.stderr.write(`[lynox:worker] task ${task.id}: an answer from a conversation the run is not for was not taken — not run\n`);
+        return;
+      }
     }
     // Same thread, so the run's own history shows the exchange it continues — unless the owner
     // deleted that conversation in the meantime. Then the run goes to a new thread: a deleted
