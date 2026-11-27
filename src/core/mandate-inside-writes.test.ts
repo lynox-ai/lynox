@@ -107,6 +107,8 @@ const { SubjectStore } = await import('./subject-store.js');
 const { RunHistory } = await import('./run-history.js');
 const { TaskManager } = await import('./task-manager.js');
 const { ApiStore } = await import('./api-store.js');
+const { DataStore } = await import('./data-store.js');
+const { OWNER_PRINCIPAL } = await import('./request-principal.js');
 const { ConnectionStore } = await import('./connection-store.js');
 const { GrantLedger } = await import('./grant-ledger.js');
 const { setTenantWorkspace, clearTenantWorkspace, _resetCache: resetWorkspaceCache } = await import('./workspace.js');
@@ -152,6 +154,9 @@ const outcomeOf = (db: Database.Database, site: string): boolean =>
   db.prepare(`SELECT 1 FROM audit_log WHERE phase IN ('returned', 'failed') AND action LIKE ?`).get(`instance:${site}:%`) !== undefined;
 const attemptOf = (db: Database.Database, site: string): boolean =>
   db.prepare(`SELECT 1 FROM audit_log WHERE phase = 'attempt' AND action LIKE ?`).get(`instance:${site}:%`) !== undefined;
+
+/** The opaque id the data-store fixtures give the table `leads`. */
+const LEADS_ID = 'dsc_0123456789abcdef';
 
 interface Call { on: string; method: string; read: boolean; own: boolean; any: boolean }
 interface GuardState { calls: Call[]; violations: string[]; open: () => { own: boolean; any: boolean } }
@@ -355,7 +360,7 @@ function apiStoreOnDb(seed: ApiProfile | null): { store: InstanceType<typeof Api
   }
   return { store, engine };
 }
-const API_READS = ['get', 'storedProfile', 'knownProfiles', 'saveRefusal', 'deleteRefusal', 'unreadableSourceOf', 'unreadableClearedByHand', 'trailIdOf', 'newTrailId',
+const API_READS = ['get', 'storedProfile', 'knownProfiles', 'saveRefusal', 'deleteRefusal', 'engineLessRefusal', 'unreadableSourceOf', 'unreadableClearedByHand', 'trailIdOf', 'newTrailId',
   'getProfiles', 'getAll', 'list', 'heldBackProfiles', 'hostOwners', 'profileForHost', 'isHeldBack', 'waitingConnections', 'heldBack'] as const;
 
 // ── the fixtures: one per site and branch ───────────────────────────────────
@@ -365,11 +370,11 @@ const FIXTURES: Fixture[] = [
   { site: 'remember#create', branch: 'create', created: true, row: { verb: 'create', target: 'knowledge' }, tool: rememberTool as ToolEntry, input: { text: 'ACME renews in March', subject: 'ACME' },
     build: () => ({ ctx: { knowledgeStore: { obj: { write: vi.fn(() => ({ status: 'active', id: 'abcd1234-0000-4000-8000-000000000001' })) }, reads: [] } }, spy: 'ctx.knowledgeStore.write' }) },
   { site: 'memory_block_edit#change', branch: 'append', row: { verb: 'change', target: 'memory_block block=playbook' }, tool: memoryBlockEditTool as ToolEntry, input: { block: 'playbook', mode: 'append', new_text: 'Always cc finance.' },
-    build: () => ({ ctx: { knowledgeStore: { obj: { editBlock: vi.fn() }, reads: [] } }, promptUser: async () => 'Apply', spy: 'ctx.knowledgeStore.editBlock' }) },
+    build: () => ({ ctx: { knowledgeStore: { obj: { editBlock: vi.fn() }, reads: [] } }, promptUser: async () => 'apply', spy: 'ctx.knowledgeStore.editBlock' }) },
   { site: 'memory_retire#change', branch: 'retire', row: { verb: 'change', target: 'knowledge entry=abcd1234-0000' }, tool: memoryRetireTool as ToolEntry, input: { id: 'abcd1234' },
     build: () => ({
       ctx: { knowledgeStore: { obj: { findActiveByIdPrefix: vi.fn(() => ({ id: 'abcd1234-0000', sourceType: 'agent_inferred', text: 'old fact' })), retireEntry: vi.fn() }, reads: ['findActiveByIdPrefix'] } },
-      promptUser: async () => 'Retire', spy: 'ctx.knowledgeStore.retireEntry',
+      promptUser: async () => 'retire', spy: 'ctx.knowledgeStore.retireEntry',
     }) },
   { site: 'memory_store#create', branch: 'scoped', row: { verb: 'create', target: 'memory ns=knowledge scope=context' }, tool: memoryStoreTool as ToolEntry, input: { namespace: 'knowledge', content: 'x', scope: 'context:proj1' },
     build: () => ({ memory: { obj: memoryMock({}), reads: [] }, activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.appendScoped' }) },
@@ -478,19 +483,19 @@ const FIXTURES: Fixture[] = [
       const subjects = subjectStore();
       const dup = subjects.createSubject({ kind: 'person', name: 'Ada' });
       const canon = subjects.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
-      return { target: `subjects duplicate=${dup} canonical=${canon}`, ctx: { subjectStore: { obj: subjects, reads: ['findCanonical', 'findByAlias'] } }, promptUser: async () => 'Merge', spy: 'ctx.subjectStore.executeMerge', cleanup: () => setDataDir(null) };
+      return { target: `subjects duplicate=${dup} canonical=${canon}`, ctx: { subjectStore: { obj: subjects, reads: ['findCanonical', 'findByAlias'] } }, promptUser: async () => 'merge', spy: 'ctx.subjectStore.executeMerge', cleanup: () => setDataDir(null) };
     } },
 
   // data store, contacts, artifacts, files, threads
-  { site: 'data_store_create#create', branch: 'create', row: { verb: 'create', target: 'data_store' }, tool: dataStoreCreateTool as ToolEntry, input: { name: 'leads', columns: [{ name: 'email', type: 'string' }] },
-    build: () => ({ ctx: { dataStore: { obj: { createCollection: vi.fn(() => ({ name: 'leads', columns: [{ name: 'email', type: 'string' }], scopeType: 'context', scopeId: '' })) }, reads: [] } }, spy: 'ctx.dataStore.createCollection' }) },
-  { site: 'data_store_insert#save', branch: 'insert', row: { verb: 'save', target: 'data_store' }, tool: dataStoreInsertTool as ToolEntry, input: { collection: 'leads', records: [{ email: 'a@b.c' }] },
-    build: () => ({ ctx: { dataStore: { obj: { insertRecords: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: [] } }, spy: 'ctx.dataStore.insertRecords' }) },
-  { site: 'data_store_delete#delete', branch: 'delete', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDeleteTool as ToolEntry, input: { collection: 'leads', filter: { email: 'a@b.c' } },
+  { site: 'data_store_create#create', branch: 'create', row: { verb: 'create', target: /^data_store collection=dsc_[0-9a-f]{16}$/ }, tool: dataStoreCreateTool as ToolEntry, input: { name: 'leads', columns: [{ name: 'email', type: 'string' }] },
+    build: () => ({ ctx: { dataStore: { obj: { hasCollectionIdColumn: () => true, createCollection: vi.fn(() => ({ name: 'leads', columns: [{ name: 'email', type: 'string' }], scopeType: 'context', scopeId: '' })) }, reads: ['hasCollectionIdColumn'] } }, spy: 'ctx.dataStore.createCollection' }) },
+  { site: 'data_store_insert#save', branch: 'insert', row: { verb: 'save', target: `data_store collection=${LEADS_ID}` }, tool: dataStoreInsertTool as ToolEntry, input: { collection: 'leads', records: [{ email: 'a@b.c' }] },
+    build: () => ({ ctx: { dataStore: { obj: { collectionIdOf: () => LEADS_ID, insertRecords: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: ['collectionIdOf'] } }, spy: 'ctx.dataStore.insertRecords' }) },
+  { site: 'data_store_delete#delete', branch: 'delete', row: { verb: 'delete', target: `data_store collection=${LEADS_ID}` }, tool: dataStoreDeleteTool as ToolEntry, input: { collection: 'leads', filter: { email: 'a@b.c' } },
     hit: ['records=2', 'id=7', 'id=9'],
-    build: () => ({ ctx: { dataStore: { obj: { deleteRecordsReturningIds: vi.fn(() => ({ deleted: 2, ids: [7, 9] })) }, reads: [] } }, spy: 'ctx.dataStore.deleteRecordsReturningIds' }) },
-  { site: 'data_store_drop#delete', branch: 'drop', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
-    build: () => ({ ctx: { dataStore: { obj: { dropCollection: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.dataStore.dropCollection' }) },
+    build: () => ({ ctx: { dataStore: { obj: { collectionIdOf: () => LEADS_ID, deleteRecordsReturningIds: vi.fn(() => ({ deleted: 2, ids: [7, 9] })) }, reads: ['collectionIdOf'] } }, spy: 'ctx.dataStore.deleteRecordsReturningIds' }) },
+  { site: 'data_store_drop#delete', branch: 'drop', row: { verb: 'delete', target: `data_store collection=${LEADS_ID}` }, tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
+    build: () => ({ ctx: { dataStore: { obj: { collectionIdOf: () => LEADS_ID, dropCollection: vi.fn(() => true) }, reads: ['collectionIdOf'] } }, spy: 'ctx.dataStore.dropCollection' }) },
   { site: 'contacts_save#save', branch: 'save', row: { verb: 'save', target: 'contacts' }, tool: contactsSaveTool as ToolEntry, input: { name: 'Ada', email: 'ada@x.example' },
     build: () => ({ ctx: { crm: { obj: { upsertContact: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: [] } }, spy: 'ctx.crm.upsertContact' }) },
   { site: 'artifact_save#save', branch: 'create', created: true, row: { verb: 'create', target: 'artifacts' }, tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# x' },
@@ -576,7 +581,7 @@ const FIXTURES: Fixture[] = [
       // The mandate's own workflow: it may schedule only those and the owner's.
       history.insertPlannedPipeline({ id: 'wf-own', name: 'Own', goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, MANDATE);
       history.setWorkflowConfirmedAt('wf-own', '2026-07-01T00:00:00.000Z');
-      return { ctx: { taskManager: { obj: tm, reads: [] }, runHistory: { obj: history, reads: ['getPlannedPipeline', 'getWorkflowAuthorship'] } }, spy: 'ctx.taskManager.createPipelineTask' };
+      return { ctx: { taskManager: { obj: tm, reads: [] }, runHistory: { obj: history, reads: ['getPlannedPipeline', 'getWorkflowAuthorship', 'workflowStampState'] } }, spy: 'ctx.taskManager.createPipelineTask' };
     } },
   { site: 'task_create#scheduled', branch: 'scheduled', created: true, row: { verb: 'create', target: 'tasks type=scheduled' }, tool: taskCreateTool as ToolEntry, input: { title: 'Bericht', schedule: '0 9 * * 1' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.createScheduled' }; } },
@@ -597,9 +602,6 @@ const FIXTURES: Fixture[] = [
     return [
       { site: 'task_update#change', branch: 'trigger', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, title: 'Wochenbericht' }; },
         build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
-      // Only a field a trigger does not carry: the mark is written, the update changes nothing.
-      { site: 'task_update#change', branch: 'trigger, only a field it does not take', wrote: 'part', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
-        build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
       { site: 'task_update#change', branch: 'to-do, complete', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, status: 'completed' }; },
         build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.complete') },
       { site: 'task_update#change', branch: 'to-do, update', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
@@ -611,7 +613,7 @@ const FIXTURES: Fixture[] = [
     build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, spy: 'ctx.runHistory.insertPlannedPipeline' }) },
   { site: 'plan_task#create', branch: 'Proceed', created: true, row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: planTaskTool as ToolEntry,
     input: { summary: 'Authored plan', phases: [{ name: 'Step one', steps: ['Do the thing'], tools: [] }] },
-    build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, promptUser: async () => 'Proceed', spy: 'ctx.runHistory.insertPlannedPipeline' }) },
+    build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, promptUser: async () => 'proceed', spy: 'ctx.runHistory.insertPlannedPipeline' }) },
   { site: 'save_workflow#copy', branch: 'copy', created: true, row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} from=plan-789$/ }, tool: saveWorkflowTool as ToolEntry, input: { name: 'Saved Ad Report', workflow_id: 'plan-789' },
     build: () => {
       _resetPipelineStore();
@@ -661,7 +663,7 @@ const FIXTURES: Fixture[] = [
       return {
         ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
         secretStore: { obj: vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), reads: VAULT_READS },
-        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+        promptUser: async () => 'allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
     } },
   // The vault keeps the value through the delete: nothing emptied, nothing saved, no change proven.
@@ -673,7 +675,7 @@ const FIXTURES: Fixture[] = [
       return {
         ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
         secretStore: { obj: keeps, reads: VAULT_READS },
-        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+        promptUser: async () => 'allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
     } },
   // A vault with no delete: nothing can be emptied, so nothing is proven, and the call refuses.
@@ -685,7 +687,7 @@ const FIXTURES: Fixture[] = [
       return {
         ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
         secretStore: { obj: noDelete, reads: VAULT_READS },
-        promptUser: async () => 'Allow', spy: 'ctx.apiStore.saveRefusal', cleanup: () => setDataDir(null),
+        promptUser: async () => 'allow', spy: 'ctx.apiStore.saveRefusal', cleanup: () => setDataDir(null),
       };
     } },
   { site: 'api_setup#save', branch: 'empties token slots, then the save is refused', wrote: 'part', row: { verb: 'change', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
@@ -697,13 +699,13 @@ const FIXTURES: Fixture[] = [
       return {
         ctx: { apiStore: { obj: store, reads: API_READS } },
         secretStore: { obj: vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), reads: VAULT_READS },
-        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+        promptUser: async () => 'allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
     } },
   { site: 'api_setup#save', branch: 'create, nothing to empty', row: { verb: 'create', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'create', profile: PROFILE },
     build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(null), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; } },
   { site: 'api_setup#delete', branch: 'delete', row: { verb: 'delete', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'delete', id: 'test-api' },
-    build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'Allow', spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) }; } },
+    build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'allow', spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) }; } },
   // On engine.db, as in production: the row names the profile by its opaque id, never by the slug.
   { site: 'api_setup#refine', branch: 'refine on engine.db', row: { verb: 'change', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'mueller-crm', refine: { addNotes: ['x'] } },
     build: () => {
@@ -723,7 +725,7 @@ const FIXTURES: Fixture[] = [
     build: () => {
       setDataDir(tmp('lynox-iw-api-'));
       const { store } = apiStoreOnDb(MUELLER);
-      return { ctx: { apiStore: { obj: store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'Allow', target: `api_profiles profile=${store.trailIdOf('mueller-crm')!}`, spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) };
+      return { ctx: { apiStore: { obj: store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'allow', target: `api_profiles profile=${store.trailIdOf('mueller-crm')!}`, spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) };
     } },
 ];
 
@@ -803,9 +805,9 @@ describe('a mandate\'s call to a pattern writer is refused by the lock', () => {
 });
 
 describe('a lineage write that fails after the workflow is saved', () => {
-  // The lineage record is internal: once the workflow is saved, its failure is logged and the block
-  // returns the saved workflow. (A block that throws after a proven change: instance-trail-outcome.test.ts.)
-  it('save_workflow from the session: the answer is the saved workflow, and the trail records it returned and created', async () => {
+  // The lineage record is internal: once the workflow is stored, its failure is noted and the save
+  // answers as saved. (A block that throws after a proven change: instance-trail-outcome.test.ts.)
+  it('save_workflow from the session: the answer is the saved workflow, and the trail row says wrote=all and lineage=lost', async () => {
     const base = FIXTURES.find(f => f.site === 'save_workflow#session')!;
     const f: Fixture = {
       ...base,
@@ -818,10 +820,14 @@ describe('a lineage write that fails after the workflow is saved', () => {
     };
     const { result, trail } = await drive(f, false);
     expect(JSON.stringify(result.content)).not.toContain('No workflow was saved');
+    expect(JSON.stringify(result.content)).not.toContain('history.db is read-only');
     expect(JSON.stringify(result.content)).toContain('It is saved and reusable.');
     const rows = trail.db.prepare('SELECT phase, target FROM audit_log WHERE action LIKE ? ORDER BY id').all('instance:save_workflow#session:%') as Array<{ phase: string; target: string }>;
     expect(rows.map(r => r.phase)).toEqual(['attempt', 'returned']);
-    expect(rows[1]!.target).toMatch(/^workflows wrote=all created=[0-9a-f-]{36} workflow=[0-9a-f-]{36}$/);
+    const target = /^workflows wrote=all created=([0-9a-f-]{36}) workflow=[0-9a-f-]{36} lineage=lost$/.exec(rows[1]!.target);
+    expect(target).not.toBeNull();
+    const answer = JSON.parse(typeof result.content === 'string' ? result.content : JSON.stringify(result.content)) as { workflow_id?: unknown };
+    expect(answer.workflow_id).toBe(target![1]);
   });
 });
 
@@ -862,7 +868,7 @@ describe('the refusal reaches the model whatever the handler made of it', () => 
     const trail = await freshTrail('data_store_drop#delete');
     const drop = vi.fn(() => true);
     const toolContext = createToolContext({} as never);
-    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { dropCollection: drop };
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { collectionIdOf: () => LEADS_ID, dropCollection: drop };
     toolContext.auditLog = trail.log;
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dataStoreDropTool as ToolEntry], toolContext, principal: MANDATE });
     // Called alone, outside a call's slot: the handler's catch answers in its own words.
@@ -877,7 +883,7 @@ describe('the refusal reaches the model whatever the handler made of it', () => 
   it('a mandate whose session has no log at all is refused the same', async () => {
     const drop = vi.fn(() => true);
     const toolContext = createToolContext({} as never);
-    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { dropCollection: drop };
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { collectionIdOf: () => LEADS_ID, dropCollection: drop };
     toolContext.auditLog = null;
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dataStoreDropTool as ToolEntry], toolContext, principal: MANDATE });
     const r = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
@@ -890,7 +896,7 @@ describe('the refusal reaches the model whatever the handler made of it', () => 
     const trail = await freshTrail('data_store_drop#delete');
     const drop = vi.fn(() => true);
     const toolContext = createToolContext({} as never);
-    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { dropCollection: drop };
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { collectionIdOf: () => LEADS_ID, dropCollection: drop };
     toolContext.auditLog = trail.log;
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dataStoreDropTool as ToolEntry], toolContext });
     const r = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
@@ -1091,5 +1097,117 @@ describe('a mandate\'s row names an API profile by its opaque id', () => {
     expect(result.is_error, `precondition: the save went through; ${JSON.stringify(result.content)}`).not.toBe(true);
     expect(attemptTarget(trail, 'api_setup#save')).toBe('api_profiles profile=apf_00000000000000aa');
     expect(rawRow(made!.engine, 'mueller-crm').trail_id).toBe('apf_00000000000000aa');
+  });
+});
+
+// A mandate's row names a table by its opaque id, never by its name, and the id a create names is
+// the one the table carries afterwards. On a real store, through the handlers.
+describe('a mandate\'s row names a table by its opaque id', () => {
+  const ID = /^dsc_[0-9a-f]{16}$/;
+  const SECRET_NAME = 'projekt_geheim';
+  let dir: string;
+  let store: InstanceType<typeof DataStore>;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'lynox-ds-trail-')); });
+  afterEach(() => { vi.restoreAllMocks(); try { store.close(); } catch { /* closed */ } rmSync(dir, { recursive: true, force: true }); });
+
+  /** A store on a file from before the id column, when `legacy`. */
+  const open = async (legacy = false): Promise<void> => {
+    const path = join(dir, 'datastore.db');
+    if (legacy) {
+      const { default: Sqlite } = await import('better-sqlite3');
+      const raw = new Sqlite(path);
+      raw.exec(`CREATE TABLE ds_collections (name TEXT PRIMARY KEY, scope_type TEXT NOT NULL DEFAULT 'project', scope_id TEXT NOT NULL DEFAULT '',
+        schema_json TEXT NOT NULL, unique_key TEXT, record_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+      raw.close();
+    }
+    store = new DataStore(path);
+  };
+  const run = async (tool: ToolEntry, input: unknown, principal: RequestPrincipal = MANDATE): Promise<{ db: Database.Database; out: unknown }> => {
+    const { runInCallSlot } = await import('./call-connection.js');
+    const { instanceTrailFor } = await import('./instance-trail.js');
+    const trail = await freshTrail(null);
+    const toolContext = createToolContext({} as never);
+    toolContext.auditLog = trail.log;
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = store;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], toolContext, principal, currentRunId: 'run-1' });
+    const out = await runInCallSlot({ instanceTrail: instanceTrailFor(agent, tool.definition.name) }, () => tool.handler(input as never, agent));
+    return { db: trail.db, out };
+  };
+  const targets = (db: Database.Database): string[] => (db.prepare('SELECT target FROM audit_log ORDER BY id').all() as Array<{ target: string }>).map(r => r.target);
+  const COLS = [{ name: 'email', type: 'string' }];
+
+  it('every write names the id the table carries, and its name in no row', async () => {
+    await open();
+    const created = await run(dataStoreCreateTool as ToolEntry, { name: SECRET_NAME, columns: COLS });
+    const id = store.collectionIdOf(SECRET_NAME);
+    expect(id).toMatch(ID);
+    expect(targets(created.db)[0]).toBe(`data_store collection=${id!}`);
+    const all = [...targets(created.db)];
+    for (const [tool, input] of [
+      [dataStoreInsertTool, { collection: SECRET_NAME, records: [{ email: 'a@b.c' }] }],
+      [dataStoreDeleteTool, { collection: SECRET_NAME, filter: { email: 'a@b.c' } }],
+      [dataStoreDropTool, { collection: SECRET_NAME }],
+    ] as const) {
+      const r = await run(tool as ToolEntry, input);
+      expect(targets(r.db)[0]).toBe(`data_store collection=${id!}`);
+      all.push(...targets(r.db));
+    }
+    expect(all.length).toBeGreaterThanOrEqual(8);
+    expect(all.join('\n')).not.toContain(SECRET_NAME);
+  });
+
+  it('a table that does not exist is named by the kind only', async () => {
+    await open();
+    const r = await run(dataStoreInsertTool as ToolEntry, { collection: 'missing', records: [{ email: 'a@b.c' }] });
+    expect(targets(r.db)[0]).toBe('data_store');
+  });
+
+  it('a table whose id is NULL (created by an older build on a migrated file) is named by the kind only, never "null"', async () => {
+    await open();
+    store.createCollection({ name: 'leads', scope: { type: 'global', id: '' }, columns: COLS as never });
+    (store['db'] as Database.Database).prepare("UPDATE ds_collections SET collection_id = NULL WHERE name = 'leads'").run();
+    const r = await run(dataStoreInsertTool as ToolEntry, { collection: 'leads', records: [{ email: 'a@b.c' }] });
+    expect(targets(r.db)[0]).toBe('data_store');
+  });
+
+  it('on a file before its boot migration a create and an insert run, named by the kind only', async () => {
+    await open(true);
+    const c = await run(dataStoreCreateTool as ToolEntry, { name: 'leads', columns: COLS });
+    expect(targets(c.db)[0]).toBe('data_store');
+    expect(store.listCollections().map(x => x.name)).toContain('leads');
+    const i = await run(dataStoreInsertTool as ToolEntry, { collection: 'leads', records: [{ email: 'a@b.c' }] });
+    expect(targets(i.db)[0]).toBe('data_store');
+    expect(store.queryRecords({ collection: 'leads' }).rows).toHaveLength(1);
+  });
+
+  it('a failing column check before a create: the table is created, the row names the kind only', async () => {
+    await open();
+    vi.spyOn(store, 'hasCollectionIdColumn').mockImplementation(() => { throw new Error('disk I/O error'); });
+    const c = await run(dataStoreCreateTool as ToolEntry, { name: 'leads', columns: COLS });
+    expect(targets(c.db)[0]).toBe('data_store');
+    expect(store.listCollections().map(x => x.name)).toContain('leads');
+  });
+
+  it('a table id that cannot be read for another reason refuses the write instead of recording it without saying where', async () => {
+    await open();
+    store.createCollection({ name: 'leads', scope: { type: 'global', id: '' }, columns: COLS as never });
+    const db = store['db'] as Database.Database;
+    const real = db.prepare.bind(db);
+    vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      if (sql.startsWith('SELECT collection_id FROM ds_collections')) throw new Error('disk I/O error');
+      return real(sql);
+    }) as never);
+    const r = await run(dataStoreInsertTool as ToolEntry, { collection: 'leads', records: [{ email: 'a@b.c' }] });
+    vi.restoreAllMocks();
+    expect(String(r.out)).toContain(INSTANCE_WRITE_UNRECORDED);
+    expect(targets(r.db)).toEqual([]);
+    expect(store.queryRecords({ collection: 'leads' }).rows).toHaveLength(0);
+  });
+
+  it('control: the owner\'s create writes no row, and the table still gets its id', async () => {
+    await open();
+    const r = await run(dataStoreCreateTool as ToolEntry, { name: 'leads', columns: COLS }, OWNER_PRINCIPAL);
+    expect(targets(r.db)).toEqual([]);
+    expect(store.collectionIdOf('leads')).toMatch(ID);
   });
 });

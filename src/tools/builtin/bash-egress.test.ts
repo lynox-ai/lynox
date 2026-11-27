@@ -9,6 +9,26 @@ import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { CredentialRegistry, type HostSet } from '../../egress-proxy/registry.js';
 import { createAdminServer } from '../../egress-proxy/server.js';
 import { credentialFromHeader } from '../../egress-proxy/policy.js';
+import { OwnerKnownTargets } from '../../core/owner-known-targets.js';
+import { SearchResultAddresses } from '../../core/search-result-addresses.js';
+import { Agent } from '../../core/agent.js';
+import { ConversationLatch } from '../../core/conversation-latch.js';
+import { createToolContext } from '../../core/tool-context.js';
+import type { ToolEntry } from '../../types/index.js';
+
+// A real agent for the test where the provider's own search comes in the same answer as the
+// bash call: the model's answers are scripted, nothing reaches a provider.
+vi.mock('@anthropic-ai/sdk', () => {
+  class MockAnthropic { beta = { messages: { stream: vi.fn() } }; }
+  class APIError extends Error {}
+  return { default: MockAnthropic, APIError };
+});
+const mockProcess = vi.fn();
+vi.mock('../../core/stream.js', () => ({
+  StreamProcessor: vi.fn().mockImplementation(function (this: { process: typeof mockProcess }) {
+    this.process = mockProcess;
+  }),
+}));
 
 /**
  * bash in sidecar mode with the egress proxy (PRD 152 v2 §4.2, W2), against the proxy's own
@@ -81,8 +101,12 @@ let socketPath = '';
 
 function agent(policy: 'allow-all' | 'guarded' | 'allow-list' | 'deny-all' | undefined, opts: {
   hosts?: string[]; wildcards?: string[]; acks?: string[]; envVars?: Record<string, string>;
+  /** The call's batch started after foreign content; `null` for an agent that cannot say. */
+  tainted?: boolean | null;
 } = {}): never {
+  const tainted = opts.tainted === undefined ? false : opts.tainted;
   return {
+    ...(tainted === null ? {} : { batchStartedTainted: () => tainted }),
     toolContext: {
       shellIsolation: { kind: 'sidecar', socket: socketPath, root: {} },
       networkPolicy: policy,
@@ -249,5 +273,116 @@ describe('bash with the egress proxy', () => {
     expect(result).toBe('hi\n');
     expect(credDuringCall).toBeNull();
     expect(seenEnv['HTTPS_PROXY'], 'and no proxy from the isolation config either').toBeUndefined();
+  });
+});
+
+describe('bash reaches what the owner typed, and after taint only what the engine reads unasked (152 W2b, W3)', () => {
+  function withTyped(policy: 'guarded' | 'allow-list' | 'allow-all' | 'deny-all', typed: string[], tainted: boolean | null = false, acks: string[] = []): never {
+    return { ...(agent(policy, { ...(policy === 'allow-list' ? { hosts: ['only.example'] } : {}), acks, tainted }) as object), ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => typed }) } as never;
+  }
+  const registered = (): string[] => [...(setDuringCall as ReadonlySet<string>)];
+
+  it('under guarded a host the owner typed joins', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'curl -s https://shop.example/preise' }, withTyped('guarded', ['bitte lies https://shop.example/preise']));
+    expect(registered()).toContain('shop.example');
+  });
+
+  it('before taint: allow-list stays the list, allow-all stays every host', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'true' }, withTyped('allow-list', ['docs.example']));
+    expect(registered().sort()).toEqual(['only.example']);
+    await bashTool.handler({ command: 'true' }, withTyped('allow-all', ['docs.example']));
+    expect(setDuringCall).toBe('*');
+  });
+
+  it('after taint under allow-all: not every host, but the baseline and the typed host', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'true' }, withTyped('allow-all', ['docs.example'], true));
+    expect(setDuringCall).not.toBe('*');
+    expect(registered()).toContain('docs.example');
+    expect(registered()).toContain('api.anthropic.com');
+  });
+
+  it('after taint under guarded a connected API\'s host is left out, the typed host stays', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'true' }, withTyped('guarded', ['docs.example'], false, ['api.vendor.example']));
+    expect(registered()).toContain('api.vendor.example');
+    await bashTool.handler({ command: 'true' }, withTyped('guarded', ['docs.example'], true, ['api.vendor.example']));
+    expect(registered()).not.toContain('api.vendor.example');
+    expect(registered()).toContain('docs.example');
+  });
+
+  it('an agent that cannot say whether its batch started tainted gets the tainted set', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'true' }, withTyped('allow-all', [], null));
+    expect(setDuringCall).not.toBe('*');
+  });
+
+  it('under guarded a host a search listed in this conversation never joins the shell set, before or after taint', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    const searches = new SearchResultAddresses();
+    searches.noteResults('pricing', ['https://listed.example/page']);
+    expect(searches.has('https://listed.example/page'), 'the search recorded the address').toBe(true);
+    for (const tainted of [false, true]) {
+      const withSearch = { ...(withTyped('guarded', ['docs.example'], tainted) as object), searchResultAddresses: searches } as never;
+      await bashTool.handler({ command: 'curl -s https://listed.example/page' }, withSearch);
+      expect(registered(), `tainted=${String(tainted)}: the listed host`).not.toContain('listed.example');
+      expect(registered(), `tainted=${String(tainted)}: the typed host, as a control`).toContain('docs.example');
+    }
+  });
+
+  it('after taint under allow-list the list, under deny-all nothing', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'true' }, withTyped('allow-list', ['docs.example'], true));
+    expect(registered().sort()).toEqual(['only.example']);
+    await bashTool.handler({ command: 'true' }, withTyped('deny-all', ['docs.example'], true));
+    expect(setDuringCall).toBeNull();
+  });
+});
+
+describe('bash after a search the provider ran in the same answer', () => {
+  const usage = { input_tokens: 1, output_tokens: 1 };
+  const searchCall = { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: { query: 'crm api' } };
+  const searchResult = { type: 'web_search_tool_result', tool_use_id: 'srv_1', content: [{ type: 'web_search_result', url: 'https://page.example/', title: 'a page', encrypted_content: 'x' }] };
+  const bashCall = { type: 'tool_use', id: 'tu_1', name: 'bash', input: { command: 'true' } };
+
+  async function runAnswer(...blocks: unknown[]): Promise<string[]> {
+    mockProcess.mockReset();
+    mockProcess
+      .mockResolvedValueOnce({ content: blocks, stop_reason: 'tool_use', usage })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn', usage });
+    const agent = new Agent({
+      name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', noticeLanguage: 'en',
+      tools: [bashTool as unknown as ToolEntry],
+      promptUser: async () => 'allow',
+      ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => ['bitte lies docs.example'] }),
+      conversationLatch: ConversationLatch.detached(),
+      toolContext: {
+        ...createToolContext({}),
+        shellIsolation: { kind: 'sidecar', socket: socketPath, root: {} },
+        networkPolicy: 'guarded',
+        allowedHosts: undefined,
+        allowedWildcards: [],
+        apiStore: { getAcceptedEgressHosts: () => new Set(['api.vendor.example']) },
+      },
+    } as unknown as ConstructorParameters<typeof Agent>[0]);
+    setDuringCall = 'unregistered';
+    await agent.send('look up the CRM API');
+    expect(setDuringCall, 'the bash call ran and registered a set').not.toBe('unregistered');
+    return [...(setDuringCall as ReadonlySet<string>)];
+  }
+
+  it('after a provider search in the same answer, a connected API\'s host stays out of the shell set', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    const set = await runAnswer(searchCall, searchResult, bashCall);
+    expect(set).not.toContain('api.vendor.example');
+    expect(set, 'the host the owner typed, as a control').toContain('docs.example');
+  });
+
+  it('CONTROL: an answer with the bash call alone keeps the connected API\'s host in the shell set', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    const set = await runAnswer(bashCall);
+    expect(set).toContain('api.vendor.example');
   });
 });

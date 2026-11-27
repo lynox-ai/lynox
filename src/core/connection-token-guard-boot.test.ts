@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { LynoxConfig } from '../types/index.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import type { ApiProfile } from './api-store.js';
+import { ApiStore, type ApiProfile } from './api-store.js';
 import type { RequestPrincipal } from './request-principal.js';
 
 /**
@@ -119,5 +119,102 @@ describe('Engine boot — a mandate\'s connection ends with the mandate', () => 
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // The guard used to be set at the end of the block that loads the API profiles. When that block
+  // threw, it was never set, or it was set over a store the catch had nulled and let every name
+  // through. Without the profiles nobody knows which vault names hold a connection's token, so the
+  // guard now closes the vault's names then, and keeps the environment's and the platform's slots.
+  describe('the profiles fail to load', () => {
+    const boot = async (failAt: 'load' | 'after-load' | 'none'): Promise<Engine> => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-connguardboot-'));
+      dirs.push(dir);
+      setEnv('LYNOX_DATA_DIR', dir);
+      setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+      setEnv('LYNOX_SECRET_FROM_ENV', 'env-value');
+      // The platform's slot below must pass as a protected name, not as one the environment set.
+      setEnv('ANTHROPIC_API_KEY', undefined);
+      reloadConfig();
+      const spy = failAt === 'load'
+        ? vi.spyOn(ApiStore.prototype, 'loadFromConnections').mockImplementation(() => { throw new Error('broken connections row'); })
+        : failAt === 'after-load'
+          ? vi.spyOn(ApiStore.prototype, 'formatSuggestedApisForSystemPrompt').mockImplementation(() => { throw new Error('broken catalog'); })
+          : null;
+      const engine = new Engine({} as LynoxConfig);
+      engines.push(engine);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await engine.init();
+      } finally {
+        stderr.mockRestore();
+        spy?.mockRestore();
+      }
+      return engine;
+    };
+
+    for (const failAt of ['load', 'after-load'] as const) {
+      it(`(${failAt}) hands out no vault name that could hold a connection's token, and keeps the environment's and the platform's`, async () => {
+        const engine = await boot(failAt);
+        expect(engine.getApiStore()).toBeNull();
+        const secrets = engine.getSecretStore()!;
+        secrets.set('ENDED_API_ACCESS_TOKEN', 'ended-token-value');
+        secrets.set('ANTHROPIC_API_KEY', 'sk-ant-platform-slot');
+        secrets.recordConsent('FROM_ENV');
+        expect(secrets.resolve('ENDED_API_ACCESS_TOKEN')).toBeNull();
+        expect(secrets.holds('ENDED_API_ACCESS_TOKEN')).toBe(false);
+        expect(secrets.resolve('FROM_ENV')).toBe('env-value');
+        expect(secrets.resolve('ANTHROPIC_API_KEY')).toBe('sk-ant-platform-slot');
+      });
+    }
+
+    // While the profiles load, the store exists but holds only some of them: a guard that asked it
+    // then would let through a token whose profile is not loaded yet.
+    it('while the profiles load, the vault\'s names are not handed out yet', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-connguardboot-'));
+      dirs.push(dir);
+      setEnv('LYNOX_DATA_DIR', dir);
+      setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+      reloadConfig();
+      const first = new Engine({} as LynoxConfig);
+      engines.push(first);
+      const quiet = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await first.init();
+        first.getSecretStore()!.set('WAITING_API_ACCESS_TOKEN', 'stored-before');
+        await first.shutdown();
+      } finally {
+        quiet.mockRestore();
+      }
+      engines.length = 0;
+
+      const engine = new Engine({} as LynoxConfig);
+      engines.push(engine);
+      let duringLoad: string | null | undefined;
+      const load = ApiStore.prototype.loadFromConnections;
+      const spy = vi.spyOn(ApiStore.prototype, 'loadFromConnections').mockImplementation(function (this: ApiStore, ...args: Parameters<ApiStore['loadFromConnections']>) {
+        duringLoad = engine.getSecretStore()?.resolve('WAITING_API_ACCESS_TOKEN');
+        return load.apply(this, args);
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await engine.init();
+      } finally {
+        stderr.mockRestore();
+        spy.mockRestore();
+      }
+      expect(duringLoad).toBeNull();
+      // Loaded, and no profile holds it: handed out.
+      expect(engine.getSecretStore()!.resolve('WAITING_API_ACCESS_TOKEN')).toBe('stored-before');
+    });
+
+    it('control: with the profiles loaded, a vault name no waiting connection holds is handed out', async () => {
+      const engine = await boot('none');
+      expect(engine.getApiStore()).not.toBeNull();
+      const secrets = engine.getSecretStore()!;
+      secrets.set('ENDED_API_ACCESS_TOKEN', 'ended-token-value');
+      secrets.recordConsent('FROM_ENV');
+      expect(secrets.resolve('ENDED_API_ACCESS_TOKEN')).toBe('ended-token-value');
+      expect(secrets.resolve('FROM_ENV')).toBe('env-value');
+    });
   });
 });

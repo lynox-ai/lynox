@@ -289,6 +289,7 @@ describe('OAuthGraphProvider — fetch', () => {
             { name: 'In-Reply-To', value: '<parent@example.com>' },
             { name: 'References', value: '<root@example.com> <parent@example.com>' },
             { name: 'Auto-Submitted', value: 'auto-replied' },
+            { name: 'List-Id', value: 'Acme News <news.acme.example>' },
           ],
         });
       }
@@ -307,10 +308,33 @@ describe('OAuthGraphProvider — fetch', () => {
     expect(msg.inReplyTo).toBe('<parent@example.com>');
     expect(msg.references).toBe('<root@example.com> <parent@example.com>');
     expect(msg.envelope.isAutoReply, 'the reply tool reads this, from the FETCHED envelope').toBe(true);
+    expect(msg.envelope.isAutoReplied).toBe(true);
+    expect(msg.envelope.listId).toBe('news.acme.example');
+    expect(env!.listId, 'a collection carries no headers').toBeUndefined();
     expect(msg.attachments).toEqual([
       { partId: 'att-1', filename: 'offer.pdf', contentType: 'application/pdf', sizeBytes: 1234, contentId: undefined, inline: false },
       { partId: 'att-2', filename: 'logo.png', contentType: 'image/png', sizeBytes: 99, contentId: undefined, inline: true },
     ]);
+  });
+
+  it('marks a fetched mail with only an autoresponder header or a bounce type, not one with X-Auto-Response-Suppress', async () => {
+    const cases: Array<[string, { name: string; value: string }, { isAutoReply: boolean; isAutoReplied: boolean }]> = [
+      ['a1', { name: 'X-Autorespond', value: 'yes' }, { isAutoReply: true, isAutoReplied: true }],
+      ['a2', { name: 'Precedence', value: 'auto_reply' }, { isAutoReply: true, isAutoReplied: true }],
+      ['a3', { name: 'Content-Type', value: 'multipart/report; report-type=delivery-status; boundary="b"' }, { isAutoReply: true, isAutoReplied: false }],
+      ['a4', { name: 'X-Auto-Response-Suppress', value: 'All' }, { isAutoReply: false, isAutoReplied: false }],
+    ];
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
+    const envs = await listed(provider, cases.map(([id]) => id));
+    routes.unshift((url) => {
+      if (url.includes('/attachments?')) return json({ value: [] });
+      const hit = cases.find(([id]) => url.startsWith(`${ME}/messages/${id}?`));
+      return hit ? json({ ...graphMessage(hit[0]), internetMessageHeaders: [hit[1]] }) : undefined;
+    });
+    for (const [i, [id, , want]] of cases.entries()) {
+      const msg = await provider.fetch({ uid: envs[i]!.uid });
+      expect({ isAutoReply: msg.envelope.isAutoReply, isAutoReplied: msg.envelope.isAutoReplied }, id).toEqual(want);
+    }
   });
 
   it('a text body is passed through and html stays undefined without includeHtml', async () => {
@@ -323,6 +347,7 @@ describe('OAuthGraphProvider — fetch', () => {
     expect(msg.text).toBe('Plain <b>as is</b>');
     expect(msg.html).toBeUndefined();
     expect(msg.envelope.isAutoReply).toBe(false);
+    expect(msg.envelope.isAutoReplied).toBe(false);
   });
 });
 

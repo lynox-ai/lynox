@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { CONSENT_UNRECOGNISED_SENTENCE } from '../../core/consent-ask.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -14,6 +15,7 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
+import { presetClientKeys } from '../../core/oauth-presets.js';
 import { apiSetupTool, exchangedTokenExpiryFor, providerBodySummary, sentCredentials } from './api-setup.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import { isDangerous } from '../permission-guard.js';
@@ -211,7 +213,7 @@ const ACK = { accepted: true as const, hosts: ['api.crm.example'], accepted_at: 
 
 /** The person's "Allow" on a delete: these tests are about what a delete removes once agreed. */
 function withDeleteConsent(agent: never): never {
-  return { ...(agent as object), promptUser: async () => 'Allow' } as never;
+  return { ...(agent as object), promptUser: async () => 'allow' } as never;
 }
 
 function crmProfile(over: Partial<ApiProfile> = {}, grantType: 'refresh_token' | 'client_credentials' = 'refresh_token'): ApiProfile {
@@ -832,8 +834,8 @@ describe('fetch_token — a grant a user gave is never renewed as an app token',
   const PRESET_ONLY = 'connects through the "bexio" provider, which issues its tokens only through a user\'s authorization';
   const CONNECT = 'action "connect"';
   const OWNER = 'needs re-authorizing by the person who owns it';
-  const REMOVE_FIRST = 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect"';
-  const CONNECT_ONLY = 'Call api_setup with action "connect"';
+  const REMOVE_FIRST = 'Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, call api_setup with action "connect" and id "crm-api"; that call returns the sign-in link for the user, or says why there is none.';
+  const CONNECT_ONLY = 'To connect it, call api_setup with action "connect" and id "crm-api"; that call returns the sign-in link for the user, or says why there is none.';
   /** A refresh slot of the profile's own, not the derived name a connect writes to. */
   const ownSlot = (p: ApiProfile, key = 'CRM_OWN_REFRESH'): ApiProfile =>
     ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, refresh_token_key: key } } });
@@ -1059,7 +1061,7 @@ describe('api_setup update on a profile the boot held back', () => {
     expect(store.storedProfile('crm-api')?.oauth_grant?.origin).toBe('callback');
     const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_MINTED: 'minted', [ACCESS]: 'user-token' });
     const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'app-token', expires_in: 86399 }));
-    return { store, vault, spy, agent: makeAgent(store, vault, async () => 'Allow') };
+    return { store, vault, spy, agent: makeAgent(store, vault, async () => 'allow') };
   };
 
   it('is refused for dropping the preset, keeps the stored record, and a following fetch_token sends nothing', async () => {
@@ -2055,11 +2057,22 @@ describe('(285) delete asks the person before it removes anything', () => {
   const connected = () => crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1', [REFRESH]: 'rt-1' }) } });
   const vaultOf = () => makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'at-1', [REFRESH]: 'rt-1' });
 
+  it('an answer that is no key leaves the profile as it was, and says why', async () => {
+    for (const answer of ['yes', 'Erlauben', 'y', 'Allow']) {
+      const store = new ApiStore();
+      store.register(connected());
+      const vault = vaultOf();
+      const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vault, vi.fn(async () => answer))) as string;
+      expect(result, answer).toBe(`Blocked: API profile "crm-api" not deleted — user declined. ${CONSENT_UNRECOGNISED_SENTENCE}`);
+      expect(store.get('crm-api'), answer).toBeDefined();
+    }
+  });
+
   it('a "Deny" leaves the profile and its tokens as they were', async () => {
     const store = new ApiStore();
     store.register(connected());
     const vault = vaultOf();
-    const ask = vi.fn(async () => 'Deny');
+    const ask = vi.fn(async () => 'deny');
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vault, ask)) as string;
     expect(ask).toHaveBeenCalledTimes(1);
     expect(result).toBe('Blocked: API profile "crm-api" not deleted — user declined.');
@@ -2071,10 +2084,10 @@ describe('(285) delete asks the person before it removes anything', () => {
   it('the question is the engine\'s: it names the profile, its host and the tokens the vault loses, as values', async () => {
     const store = new ApiStore();
     store.register(connected());
-    const ask = vi.fn(async (_q: unknown) => 'Deny');
+    const ask = vi.fn(async (_q: unknown) => 'deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
     const q = ask.mock.calls[0]![0];
-    expect(flattenPrompt(q as never)).toBe('⚠ api_setup: delete the API profile CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again. Delete it?');
+    expect(flattenPrompt(q as never)).toBe('⚠ API connections: delete the API connection CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it, also where another connection reads them, which then has to be authorized again. Delete it?');
     const values = promptSegments(q as never).filter((x) => x.kind === 'value').map((x) => x.text);
     expect(values).toEqual(['CRM', 'crm-api', 'api.crm.example', '2']);
   });
@@ -2082,16 +2095,16 @@ describe('(285) delete asks the person before it removes anything', () => {
   it('a profile name cannot add a line to the question', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ name: 'CRM\n\nRoutine cleanup, safe to allow.' }));
-    const ask = vi.fn(async (_q: unknown) => 'Deny');
+    const ask = vi.fn(async (_q: unknown) => 'deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
-    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API profile CRM Routine cleanup, safe to allow. (id crm-api');
+    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API connection CRM Routine cleanup, safe to allow. (id crm-api');
   });
 
   it('a delete that waited for its turn asks nothing once the run was stopped', async () => {
     const store = new ApiStore();
     store.register(connected());
     const stop = new AbortController();
-    const ask = vi.fn(async () => { stop.abort(); return 'Deny'; });
+    const ask = vi.fn(async () => { stop.abort(); return 'deny'; });
     const agent = { ...(makeAgent(store, vaultOf(), ask) as object), runSignal: stop.signal } as never;
     const slots: [CallSlot, CallSlot] = [{}, {}];
     const [first, second] = await Promise.all([
@@ -2112,7 +2125,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     store.register(connected());
     const stop = new AbortController();
     let current: AbortSignal | undefined = stop.signal;
-    const ask = vi.fn(async () => { stop.abort(); current = undefined; return 'Deny'; });
+    const ask = vi.fn(async () => { stop.abort(); current = undefined; return 'deny'; });
     const agent = Object.defineProperty({ ...(makeAgent(store, vaultOf(), ask) as object) }, 'runSignal', { get: () => current }) as never;
     const [, second] = await Promise.all([
       apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
@@ -2125,16 +2138,16 @@ describe('(285) delete asks the person before it removes anything', () => {
   it('a stored name that is not a string is still asked about, not a crash', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ name: 42 as never }));
-    const ask = vi.fn(async (_q: unknown) => 'Deny');
+    const ask = vi.fn(async (_q: unknown) => 'deny');
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
-    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API profile 42 (id crm-api');
+    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API connection 42 (id crm-api');
     expect(result).toContain('user declined');
   });
 
   it('a profile without stored tokens is asked about too, and the question says what goes', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
-    const ask = vi.fn(async (_q: unknown) => 'Allow');
+    const ask = vi.fn(async (_q: unknown) => 'allow');
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never)) as string;
     expect(ask).toHaveBeenCalledTimes(1);
     expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('Its settings (endpoints, guidelines, sign-in method) are removed.');
@@ -2156,7 +2169,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     const store = new ApiStore();
     const mandate: RequestPrincipal = { kind: 'mandate', email: 'helper@example.test' };
     store.register(crmProfile({ created_by: 'mandate:helper@example.test' }));
-    const ask = vi.fn(async () => 'Deny');
+    const ask = vi.fn(async () => 'deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask, undefined, mandate));
     expect(ask).toHaveBeenCalledTimes(1);
     expect(store.get('crm-api')).toBeDefined();
@@ -2168,7 +2181,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     store.register(crmProfile({ id: 'crm-two', name: 'CRM two' }));
     let open = 0;
     let maxOpen = 0;
-    const ask = vi.fn(async () => { open++; maxOpen = Math.max(maxOpen, open); await new Promise((r) => setTimeout(r, 5)); open--; return 'Deny'; });
+    const ask = vi.fn(async () => { open++; maxOpen = Math.max(maxOpen, open); await new Promise((r) => setTimeout(r, 5)); open--; return 'deny'; });
     const agent = makeAgent(store, vaultOf(), ask);
     await Promise.all([
       apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
@@ -2179,7 +2192,7 @@ describe('(285) delete asks the person before it removes anything', () => {
   });
 
   it('under autonomous the guard blocks a delete; interactively it adds no question of its own', () => {
-    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBe('⚠ api_setup: delete [BLOCKED — destructive data operation needs your OK]');
+    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBe('⚠ API connections: delete connection [BLOCKED — destructive data operation needs your OK]');
     expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'guided', apiSetupTool as never)).toBeNull();
     expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'supervised', apiSetupTool as never)).toBeNull();
     expect(isDangerous('api_setup', { action: 'view', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBeNull();
@@ -2277,7 +2290,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const store = new ApiStore();
     const vault = makeVault({ GITHUB_ACCESS_TOKEN: 'the-users-github-token' });
     // A host on the private LAN needs no acceptance; the one question left is where X_KEY may go.
-    const agent = makeAgent(store, vault, async () => 'Allow');
+    const agent = makeAgent(store, vault, async () => 'allow');
     await apiSetupTool.handler({ action: 'create', profile: {
       id: 'github', name: 'x', base_url: 'https://x.local/api', description: 'x',
       auth: { type: 'bearer', vault_keys: ['X_KEY'] },
@@ -3939,7 +3952,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
       'https://api.crm.example/v1/contacts',
       headers,
       false,
-      { apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never,
+      { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },  apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never,
       { bulkRunId: 'run-1' },
     );
 
@@ -3965,7 +3978,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
+    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },  apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
     expect(attached !== null).toBe(sent);
     expect(headers['X-Pay-900'] !== undefined).toBe(sent);
   });
@@ -3983,7 +3996,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
+    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },  apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
     expect(attached !== null).toBe(sent);
     expect(headers['Authorization'] === 'Bearer pat-value').toBe(sent);
   });
@@ -4403,7 +4416,7 @@ describe('mandates and stored credentials', () => {
       }
       return new Response('{"ok":true}', { status, headers: { 'content-type': 'application/json' } });
     });
-    const agent = makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal, releases) as unknown as { toolContext: Record<string, unknown> };
+    const agent = makeAgent(apiStore, v as never, async () => 'allow', undefined, principal, releases) as unknown as { toolContext: Record<string, unknown> };
     // A mandate's renewal is recorded before it runs (H2h); this block is about the credential,
     // so the log only has to accept the rows. Without one the renewal is skipped by design.
     agent.toolContext['auditLog'] = { record: (): void => {} };
@@ -5135,5 +5148,276 @@ describe('fetch_token — only a revocation verdict writes a provider record (T2
     const result = await fetchToken(makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_OWN_REFRESH: 'rt-1' })));
     expect(result).toContain('Nothing was recorded');
     expect(records()).toHaveLength(0);
+  });
+});
+
+// fetch_token and the 401 reminder of a built-in provider's profile name the same way
+// forward, from one function, so the two cannot drift apart again.
+describe('the way forward: fetch_token and the 401 reminder say the same', () => {
+  const WAYS = {
+    owner: 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.',
+    shares: 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.',
+    // The connect call as every text that sends the model there words it (`connectCallText`).
+    removeFirst: (id: string): string => `Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, call api_setup with action "connect" and id "${id}"; that call returns the sign-in link for the user, or says why there is none. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.`,
+    connect: (id: string): string => `To connect it, call api_setup with action "connect" and id "${id}"; that call returns the sign-in link for the user, or says why there is none.`,
+  };
+  /** What the 401 reminder alone adds after a way that ends in connect. */
+  const AFTER_CONNECT = ' If connect answers that this profile is already connected, that is the token this API just refused: show the user the link from that answer. Do not offer to renew the token instead; fetch_token refuses for this profile.';
+  const BEXIO_KEYS = presetClientKeys('bexio');
+  /** A bexio profile as a connect leaves it: no token_url, no grant type. */
+  const bexio = (id: string, oauth: Record<string, unknown> = {}): ApiProfile => ({
+    id, name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'bexio',
+    auth: { type: 'oauth2', vault_keys: [BEXIO_KEYS.id], oauth: { preset_id: 'bexio', client_id_key: BEXIO_KEYS.id, client_secret_key: BEXIO_KEYS.secret, ...oauth } } as never,
+    custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], accepted_at: '2026-11-08T00:00:00.000Z' } as never,
+  });
+
+  it('the reminder says what to make of "already connected" after a way that ends in connect, and only there', async () => {
+    const { presetDelegatedReminder } = await import('./http.js');
+    const { OAUTH_PRESETS } = await import('../../core/oauth-presets.js');
+    const { refreshTokenKey } = await import('../../core/api-store.js');
+    const preset = OAUTH_PRESETS.get('bexio')!;
+    const none = { knownProfiles: () => [] };
+    expect(presetDelegatedReminder(bexio('books'), preset, none)).toContain(`${WAYS.connect('books')}${AFTER_CONNECT} The engine`);
+    expect(presetDelegatedReminder(bexio('books', { refresh_token_key: 'BOOKS_OWN_REFRESH' }), preset, none)).toContain(`${WAYS.removeFirst('books')}${AFTER_CONNECT} The engine`);
+    const owner = bexio('books');
+    const member = bexio('books-2', { refresh_token_key: refreshTokenKey('books') });
+    const shared = presetDelegatedReminder(member, preset, { knownProfiles: () => [owner, member] });
+    expect(shared).toContain(`${WAYS.shares} The engine`);
+    expect(shared).not.toContain('just refused');
+  });
+
+  it('names one way per shape', async () => {
+    const { delegatedRenewalWay } = await import('./http.js');
+    const { OAUTH_PRESETS } = await import('../../core/oauth-presets.js');
+    const { refreshTokenKey } = await import('../../core/api-store.js');
+    const preset = OAUTH_PRESETS.get('bexio')!;
+    const none = { knownProfiles: () => [] };
+    expect(delegatedRenewalWay(bexio('books'), undefined, none)).toBe(WAYS.owner);
+    expect(delegatedRenewalWay(bexio('books'), preset, none)).toBe(WAYS.connect('books'));
+    expect(delegatedRenewalWay(bexio('books', { refresh_token_key: 'BOOKS_OWN_REFRESH' }), preset, none)).toBe(WAYS.removeFirst('books'));
+    const owner = bexio('books');
+    const member = bexio('books-2', { refresh_token_key: refreshTokenKey('books') });
+    expect(delegatedRenewalWay(member, preset, { knownProfiles: () => [owner, member] })).toBe(WAYS.shares);
+    // Without the store the sharing cannot be seen: the profile's own slot decides.
+    expect(delegatedRenewalWay(member, preset, undefined)).toBe(WAYS.removeFirst('books-2'));
+  });
+
+  // Two profiles that share a connection both sit on the provider's API host, so the host maps to
+  // neither, a request there is not sent, and no 401 reminder can follow: fetch_token alone names
+  // the sharing way.
+  it('a profile that shares another profile\'s connection: fetch_token names the sharing way, and no request reaches a 401', async () => {
+    const { accessTokenKey, refreshTokenKey } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    expect(store.register(bexio('books'))).toBe(true);
+    expect(store.register({ ...bexio('books-2', { refresh_token_key: refreshTokenKey('books') }), base_url: 'https://api.bexio.com/3.0' })).toBe(true);
+    const vault = makeVault({ [accessTokenKey('books-2')]: 'expired-token', [refreshTokenKey('books')]: 'rt-1' });
+    const agent = makeAgent(store, vault);
+    const fetched = await (apiSetupTool.handler({ action: 'fetch_token', id: 'books-2' }, agent) as Promise<string>);
+    expect(fetched, fetched).toContain(WAYS.shares);
+    expect(store.getByHostname('api.bexio.com')).toBeUndefined();
+    let sent = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => { sent++; return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }); });
+    let reply: string;
+    try {
+      reply = await (httpRequestTool.handler({ url: 'https://api.bexio.com/3.0/contact' }, agent) as Promise<string>);
+    } catch (err) {
+      reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
+    }
+    // No 401 can come back: a host two profiles map to carries no credential, and nothing is sent.
+    expect(sent).toBe(0);
+    expect(reply).toContain('more than one api_profile maps to api.bexio.com');
+    expect(reply).not.toContain('Agent reminder: OAuth2 401');
+  });
+
+  it.each([
+    ['connected, nothing of its own', {}, WAYS.connect('books')],
+    ['reading a refresh slot of its own', { refresh_token_key: 'BOOKS_OWN_REFRESH' }, WAYS.removeFirst('books')],
+  ])('a built-in provider\'s profile %s: both name the same way, byte for byte', async (_label, oauth, way) => {
+    const { accessTokenKey } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    expect(store.register(bexio('books', oauth))).toBe(true);
+    const agent = makeAgent(store, makeVault({ [accessTokenKey('books')]: 'expired-token' }));
+
+    const fetched = await (apiSetupTool.handler({ action: 'fetch_token', id: 'books' }, agent) as Promise<string>);
+    expect(fetched, fetched).toMatch(new RegExp(` ${way.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+    // fetch_token can be called with no 401 before it: "just refused" is the reminder's alone.
+    expect(fetched).not.toContain('just refused');
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }));
+    let reply: string;
+    try {
+      reply = await (httpRequestTool.handler({ url: 'https://api.bexio.com/2.0/contact' }, agent) as Promise<string>);
+    } catch (err) {
+      reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
+    }
+    const head = '**[Agent reminder: OAuth2 401, and fetch_token is the wrong move here]**';
+    expect(reply).toContain(head);
+    expect(reply.slice(reply.indexOf(head))).toBe(
+      `${head}\nThis URL maps to api_profile "books". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do not call api_setup fetch_token for it as the profile stands, and change nothing on the profile beyond the step below. ${way}${AFTER_CONNECT} The engine has written the details to its log.`
+      + '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.',
+    );
+  });
+});
+
+// The refusal path of a renewal with a preset id the engine does not know already has a test;
+// the success path too must never repeat that model-authored id.
+describe('the 401 reminders keep their own profiles', () => {
+  it('a built-in provider\'s profile that renews by its refresh token and names no token_url gets neither reminder', async () => {
+    const { accessTokenKey } = await import('../../core/api-store.js');
+    const keys = presetClientKeys('bexio');
+    const store = new ApiStore();
+    expect(store.register({
+      id: 'books', name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'bexio',
+      auth: { type: 'oauth2', vault_keys: [keys.id], oauth: { preset_id: 'bexio', grant_type: 'refresh_token', client_id_key: keys.id, client_secret_key: keys.secret } } as never,
+      custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], accepted_at: '2026-11-08T00:00:00.000Z' } as never,
+    })).toBe(true);
+    let sent = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => { sent++; return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }); });
+    let reply: string;
+    try {
+      reply = await (httpRequestTool.handler({ url: 'https://api.bexio.com/2.0/contact' }, makeAgent(store, makeVault({ [accessTokenKey('books')]: 'expired-token' }))) as Promise<string>);
+    } catch (err) {
+      reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
+    }
+    expect(sent).toBe(1);
+    expect(reply).toContain('401');
+    expect(reply).not.toContain('Agent reminder');
+  });
+});
+
+// The 401 reminder now reaches a built-in provider's profile without a token_url.
+// Held in each direction: what newly gets it, what still does not, and what stays as it was.
+describe('which profiles a 401 reminder reaches', () => {
+  const MANAGED = '**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**';
+  const PRESET_DELEGATED = '**[Agent reminder: OAuth2 401, and fetch_token is the wrong move here]**';
+  const ackFor = (hosts: string[]): never => ({ accepted: true, hosts, accepted_at: '2026-11-08T00:00:00.000Z' }) as never;
+  async function on401(profile: ApiProfile, vault: MockVault): Promise<{ reply: string; sent: number }> {
+    const store = new ApiStore();
+    expect(store.register(profile)).toBe(true);
+    let sent = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => { sent++; return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }); });
+    let reply: string;
+    try {
+      reply = await (httpRequestTool.handler({ url: `${profile.base_url}/contact` }, makeAgent(store, vault)) as Promise<string>);
+    } catch (err) {
+      reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
+    }
+    return { reply, sent };
+  }
+  const keys = presetClientKeys('bexio');
+  const bexio = (oauth: Record<string, unknown>): ApiProfile => ({
+    id: 'books', name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'bexio',
+    auth: { type: 'oauth2', vault_keys: [keys.id], oauth: { preset_id: 'bexio', client_id_key: keys.id, client_secret_key: keys.secret, ...oauth } } as never,
+    custom_endpoint_ack: ackFor(['api.bexio.com', 'auth.bexio.com']),
+  });
+  const TOKEN = { BOOKS_ACCESS_TOKEN: 'expired-token' };
+
+  it('newly: a built-in provider\'s profile without a token_url gets the delegated reminder, not the managed one', async () => {
+    const { reply, sent } = await on401(bexio({}), makeVault(TOKEN));
+    expect(sent).toBe(1);
+    expect(reply).toContain(PRESET_DELEGATED);
+    expect(reply).not.toContain(MANAGED);
+  });
+
+  it('still not: an oauth2 profile with no built-in provider and no token_url gets no reminder, a user\'s grant included', async () => {
+    // A user authorized it and it declares no grant type: the delegated reminder would fit its
+    // grant, so only the built-in provider can be what lets a profile without a token_url in.
+    const p = crmProfile({ base_url: 'https://api.crm.example/v1', oauth_grant: { origin: 'callback', state: 'no-refresh' } });
+    const oauth = { ...p.auth!.oauth! };
+    delete oauth.token_url;
+    delete oauth.grant_type;
+    const { reply, sent } = await on401({ ...p, auth: { ...p.auth!, oauth } }, makeVault({ CRM_API_ACCESS_TOKEN: 'expired-token' }));
+    expect(sent).toBe(1);
+    expect(reply).toContain('401');
+    expect(reply).not.toContain('Agent reminder');
+  });
+
+  it('still not: a bearer profile that carries a stray preset_id gets no reminder', async () => {
+    const { reply, sent } = await on401({
+      id: 'books', name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'bexio',
+      auth: { type: 'bearer', vault_keys: ['BOOKS_KEY'], oauth: { preset_id: 'bexio' } } as never,
+      custom_endpoint_ack: ackFor(['api.bexio.com']),
+    }, makeVault({ BOOKS_KEY: 'k' }));
+    expect(sent).toBe(1);
+    expect(reply).not.toContain('Agent reminder');
+  });
+
+  it('as before: a built-in provider\'s profile with a token_url that renews by its refresh token gets the managed reminder', async () => {
+    const { reply, sent } = await on401(bexio({ token_url: 'https://auth.bexio.com/token', grant_type: 'refresh_token' }), makeVault(TOKEN));
+    expect(sent).toBe(1);
+    expect(reply).toContain(MANAGED);
+    expect(reply).not.toContain(PRESET_DELEGATED);
+  });
+
+  // Whether a refresh token is stored decides which reminder a hand-configured profile gets; it is
+  // asked without reading the token out where the store can, and as before where it cannot.
+  const handConfigured = (): ApiProfile => {
+    const p = crmProfile();
+    const oauth = { ...p.auth!.oauth! };
+    delete oauth.grant_type;
+    return { ...p, auth: { ...p.auth!, oauth } };
+  };
+  it.each([
+    ['a store that answers holds: the slot is not read out', true],
+    ['control: a store without holds is asked as before', false],
+  ])('a stored refresh token turns the reminder to the delegated one: %s', async (_label, withHolds) => {
+    const read: string[] = [];
+    const vault = makeVault({ CRM_API_ACCESS_TOKEN: 'expired-token', [REFRESH]: 'rt-1' }, { reads: read });
+    const asked = withHolds ? { ...vault, holds: (name: string) => vault.peek(name) !== undefined } : vault;
+    const { reply, sent } = await on401(handConfigured(), asked as MockVault);
+    expect(sent).toBe(1);
+    expect(reply).toContain('fetch_token is the WRONG move here');
+    if (withHolds) expect(read).not.toContain(REFRESH);
+    else expect(read).toContain(REFRESH);
+  });
+
+  it('control: with no refresh token stored the same profile gets the managed reminder', async () => {
+    const vault = makeVault({ CRM_API_ACCESS_TOKEN: 'expired-token' });
+    const { reply } = await on401(handConfigured(), { ...vault, holds: (name: string) => vault.peek(name) !== undefined } as MockVault);
+    expect(reply).toContain(MANAGED);
+  });
+});
+
+describe('a renewal that goes through does not repeat a preset id the engine does not know', () => {
+  const STRAY = 'not-a-provider';
+  const SEED = { CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH' };
+  const stray = (oauth: Record<string, unknown> = {}): ApiProfile => {
+    const p = crmProfile();
+    return { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: STRAY, ...oauth } } };
+  };
+
+  it('fetch_token: the success reply names no such id', async () => {
+    const store = new ApiStore();
+    expect(store.register(stray())).toBe(true);
+    const vault = makeVault(SEED);
+    tokenEndpoint(200, JSON.stringify({ access_token: 'new-token', refresh_token: 'NEW_REFRESH', expires_in: 3600 }));
+    const result = await fetchToken(makeAgent(store, vault));
+    expect(result).toContain('Token exchange OK');
+    expect(vault.peek(ACCESS)).toBe('new-token');
+    expect(result).not.toContain(STRAY);
+  });
+
+  it('unattended, before a request: neither the reply nor the log names it', async () => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(stray({ token_expires_at: Date.now() - 1000 }));
+    const vault = makeVault(SEED);
+    const seen: { authorization?: string } = {};
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) return new Response(JSON.stringify({ access_token: 'NEW_TOKEN', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      seen.authorization = new Headers(init?.headers).get('authorization') ?? undefined;
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const logged: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown) => { logged.push(String(chunk)); return true; }) as never);
+
+    const out = await httpRequestTool.handler({ url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never, makeAgent(apiStore, vault));
+
+    // The renewal went through: the new token was attached, so the success path is what ran.
+    expect(seen.authorization).toBe('Bearer NEW_TOKEN');
+    expect(String(out)).not.toContain(STRAY);
+    expect(logged.join('')).not.toContain(STRAY);
   });
 });

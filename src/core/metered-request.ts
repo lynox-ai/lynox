@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
 import { currentRunGroup } from './run-group.js';
-import { recordSessionCost } from './session-budget.js';
+import { checkPersistentBudget, recordSessionCost } from './session-budget.js';
 import type { Engine, RunContext } from './engine.js';
-import type { ModelTier, SessionCounters } from '../types/index.js';
+import { fireAdmissionHooks, RunAdmissionRefusedError, SINGLE_CALL_WORST_CASE_CENTS } from './run-admission.js';
+import type { ModelTier, PersistentBudgetCheck, SessionCounters } from '../types/index.js';
 
 /**
  * Minimal engine surface these helpers need. Lets a non-`Session` caller that
@@ -31,8 +32,8 @@ export type HookHost = Pick<Engine, 'getHooks' | 'getContext'>;
  * These two helpers fire the exact same hooks `Session.run()` and
  * `runGuardedSavedWorkflow()` use, so every metered path converges on one gate
  * + one debit. On a true self-hosted instance (no `LYNOX_BILLING_TIER` env) no
- * hooks are registered, so both helpers are no-ops and the audio routes behave
- * exactly as before. The managed hook is also registered on hosted/BYOK (any
+ * hooks are registered: the gate then checks only the instance's daily and
+ * monthly spending caps, and the debit is a no-op. The managed hook is also registered on hosted/BYOK (any
  * billing tier set), but there the control plane reports `allowed: true` so the
  * gate passes, and the cost report is rejected as not-applicable so the debit
  * is a CP no-op — BYOK is never credit-gated or billed for voice. Only
@@ -50,8 +51,26 @@ export interface MeteredGateResult {
   /** Run id shared by the gate and the later cost report. The CP dedups
    *  debits on this id, so the same value MUST be passed to reportMeteredCost. */
   runId: string;
-  /** Non-null when a hook blocked the run; the human-readable reason to surface. */
+  /** Non-null when the run is blocked; the human-readable reason to surface. */
   blockedReason: string | null;
+  /**
+   * Which of the instance's own spending caps blocked it; null when none did (a hook
+   * may still have). `unknown` when the cap check refused without either cap being
+   * over its spend, so the caller does not name one.
+   */
+  capReached: 'daily' | 'monthly' | 'unknown' | null;
+  /**
+   * True when a hook refused because the balance cannot cover the call while runs are
+   * admitted only within it ({@link RunAdmissionRefusedError}): a refusal that can lift as
+   * soon as a running run gives its reservation back.
+   */
+  refusedWithinBalance: boolean;
+}
+
+function reachedCap(check: PersistentBudgetCheck): 'daily' | 'monthly' | 'unknown' {
+  if (check.dailyLimitUSD !== null && check.todayCostUSD >= check.dailyLimitUSD) return 'daily';
+  if (check.monthlyLimitUSD !== null && check.monthCostUSD >= check.monthlyLimitUSD) return 'monthly';
+  return 'unknown';
 }
 
 function buildRunContext(host: HookHost, runId: string, modelTier: ModelTier): RunContext {
@@ -66,25 +85,47 @@ function buildRunContext(host: HookHost, runId: string, modelTier: ModelTier): R
 }
 
 /**
- * Run every registered `onBeforeRun` hook. A hook that throws means "blocked"
- * (managed budget exhausted, or control plane stale → fail-closed). Mirrors
- * `Session.run()` / `runGuardedSavedWorkflow()`: the caller must abort the run
- * when `blockedReason` is non-null. Returns the run id to thread into the
- * matching `reportMeteredCost()` on the success path.
+ * The admission for a model call that does not flow through `Session.run()`.
+ * Two checks, in the order `Session.run()` makes them:
+ *
+ *   1. The instance's daily and monthly spending caps (`checkPersistentBudget`),
+ *      on every instance, self-hosted included. `host` plays no part in it, so a
+ *      caller without a metered host still calls the gate, with `null`.
+ *   2. Every registered `onBeforeRun` hook. A hook that throws means "blocked"
+ *      (managed budget exhausted, or control plane stale → fail-closed).
+ *
+ * The caller must not make the call when `blockedReason` is non-null. Returns
+ * the run id to thread into the matching `reportMeteredCost()` on the success path.
+ *
+ * A single call cannot be stopped part-way, so it is admitted on its worst case: the hooks
+ * see it as `maxCostCents` (the caller's, or {@link SINGLE_CALL_WORST_CASE_CENTS}), and a hook
+ * that admits only within the balance refuses the call unless that much is free. What a hook
+ * sets aside for the check is given back at once; nothing is held while the call runs.
  */
-export async function fireBeforeRunGate(host: HookHost, modelTier: ModelTier): Promise<MeteredGateResult> {
+export async function fireBeforeRunGate(
+  host: HookHost | null,
+  modelTier: ModelTier,
+  opts: { maxCostCents?: number | undefined } = {},
+): Promise<MeteredGateResult> {
   const runId = randomUUID();
-  const runContext = buildRunContext(host, runId, modelTier);
-  for (const hook of host.getHooks()) {
-    if (hook.onBeforeRun) {
-      try {
-        await hook.onBeforeRun(runId, runContext);
-      } catch (err: unknown) {
-        return { runId, blockedReason: err instanceof Error ? err.message : String(err) };
-      }
-    }
+  const cap = checkPersistentBudget();
+  if (!cap.allowed) return { runId, blockedReason: cap.reason ?? 'Spending cap reached.', capReached: reachedCap(cap), refusedWithinBalance: false };
+  if (host === null) return { runId, blockedReason: null, capReached: null, refusedWithinBalance: false };
+  const runContext: RunContext = {
+    ...buildRunContext(host, runId, modelTier),
+    maxCostCents: opts.maxCostCents ?? SINGLE_CALL_WORST_CASE_CENTS,
+  };
+  try {
+    (await fireAdmissionHooks(host.getHooks(), runId, runContext)).release();
+  } catch (err: unknown) {
+    return {
+      runId,
+      blockedReason: err instanceof Error ? err.message : String(err),
+      capReached: null,
+      refusedWithinBalance: err instanceof RunAdmissionRefusedError,
+    };
   }
-  return { runId, blockedReason: null };
+  return { runId, blockedReason: null, capReached: null, refusedWithinBalance: false };
 }
 
 /**

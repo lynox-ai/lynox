@@ -209,7 +209,7 @@ describe('mechanical control — the agent a run builds (worker vs web UI)', () 
     expect(cfg.systemPrompt).not.toContain(WEB_UI_SYSTEM_PROMPT_SUFFIX.trim());
     expect(cfg.autonomy).toBe('autonomous');
     expect(cfg.maxIterations).toBe(30);
-    expect(await cfg.promptUser!('⚠ mail_send [BLOCKED — connecting/sending mail needs your OK]', ['Allow', 'Deny'])).toBe('Yes');
+    expect(await cfg.promptUser!('⚠ New email [BLOCKED — connecting/sending mail needs your OK]', ['Allow', 'Deny'])).toBe('Yes');
     expect(asked).toBe(1);
     expect(cfg.briefing).toContain(CANARY);
     expect(cfg.toolContext?.apiStore).toBeDefined();

@@ -37,7 +37,7 @@ const RUNS = Number(process.env['MEDIA_RUNS'] ?? 3);
 const STORE = 'acme-demo.myshopify.com';
 // The engine's own Shopify connection to STORE, granted what the preset asks for: no image scope.
 const PRODUCT_ONLY_STORE = {
-  getByHostname: (h: string) => h === STORE ? { base_url: `https://${STORE}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: STORE.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products'] } } : undefined,
+  getByHostname: (h: string) => h === STORE ? { base_url: `https://${STORE}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: STORE.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products'], store_binding: 'bound' } } : undefined,
 };
 
 const PRODUCTS = JSON.stringify({
@@ -71,7 +71,9 @@ function realBulkPlan(ledger: BulkLedger, calls: Call[]): ToolEntry {
   } as ToolEntry;
 }
 
-const REFUSED = /^Error: source_list\.form shopify_media writes image alt texts/;
+// The refusal of the image form: the scope cases open with what the run cannot change, the
+// granted-but-refused case names the form.
+const REFUSED = /^Error: (?:source_list\.form shopify_media writes image alt texts|The bulk run cannot change image alt texts:)/;
 // The note the product rules and the store hint carry on a connection without the image scope.
 const NOTED = /Image alt texts: a bulk run cannot change them in this store/;
 

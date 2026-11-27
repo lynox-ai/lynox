@@ -1,4 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+
+// An update reads the event's guests before it asks, through the pinned transport: the bridge
+// hands that read to the stubbed `fetch` below, as in the calendar tool's own tests.
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: vi.fn(async () => dnsLookupStub()) },
+}));
+import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+let restorePinnedFetchBridge: (() => void) | undefined;
+beforeAll(() => { restorePinnedFetchBridge = installPinnedFetchBridge(); });
+afterAll(() => { restorePinnedFetchBridge?.(); });
+
 import { createDriveTool } from './google-drive.js';
 import { createCalendarTool } from './google-calendar.js';
 import { createSheetsTool } from './google-sheets.js';
@@ -47,7 +58,7 @@ function capturingAgent(): { agent: IAgent; prompt: () => string | PromptText } 
     onStream: null,
     promptUser: vi.fn().mockImplementation((question: string | PromptText) => {
       seen.push(question);
-      return Promise.resolve('no');
+      return Promise.resolve('cancel');
     }),
   } as unknown as IAgent;
   return {
@@ -135,8 +146,11 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     it.each(['update_event', 'delete_event'] as const)('%s stays single-line', async (action) => {
       const tool = createCalendarTool(() => mockAuth([SCOPES.CALENDAR_EVENTS]));
       const { agent, prompt } = capturingAgent();
-
-      await tool.handler({ action, event_id: FORGERIES[0] as string }, agent);
+      // An update reads the event's guests first: an event with none.
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ id: 'e' }), { status: 200 })));
+      try {
+        await tool.handler({ action, event_id: FORGERIES[0] as string }, agent);
+      } finally { vi.unstubAllGlobals(); }
 
       expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
     });

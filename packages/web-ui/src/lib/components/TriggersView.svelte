@@ -1,4 +1,5 @@
 <script lang="ts">
+	import BulkHost from './BulkHost.svelte';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
@@ -6,13 +7,21 @@
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
-	import { escalationNotice } from '../utils/trigger-escalation.js';
-	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
-	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { escalationNotice, escalationChatLink } from '../utils/trigger-escalation.js';
+	import WatchAddress from './WatchAddress.svelte';
+	import { awaitsConfirmation, displaySafe, instructionOf, markHidden, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
+	import { endedNotices, pausedTitleLine, pausedWhoText, planTitle, refusalText, shownWhole, takeoverLines, writtenByMember, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
+	import { blockedReasonParts, holdsNextRun, hostLabels, type BlockedReason } from '../utils/blocked-reason.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
+	import MarkedLine from './MarkedLine.svelte';
+	import { FoldGroup } from '../utils/fold-group.svelte.js';
+	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { approvalSetupKind, approvalSetupName, type ApprovalSetupLine } from './approvals.js';
+	import { visibleText } from '../visible-text.js';
+	import { clockTime, isCustomSchedule, localSchedule, monthDay } from '../utils/cron-human.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -43,12 +52,25 @@
 		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
 		created_by?: string;
 		edited_by?: string;
+		// The same, as the lines shown under the title: a helper that set it up or changed it
+		// last, named as the session may read it — by name, or to a helper another helper's mark
+		// as "another person with delegated access" (`GET /api/triggers`). Only the marks on the trigger itself, not on the workflow it
+		// runs. Empty for the owner's own.
+		setup?: ApprovalSetupLine[];
+		// The last mandate that changed the trigger, kept after the owner changes it again.
+		mandate_editor?: string;
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
 		stamp_listed?: StampListed | null;
 		// Whether the last escalation of this trigger (a failed scheduled run, a watch
 		// finding) reached anyone — see `escalationNotice`.
 		last_escalation_at?: string;
 		last_escalation_outcome?: string;
+		// Why a `not_delivered` one reached nobody, and the chat its question or alert stands in
+		// (owner only; absent once that chat is deleted) — see `escalationChatLink`.
+		last_escalation_case?: string;
+		last_escalation_chat?: { threadId: string; kind: string };
+		// Whether that escalation was a run's question or an alert, kept when its chat is gone.
+		last_escalation_kind?: string;
 		// Whether a run of this trigger is in flight right now, and whether a stop can end it
 		// (`GET /api/triggers`; a mandate is told only about its own runs). Snapshots from
 		// the last load: the stop route still answers a run that ended since.
@@ -57,10 +79,43 @@
 		// Paused because the access of someone who set up or changed it ended: it does not run
 		// until it is taken over (`GET /api/triggers`, engine `plan-pause.ts`).
 		paused?: boolean;
+		// A completed plan that keeps its pause: the workflow whose takeover comes before a new plan,
+		// or null when none does (U-275 N6). Absent when the engine could not read it, or is older:
+		// the line then gives the condition.
+		paused_done_workflow?: { name: string | null } | null;
 		// Whose ended access paused it, for the owner only (a helper is not told about another's).
 		paused_who?: string[];
 		// How and when each of those accesses ended, for the owner only: the notices above the list.
 		paused_ended?: PausedEnded[];
+		// A bulk run's trigger: the host its run works on, or null where it has none (`GET /api/triggers`).
+		bulk_host?: string | null;
+		// The workflow's name, where the plan's title is that name as the engine wrote it
+		// (`GET /api/triggers`): the list puts lynox's words before it (`planTitle`).
+		title_workflow?: string;
+		// Why its run does not do its work, as a cause the view says in its own language
+		// (`GET /api/triggers`; a watch the instance's network_policy keeps from its page, U-392).
+		blocked_reason?: BlockedReason;
+		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
+		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
+		recipients_unconfirmed?: boolean;
+	}
+
+	// A bulk run's trigger is titled with its run id, which the model reads; the list names it by
+	// its stage and host instead (U-324). Every other trigger by its title, a workflow's name
+	// after lynox's words where the engine titled the plan with it (`planTitle`).
+	const BULK_STAGE_KEYS: Readonly<Record<string, string>> = {
+		bulk_preview: 'triggers.bulk.preview', bulk_judge: 'triggers.bulk.judge', bulk_apply: 'triggers.bulk.apply', bulk_undo: 'triggers.bulk.undo',
+	};
+	// The host is the planner's, so it stands boxed as code beside the stage, never as part of the title.
+	function shownTitle(trigger: Trigger): string {
+		const key = trigger.effect === undefined ? undefined : BULK_STAGE_KEYS[trigger.effect];
+		return key === undefined ? planTitle(trigger) : t(key);
+	}
+	const HOST_SEP = ' · ';
+	function shownHost(trigger: Trigger): string | null {
+		if (trigger.effect === undefined || BULK_STAGE_KEYS[trigger.effect] === undefined) return null;
+		const host = trigger.bulk_host ?? null;
+		return host === null || host === '' ? null : host;
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -104,8 +159,15 @@
 			const data = (await res.json()) as { triggers: Trigger[]; viewer?: 'owner' | 'mandate' | 'none' };
 			if (load < shownLoad) return;
 			shownLoad = load;
-			triggers = data.triggers;
 			viewer = data.viewer ?? 'none';
+			// A check left open closes once its row stops offering it (the access ended, the plan waits
+			// again, the row left the list): otherwise it would reopen by itself, without a click, when the
+			// row offers it again.
+			for (const id of Object.keys(checking)) {
+				const row = data.triggers.find((x) => x.id === id);
+				if (row === undefined || !offersCheck(row)) delete checking[id];
+			}
+			triggers = data.triggers;
 			error = '';
 			loading = false;
 		} catch {
@@ -173,6 +235,8 @@
 	// "Check connections": a confirmed schedule whose run can use a connection, opened on demand,
 	// so the preview is not asked for on every refresh (ux U-058, ii-c-min).
 	let checking = $state<Record<string, boolean>>({});
+	// "Confirm recipients" opened per row.
+	let confirmingRecipients = $state<Record<string, boolean>>({});
 	function offersCheck(trigger: Trigger): boolean {
 		// Not once a member's access ended: the gate refuses the run whatever is listed, so allowing a
 		// connection there changes nothing, and the ended note already names the way out.
@@ -209,7 +273,7 @@
 				// to answer it — a sentence they never saw while this branch showed one
 				// fixed string and never read the body.
 				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
-				const who = trigger.paused_who?.join(', ') ?? '';
+				const who = pausedWhoText(trigger.paused_who);
 				addToast(code === 'awaiting_answer' ? t('triggers.run_awaiting_answer')
 					: code === 'paused' ? (who !== '' ? tf('triggers.run_paused', { who }) : t('triggers.run_paused_anon'))
 					: t('triggers.run_already'), 'info');
@@ -281,20 +345,44 @@
 	}
 
 	// A completed plan keeps its pause (reopened, it would need the takeover still), but nothing is
-	// due on it: no label, no button, not in the notices, as the badge's count leaves it out too.
+	// due on it: no takeover label or button, not in the notices, as the badge's count leaves it out
+	// too. It has its own mark and line instead (`pausedDone`, U-275).
 	function pausedOpen(trigger: Trigger): boolean {
 		return trigger.paused === true && trigger.status !== 'completed';
 	}
 
-	// Run now on a completed plan that keeps its pause is refused with the paused sentence, which
-	// sends the owner to a takeover this plan does not offer, and nothing reopens a paused plan. So
-	// the button is not offered there (ux U-179).
+	// Run now on a completed plan that keeps its pause is refused: nothing takes it over and nothing
+	// reopens a paused plan, so it never runs again. So the button is not offered there (U-179).
 	function pausedDone(trigger: Trigger): boolean {
 		return trigger.paused === true && trigger.status === 'completed';
 	}
 
+	// Which line a completed, paused plan gets (U-275 N6): its workflow's takeover first, by name;
+	// no workflow sentence; or, when the engine could not say, the condition as before.
+	function pausedDoneCase(trigger: Trigger): 'workflow' | 'none' | 'unknown' {
+		return trigger.paused_done_workflow === undefined ? 'unknown' : trigger.paused_done_workflow === null ? 'none' : 'workflow';
+	}
+	function pausedDoneHint(trigger: Trigger): string {
+		const wf = trigger.paused_done_workflow;
+		const takeover = { tab: t('hub.automation.workflows'), button: t('workflow_library.takeover.button') };
+		if (wf === undefined) return ownerActs ? tf('triggers.paused_done_hint', takeover) : t('triggers.paused_done_hint_helper');
+		if (wf === null) return t('triggers.paused_done_hint_none');
+		// Without a name its workflow is "its workflow", in lynox's own words.
+		if (wf.name === null) return ownerActs ? tf('triggers.paused_done_hint_its_workflow', takeover) : t('triggers.paused_done_hint_its_workflow_helper');
+		return ownerActs ? tf('triggers.paused_done_hint_workflow', { ...takeover, workflow: shownWhole(wf.name) }) : tf('triggers.paused_done_hint_workflow_helper', { workflow: shownWhole(wf.name) });
+	}
+
+	// At a paused plan, open or completed, Delete is the owner's: the route refuses it to a helper
+	// (`paused`), so a helper is not offered it there. It waits for a known owner, as the confirm does.
+	// The switch is offered to nobody at a paused plan (see the row's buttons).
+	function ownerOnlyHere(trigger: Trigger): boolean {
+		return trigger.paused === true && !ownerActs;
+	}
+
 	let takeoverFor = $state<Trigger | null>(null);
 	let takeoverPreview = $state<TakeoverPreview | null>(null);
+	// The lists of plans the open preview has unfolded: a new preview starts folded.
+	const takeoverFolds = $derived(takeoverPreview === null ? undefined : new FoldGroup());
 	// A line above the preview: why it was fetched again, or why the takeover was refused.
 	let takeoverNote = $state('');
 	let takeoverBusy = $state(false);
@@ -451,29 +539,28 @@
 		}
 	}
 
-	// Render a UTC cron in the user's local time so "0 7 * * *" (created locally
-	// as 09:00 in CEST) displays back as "Täglich um 09:00" instead of "07:00".
-	function utcHmToLocal(mmStr: string, hhStr: string): string {
-		const mm = parseInt(mmStr, 10);
-		const hh = parseInt(hhStr, 10);
-		if (Number.isNaN(mm) || Number.isNaN(hh)) return `${hhStr}:${mmStr.padStart(2, '0')}`;
-		const d = new Date();
-		d.setUTCHours(hh, mm, 0, 0);
-		const pad = (n: number) => n.toString().padStart(2, '0');
-		return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-	}
-
+	// A UTC cron as the reader lives it: hour, day and weekday in local time (`localSchedule`).
+	const WEEKDAY_KEYS = ['tasks.sunday', 'tasks.monday', 'tasks.tuesday', 'tasks.wednesday', 'tasks.thursday', 'tasks.friday', 'tasks.saturday'] as const;
 	function cronToHuman(cron: string): string {
-		if (cron === '0 * * * *') return t('tasks.every_hour');
-		const m = cron.match(/^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/);
-		if (!m) return cron;
-		const local = utcHmToLocal(m[1] ?? '0', m[2] ?? '0');
-		const day = m[3];
-		const weekday = m[4];
-		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
-		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${local}`;
-		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${local}`;
-		return `${t('tasks.daily_at')} ${local}`;
+		const s = localSchedule(cron);
+		const at = (time: string): string => clockTime(time, getLocale());
+		switch (s.kind) {
+			case 'every_minute': return t('tasks.every_minute');
+			case 'interval': return s.text;
+			case 'every_minutes': return tf('tasks.every_n_minutes', { n: String(s.n) });
+			case 'hourly': return t('tasks.every_hour');
+			case 'hourly_at': return tf('tasks.every_hour_at', { t1: at(s.times[0]), t2: at(s.times[1]) });
+			case 'every_hours': return tf('tasks.every_n_hours', { n: String(s.n), t1: at(s.times[0]), t2: at(s.times[1]) });
+			case 'daily': return `${t('tasks.daily_at')} ${at(s.time)}`;
+			case 'weekly': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${at(s.time)}`;
+			case 'weekly_utc': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${at(s.time)} UTC`;
+			case 'monthly': return tf('tasks.monthly_on_day', { day: monthDay(s.day, getLocale()), time: at(s.time) });
+			case 'monthly_last': return tf('tasks.monthly_last_day', { time: at(s.time) });
+			case 'monthly_utc': return tf('tasks.monthly_on_day_utc', { day: monthDay(s.day, getLocale()), time: at(s.time) });
+			// The expression itself is no label: the card says it is a schedule of its own and shows
+			// the expression on hover. The confirm card, where the owner decides on it, shows it in full.
+			case 'raw': return t('tasks.custom_schedule');
+		}
 	}
 
 	function typeLabel(trigger: Trigger): string {
@@ -489,8 +576,19 @@
 		}
 	}
 
+	/** Whether a run's time has passed, as the list is drawn (it reloads on its own while open). */
+	function isDue(iso: string): boolean {
+		const at = new Date(iso).getTime();
+		return Number.isFinite(at) && at <= Date.now();
+	}
+
 	function fmtDate(iso: string): string {
-		return new Date(iso).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+		// The time is written by `clockTime`, as on the schedule line beside it, so a card has one form.
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return d.toLocaleString();
+		const locale = getLocale();
+		const day = d.toLocaleDateString(locale === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric' });
+		return `${day}, ${clockTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`, locale)}`;
 	}
 
 	// A missing key renders with NO class, which reads as "no verdict" rather than as
@@ -515,9 +613,12 @@
 		interrupted: 'text-warning',
 	};
 	// Colour alone does not tell these apart from the rest (and not at all to a reader
-	// who does not see colour), so they also carry a word. `stopped` and `halted` share
-	// the muted colour, which makes the word the only thing that separates them.
-	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+	// who does not see colour), so every run that did not succeed carries a word. `stopped`
+	// and `halted` share the muted colour, which makes the word the only thing that
+	// separates them; `failed` and `timeout` share the danger colour.
+	const runStatusWord: Record<string, 'tasks.run_failed' | 'tasks.run_timeout' | 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+		failed: 'tasks.run_failed',
+		timeout: 'tasks.run_timeout',
 		halted: 'tasks.run_halted',
 		interrupted: 'tasks.run_interrupted',
 		stopped: 'tasks.run_stopped',
@@ -551,7 +652,7 @@
 	     shortens the name to fit). The owner's only — a helper's list carries no `paused_ended`. -->
 	{#if viewer === 'owner'}
 		{#each endedNotices(triggers.filter(pausedOpen), endDayOf) as notice}
-			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice>{notice}</div>
+			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice><MarkedLine text={notice} /></div>
 		{/each}
 	{/if}
 
@@ -571,10 +672,15 @@
 							<!-- Wrapping, so the badges move to their own line on a narrow card instead
 							     of squeezing the title: the badges are `shrink-0` and the title clamps. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-								<p class="text-sm font-medium line-clamp-2 break-words">{trigger.title}</p>
+								<!-- A plan to take over, or, in the owner's view, one a person with access set up or changed:
+								     its title is someone else's value, as in the notice above (`pausedTitleLine`). A bulk run's trigger is named by its
+								     stage and host instead (`shownTitle`); it offers no takeover. -->
+								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if (pausedOpen(trigger) || (ownerActs && writtenByMember(trigger))) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{#if shownHost(trigger) !== null}{HOST_SEP}<BulkHost value={shownHost(trigger) ?? ''} testid="trigger-bulk-host" />{/if}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
-								{#if trigger.enabled === 0}
-									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
+								<!-- Not at a completed plan: its own mark says it does not run, and it has no switch
+								     that "Paused" would offer to resume (U-275 N6). -->
+								{#if trigger.enabled === 0 && trigger.status !== 'completed'}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-switched-off>{t('triggers.paused')}</span>
 								{/if}
 								{#if held(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-held>{t('triggers.awaiting_confirmation')}</span>
@@ -585,10 +691,28 @@
 								{#if pausedOpen(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
+								{#if pausedDone(trigger)}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-trigger-paused-done>{t('triggers.paused_done')}</span>
+								{/if}
+								<!-- A completed plan runs no more: without a mark it read as active (only its schedule,
+								     no next run). One that keeps its pause has its own mark above. -->
+								{#if trigger.status === 'completed' && trigger.paused !== true}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-trigger-completed>{t('triggers.completed')}</span>
+								{/if}
 							</div>
+							<!-- Who set it up or changed it last, when that was a helper, worded as on an
+							     approval card (U-202). The owner's own trigger has none. -->
+							{#each trigger.setup ?? [] as line, i (i)}
+								<p class="mt-0.5 text-xs text-text-muted break-words" data-trigger-setup={line.kind}>{tf(`approvals.setup.${approvalSetupKind(line, viewer)}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
+							{/each}
+							<!-- A helper has no takeover button: who lets the plan run again is said here,
+							     visibly. A bulk run never reaches this pause (it has no helper's mark). -->
+							{#if viewer === 'mandate' && pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}
+								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-owner>{t('triggers.paused_owner_takes_over')}</p>
+							{/if}
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
-									<span class="flex items-center gap-1">
+									<span class="flex items-center gap-1" data-trigger-schedule title={isCustomSchedule(trigger.schedule_cron) ? markHidden(trigger.schedule_cron) : undefined}>
 										<Icon name="clock" size="xs" />
 										{cronToHuman(trigger.schedule_cron)}
 									</span>
@@ -597,17 +721,53 @@
 								     past — it is not a next run, so it is not labelled as one. It is said
 								     in the consent block below instead, where it is the thing a person
 								     needs: what confirming starts, and when. -->
-								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true}
-									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
+								<!-- Nor does a trigger the worker will not start: one whose run is parked on an
+								     open question (it keeps the moment it parked as next_run_at until the
+								     question is answered), one that is completed or stopped (completing a
+								     trigger leaves its next_run_at as it was), and a failed one without a
+								     schedule. Nor one that is running: its next_run_at moves only once the run
+								     has ended, and the running badge says what happens. -->
+								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.running !== true && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && !(trigger.status === 'failed' && !trigger.schedule_cron) && trigger.paused !== true}
+									<!-- A next_run_at in the past is due since then (until the worker takes it, or
+									     when it could not start it), not a next run before the last one. -->
+									{@const due = isDue(trigger.next_run_at)}
+									<span data-next-run={due ? 'due' : 'next'}>{due ? t('tasks.due_since') : t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}
 									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''} data-run-status={trigger.last_run_status}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}{#if Object.hasOwn(runStatusWord, trigger.last_run_status ?? '')}&nbsp;· {t(runStatusWord[trigger.last_run_status ?? '']!)}{/if}</span>
 								{/if}
 								{#if escalationNotice(trigger)}
 									{@const notice = escalationNotice(trigger)!}
-									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
+									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{fmtDate(notice.at)} · {t(notice.key)}</span>
 								{/if}
 							</div>
+							{#if escalationChatLink(trigger)}
+								{@const chatLink = escalationChatLink(trigger)!}
+								<p class="mt-1 mb-1 text-xs" data-escalation-chat={trigger.last_escalation_chat?.kind}><a class="text-accent-text underline" href={chatLink.href}>{t(chatLink.key)}</a></p>
+							{/if}
+							<!-- A completed plan that keeps its pause has no way back at the plan: nothing takes it
+							     over or reopens it. The line names the way there is (U-275). -->
+							{#if pausedDone(trigger)}
+								<p class="mt-1 text-xs text-text-muted break-words" data-trigger-paused-done-hint={pausedDoneCase(trigger)}><MarkedLine text={pausedDoneHint(trigger)} mono={false} /></p>
+							{/if}
+							<!-- Why its run does not do its work, with the way out: a watch the policy keeps from its
+							     page, or the cause its last failed run stored. Only causes lynox itself knows, said in
+							     lynox's own sentences; the run's result text is never shown here. The host is set
+							     apart as a value, as the plan views set apart what someone else wrote. -->
+							{#if trigger.blocked_reason}
+								{@const parts = blockedReasonParts(trigger.blocked_reason, t)}
+								{#if parts.before !== '' || parts.host !== null}
+								<p class="mt-1 text-xs text-warning break-words" data-blocked-reason={trigger.blocked_reason.kind}>{parts.before}{#if parts.host !== null}<bdi data-foreign-value class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono">{#each hostLabels(parts.host) as label, i (i)}<span class="inline-block max-w-full [overflow-wrap:anywhere]">{label}</span><wbr />{/each}</bdi>{/if}{parts.after}</p>
+								{/if}
+							{/if}
+							<!-- A confirmed watch names its page too: its escalation leaves the address out when
+							     someone the owner let in set it up, and points here (PRD B6). -->
+							{#if showsWatchAddress(trigger) && !held(trigger)}
+								<p class="mt-1 break-words text-xs text-text-muted" data-trigger-watch>
+									<span class="font-medium">{t('triggers.watch_url')}:</span>
+									<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="trigger-watch-address" />
+								</p>
+							{/if}
 							{#if held(trigger)}
 								<!-- Confirming allows this to run without the owner present, so what the run
 								     would carry out is shown beside the button — a button next to nothing but an
@@ -634,7 +794,7 @@
 									{#if !ownerStamps(trigger) && showsWatchTarget(trigger)}
 										<div class="text-xs text-text-muted" data-consent-watch>
 											<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>
-											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>
+											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="consent-watch-address" /></p>
 											{#if watchOf(trigger)?.intervalMinutes}
 												<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>
 											{/if}
@@ -647,9 +807,9 @@
 								{@const note = listedNote(listed, pausedOpen(trigger))}
 								<div class="mt-2 text-xs text-text-muted" data-stamp-listed>
 									<span class="font-medium">{t('stamp.listed_heading')}:</span>
-									<ul class="mt-0.5">
+									<ul class="mt-0.5 list-disc pl-4 space-y-0.5">
 										{#each listed.entries as entry}
-											<li data-stamp-entry={entry.state}>{listedLine(entry)}</li>
+											<li class="break-words" data-stamp-entry={entry.state}><MarkedLine text={listedLine(entry)} /></li>
 										{/each}
 									</ul>
 									{#if note}
@@ -657,14 +817,28 @@
 									{/if}
 								</div>
 							{/if}
+							{#if ownerActs && trigger.recipients_unconfirmed === true}
+								<!-- The engine does not count this trigger's instruction as the owner's, so its run
+								     sends to none of the recipients it names. The hint leads to the button; the
+								     button opens the instruction to confirm. -->
+								<div class="mt-2 text-xs" data-recipients-unconfirmed>
+									<p class="text-warning">{t('recipients.unconfirmed_hint')}</p>
+									{#if confirmingRecipients[trigger.id]}
+										<RecipientConfirm id={trigger.id} onconfirmed={() => { confirmingRecipients[trigger.id] = false; void loadTriggers(true); }} onclose={() => (confirmingRecipients[trigger.id] = false)} />
+									{:else}
+										<button onclick={() => (confirmingRecipients[trigger.id] = true)} class="mt-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1 text-xs text-text-muted hover:text-text" data-recipients-open>{t('recipients.button')}</button>
+									{/if}
+								</div>
+							{/if}
 							{#if checking[trigger.id] && offersCheck(trigger)}
 								<StampConfirm id={trigger.id} mode="check" cronText={cronToHuman} onstamped={() => void stamped(trigger)} onclose={() => (checking[trigger.id] = false)} />
 							{/if}
 						</div>
-						<!-- The controls hide until hover where hovering exists, and stay visible
-						     where it does not — keyed on the POINTER, not on a width: a touch screen
-						     wider than `sm` has no hover either, and there they only appeared when a
-						     tap happened to leave the card in `:hover`. -->
+						<!-- The controls hide until hover only from `sm` up and only where hovering
+						     exists. A touch screen wider than `sm` has no hover, and there they only
+						     appeared when a tap happened to leave the card in `:hover`. Below `sm` the
+						     row wraps under the text; hidden controls there left blank space in it, an
+						     empty line when nothing else in the row shows. -->
 						<div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5">
 							<!-- Stop: only where a stop can end the run. Not hidden until hover like the
 							     others — a run the owner wants to end should not need finding. -->
@@ -672,16 +846,27 @@
 								<button onclick={() => stopRun(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.stop_run')} title={t('triggers.stop_run')} class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 disabled:opacity-40" data-trigger-stop>■ {t('triggers.stop_run')}</button>
 							{/if}
 							<!-- Not offered while waiting: the engine refuses the run after the request
-							     has already been answered as started. Not at a completed paused plan
-							     either: it would be refused, and the refusal names no way out there. -->
-							{#if !held(trigger) && !pausedDone(trigger)}
-								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
+							     has already been answered as started. Not at a paused plan either: it
+							     would be refused, and the way out is the takeover, which the badge and
+							     the takeover button (or, to a helper, the line under the badge) say. -->
+							<!-- Nor where the policy keeps a watch from its page: the run would read nothing. A
+							     failed run's stored cause keeps it: the next run may read the page. -->
+							{#if !held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !holdsNextRun(trigger.blocked_reason)}
+								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
-							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
-							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
-							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
+							<!-- Not at a paused plan. Open, it waits for its takeover: next to its badge the switch
+							     read as a second pause, and a helper's is refused. After the takeover it comes
+							     back, and an own pause set before stays. Nor at a completed plan, paused or not: it never
+							     runs again, whatever the switch says, and a switch without effect contradicts its mark (U-275 N2, N6). -->
+							{#if trigger.paused !== true && trigger.status !== 'completed'}
+								<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} data-trigger-toggle class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
+							{/if}
+							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
+							{#if !ownerOnlyHere(trigger)}
+								<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} data-trigger-delete class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
+							{/if}
 							{#if offersCheck(trigger)}
-								<button onclick={() => (checking[trigger.id] = !checking[trigger.id])} aria-expanded={checking[trigger.id] === true} class="{checkAsked(trigger) ? '' : '[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100'} rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity" data-trigger-check>{t('stamp.check')}</button>
+								<button onclick={() => (checking[trigger.id] = !checking[trigger.id])} aria-expanded={checking[trigger.id] === true} class="{checkAsked(trigger) ? '' : 'sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100'} rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity" data-trigger-check>{t('stamp.check')}</button>
 							{/if}
 							<!-- Take over: always visible, like Stop — a paused plan does nothing until it is.
 							     Last, so it ends the row where the hidden controls hold their place (ux). -->
@@ -716,14 +901,14 @@
 	>
 		<div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">
 			<h2 id="takeover-title" class="text-sm font-medium mb-1">{t('takeover.title')}</h2>
-			<p class="text-xs text-text-subtle mb-3 break-words">{takeoverFor.title}</p>
+			<p class="text-xs text-text-subtle mb-3 break-words" data-takeover-subtitle><MarkedLine text={pausedTitleLine(takeoverFor)} mono={false} /></p>
 			{#if takeoverNote !== ''}
-				<p class="text-xs text-warning mb-3" role="status" data-takeover-note>{takeoverNote}</p>
+				<p class="text-xs text-warning mb-3" role="status" data-takeover-note><MarkedLine text={takeoverNote} /></p>
 			{/if}
 			{#if takeoverPreview !== null}
 				<ul class="space-y-2 text-xs text-text-muted" data-takeover-lines>
 					{#each takeoverLines(takeoverPreview, dayOf) as line}
-						<li class="break-words" data-takeover-line={line.kind}>{line.text}</li>
+						<li class="break-words" data-takeover-line={line.kind}><MarkedLine text={line.text} group={takeoverFolds} /></li>
 					{/each}
 				</ul>
 			{:else if takeoverNote === ''}

@@ -27,7 +27,18 @@ export type FailReason =
   /** Daily classifier budget (InboxCostBudget) was exhausted — no LLM call. */
   | 'budget_exceeded'
   /** The model archived a mail a person forwarded (`forwarded.ts`); it is shown instead. */
-  | 'forwarded_by_person';
+  | 'forwarded_by_person'
+  /** The model filed a mail the sensitive check flagged (`mask`/`allow`) as handled; it is shown instead. */
+  | 'sensitive_content'
+  /** A description rule would have filed a sensitive mail as handled; it is shown instead. */
+  | 'rule_withheld_sensitive'
+  /** A description rule would have filed the mail as handled, but the classifier does not see it
+   *  as handled; the classifier's verdict stands, so a description rule files no mail the
+   *  classifier would show. */
+  | 'rule_withheld_classifier'
+  /** A description rule would have filed the mail as handled, and the classifier's check could not
+   *  run (no budget, a failed call); the mail is shown. */
+  | 'rule_withheld_unchecked';
 
 export interface ClassifierVerdict {
   bucket: InboxBucket;
@@ -86,8 +97,8 @@ export function parseClassifierResponse(raw: string): ClassifierVerdict {
     return failClosed('reason_over_length');
   }
   if (bucket === 'noise') {
-    // PRD: noise must be dropped at the prefilter; if the model insists, we
-    // route to requires_user rather than silently swallow the mail.
+    // `noise` is no bucket an item can have; if the model insists, we route
+    // to requires_user rather than silently swallow the mail.
     return failClosed('noise_bucket_returned', reason);
   }
   if (confidence < REQUIRES_USER_THRESHOLD && bucket !== 'requires_user') {
