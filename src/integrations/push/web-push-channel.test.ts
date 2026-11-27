@@ -370,6 +370,51 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(sendCalls().sort()).toEqual(['https://push.example/abc', 'https://push.example/eva', 'https://push.example/max']);
 	});
 
+	// The mandates' sentence of a notice every reader gets: every live grant's devices, none of the
+	// owner's, and the owner's device never makes it count as told.
+	it('sends an all-mandates message to every live grant\'s devices and none of the owner\'s', async () => {
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toEqual({ sent: 1, sentToOwner: 0, failed: 0, failedOwner: 0, cleaned: 0 });
+		expect(sendCalls()).toEqual(['https://push.example/eva']);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		ch.subscribe('https://push.example/max', 'k', 'a', mandate('max@example.invalid', 'TEST-MANDATE-2'));
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toBe('delivered');
+		expect(sendCalls().sort()).toEqual(['https://push.example/eva', 'https://push.example/max']);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		// A mandate's device that refused it: nobody it is for was told.
+		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockRejectedValue(Object.assign(new Error('down'), { statusCode: 500 }));
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toBe('failed');
+		// Their failure is never counted as the owner's, and the owner's device is not tried.
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		expect(await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toEqual({ sent: 0, sentToOwner: 0, failed: 2, failedOwner: 0, cleaned: 0 });
+		expect(sendCalls().sort()).toEqual(['https://push.example/eva', 'https://push.example/max']);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockReset();
+		stderr.mockRestore();
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		// With no mandate's device at all, there is nobody it is for: skipped, not failed. The owner's
+		// device takes no part either way.
+		ch.unsubscribe('https://push.example/eva');
+		ch.unsubscribe('https://push.example/max');
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toBe('skipped');
+		expect(sendCalls()).toEqual([]);
+	});
+
+	it('sends an all-mandates message to no device of an ended grant, nor of one whose state cannot be read', async () => {
+		let busy = false;
+		const flaky = new WebPushNotificationChannel(dataDir, { isMandateLive: (id) => { if (busy && id === 'TEST-MANDATE-2') throw new Error('engine.db busy'); return live.has(id); } });
+		live.add('TEST-MANDATE-3');
+		flaky.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		flaky.subscribe('https://push.example/max', 'k', 'a', mandate('max@example.invalid', 'TEST-MANDATE-2'));
+		flaky.subscribe('https://push.example/jo', 'k', 'a', mandate('jo@example.invalid', 'TEST-MANDATE-3'));
+		live.delete('TEST-MANDATE-3');
+		busy = true;
+		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+		expect((await flaky.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).sent).toBe(1);
+		stderr.mockRestore();
+		expect(sendCalls()).toEqual(['https://push.example/eva']);
+	});
+
 	// A side narrows what `onlyFor` allows and never widens it.
 	it('keeps a side within `onlyFor`: one mandate\'s own for the mandates\' side, nothing of the owner\'s', async () => {
 		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);

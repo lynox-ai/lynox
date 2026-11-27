@@ -65,7 +65,7 @@ describe('the worker wires the judge to the engine\'s managed hook', () => {
     } as unknown as Engine;
     const router = { hasChannels: vi.fn(() => false), notify: vi.fn(async () => {}) } as unknown as NotificationRouter;
     const loop = new WorkerLoop(engine, router, 60_000);
-    const task = { id: 't-1', title: 'judge', bulk_run_id: 'run-1' } as unknown as TriggerRecord;
+    const task = { id: 't-1', title: 'judge', effect: 'bulk_judge', bulk_run_id: 'run-1' } as unknown as TriggerRecord;
     await (loop as unknown as { executeBulkJudge: (t: TriggerRecord, s: AbortSignal, o: () => boolean) => Promise<void> })
       .executeBulkJudge(task, new AbortController().signal, () => false);
     expect(captured.deps).toBeDefined();

@@ -31,6 +31,7 @@ import { fireBeforeRunGate, type HookHost } from '../../core/metered-request.js'
 import { SINGLE_CALL_WORST_CASE_CENTS } from '../../core/run-admission.js';
 import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
+import type { PrefilterRule } from '../mail/triage/rules.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxRule } from '../../types/index.js';
 import { checkDescriptionRules } from './rule-check.js';
@@ -63,6 +64,8 @@ export interface InboxQueuePayload {
     snippet: string | undefined;
     messageId: string | undefined;
     inReplyTo: string | undefined;
+    /** The prefilter rule the mail met, carried onto the item. */
+    prefilterRule?: PrefilterRule | undefined;
   } | undefined;
   /**
    * Set when the watcher hook detected sensitive content and either

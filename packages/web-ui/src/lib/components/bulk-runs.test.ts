@@ -1099,7 +1099,7 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('timeBudget'), true, DE, true)).toMatchObject({ before: null, soFar: null, allows: null });
 		// Shopify's own switch: who turns it back on depends on who runs the instance.
 		expect(bulkResumeText(w('shopifyWriteOff'), true, DE, true)).toMatchObject({
-			cause: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kannst du ihn hier fortsetzen.',
+			cause: 'Änderungen per Massenlauf an Shopify-Shops sind auf dieser Instanz ausgeschaltet. Der Lauf ist angehalten. Sobald sie wieder eingeschaltet sind, kannst du ihn hier fortsetzen.',
 			before: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
 		});
 		expect(bulkResumeText(w('shopifyWriteOff'), false, EN, true)?.before).toBe('You enable bulk changes in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
@@ -1414,6 +1414,20 @@ describe('going on from a run that halted', () => {
 			expect([without.judgeOwnKey, bulkSupportMailto(without, true, DE), bulkHaltText(without, true, DE, true)?.before]).toEqual([without.judgeOwnKey, null, null]);
 		}
 		expect(bulkSupportMailto(any('blocked', { phase: 'aborted' }), true, DE)).toBeNull();
+	});
+});
+
+describe('the switched-off sentence a mandate reads (U-383)', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) de[m[1]!] = m[2]!;
+	}
+
+	it('pins the switched-off sentence a mandate reads, word for word (U-383)', () => {
+		expect(de['bulk.halt.shopifyWriteOff_mandate']).toBe('Änderungen per Massenlauf an Shopify-Shops sind auf dieser Instanz ausgeschaltet. Der Lauf ist angehalten. Sobald sie wieder eingeschaltet sind, kann der Inhaber ihn hier fortsetzen.');
 	});
 });
 

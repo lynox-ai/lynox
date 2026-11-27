@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { scheduledTaskTurn } from '../../packages/web-ui/src/lib/utils/scheduled-task-turn.js';
-import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, principalFromTag, principalTag } from './request-principal.js';
 import { WORKER_NOTICES } from './worker-notices.js';
 import { currentWorkerRunStart, type WorkerRunStart } from './worker-run-start.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
@@ -10,7 +10,7 @@ import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp } from './prompt-store.js';
+import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp, consentOfPayload, consentActionOfPayload } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { AuditLog, TRAIL_FORM, newCorrelationId } from './audit-log.js';
@@ -179,6 +179,8 @@ function makeEngine(opts?: {
   promptStore?: PromptStore | null;
   /** Ids of threads the owner deleted; the worker does not continue in one. */
   deletedThreads?: readonly string[];
+  /** Who opened which thread (`created_by`); a thread not named has no row. */
+  threadOwners?: Readonly<Record<string, string>>;
   /** The actor trail; by default one that takes every row, as a booted engine's does. */
   auditLog?: { record: (entry: unknown) => void } | null;
   /** The containment store; by default none, as on an instance that never connected a store. */
@@ -191,7 +193,10 @@ function makeEngine(opts?: {
   return {
     getTaskManager: vi.fn(() => tm),
     createSession: vi.fn(() => session),
-    getThreadStore: vi.fn(() => ({ isDeleted: (id: string) => deleted.has(id) })),
+    getThreadStore: vi.fn(() => ({
+      isDeleted: (id: string) => deleted.has(id),
+      getThread: (id: string) => (opts?.threadOwners?.[id] === undefined ? undefined : { id, created_by: opts.threadOwners[id] }),
+    })),
     // The real Engine always has this; the mock lacked it, which made every
     // executeStandard test fail loud once the prompt wiring started calling it.
     // `null` is a real production shape (an engine with no store), and the
@@ -1160,6 +1165,57 @@ describe('WorkerLoop', () => {
       }
     });
 
+    // The owner's wording of a refused member connection names another member's provider, profile
+    // and login and the owner's way to change it: the owner's devices read it, every live grant
+    // reads the same end without it, and no push goes to every device.
+    it('pushes a run\'s end with a member line to the owner\'s devices, and to every grant a fixed sentence instead of the result, with no link back to it', async () => {
+      const { noteMemberConnection } = await import('./member-connection-notes.js');
+      const LINE = 'Connection not used: CRM was connected by jo@kanzlei.example with their own login. Change it under Settings → APIs.';
+      const task = stamped();
+      const tm = makeTaskManager([task]);
+      // The model's reply repeats the refusal, as the refusal tells it to: it names the other member.
+      const REPLY = 'ran — jo@kanzlei.example set up CRM with their own login; connect CRM yourself.';
+      const session = makeSession(REPLY);
+      vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection(LINE); return REPLY; });
+      const router = makeNotificationRouter();
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('po-1', `${REPLY}\n• ${LINE}`, 'halted');
+      const sent = vi.mocked(router.notify).mock.calls.map(([m]) => m);
+      expect(sent.map((m) => [m.audience, m.mandateId, m.body])).toEqual([
+        ['owner', undefined, `${REPLY}\n• ${LINE}`],
+        ['all_mandates', undefined, WORKER_NOTICES.en.memberEndForMandates],
+      ]);
+      expect(sent[1]!.body).not.toContain('jo@kanzlei.example');
+      // The owner's push is the one it was, with the audience added: title, priority, thread, chips.
+      expect(sent[0]).toMatchObject({ title: `⏸ ${task.title}`, priority: 'normal', taskId: 'po-1', data: { threadId: 'thread-worker-test' } });
+      expect(sent[0]!.followUps?.map((f) => f.label)).toEqual([WORKER_NOTICES.en.chipDetails, WORKER_NOTICES.en.chipRunAgain]);
+      // Both are the same end, one title; the grants' push leads nowhere back to the reply: no
+      // deep link into the run's thread, no follow-ups.
+      expect(sent[1]!.title).toBe(`⏸ ${task.title}`);
+      expect(sent[1]!.title).toBe(sent[0]!.title);
+      expect(sent[1]!.taskId).toBe('po-1');
+      expect(sent[1]!.priority).toBe(sent[0]!.priority);
+      expect(sent[1]!.data).toBeUndefined();
+      expect(sent[1]!.followUps).toBeUndefined();
+      loop.stop();
+    });
+
+    it('pushes the owner\'s own plan\'s end with a member line to the owner\'s devices, and to every grant a fixed sentence', async () => {
+      const { noteMemberConnection } = await import('./member-connection-notes.js');
+      const task = makeTask();
+      const tm = makeTaskManager([task]);
+      const session = makeSession('ran');
+      vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection('Connection not used: a line.'); return 'ran'; });
+      const router = makeNotificationRouter();
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.body])).toEqual([['owner', 'ran\n• Connection not used: a line.'], ['all_mandates', WORKER_NOTICES.en.memberEndForMandates]]);
+      loop.stop();
+    });
+
     it('builds the run for the mandate when the owner starts it by hand too, and says it was by hand', async () => {
       const { loop, engine, rows } = setup(stamped());
       expect(await loop.runTriggerNow('po-1')).toEqual({ ok: true });
@@ -1443,6 +1499,79 @@ describe('WorkerLoop', () => {
       release();
       await vi.advanceTimersByTimeAsync(0);
       expect(loop.runningPlanTag('po-1')).toBeUndefined();
+    });
+
+    // A run for the mandate picks up an answer given in a conversation that is not the mandate's:
+    // the owner answered the trigger's question in the owner's chat. The answer is not taken.
+    describe('an answered question in a conversation that is not the mandate\'s', () => {
+      const THREADS: Record<string, string> = { 'thread-owner': 'owner', 'thread-eva': 'mandate:eva@kanzlei.example' };
+      function withAnswerIn(s: { engine: Engine }, threadId: string): { releaseTrigger: ReturnType<typeof vi.fn> } {
+        const releaseTrigger = vi.fn();
+        const answeredStore = {
+          getAnsweredForTrigger: vi.fn(() => ({
+            id: 'prompt-1', session_id: threadId, question: 'Send the report?', answer: 'Yes, send it.', created_by: 'owner',
+          })),
+          releaseTrigger,
+          getPendingForTrigger: vi.fn(() => undefined),
+        } as unknown as PromptStore;
+        const ref = s.engine as unknown as Record<string, unknown>;
+        ref['getPromptStore'] = () => answeredStore;
+        ref['getThreadStore'] = () => ({
+          isDeleted: () => false,
+          getThread: (id: string) => (THREADS[id] === undefined ? undefined : { id, created_by: THREADS[id] }),
+        });
+        return { releaseTrigger };
+      }
+      const sessionIdOf = (engine: Engine): string | undefined =>
+        (engine.createSession as unknown as { mock: { calls: Array<[{ sessionId?: string }?]> } }).mock.calls[0]?.[0]?.sessionId;
+      const promptOf = (session: Session): string =>
+        (session.run as unknown as { mock: { calls: string[][] } }).mock.calls[0]?.[0] ?? '';
+
+      it('a stamped plan of the mandate runs in a new conversation, without the answer, and releases it', async () => {
+        const s = setup(stamped());
+        const { releaseTrigger } = withAnswerIn(s, 'thread-owner');
+        await s.loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+        expect(sessionIdOf(s.engine), 'not in the owner\'s conversation').toBeUndefined();
+        expect(s.session.run, 'the run still ran').toHaveBeenCalled();
+        expect(promptOf(s.session), 'without the question').not.toContain('Send the report?');
+        expect(promptOf(s.session), 'and without the answer').not.toContain('Yes, send it.');
+        expect(releaseTrigger, 'the answer is released').toHaveBeenCalledWith('prompt-1');
+      });
+
+      it('a mandate\'s start by hand runs in a new conversation, without the answer, and releases it', async () => {
+        const task = makeTask({ id: 'po-prop', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, schedule_cron: undefined, next_run_at: undefined });
+        const s = setup(task);
+        const { releaseTrigger } = withAnswerIn(s, 'thread-owner');
+        expect(await s.loop.runTriggerNow('po-prop', s.loop.claimHandRunMinter()('po-prop', EVA))).toEqual({ ok: true });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+        expect(sessionIdOf(s.engine), 'not in the owner\'s conversation').toBeUndefined();
+        expect(s.session.run, 'the run still ran').toHaveBeenCalled();
+        expect(promptOf(s.session), 'without the question').not.toContain('Send the report?');
+        expect(promptOf(s.session), 'and without the answer').not.toContain('Yes, send it.');
+        expect(releaseTrigger, 'the answer is released').toHaveBeenCalledWith('prompt-1');
+      });
+
+      it('a conversation without a row is no one\'s: the mandate\'s run does not take its answer', async () => {
+        const s = setup(stamped());
+        const { releaseTrigger } = withAnswerIn(s, 'thread-without-row');
+        await s.loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sessionIdOf(s.engine), 'not in that conversation').toBeUndefined();
+        expect(promptOf(s.session), 'without the answer').not.toContain('Yes, send it.');
+        expect(releaseTrigger).toHaveBeenCalledWith('prompt-1');
+      });
+
+      it('control: an answer in the mandate\'s own conversation is continued there, with the answer', async () => {
+        const s = setup(stamped());
+        const { releaseTrigger } = withAnswerIn(s, 'thread-eva');
+        await s.loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sessionIdOf(s.engine)).toBe('thread-eva');
+        expect(promptOf(s.session), 'the answer reached the run').toContain('Yes, send it.');
+      });
     });
   });
 
@@ -2494,12 +2623,15 @@ describe('WorkerLoop', () => {
 
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(1);
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, `All done.\n• ${LINE}`, 'halted');
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    // One end, told by reader: with the line to the owner's devices, without it to every grant's.
+    expect(router.notify).toHaveBeenCalledTimes(2);
     expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({
       title: `\u23F8 ${task.title}`,
       body: `All done.\n• ${LINE}`,
       priority: 'normal',
+      audience: 'owner',
     }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: WORKER_NOTICES.en.memberEndForMandates, audience: 'all_mandates' }));
 
     // The next run of the schedule meets the same refusal: recorded again, not pushed again.
     Object.assign(task, { last_run_status: 'halted', last_run_result: `All done.\n• ${LINE}` });
@@ -2508,7 +2640,7 @@ describe('WorkerLoop', () => {
 
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
     expect(vi.mocked(tm.recordTaskRun).mock.calls[1]).toEqual([task.id, `All done.\n• ${LINE}`, 'halted']);
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledTimes(2);
     loop.stop();
   });
 
@@ -2546,18 +2678,19 @@ describe('WorkerLoop', () => {
     const recordedLine = 'The plan "Daily Report" did not use api.crm.example (profile "CRM" (id crm-api)). setup@example.org set it up with their own login, so only setup@example.org\'s own session uses it. If the plan should use this service, there are two ways: once setup@example.org\'s access has ended, ask in a chat to take over the connection and confirm with “Allow”; or delete the connection under Settings → API connections and connect the service yourself, which disconnects setup@example.org. Otherwise the plan cannot run this step.';
     expect(modelLine).toMatch(/^Connection not used: setup@example\.org set up this connection .*Say so in your reply, and do not ask for permission\.$/);
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, `All done.\n• ${recordedLine}`, 'halted');
-    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `All done.\n• ${pushedLine}` }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `All done.\n• ${pushedLine}`, audience: 'owner' }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: WORKER_NOTICES[language].memberEndForMandates, audience: 'all_mandates' }));
 
     // The next run meets the same refusal: compared as recorded, so not pushed again, in either language.
     Object.assign(task, { last_run_status: 'halted', last_run_result: `All done.\n• ${recordedLine}` });
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledTimes(2);
     loop.stop();
   });
 
-  it('a run ended through recordAndNotify (a workflow\'s end) is told with its line and ⏸, once', async () => {
+  it('a run ended through recordAndNotify (a workflow\'s end) is told with its line and ⏸ to the owner, as a fixed sentence to every grant, once', async () => {
     const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
     const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
     const task = makeTask();
@@ -2571,13 +2704,39 @@ describe('WorkerLoop', () => {
 
     await end();
     expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, `Pipeline completed.\n• ${LINE}`, 'halted');
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledTimes(2);
     expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `Pipeline completed.\n• ${LINE}`, priority: 'normal' }));
+    // The line names another member's connection: the owner's devices only; every grant reads the end without it.
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.body])).toEqual([['owner', `Pipeline completed.\n• ${LINE}`], ['all_mandates', WORKER_NOTICES.en.memberEndForMandates]]);
 
     Object.assign(task, { last_run_status: 'halted', last_run_result: `Pipeline completed.\n• ${LINE}` });
     await end();
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledTimes(2);
+  });
+
+  // A workflow's end with a member line: the owner's devices read it with the line, every live
+  // grant reads it without, whoever started or planned the run.
+  it.each([
+    ['a plan a mandate acts for', { planOf: { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'G-EVA' }, starter: OWNER_PRINCIPAL }],
+    ['a run a mandate started by hand', { starter: { kind: 'mandate', email: 'arno@kanzlei.example', mandateId: 'G-ARNO' } }],
+  ] as const)('a workflow\'s end with a member line reaches every grant as a fixed sentence, for %s', async (_case, slot) => {
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: CRM was connected by jo@kanzlei.example with their own login.';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm }), router, 60_000);
+    (loop as unknown as { activeTasks: Map<string, unknown> }).activeTasks.set(task.id, { planMembers: [], ...slot });
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection(LINE);
+      (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: boolean) => void }).recordAndNotify(task, 'Pipeline completed.', true);
+    }).done;
+    const sent = vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.mandateId, m.body]);
+    expect(sent).toEqual([
+      ['owner', undefined, `Pipeline completed.\n• ${LINE}`],
+      ['all_mandates', undefined, WORKER_NOTICES.en.memberEndForMandates],
+    ]);
   });
 
   // UX-065: a contained run's push leaves out the result but keeps the member lines, in German too.
@@ -3257,6 +3416,36 @@ describe('WorkerLoop', () => {
       // The marker, not a sentence: a cancellation must not be mistakable for
       // an answer by the model that receives it.
       expect(answer).toBe('__dismissed__');
+    } finally {
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a tool consent asked from a task goes out with its buttons in the owner\'s words, and keeps its action', async () => {
+    vi.useRealTimers();
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-consent-action-'));
+    const history = new RunHistory(join(dir, 'history.db'));
+    vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
+    const store = new PromptStore(history.getDb());
+    try {
+      const session = {
+        sessionId: 'thread-consent-action',
+        _recreateAgent: vi.fn(),
+        promptUser: undefined as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>) | undefined,
+        run: vi.fn(async () => { await session.promptUser!('Delete event e1', ['confirm', 'cancel'], { consent: 'google', consentAction: 'delete' }); return 'Done.'; }),
+      };
+      const task = makeTask();
+      const engine = makeEngine({ taskManager: makeTaskManager([task]), session: session as unknown as Session, promptStore: store });
+      const router = makeNotificationRouter();
+      const loop = new WorkerLoop(engine, router, 60_000);
+      await loop.tick();
+      for (let i = 0; i < 200 && !store.getPending('thread-consent-action'); i++) await new Promise((r) => setTimeout(r, 5));
+      expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ inquiry: { question: 'Delete event e1', options: ['Delete', 'Cancel'] } }));
+      const row = store.getPending('thread-consent-action')!;
+      expect(consentOfPayload(row.payload_json)).toBe('google');
+      expect(consentActionOfPayload(row.payload_json)).toBe('delete');
+      loop.stop();
     } finally {
       history.close();
       rmSync(dir, { recursive: true, force: true });
@@ -5926,7 +6115,8 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     if (stamped) tm.confirmTrigger(t.id, undefined, 'owner');
     const session = makeSession('Resumed.');
     const engine = Object.assign(
-      makeEngine({ taskManager: tm as unknown as TaskManager, session, promptStore: store }),
+      // The question's conversation is the one the run that asked it opened.
+      makeEngine({ taskManager: tm as unknown as TaskManager, session, promptStore: store, threadOwners: { [`ask-${t.id}`]: principalTag(stamp.principal) } }),
       { getRunHistory: () => history, getMandateEnds: () => (isLive === null ? null : { isLive }) },
     ) as unknown as Engine;
     return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), store, t, promptId, engine };

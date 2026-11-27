@@ -143,7 +143,7 @@ describe('every path that takes a new step id refuses one outside the shape', ()
   });
 
   it('plan_task cuts an id from a long phase name to the length at a word boundary, the suffix of a twin included', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const long = 'Research every competitor price in the region and compare them';
     const out = await planTaskTool.handler({ summary: 'Pricing', phases: [
       { name: long, steps: ['Research'] },
@@ -160,7 +160,7 @@ describe('every path that takes a new step id refuses one outside the shape', ()
   });
 
   it('plan_task keeps a twin within the length when the first id already fills it', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const promptUser = vi.fn().mockResolvedValue('proceed');
     const word = 'Wettbewerbspreisvergleichsuebersichtstabellenerstellung';
     const out = await planTaskTool.handler({ summary: 'Pricing', phases: [
       { name: word, steps: ['One'] },

@@ -22,6 +22,12 @@ let changed: Array<{ file: string; status: string; diff: string }>;
 let holdFirstRun: Promise<void> | null;
 /** While set, the changeset answer waits until it resolves. */
 let holdChangeset: Promise<void> | null;
+/** Per thread: its changeset answer waits until the promise here resolves. */
+let holdChangesetIn: Map<string, Promise<void>>;
+/** While set, the next `/run` waits for it and is refused: the open review holds the message. */
+let refuseNextRunForReview: Promise<void> | null;
+/** Per thread: what its changeset answer names, in place of `changed`. */
+let changedIn: Map<string, Array<{ file: string; status: string; diff: string }>>;
 /** While set, every run after the first streams until it resolves. */
 let holdLaterRuns: Promise<void> | null;
 let reviewStatus: number;
@@ -33,12 +39,18 @@ let holdReopen: Map<string, Promise<void>>;
 let holdReview: Promise<void> | null;
 /** A run the server still runs in a thread, for a thread opened again to re-attach to. */
 let liveRunIn: string | null;
-/** How the stream of the run re-attached to answers: as usual, or not found (the run had ended). */
-let liveStream: 'done' | 'gone';
+/** How the stream of the run re-attached to answers: as usual, not found (the run had ended),
+ *  dropped before its end, not reachable, or its reading refused. */
+let liveStream: 'done' | 'gone' | 'aborted' | 'unreachable' | 'refused';
+/** While true, the registry lists the live run, with this status. */
+let liveRunActive: boolean;
+let liveRunStatus: 'running' | 'interrupted';
 /** The transcript the server gives with the live run; long enough, the chat takes it and re-attaches. */
 let liveTranscript: Array<{ role: string; content: string }>;
 /** How often the live run's stream was asked for. */
 let liveStreamGets: number;
+/** How often the registry of runs was asked. */
+let activeGets: number;
 let newSessions: number;
 /** How often the review was asked for. */
 let changesetGets: number;
@@ -59,7 +71,14 @@ function serve(): void {
 			// A thread opened again keeps its id; new chats get t1, then t2.
 			return json({ sessionId: body.threadId ?? (newSessions++ === 0 ? 't1' : 't2') });
 		}
-		if (url.endsWith('/runs/active')) return json({ runs: [] });
+		if (url.endsWith('/runs/active')) activeGets++;
+		if (url.endsWith('/runs/active')) return json({ runs: liveRunActive ? [{ runId: 'r-live', threadId: 't1', status: liveRunStatus, lastPersistedSeq: 0 }] : [] });
+		if (url.endsWith('/run') && refuseNextRunForReview) {
+			const held = refuseNextRunForReview;
+			refuseNextRunForReview = null;
+			await held;
+			return json({ error: 'review pending', code: 'review_pending' }, 409);
+		}
 		if (url.endsWith('/run')) {
 			const body = JSON.parse(String(init?.body)) as { task?: string };
 			runTasks.push(String(body.task));
@@ -79,6 +98,11 @@ function serve(): void {
 		if (url.includes('/runs/r-live/stream')) {
 			liveStreamGets++;
 			if (liveStream === 'gone') return json({ error: 'not found' }, 404);
+			if (liveStream === 'unreachable') throw new TypeError('network');
+			if (liveStream === 'refused') return json({ error: 'refused', code: 'contained_thread' }, 403);
+			if (liveStream === 'aborted') {
+				return new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('dropped')); } }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+			}
 			const enc = new TextEncoder();
 			return new Response(new ReadableStream<Uint8Array>({
 				start(c) { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); },
@@ -86,6 +110,11 @@ function serve(): void {
 		}
 		if (url.endsWith('/changeset')) {
 			changesetGets++;
+			const sid = /\/sessions\/([^/]+)\/changeset$/.exec(url)?.[1] ?? '';
+			const heldIn = holdChangesetIn.get(sid);
+			if (heldIn) await heldIn;
+			const filesIn = changedIn.get(sid);
+			if (filesIn) return json({ hasChanges: filesIn.length > 0, runId: 'run-7', files: filesIn });
 			if (holdChangeset) {
 				// A time limit given to this fetch would end it here, as the network would.
 				const signal = init?.signal;
@@ -124,13 +153,19 @@ beforeEach(async () => {
 	changed = [];
 	holdFirstRun = null;
 	holdChangeset = null;
+	holdChangesetIn = new Map();
+	refuseNextRunForReview = null;
+	changedIn = new Map();
 	holdLaterRuns = null;
 	holdReopen = new Map();
 	holdReview = null;
 	liveRunIn = null;
 	liveStream = 'done';
+	liveRunActive = false;
+	liveRunStatus = 'running';
 	liveTranscript = [{ role: 'user', content: 'earlier' }];
 	liveStreamGets = 0;
+	activeGets = 0;
 	newSessions = 0;
 	changesetGets = 0;
 
@@ -138,7 +173,7 @@ beforeEach(async () => {
 	changesetFails = false;
 	serve();
 });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 /** A run that streams until released, with a message typed and queued behind it. */
 async function queueBehindRun(): Promise<() => void> {
@@ -335,6 +370,123 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		expect(runTasks, 'the earlier drain does not send past the review').toEqual(['edit the notes']);
 	});
 
+	it('the review a thread asked for, answered after another thread opened, shows no card there and holds nothing there', async () => {
+		// The first thread's run ends with a review, and its fetch is slow.
+		changed = notes; // the run says so (changeset_ready)
+		changedIn.set('t1', notes);
+		let answerT1!: () => void;
+		holdChangesetIn.set('t1', new Promise<void>((r) => { answerT1 = r; }));
+		await store.sendMessage('edit the notes');
+		await settle();
+		expect(changesetGets, 'positive control: the first thread asked for its review').toBeGreaterThan(0);
+		// Another thread opens; it holds no review.
+		changedIn.set('t9', []);
+		await store.resumeThread('t9');
+		await settle();
+		answerT1();
+		await settle();
+		expect(store.getPendingChangeset(), 'the first thread\'s review is not shown in the other one').toBeNull();
+		await store.sendMessage('in the other thread');
+		await settle();
+		expect(runTasks, 'a message typed there is sent, not held by the other thread\'s review').toEqual(['edit the notes', 'in the other thread']);
+	});
+
+	it('a message the open review holds, refused after another thread opened, waits in its thread on the way back, not sent', async () => {
+		let refuse!: () => void;
+		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
+		void store.sendMessage('held by the review');
+		await settle();
+		expect(store.getMessages().find((m) => m.content === 'held by the review'), 'positive control: the message is on screen').toBeDefined();
+		await store.resumeThread('t9');
+		await settle();
+		refuse(); // the server answers: the review of the last run holds it
+		await settle();
+		changedIn.set('t1', notes); // and that review is still open on the way back
+		await store.resumeThread('t1');
+		await settle();
+		const back = store.getMessages().find((m) => m.content === 'held by the review');
+		expect(back, 'the message is still there').toBeDefined();
+		expect(back?.queued, 'it waits').toBe(true);
+		expect(store.getPendingChangeset(), 'behind the review that holds it').not.toBeNull();
+		expect(runTasks, 'nothing sent past the review').toEqual([]);
+	});
+
+	it('a message the open review holds, refused after another thread opened, waits there too when the thread had a saved copy from before it', async () => {
+		await store.resumeThread('t1'); // the thread was open before: it has a saved copy, without the message
+		await settle();
+		let refuse!: () => void;
+		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
+		void store.sendMessage('held by the review');
+		await settle();
+		await store.resumeThread('t9');
+		await settle();
+		refuse();
+		await settle();
+		const savedT1 = (JSON.parse(saved.get('lynox-chat') ?? '{}') as { threads?: Record<string, Array<{ content: string; queued?: boolean }>> }).threads?.t1;
+		expect(savedT1, 'positive control: the saved copy is there').toBeDefined();
+		changedIn.set('t1', notes);
+		await store.resumeThread('t1');
+		await settle();
+		const back = store.getMessages().find((m) => m.content === 'held by the review');
+		expect(back?.queued, 'it waits').toBe(true);
+		expect(runTasks, 'nothing sent past the review').toEqual([]);
+	});
+
+	it('the review of a run, answered after its thread was opened again, shows its card there', async () => {
+		changed = notes; // the run ends with a review (changeset_ready)
+		changedIn.set('t1', notes);
+		let answer!: () => void;
+		holdChangesetIn.set('t1', new Promise<void>((r) => { answer = r; }));
+		await store.sendMessage('edit the notes');
+		await settle();
+		expect(changesetGets, 'positive control: the thread asked for its review').toBeGreaterThan(0);
+		expect(store.getQueueLength(), 'nothing queued: the opening does not ask itself').toBe(0);
+		await store.resumeThread(store.getSessionId()!); // the same thread, opened again
+		await settle();
+		answer();
+		await settle();
+		expect(store.getPendingChangeset(), 'the card shows in the opening').not.toBeNull();
+	});
+
+	it('a message with a file the open review holds, refused after another thread opened, is back failed, not held', async () => {
+		let refuse!: () => void;
+		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
+		void store.sendMessage('held with a file', [{ name: 'a.txt', type: 'text/plain', data: 'YQ==' }]);
+		await settle();
+		expect(store.getMessages().find((m) => m.content.includes('held with a file')), 'positive control: the message is on screen').toBeDefined();
+		await store.resumeThread('t9');
+		await settle();
+		refuse();
+		await settle();
+		changedIn.set('t1', notes);
+		await store.resumeThread('t1');
+		await settle();
+		const back = store.getMessages().filter((m) => m.content.includes('held with a file'));
+		expect(back, 'one bubble').toHaveLength(1);
+		expect(back[0]?.failed, 'failed: its file cannot be sent again').toBe(true);
+		expect(back[0]?.held, 'not held: a tap would send it without its file').toBeFalsy();
+		expect(back[0]?.queued, 'not waiting either').toBeFalsy();
+		expect(runTasks, 'nothing sent past the review').toEqual([]);
+	});
+
+	it('a message the open review holds, refused after its thread was opened again, waits there, not sent', async () => {
+		let refuse!: () => void;
+		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
+		void store.sendMessage('held by the review');
+		await settle();
+		const sid = store.getSessionId();
+		expect(sid, 'positive control: the message went to a thread').not.toBeNull();
+		changedIn.set(sid!, notes);
+		await store.resumeThread(sid!); // the same thread, opened again before the answer
+		await settle();
+		refuse();
+		await settle();
+		const back = store.getMessages().find((m) => m.content === 'held by the review');
+		expect(back?.queued, 'it waits in the thread on screen').toBe(true);
+		expect(store.getPendingChangeset(), 'behind the review that holds it').not.toBeNull();
+		expect(runTasks, 'nothing sent past the review').toEqual([]);
+	});
+
 	it('an answer to a review that arrives after another thread opened clears neither its review nor sends its turn', async () => {
 		const release = await queueBehindRun(); // t1 leaves a review open
 		changed = notes;
@@ -486,6 +638,24 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		expect(runTasks, 'the queued turn waits for the new chat\'s own run').toEqual(['edit the notes', 'in the new chat']);
 	});
 
+	it('a run that ends after a new chat was started leaves the new chat\'s run streaming, and a message typed there waits behind it', async () => {
+		let release!: () => void;
+		holdFirstRun = new Promise<void>((r) => { release = r; });
+		void store.sendMessage('edit the notes'); // t1's run streams on
+		await settle();
+		store.newChat();
+		holdLaterRuns = new Promise<void>(() => {}); // the new chat's run streams on
+		void store.sendMessage('in the new chat');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: the new chat\'s run streams').toBe(true);
+		release(); // t1's run ends now
+		await settle();
+		expect(store.getIsStreaming(), 'the new chat\'s run still streams').toBe(true);
+		await store.sendMessage('typed in the new chat');
+		expect(store.getMessages().find((m) => m.content === 'typed in the new chat')?.queued, 'the message waits behind that run').toBe(true);
+		expect(runTasks, 'and is not sent past it').toEqual(['edit the notes', 'in the new chat']);
+	});
+
 	describe('a turn queued behind a run, when its thread is opened again and the run had ended by the re-attach', () => {
 		const reopenWhileRunning = async (stream: 'gone'): Promise<() => void> => {
 			const release = await queueBehindRun(); // t1's run streams on, a turn queued behind it
@@ -524,6 +694,111 @@ describe('a turn queued before a reload waits for the review the server holds', 
 			changed = notes;
 			const release = await reopenWhileRunning('gone');
 			release();
+			await settle();
+			await wait(200);
+			await settle();
+			expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
+			expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
+		});
+	});
+
+	describe('a turn queued behind a run, when its thread is opened again and the re-attach lets go before the run ends', () => {
+		const reopenAndLose = async (stream: 'aborted' | 'unreachable' | 'refused'): Promise<void> => {
+			const release = await queueBehindRun(); // t1's run streams on, a turn queued behind it
+			liveRunIn = 't1';
+			liveStream = stream;
+			liveRunActive = true; // the server still runs it
+			liveTranscript = Array.from({ length: 6 }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `turn ${i}` }));
+			await store.resumeThread('t1');
+			await settle();
+			expect(liveStreamGets, 'positive control: the opening tried to re-attach').toBe(1);
+			release(); // the stream of the run from before the opening ends here; it drains nothing
+			await settle();
+			await wait(2300); // past one ask of the registry
+			await settle();
+		};
+
+		for (const stream of ['aborted', 'unreachable', 'refused'] as const) {
+			it(`${stream}: the queued turn waits while the run runs, and goes once it ended and no review holds it`, async () => {
+				await reopenAndLose(stream);
+				expect(runTasks, 'nothing sent while the server still runs the run').toEqual(['edit the notes']);
+				expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+				liveRunActive = false; // the run ends on the server
+				await wait(2300);
+				await settle();
+				await wait(200);
+				await settle();
+				expect(runTasks, 'the turn goes once, after the run\'s end').toEqual(['edit the notes', 'then this']);
+			});
+		}
+
+		it('a run a restart left interrupted counts as ended: the queued turn goes', async () => {
+			await reopenAndLose('aborted');
+			expect(runTasks, 'positive control: nothing sent while it runs').toEqual(['edit the notes']);
+			liveRunStatus = 'interrupted'; // still listed, no longer running
+			await wait(2300);
+			await settle();
+			await wait(200);
+			await settle();
+			expect(runTasks, 'the turn goes').toEqual(['edit the notes', 'then this']);
+		});
+
+		it('a run still going after six minutes: the wait stops, and the queued turn is failed for a tap, not sent', async () => {
+			vi.useFakeTimers({ shouldAdvanceTime: true }); // real time runs on; the six minutes are jumped
+			await reopenAndLose('aborted');
+			expect(store.getQueueLength(), 'positive control: the turn waits').toBe(1);
+			await vi.advanceTimersByTimeAsync(6 * 60_000 + 10_000);
+			await settle();
+			expect(activeGets, 'positive control: the registry was asked up to the cap').toBeGreaterThanOrEqual(180);
+			const bubbles = store.getMessages().filter((m) => m.content === 'then this');
+			expect(bubbles, 'one bubble for the turn').toHaveLength(1);
+			const turn = bubbles[0];
+			expect(turn?.failed, 'failed, for a tap to send again').toBe(true);
+			expect(turn?.queued, 'no longer shown waiting').toBeFalsy();
+			expect(store.getQueueLength(), 'nothing left in the queue').toBe(0);
+			const asked = activeGets;
+			await vi.advanceTimersByTimeAsync(60_000);
+			await settle();
+			expect(activeGets, 'the registry is asked no more').toBe(asked);
+			liveRunActive = false; // the run ends after all
+			await vi.advanceTimersByTimeAsync(10_000);
+			await settle();
+			expect(runTasks, 'nothing sent on its own').toEqual(['edit the notes']);
+		});
+
+		it('a run that ends within the six minutes: the queued turn goes as before (control)', async () => {
+			vi.useFakeTimers({ shouldAdvanceTime: true });
+			await reopenAndLose('aborted');
+			await vi.advanceTimersByTimeAsync(5 * 60_000);
+			await settle();
+			expect(runTasks, 'positive control: nothing sent while it runs').toEqual(['edit the notes']);
+			liveRunActive = false;
+			await vi.advanceTimersByTimeAsync(5_000);
+			await settle();
+			await vi.advanceTimersByTimeAsync(500);
+			await settle();
+			expect(runTasks, 'the turn goes once').toEqual(['edit the notes', 'then this']);
+		});
+
+		it('a second re-attach that also lets go while the wait runs starts no second wait', async () => {
+			vi.useFakeTimers({ shouldAdvanceTime: true });
+			await reopenAndLose('unreachable');
+			const gets = liveStreamGets;
+			liveRunIn = 't1'; // the server still lists the run for the thread
+			await store.reconcileThread(); // the chat view mounts again and re-attaches to the same run
+			await settle();
+			expect(liveStreamGets, 'positive control: it tried to re-attach again').toBeGreaterThan(gets);
+			const asked = activeGets;
+			await vi.advanceTimersByTimeAsync(20_000);
+			await settle();
+			expect(activeGets - asked, 'one wait: an ask every two seconds, not two').toBeLessThanOrEqual(11);
+		});
+
+		it('the queued turn is not sent after the run\'s end while a review is open', async () => {
+			await reopenAndLose('aborted');
+			changed = notes;
+			liveRunActive = false;
+			await wait(2300);
 			await settle();
 			await wait(200);
 			await settle();

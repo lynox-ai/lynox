@@ -64,13 +64,15 @@ export interface BulkNotices {
   consentOutdated(fields: readonly string[], nothingYet: boolean): string;
   /**
    * A Shopify product run halted because its connection did not ask for, or was not granted,
-   * `write_products` (`shopifyProductWriteAccess`), the way on included; recorded as the run result. `nothingYet` as above.
+   * `write_products` (`shopifyProductWriteAccess`), the way on included; the apply step's result.
+   * The run history, which a mandate reads too, keeps only its fact (`bulkHaltForReaders`); the
+   * way stands on the run page. `nothingYet` as above.
    */
   productWriteNotAsked(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /**
    * The same halt as it is pushed: lead and cause without the way, which the run page shows, so
-   * that with the counts it fits the web-push cut (`REMINDER_BODY_MAX`). The run result keeps
-   * {@link BulkNotices.productWriteNotAsked}, the way included, for the owner's history and the model.
+   * that with the counts it fits the web-push cut (`REMINDER_BODY_MAX`). It goes to the owner's
+   * devices; every live grant reads the owner in place of the pointer (`recordAndNotify`).
    */
   productWriteNotAskedPush(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /** A run another loop took over (B9). */
@@ -505,3 +507,123 @@ export const BULK_STORE_REACH_REFUSALS: Readonly<Record<'approve' | 'resume', Re
     shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
   },
 });
+/**
+ * A halt's sentence as each reader gets it, for the halts whose way on only the owner can take
+ * (reconnect, fix the profile, switch writing on, continue): the owner's push keeps the sentence
+ * with its way; the run's history (`record`), which a mandate reads too, keeps only the fact; the
+ * push to every live grant (`mandate`) gets the fact and that only the owner can resolve it, or,
+ * where the way is to continue the run, that the owner can (U-383). Null for every other halt,
+ * whose sentence holds for any reader.
+ */
+export interface BulkHaltReaders {
+  readonly record: string;
+  readonly mandate: string;
+}
+
+const ONLY_OWNER_RESOLVES: Readonly<Record<NoticeLanguage, string>> = Object.freeze({
+  de: 'Lösen kann das nur der Inhaber.',
+  en: 'Only the owner can resolve this.',
+});
+
+/** The fact that stands for both of a product halt's ways (the connection never asked, or Shopify refused). */
+const PRODUCT_WRITE_FACT: Readonly<Record<NoticeLanguage, string>> = Object.freeze({
+  de: 'Diese Shopify-Verbindung darf keine Produkte ändern.',
+  en: 'This Shopify connection may not change products.',
+});
+
+/**
+ * Where the way on is to continue the run, which only the owner does: the sentence a mandate reads
+ * in its place, the owner named instead of "you" and the time kept (U-383). Built when asked, not at
+ * load: `BULK_HALT_REASONS` reaches this module through an import cycle and is not set yet then.
+ */
+const ownerContinues = (): Readonly<Record<NoticeLanguage, Readonly<Record<string, string>>>> => ({
+  de: {
+    [`apply|${BULK_HALT_REASONS.unavailable}`]: 'Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, ist das Zielsystem noch nicht erreichbar.',
+    [`judge|${BULK_HALT_REASONS.unavailable}`]: 'Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, kann der Inhaber es später erneut versuchen.',
+    [BULK_HALT_REASONS.shopifyNotSetUp]: 'Sobald lynox Shopify eingerichtet hat, kann der Inhaber den Lauf fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNotCleared]: 'Sobald lynox Shopify freigegeben hat, kann der Inhaber den Lauf fortsetzen.',
+    [BULK_HALT_REASONS.shopifyUnconfirmed]: 'Der Inhaber kann den Lauf in ein paar Minuten fortsetzen.',
+    [BULK_HALT_REASONS.containmentUnwritable]: 'Der Inhaber kann den Lauf später fortsetzen.',
+  },
+  en: {
+    [`apply|${BULK_HALT_REASONS.unavailable}`]: 'The owner can continue the run; if it halts again right away, the target system is not reachable yet.',
+    [`judge|${BULK_HALT_REASONS.unavailable}`]: 'The owner can continue the run; if it halts again right away, the owner can try again later.',
+    [BULK_HALT_REASONS.shopifyNotSetUp]: 'Once lynox has set up Shopify, the owner can continue the run.',
+    [BULK_HALT_REASONS.shopifyNotCleared]: 'Once lynox has cleared Shopify, the owner can continue the run.',
+    [BULK_HALT_REASONS.shopifyUnconfirmed]: 'The owner can continue the run in a few minutes.',
+    [BULK_HALT_REASONS.containmentUnwritable]: 'The owner can continue the run later.',
+  },
+});
+
+/** A reason sentence's first sentence: its fact, without the way on that follows. */
+function firstSentence(text: string): string {
+  const at = text.indexOf('. ');
+  return at < 0 ? text : text.slice(0, at + 1);
+}
+
+/**
+ * For one stored reason, the parts of a halt sentence that carry the owner's way, each with what a
+ * reader who cannot take it reads instead. Taken from the sentences themselves, so a reworded way
+ * moves with them; tried in order, the first part found in the text wins.
+ */
+function ownerWayParts(reason: string, lang: NoticeLanguage): readonly OwnerWayPart[] {
+  const say = BULK_NOTICES[lang];
+  const R = BULK_HALT_REASONS;
+  const whole = (text: string): OwnerWayPart => [text, firstSentence(text)];
+  // The sentence that says to continue, with its leading space: the history drops it, a mandate
+  // reads that the owner continues. `from` is where in the sentence that way begins.
+  const goingOn = (text: string, from: number, key: string): OwnerWayPart => [text.slice(from), '', ` ${ownerContinues()[lang][key] ?? ''}`];
+  switch (reason) {
+    case R.credential: case R.unauthorized: case R.shopifyWriteOff: case R.storeAccessEnded: case R.storeClientMisnamed:
+      return [whole(say.halted('apply', reason))];
+    case R.unavailable: {
+      const judge = say.halted('judge', reason);
+      const apply = say.halted('apply', reason);
+      return [goingOn(judge, firstSentence(judge).length, `judge|${reason}`), goingOn(apply, firstSentence(apply).length, `apply|${reason}`)];
+    }
+    case R.shopifyNotSetUp: case R.shopifyNotCleared: case R.shopifyUnconfirmed: case R.containmentUnwritable: {
+      // The way is the last sentence; what comes before it (who sets it up) holds for every reader.
+      const apply = say.halted('apply', reason);
+      return [goingOn(apply, apply.lastIndexOf('. ') + 1, reason)];
+    }
+    case R.consentOutdated: {
+      const full = say.consentOutdated([], true);
+      // The way is the sentence after the fields' sentence; it holds no ". " of its own.
+      return [whole(say.halted('apply', reason)), [full.slice(full.lastIndexOf('. ') + 1), '']];
+    }
+    case R.productWriteNotAsked: {
+      const lead = (text: string): string => text.slice(firstSentence(text).length + 1);
+      // The push's short form names the fact and points to the run page for the way: the
+      // pointer is the way's stand-in, and holds no ". " of its own.
+      const push = say.productWriteNotAskedPush('not_asked', true);
+      return [whole(say.halted('apply', reason)),
+        [lead(say.productWriteNotAsked('not_asked', true)), PRODUCT_WRITE_FACT[lang]],
+        [lead(say.productWriteNotAsked('not_granted', true)), PRODUCT_WRITE_FACT[lang]],
+        [push.slice(push.lastIndexOf('. ') + 1), '']];
+    }
+    default:
+      return [];
+  }
+}
+
+/**
+ * One part of a halt sentence that carries the owner's way: the text, what the history reads in its
+ * place, and, where the way is to continue the run, what a mandate reads (else the fact and
+ * {@link ONLY_OWNER_RESOLVES}).
+ */
+type OwnerWayPart = readonly [from: string, record: string, mandate?: string];
+
+/** {@link BulkHaltReaders} for a run halted on `reason` whose summary is `text` in `lang`. */
+export function bulkHaltForReaders(reason: string | null, text: string, lang: NoticeLanguage): BulkHaltReaders | null {
+  if (reason === null) return null;
+  for (const [from, to, toMandate] of ownerWayParts(reason, lang)) {
+    const at = text.indexOf(from);
+    if (at < 0) continue;
+    const before = text.slice(0, at);
+    const after = text.slice(at + from.length);
+    const closing = ONLY_OWNER_RESOLVES[lang];
+    const mandate = toMandate ?? (to === '' ? ` ${closing}` : `${to} ${closing}`);
+    return { record: `${before}${to}${after}`, mandate: `${before}${mandate}${after}` };
+  }
+  return null;
+}
