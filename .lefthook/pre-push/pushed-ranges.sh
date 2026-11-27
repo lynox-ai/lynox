@@ -7,10 +7,13 @@
 #
 #   bash .lefthook/pre-push/pushed-ranges.sh <hook-name> [<remote>]   (the pre-push ref lines on stdin)
 #
-# <remote> is the hook's own $1, the name git pushes to. Only a push to `origin` may measure from
-# origin/main (below): pushed elsewhere — another remote, a URL — origin/main says nothing about what
-# that target already holds. Without it (a run by hand) nothing is measured from origin/main that
-# the remote sha would not cover.
+# <remote> is the hook's own $1, the name git pushes to. It decides one case only: a ref whose remote
+# sha this clone has moves its base to origin/main (below) only on a push to `origin`. Pushed
+# elsewhere — another remote, a URL — or without a name, such a ref is measured from its remote sha,
+# since origin/main says nothing about what that target already holds. A new ref and a remote sha
+# this clone lacks are measured from origin/main for any remote, as before. `origin` is the name,
+# not the URL: a pushurl or pushInsteadOf that sends origin's pushes to another repository is the
+# operator's own configuration and is not detected here.
 #
 # The refs come from git on stdin (`<local ref> <local sha> <remote ref> <remote sha>` per line).
 # Only the BACK three fields have a guaranteed form, so a line is matched anchored from the RIGHT.
