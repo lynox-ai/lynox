@@ -8,11 +8,13 @@ import { recordSessionCost } from '../../core/session-budget.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import type { PromptText } from '../../types/index.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 import { currentCallSignal } from '../../core/call-connection.js';
+import { RESERVED_STEP_IDS, STEP_ID_MAX } from '../../orchestrator/step-id.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -67,15 +69,20 @@ function truncateSlug(slug: string, maxLen: number): string {
 /** Convert agent-assigned plan phases to pipeline steps with dependency graph */
 export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[] {
   // Build per-index ID mapping (supports duplicate phase names)
-  const usedIds = new Set<string>();
+  // A reserved id (`step-id.ts`) counts as taken: a phase named "Params" becomes `params-2`.
+  const usedIds = new Set<string>(RESERVED_STEP_IDS);
   const ids: string[] = [];
 
   for (const phase of phases) {
-    let id = slugify(phase.name);
+    // A step id has a limited shape (`step-id.ts`); the slug has its characters, and it is cut at a
+    // word boundary to the length, the suffix that keeps it unique included.
+    const base = slugify(phase.name);
+    let id = truncateSlug(base, STEP_ID_MAX);
     if (usedIds.has(id)) {
       let counter = 2;
-      while (usedIds.has(`${id}-${counter}`)) counter++;
-      id = `${id}-${counter}`;
+      const suffixed = (n: number): string => `${truncateSlug(base, STEP_ID_MAX - `-${n}`.length)}-${n}`;
+      while (usedIds.has(suffixed(counter))) counter++;
+      id = suffixed(counter);
     }
     usedIds.add(id);
     ids.push(id);
@@ -228,7 +235,7 @@ function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, his
 
   // Save-time gate. plan_task is the canonical save path for pipelines today;
   // future Workflows-editor save endpoints should call this gate too.
-  assertPlannedPipelineIsValid(planned);
+  assertPlannedPipelineIsValid(planned, turnIsLocked(by.principal));
 
   // Persist to pipeline_runs FIRST, then the in-memory store. plan_task is
   // decoupled from run (D4) — the returned workflow_id must survive an engine
@@ -370,11 +377,15 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         // the tenant balance. No-op on self-host / BYOK. Booked from the reply,
         // not the plan: a reply that yields no plan was paid for too.
         onSpend: (costUsd) => {
+          // Charged to this run's cost ceiling too, like the agent's own helper calls.
+          agent.chargeExternalCost?.(costUsd);
           debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
         },
         // A planning call aborted at its timeout or by the stop returned no reply to book. Its upper bound
         // goes to the session cap only — never to the tenant balance (aborted-call.ts).
         onAbortedSpend: (cost) => {
+          // And to this run's ceiling, as a bound it counts but does not bill.
+          agent.chargeExternalCapOnlyCost?.(cost.upperBoundUsd);
           recordSessionCost(agent.sessionCounters, cost.upperBoundUsd);
         },
         // A stop of the run ends the planning call (plan_task has no tool time limit: it is

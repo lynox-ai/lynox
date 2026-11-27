@@ -51,8 +51,9 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });
@@ -135,6 +136,23 @@ describe('an undone run’s page', () => {
 		// Marked by a tint, not struck: a line through a „1“ reads as „4“.
 		expect(['no-underline', 'bg-danger/10', 'dark:bg-danger/20'].every((c) => befores[1]!.classList.contains(c))).toBe(true);
 		expect(befores[2]!.classList.contains('text-text')).toBe(true);
+	});
+
+	it('shows a before-value with hidden characters marked, taken back or struck, in a cell that breaks a long value', async () => {
+		const odd = 'Alt\u202Eb\u200Bc\u0007';
+		const marked = 'Alt⟨U+202E⟩b⟨U+200B⟩c⟨U+0007⟩';
+		const back = { ...written(1, true), diff: fieldsDiff(odd, 'Neu 1') } as BulkTarget;
+		const live = { ...written(2, false), diff: fieldsDiff(odd, 'Neu 2') } as BulkTarget;
+		const text = { ...written(3, true), diff: { kind: 'text', from: 0, removed: [odd], added: ['Neu 3'] } } as BulkTarget;
+		const liveText = { ...written(4, false), diff: { kind: 'text', from: 0, removed: [odd], added: ['Neu 4'] } } as BulkTarget;
+		targets = [back, live, text, liveText];
+		await render();
+		const befores = [...target.querySelectorAll<HTMLElement>('[data-testid="bulk-before"]')];
+		expect(befores.map((el) => [el.tagName, el.textContent?.trim()])).toEqual([['SPAN', marked], ['DEL', marked], ['SPAN', `- ${marked}`], ['DEL', `- ${marked}`]]);
+		// None of the hidden characters reaches the page as itself.
+		for (const el of befores) expect(/[\u202E\u200B\u0007]/.test(el.textContent ?? '')).toBe(false);
+		// The field cell and the text block both break a long value inside the cell.
+		for (const el of befores) expect(el.closest('div, pre')!.classList.contains('[overflow-wrap:anywhere]')).toBe(true);
 	});
 
 	it('greys every mark beside a target taken back, and only there: the whole row is a record', async () => {

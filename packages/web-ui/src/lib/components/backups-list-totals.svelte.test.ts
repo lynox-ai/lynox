@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t } from '../i18n.svelte.js';
+import { getLocale, setLocale, t } from '../i18n.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -70,8 +70,41 @@ describe('BackupsView: file count and size', () => {
 		await render();
 		expect(target.textContent).toContain('7 ' + t('backups.files'));
 		expect(target.textContent).toContain('3.0 MB');
-		expect(target.textContent).not.toContain('1 ' + t('backups.files'));
+		expect(target.textContent).not.toContain('1 ' + t('backups.files_one'));
 		expect(target.textContent).not.toContain('10 B');
+	});
+
+	// One file is „1 Datei“ / "1 file", every other count the plural; and the way back names the
+	// settings in the page's language. Literal strings, not `t()`: a wrong value in the table would
+	// pass a test that reads it back from there.
+	describe.each([
+		['de', '1 Datei', '2 Dateien', '← Einstellungen'],
+		['en', '1 file', '2 files', '← Settings'],
+	] as const)('in %s', (locale, one, two, back) => {
+		let before: ReturnType<typeof getLocale>;
+		beforeEach(() => { before = getLocale(); setLocale(locale); });
+		afterEach(() => { setLocale(before); });
+
+		it('one file is singular, the way back is in the page language', async () => {
+			listed = [{
+				backup_id: 'b-1', version: '2.17.0', created_at: '2026-10-28T08:00:00.000Z', encrypted: false,
+				checksum: 'c', provenance: 'verified', file_count: 1, total_bytes: 10,
+			}];
+			await render();
+			const text = (target.textContent ?? '').replace(/\s+/g, ' ');
+			expect(text).toContain(one);
+			expect(text).not.toContain(`1 ${two.split(' ')[1]}`);
+			expect(text).toContain(back);
+		});
+
+		it('two files are plural', async () => {
+			listed = [{
+				backup_id: 'b-1', version: '2.17.0', created_at: '2026-10-28T08:00:00.000Z', encrypted: false,
+				checksum: 'c', provenance: 'verified', file_count: 2, total_bytes: 10,
+			}];
+			await render();
+			expect((target.textContent ?? '').replace(/\s+/g, ' ')).toContain(two);
+		});
 	});
 
 	it('counts from the files list when an older engine sends no totals', async () => {

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
 	formatRunElapsed,
+	promptAnchorShown,
+	promptFormInView,
 	isPipelineRunning,
 	prefersReducedMotion,
 	scrollBehaviorForMotion,
@@ -230,5 +232,38 @@ describe('isPipelineRunning', () => {
 	it('tolerates a null/garbage step entry without throwing', () => {
 		expect(isPipelineRunning({ steps: [null, { status: 'running' }] })).toBe(true);
 		expect(isPipelineRunning({ steps: [null] })).toBe(false);
+	});
+});
+
+describe('promptFormInView / promptAnchorShown', () => {
+	const card = (top: number, height = 300) => ({ top, bottom: top + height });
+
+	it('counts the question as seen while its opening line is inside the visible part', () => {
+		expect(promptFormInView(card(100), 100, 400)).toBe(true);
+		expect(promptFormInView(card(353), 100, 400)).toBe(true); // a pixel of rounding either way
+		expect(promptFormInView(card(354), 100, 400)).toBe(false);
+	});
+
+	it('does not count a card whose top has scrolled away, even with its buttons showing', () => {
+		expect(promptFormInView(card(99), 100, 400)).toBe(true);
+		expect(promptFormInView(card(98), 100, 400)).toBe(false);
+		expect(promptFormInView(card(-200), 0, 400)).toBe(false);
+	});
+
+	it('counts a card shorter than a line when all of it shows', () => {
+		expect(promptFormInView(card(370, 30), 100, 400)).toBe(true);
+		expect(promptFormInView(card(371, 30), 100, 400)).toBe(true);
+		expect(promptFormInView(card(372, 30), 100, 400)).toBe(false);
+	});
+
+	it('counts nothing as seen in an area with no height', () => {
+		expect(promptFormInView(card(0, 0), 0, 0)).toBe(false);
+	});
+
+	it('shows the bar only for a question off screen, or where it cannot know', () => {
+		expect(promptAnchorShown({ kind: 'seen', inView: true })).toBe(false);
+		expect(promptAnchorShown({ kind: 'seen', inView: false })).toBe(true);
+		expect(promptAnchorShown({ kind: 'absent' })).toBe(true);
+		expect(promptAnchorShown({ kind: 'unobservable' })).toBe(true);
 	});
 });

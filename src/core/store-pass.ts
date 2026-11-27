@@ -261,6 +261,18 @@ export function mintStoreExchangePass(origin: string, body: string): ExchangeSto
   return pass;
 }
 
+/**
+ * Mint a pass for one token refresh, over the body it will send. The same kind as the connect
+ * callback's exchange pass, and checked the same way at the send; minted on its own path so the
+ * source guard can hold each to its one caller: `storeRefreshPassFor` alone, which builds the body
+ * from the vault and mints only for a connection whose binding still holds.
+ */
+export function mintStoreRefreshPass(origin: string, body: string): ExchangeStorePass {
+  const pass: ExchangeStorePass = Object.freeze({ kind: 'exchange', origin, bodyDigest: digestOf(body).toString('hex') });
+  minted.add(pass);
+  return pass;
+}
+
 /** Whether `value` is a pass this process minted. */
 export function isStorePass(value: unknown): value is StorePass {
   return typeof value === 'object' && value !== null && minted.has(value);

@@ -218,5 +218,12 @@ const bexio: PresetWriteContext = {
   },
 };
 
-/** Per preset id. A preset without an entry asks with the body only. */
+/**
+ * Per preset id. A preset without an entry asks with the body only.
+ *
+ * The readings an entry makes are not counted as API calls: the call counts the one request it
+ * was asked to send. That holds while no provider here bears a rate of its own. An owner can set
+ * one on such a profile (`validateProfile` does not check for a preset), and a second provider
+ * with an entry, or a rate on one with an entry, is when the readings should be counted too.
+ */
 export const PRESET_WRITE_CONTEXT: Readonly<Record<string, PresetWriteContext>> = Object.freeze({ bexio });

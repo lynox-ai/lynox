@@ -280,11 +280,17 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
   for (const [name, value] of Object.entries(headers)) {
     if (OVERRIDE_HEADERS.has(headerKey(name))) candidates.push(value);
   }
-  try {
-    for (const [name, value] of new URL(url).searchParams) {
-      if (isOverrideFieldName(name)) candidates.push(value);
+  // Every query a receiving server may read (`urlQueryStrings`: a `%3F` in the path that a proxy
+  // decodes included), each split every way a server may split it (`queryReadings`): one that
+  // also splits on `;` reads `?x=1;_method=DELETE` as an override, where `searchParams` sees a
+  // single field `x`. An unparsable URL gives none, and is refused before it is sent.
+  for (const search of urlQueryStrings(url)) {
+    for (const params of queryReadings(search)) {
+      for (const [name, value] of params) {
+        if (isOverrideFieldName(name)) candidates.push(value);
+      }
     }
-  } catch { /* an unparsable URL is refused before it is sent */ }
+  }
   // A GET or HEAD sends no body, so nothing in one can override it.
   if (body !== undefined && !isReadMethod(method.trim().toUpperCase())) {
     for (const reading of typeof body === 'string' ? [body] : body) {
@@ -575,11 +581,144 @@ export function graphqlUrlWrites(url: string): boolean {
 }
 
 /**
+ * Whether a text names a GraphQL operation that writes, read as its grammar has it: `mutation` or
+ * `subscription`, an optional name, and then `(`, `{` or `@`, with blanks, commas, a byte-order
+ * mark and `#` comments between them (blanks read as JavaScript's `\s`, wider than GraphQL's).
+ * Narrower than `GRAPHQL_WRITE_OPERATION`, so a REST body with the word in it
+ * (`{"subscription":"premium"}`) is no hit; a miss of this one fails open, so it is used only where
+ * the endpoint is not known to speak GraphQL.
+ *
+ * Read from each occurrence of the word on its own, comments in place and not stripped first: a
+ * `#` inside a string (`query{a(s:"#")} mutation{b}`) would otherwise hide the mutation. A loop, not
+ * a pattern: a comment is skipped by a jump to the end of its line, so each run of ignored text is
+ * walked by at most the two words before it, and the time is linear in the text. (A pattern took
+ * quadratic time on `mutation#` repeated with no line break.)
+ */
+export function namesGraphqlWrite(text: string): boolean {
+  let lineEnds: Int32Array | undefined;
+  const lineEnd = (from: number): number => {
+    if (lineEnds === undefined) {
+      lineEnds = new Int32Array(text.length + 1);
+      let next = text.length;
+      lineEnds[text.length] = next;
+      for (let i = text.length - 1; i >= 0; i--) {
+        if (text[i] === '\n' || text[i] === '\r') next = i;
+        lineEnds[i] = next;
+      }
+    }
+    return lineEnds[from]!;
+  };
+  const skipIgnored = (from: number): number => {
+    let i = from;
+    while (i < text.length) {
+      const c = text[i]!;
+      if (c === '#') i = lineEnd(i);
+      else if (/[\s,\uFEFF]/.test(c)) i++;
+      else break;
+    }
+    return i;
+  };
+  const keyword = /\b(?:mutation|subscription)\b/gi;
+  const name = /[_A-Za-z]\w*/y;
+  for (let m = keyword.exec(text); m !== null; m = keyword.exec(text)) {
+    let i = skipIgnored(m.index + m[0].length);
+    name.lastIndex = i;
+    if (name.exec(text) !== null) i = skipIgnored(name.lastIndex);
+    if (i < text.length && '({@'.includes(text[i]!)) return true;
+  }
+  return false;
+}
+
+/** Keys a persisted query names its stored document by; the server runs that document, which the request does not show. */
+const PERSISTED_QUERY_KEYS = new Set(['documentid', 'doc_id', 'queryid', 'persistedquery']);
+
+/**
+ * Whether a request body may carry a GraphQL write to an API whose URL does not say it speaks
+ * GraphQL (`api.monday.com/v2`, `/api`, `/query`), read as such a server reads it:
+ *  - every body as form pairs (`queryReadings`, `queryKeyName`): a `query` that names a write, or a
+ *    key that names a persisted query. Whatever else the body parses as: a server that takes the
+ *    form media type reads `{"a":"&query=mutation{x}&"}` as a form;
+ *  - a body that parses as JSON: the value of a `query` key at any depth (a batch included) that
+ *    names a write, a key that names a persisted query, or a key named twice in one object
+ *    (`jsonRepeatsAKey`: a server may keep the first). A `query` that is an object (a search API's)
+ *    is no GraphQL document;
+ *  - a body that does not parse as JSON but may be read as JSON by a server more lenient than
+ *    `JSON.parse` (a byte-order mark before it, a value after it, a JSON media type): refused, as no
+ *    reading here can tell what that server runs;
+ *  - any other body as a whole, as a document (`application/graphql`);
+ *  - a multipart body with an `operations` part, the GraphQL upload form, whose escapes no reading
+ *    here undoes.
+ * Other fields of a JSON body are not read: a description that says „Mutation (…)" is no request a
+ * server runs. A body that is not a string, or that throws while it is read, counts as one.
+ *
+ * For grants, not for questions: a question shows the body; a grant lets it go unseen.
+ */
+export function bodyMayWriteGraphql(body: unknown, headers: Readonly<Record<string, string>> | undefined): boolean {
+  if (body === undefined || body === '') return false;
+  if (typeof body !== 'string') return true;
+  try {
+    const contentType = Object.entries(headers ?? {}).filter(([name]) => name.trim().toLowerCase() === 'content-type').map(([, value]) => value).join(',');
+    if (/multipart/i.test(contentType) && /\boperations\b/i.test(body)) return true;
+    for (const params of queryReadings(body)) {
+      for (const [key, value] of params) {
+        const name = queryKeyName(key);
+        if (PERSISTED_QUERY_KEYS.has(name)) return true;
+        if (name === 'query' && namesGraphqlWrite(value)) return true;
+      }
+    }
+    let parsed: unknown;
+    let json = true;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      json = false;
+    }
+    if (!json) return /json/i.test(contentType) || /^[\s\uFEFF]*[[{]/.test(body) || namesGraphqlWrite(body);
+    if (jsonRepeatsAKey(body)) return true;
+    // A loop, not a recursion: a deeply nested body costs no stack.
+    const pending: unknown[] = [parsed];
+    while (pending.length > 0) {
+      const node = pending.pop();
+      if (Array.isArray(node)) {
+        for (const item of node) pending.push(item);
+      } else if (typeof node === 'object' && node !== null) {
+        for (const [key, value] of Object.entries(node)) {
+          const name = key.trim().toLowerCase();
+          if (PERSISTED_QUERY_KEYS.has(name)) return true;
+          if (name === 'query' && typeof value === 'string' && namesGraphqlWrite(value)) return true;
+          pending.push(value);
+        }
+      }
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether a URL's query strings carry what a GraphQL server on any path may run: a `query` that
+ * names a write, or a key that names a persisted query, read every way a server may
+ * (`urlQueryStrings`, `queryReadings`, `queryKeyName`). Some servers read `query` from the URL
+ * before the body (express-graphql, graphene-django). For grants, as `bodyMayWriteGraphql`.
+ */
+export function urlMayWriteGraphql(url: string): boolean {
+  try {
+    return urlQueryStrings(url).some((search) => queryReadings(search).some((params) => [...params].some(([key, value]) => {
+      const name = queryKeyName(key);
+      return PERSISTED_QUERY_KEYS.has(name) || (name === 'query' && namesGraphqlWrite(value));
+    })));
+  } catch {
+    return true;
+  }
+}
+
+/**
  * A query key as the servers that may receive it name it: PHP ends a key at a NUL, drops leading
  * spaces and reads `name[...]` as `name` (a newline inside the brackets included), ASP.NET compares
  * keys without case. So ` query`, `QUERY`, `query[]` and `query%00x` are all `query`.
  */
-function queryKeyName(key: string): string {
+export function queryKeyName(key: string): string {
   return key.split('\0')[0]!.trimStart().toLowerCase().replace(/\[[\s\S]*$/, '');
 }
 
@@ -796,11 +935,240 @@ function serverReadings(text: string): Set<string> {
 
 /** Whether a server reading of `text` holds a secret `mask` knows. Asked of text the mask
  *  already ran over: a secret left after a reading was written in a form the mask did not see. */
-function hidesEncodedSecret(text: string, mask: (text: string) => string): boolean {
-  for (const read of serverReadings(text)) {
+function hidesEncodedSecret(text: string, mask: (text: string) => string, unread = true): boolean {
+  const readings = serverReadings(text);
+  for (const read of readings) {
     if (mask(read) !== read) return true;
   }
+  return jsonTextHides(text, readings, mask, unread);
+}
+
+/**
+ * How many times JSON text inside a value is read: a value that is JSON text, a string in it
+ * that is JSON text again, and one more. A server that parses such a value reads its strings
+ * unescaped, so a secret written there with an escape (`s…`) is one the mask did not see.
+ * JSON text deeper than this counts as holding a secret (it is not read, so it is not shown),
+ * and so does JSON text whose reading costs more than {@link JSON_TEXT_BUDGET_CHARS}.
+ */
+const JSON_TEXT_DEPTH = 3;
+/** The most characters reading the JSON text inside one value may cost: each text parsed, and
+ *  each server reading of a string in it, counted by its length and 32 characters on top (each
+ *  is masked once more, or parsed). */
+const JSON_TEXT_BUDGET_CHARS = 2_000_000;
+
+/**
+ * Whether JSON text in `text` holds a secret `mask` knows in one of its strings (keys and values,
+ * a shadowed duplicate key's too), as that string or in a server reading of it, and so on down to
+ * {@link JSON_TEXT_DEPTH}. JSON text is looked for in every server reading of `text` and of each
+ * side of a `name=value` pair in it (a form body, a query; split before it is decoded, the way a
+ * server splits it), whole, from each `=` or `&` to the next `&` (a form inside a decoded value),
+ * and line by line (one JSON document per line, a multipart part). `readings` are those of
+ * `text`, taken once by the caller. `unread` is what JSON text past the depth or the budget counts
+ * as: `true` (holding a secret) for a decision, `false` for the reading a masked one is compared
+ * with (`pathHoldsSecret`).
+ */
+function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: string) => string, unread = true): boolean {
+  const ofText = [...readings];
+  const literalSeen = new Set<string>();
+  for (const read of [...ofText, ...formSides(text).flatMap((side) => [...serverReadings(side)])]) {
+    if (escapedLiteralHides(read, mask, literalSeen, 0)) return true;
+  }
+  const seen = new Set<string>();
+  let left = JSON_TEXT_BUDGET_CHARS;
+  const hides = (t: string, ofT: Iterable<string>, depth: number): boolean => {
+    for (const reads of [ofT, ...formSides(t).map(serverReadings)]) {
+      for (const read of reads) {
+        for (const candidate of jsonCandidates(read)) {
+          left -= 32;
+          if (left < 0) return unread;
+          const strings = jsonStrings(candidate);
+          if (strings.length > 0) left -= candidate.length;
+          for (const s of strings) {
+            if (seen.has(s)) continue;
+            seen.add(s);
+            if (depth >= JSON_TEXT_DEPTH) {
+              if (unread) return true;
+              continue;
+            }
+            const ofS = serverReadings(s);
+            for (const r of ofS) {
+              // Charged here, checked by the next piece `hides` reads below: there always is one.
+              left -= r.length + 32;
+              if (mask(r) !== r) return true;
+            }
+            if (hides(s, ofS, depth + 1)) return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+  return hides(text, ofText, 0);
+}
+
+/** How many times a string literal inside a string literal is read by {@link escapedLiteralHides}. */
+const LITERAL_READ_DEPTH = 3;
+
+/**
+ * Whether a JSON string literal written anywhere in `text` holds a secret `mask` knows once it is
+ * unescaped, as that string or in a server reading of it, and so on for literals inside it. Read
+ * from the literals, not from a parse: a server's parser may take text `JSON.parse` refuses
+ * (`NaN`, a comma at the end, text after the value), a JSON document over several lines inside a
+ * larger text, or a form whose name has a space. It only decides: it costs no depth and no budget
+ * of {@link jsonTextHides}, and text it cannot read (past its depth, a literal that does not parse)
+ * counts as holding nothing, so it never makes text unshowable that holds no secret. Only a literal
+ * with an escape is read: one without has its text as written, which the mask already saw.
+ */
+function escapedLiteralHides(text: string, mask: (text: string) => string, seen: Set<string>, depth: number): boolean {
+  if (depth >= LITERAL_READ_DEPTH || !text.includes('\\')) return false;
+  for (const piece of literalPieces(text)) {
+    for (const literal of escapedLiterals(piece)) {
+      const value = unescapedLiteral(literal);
+      if (seen.has(value)) continue;
+      seen.add(value);
+      for (const read of serverReadings(value)) {
+        if (mask(read) !== read) return true;
+        if (escapedLiteralHides(read, mask, seen, depth + 1)) return true;
+      }
+    }
+  }
   return false;
+}
+
+/**
+ * The double-quoted literals of `text` that hold an escape, found in one pass from the left: a
+ * literal ends at the next quote no backslash escapes. One that a raw line break ends unclosed
+ * pairs nothing else on its line, so the search goes on after that line break; a pattern that
+ * tried again from each quote would read a line of escaped quotes once per quote.
+ */
+function escapedLiterals(text: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  // run-group-starter: a synchronous scan over a string; it starts nothing that outlives the call.
+  for (;;) {
+    const start = text.indexOf('"', from);
+    if (start < 0) return out;
+    let at = start + 1;
+    let escaped = false;
+    while (at < text.length && text[at] !== '"' && text[at] !== '\n') {
+      if (text[at] === '\\') {
+        escaped = true;
+        // A backslash before CRLF continues the line like one before LF.
+        at += text[at + 1] === '\r' && text[at + 2] === '\n' ? 2 : 1;
+      }
+      at++;
+    }
+    if (at >= text.length) return out;
+    if (text[at] === '"' && escaped) out.push(text.slice(start, at + 1));
+    from = at + 1;
+  }
+}
+
+/**
+ * The text of a double-quoted literal as a parser reads it: as JSON when it is JSON, otherwise
+ * the way lenient parsers unescape (`\xHH`, `\UHHHHHHHH`, octal, `\'`, a line continuation,
+ * and an escape none of them knows read as the character after the backslash). A literal one
+ * unknown escape makes invalid JSON is still read, so a `\\u…` elsewhere in it is not lost.
+ */
+function unescapedLiteral(literal: string): string {
+  try { return JSON.parse(literal) as string; } catch { /* not JSON: read it the lenient way */ }
+  const SIMPLE: Record<string, string> = { b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '0': '\0' };
+  const code = (hex: string): string => {
+    const point = parseInt(hex, 16);
+    return Number.isFinite(point) && point <= 0x10ffff ? String.fromCodePoint(point) : '';
+  };
+  return literal.slice(1, -1).replace(
+    /\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|x([0-9a-fA-F]{2})|([0-7]{1,3})|(\r\n|[\s\S]))/g,
+    (_m, u?: string, bigU?: string, x?: string, octal?: string, other?: string) =>
+      u !== undefined ? code(u)
+        : bigU !== undefined ? code(bigU)
+        : x !== undefined ? code(x)
+        : octal !== undefined ? (octal === '0' ? '\0' : String.fromCharCode(parseInt(octal, 8)))
+        : other === '\n' || other === '\r\n' || other === '\r' || other === '\u2028' || other === '\u2029' ? ''
+        : SIMPLE[other!] ?? other!,
+  );
+}
+
+/** Where the literals of `text` are read from, so a stray quote before one does not pair the
+ *  quotes wrongly: the text, each line and each `&` piece of it, and each of those after its
+ *  first `=` (a form value). Each character is in a handful of pieces, so the cost stays linear. */
+function literalPieces(text: string): string[] {
+  const out = [text];
+  // Every line break a backslash in a literal may continue over: a line the tokenizer reads as
+  // one literal is still read line by line.
+  if (!/[\r\n\u2028\u2029&=]/.test(text)) return out;
+  // Both cuts: at LF alone (a CR, U+2028 or U+2029 may sit inside a literal) and at every break.
+  for (const segment of new Set([...text.split(/[\n&]/), ...text.split(/\r\n?|[\n\u2028\u2029&]/)])) {
+    if (segment.includes('\\')) out.push(segment);
+    const at = segment.indexOf('=');
+    if (at >= 0 && segment.includes('\\', at)) out.push(segment.slice(at + 1));
+  }
+  return out;
+}
+
+/** Both sides of every `name=value` pair of `text` read as a form, the way a server splits it
+ *  before it decodes; only a side that may read as JSON text (it starts with `{`, `[` or `"`, or
+ *  with an escape or a space that may come before one). None when `text` has no `&` or `=`. */
+function formSides(text: string): string[] {
+  if (!/[&=]/.test(text)) return [];
+  return text.split('&')
+    .flatMap((pair) => {
+      const at = pair.indexOf('=');
+      return at < 0 ? [pair] : [pair.slice(0, at), pair.slice(at + 1)];
+    })
+    .filter((side) => /^[\s+]*[{["%]/.test(side));
+}
+
+/** The pieces of one reading that may be JSON text a server parses: the reading itself; from the
+ *  start and after each `=` or `&` up to the next `&` (a form, also one inside a decoded value);
+ *  from the start and after each line break up to the next one (one JSON document per line, a
+ *  multipart part). Only a piece that starts like JSON text, after spaces. */
+function jsonCandidates(read: string): string[] {
+  const out = [read];
+  if (!/[=&\n]/.test(read)) return out;
+  // The next `&` and the next line break at or after each position, found in one pass from the
+  // end, so a reading with many pieces costs its length, not its length per piece.
+  const nextAmp = new Int32Array(read.length + 1);
+  const nextBreak = new Int32Array(read.length + 1);
+  nextAmp[read.length] = read.length;
+  nextBreak[read.length] = read.length;
+  for (let i = read.length - 1; i >= 0; i--) {
+    nextAmp[i] = read[i] === '&' ? i : nextAmp[i + 1]!;
+    nextBreak[i] = read[i] === '\n' ? i : nextBreak[i + 1]!;
+  }
+  // `named`: the text since the last `=`, `&` or line break is a name (no space, and not starting
+  // the way JSON text starts; `meta[value]` is one), so a `=` after it ends a form's name, also one
+  // inside a decoded value (`p=b=…`). Text with many `=` that are no form (`x = {`, `={={`) starts
+  // no piece at each of them: the text between two such `=` starts with the piece before.
+  let named = false;
+  let since = 0;
+  for (let i = 0; i < read.length; i++) {
+    const c = read[i]!;
+    const before = i === 0 ? '' : read[i - 1]!;
+    if (/[\s{["]/.test(c)) {
+      // A piece that runs from the start to the end is the reading itself, already in.
+      if ((i === 0 || before === '&' || (before === '=' && named)) && (i > 0 || nextAmp[i]! < read.length)) out.push(read.slice(i, nextAmp[i]));
+      if ((i === 0 || before === '\n') && (i > 0 || nextBreak[i]! < read.length)) out.push(read.slice(i, nextBreak[i]));
+    }
+    if (c === '=') named = /^[^\s{["]\S*$/.test(read.slice(since, i));
+    else if (c === '&' || c === '\n') named = false;
+    if (c === '=' || c === '&' || c === '\n') since = i + 1;
+  }
+  return out;
+}
+
+/** Every string literal (key and value, each of two equal keys too) of `text` when it parses as
+ *  JSON (an object, an array or a string), after spaces and a byte order mark, which a server
+ *  reading bytes may drop; none otherwise. Read from the text, not from the parse: a parse keeps
+ *  only the last of two equal keys, and a server may read the other. */
+function jsonStrings(text: string): string[] {
+  // Sliced, not replaced: no copy of a long text that is no JSON.
+  const body = text.slice(Math.max(0, text.search(/\S/)));
+  if (!/^[{["]/.test(body)) return [];
+  try { JSON.parse(body); } catch { return []; }
+  const out: string[] = [];
+  for (const [literal] of body.matchAll(/"(?:[^"\\]|\\.)*"/g)) out.push(JSON.parse(literal) as string);
+  return out;
 }
 
 /**
@@ -810,10 +1178,13 @@ function hidesEncodedSecret(text: string, mask: (text: string) => string): boole
  * shown text would then hand that secret to whoever reads it, as `%73ecret` or as
  * `caf�-secret`. A secret only the shown reading holds is masked in it.
  */
-function shownPiece(raw: string, read: string, mask: (text: string) => string): string {
-  for (const other of serverReadings(raw)) {
+function shownPiece(raw: string, read: string, mask: (text: string) => string, unread = true): string {
+  const readings = serverReadings(raw);
+  for (const other of readings) {
     if (other !== read && mask(other) !== other) return '***';
   }
+  // JSON text whose string holds a secret only unescaped: the shown reading would show it escaped.
+  if (jsonTextHides(raw, readings, mask, unread)) return '***';
   return mask(read);
 }
 
@@ -880,11 +1251,13 @@ export function pathForQuestion(url: string, mask: (text: string) => string): st
  * is clipped, so a secret past the clip still counts.
  */
 export function pathHoldsSecret(url: string, mask: (text: string) => string): boolean {
-  return pathShown(url, mask) !== pathShown(url, (text) => text);
+  // Compared with the path read with nothing masked and JSON text past what is read left as it
+  // is: JSON text the question stars because it is not read (`jsonTextHides`) counts too.
+  return pathShown(url, mask) !== pathShown(url, (text) => text, false);
 }
 
 /** {@link pathForQuestion} before it is clipped; `undefined` for a URL that does not parse. */
-function pathShown(url: string, mask: (text: string) => string): string | undefined {
+function pathShown(url: string, mask: (text: string) => string, unread = true): string | undefined {
   let parsed: URL;
   try { parsed = new URL(url); } catch { return undefined; }
   // Masked in both forms, encoded and decoded: a secret with a character the URL encodes is
@@ -894,11 +1267,11 @@ function pathShown(url: string, mask: (text: string) => string): string | undefi
   // Masked whole first, so a secret holding a `/` is found before the split.
   const pieces = mask(parsed.pathname).split('/').map((raw) => {
     const read = lenientDecode(raw);
-    const shown = shownPiece(raw, read, mask);
+    const shown = shownPiece(raw, read, mask, unread);
     return { left: shown === read ? raw : '', shown };
   });
   // A secret only a reading across segments holds (`%61/b` read twice) stars the whole path.
-  const path = hidesEncodedSecret(pieces.map((p) => p.left).join('/'), mask)
+  const path = hidesEncodedSecret(pieces.map((p) => p.left).join('/'), mask, unread)
     ? '/***'
     : pieces.map((p) => p.shown).join('/');
   // Keys from the query as sent, not `searchParams`: that decodes once as UTF-8 only. Masked
@@ -906,7 +1279,7 @@ function pathShown(url: string, mask: (text: string) => string): string | undefi
   const rawKeys = mask(parsed.search).slice(1).split('&').filter((pair) => pair !== '');
   const keys = [...new Set(rawKeys.map((pair) => {
     const { raw, read } = formName(pair);
-    return shownPiece(raw, read, mask);
+    return shownPiece(raw, read, mask, unread);
   }))];
   const query = keys.length > 0 ? `?${keys.map((k) => `${k}=…`).join('&')}` : '';
   return `${path}${query}`;
@@ -1149,3 +1522,14 @@ export function queryForQuestion(search: string, mask: (text: string) => string)
 
 /** The form media type alone, parameters allowed; a list of two types is not one form. */
 const FORM_CONTENT_TYPE = /^\s*application\/x-www-form-urlencoded\s*(?:;[^,]*)?$/i;
+
+/**
+ * Whether a server may run a GET of this address as a write, for an address read with no one
+ * asked (a watch, a calendar feed): a method override in it as every write gate reads it
+ * (`effectiveWriteMethod`; a value that is no method counts), or, at an address that parses as a
+ * GraphQL endpoint, a mutation in its query (`graphqlUrlWrites`).
+ */
+export function readAddressWrites(url: string): boolean {
+  if (!isReadMethod(effectiveWriteMethod('GET', {}, url))) return true;
+  return URL.canParse(url) && isGraphqlEndpoint(url) && graphqlUrlWrites(url);
+}

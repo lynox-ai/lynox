@@ -287,8 +287,8 @@ describe('wrapUntrustedData boundary escape prevention', () => {
     // Whitespace or a control character after the delimiter, as the closer allows.
     expect(wrapUntrustedData('a < untrusted_data> b', 't')).toContain('a &lt; untrusted_data> b');
     expect(wrapUntrustedData('a <\x01untrusted_data> b', 't')).toContain('a &lt;\x01untrusted_data> b');
-    const split = wrapUntrustedData('a <​untrusted_data> b', 't');
-    expect(openers(split.replace(/​/g, ''))).toBe(1);
+    const split = wrapUntrustedData('a <\u200Buntrusted_data> b', 't');
+    expect(openers(split.replace(/\u200B/g, ''))).toBe(1);
   });
 
   it('leaves a longer name that merely starts like the element alone', () => {

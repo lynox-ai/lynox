@@ -1,6 +1,31 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeLLMTitle, generateThreadTitle } from './session.js';
+import { sanitizeLLMTitle, generateThreadTitle, LLM_TITLE_PROMPT, llmTitleSource } from './session.js';
 import { closeLoadedContext } from './chat-context.js';
+import { compose } from './data-boundary.js';
+import { runTaskPrompt, RUN_TASK_LEAD } from './run-task-turn.js';
+
+describe('LLM_TITLE_PROMPT', () => {
+  // The prompt is the only thing that sets the title's language: the call adds the message alone.
+  it('asks for the title in the language of the first message, Title Case only in English', () => {
+    expect(LLM_TITLE_PROMPT).toBe(
+      'Write a concise 3-6 word title for a conversation that begins with the message below. ' +
+      'Write it in the language of that message; use Title Case only for an English title. ' +
+      'No quotes, no trailing punctuation. Reply with ONLY the title.\n\n',
+    );
+  });
+});
+
+describe('llmTitleSource', () => {
+  it('gives a scheduled run\'s task words, not the engine\'s English lead', () => {
+    const turn = compose(runTaskPrompt('Wochenbericht Umsatz', 'Fasse die Umsätze der Vorwoche zusammen.'), '\n');
+    expect(llmTitleSource(turn)).toBe(generateThreadTitle(turn));
+    expect(llmTitleSource(turn)).not.toContain(RUN_TASK_LEAD.slice(0, 20));
+  });
+
+  it('control: an ordinary first message passes through', () => {
+    expect(llmTitleSource('Kannst du mir eine Offerte für Keller AG schreiben?')).toBe('Kannst du mir eine Offerte für Keller AG schreiben?');
+  });
+});
 
 describe('sanitizeLLMTitle', () => {
   it('passes a clean title through unchanged', () => {
@@ -78,5 +103,17 @@ describe('generateThreadTitle', () => {
 
   it('falls back to "New Chat" for an empty message', () => {
     expect(generateThreadTitle('')).toBe('New Chat');
+  });
+});
+
+describe('generateThreadTitle on a scheduled run\'s opening turn', () => {
+  it('names the thread by the task, never by the engine\'s lead', () => {
+    const turn = compose(runTaskPrompt('Daily Report', 'Generate the daily report'), '\n');
+    expect(generateThreadTitle(turn)).toBe('Daily Report');
+    expect(generateThreadTitle(turn)).not.toContain('Carry out');
+    // The answered (re-armed) turn opens the same way.
+    expect(generateThreadTitle(`${turn}\n\nA question you asked earlier has been answered.`)).toBe('Daily Report');
+    // Control: an owner's message that merely quotes the lead is titled as written.
+    expect(generateThreadTitle(`Why does it say: ${RUN_TASK_LEAD}`)).toBe(`Why does it say: ${RUN_TASK_LEAD}`.slice(0, 77) + '...');
   });
 });

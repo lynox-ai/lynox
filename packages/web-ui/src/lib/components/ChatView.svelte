@@ -1,7 +1,10 @@
 <script lang="ts">
+	import { consentAnswer } from '../contract/prompt.js';
 	import {
 		sendMessage,
 		retryFailedTurn,
+		sendHeldMessage,
+		removeHeldMessage,
 		abortRun,
 		replyPermission,
 		replyPermissionTabs,
@@ -30,6 +33,7 @@
 		submitMailConnect,
 		cancelMailConnect,
 		getChatError,
+		getUnmatchedAnswerCount,
 		getChatErrorDetail,
 		getRetryStatus,
 		getIsOffline,
@@ -40,6 +44,7 @@
 		getContextBudget,
 		getCompactionOffer,
 		getPendingChangeset,
+		getRollbackStopped,
 		sendBlockedByReview,
 		getChangesetLoading,
 		submitChangesetReview,
@@ -95,13 +100,16 @@
 	import { looksLikeSecret } from '../utils/secret-shapes.js';
 	import { maskText } from '../utils/mask-text.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
+	import { scheduledTaskTurn } from '../utils/scheduled-task-turn.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
-	import { isPipelineRunning } from '../utils/pipeline-status.js';
+	import { isPipelineRunning, prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
 	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
+	import { contentBottomOf, contentLeftBelow, linesLeftBelow, readOnStep, splitPromptHead } from '../utils/prompt-head.js';
+	import PromptQuestionField from './PromptQuestionField.svelte';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
@@ -114,6 +122,8 @@
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { canChooseModel, isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { tierName } from '../utils/tier-words.js';
+	import { speakHttpFailureText, transcribeFailureText } from './voice-failure.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -123,7 +133,8 @@
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
+	import PasskeyPrompt from './PasskeyPrompt.svelte';
 	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	// Welcome screen state
@@ -519,7 +530,7 @@
 
 	/** Tool call label: returns { action, subject } or null if hidden.
 	 *  Logic lives in `utils/tool-call-label.ts` so the per-tool rules
-	 *  (especially memory_recall's query/namespace fallback) are unit-tested
+	 *  (the subject each tool shows, and the bounds on it) are unit-tested
 	 *  outside this component. */
 	function toolCallLabel(tc: ToolCallInfo): { action: string; subject: string } | null {
 		return resolveToolCallLabel(tc.name, tc.input, t);
@@ -528,7 +539,7 @@
 	type GroupedBlock =
 		| { type: 'text'; text: string }
 		| { type: 'thinking'; text: string }
-		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status'] }
+		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status']; unsuccessful: boolean }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'spawn'; spawnId: string };
 
@@ -660,8 +671,10 @@
 				if (last && last.type === 'tools' && last.action === label.action) {
 					if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
 					last.status = worstStatus(last.status, tc.status);
+					// One member that did not succeed makes the row say so, as one error makes it ✗.
+					if (tc.unsuccessful === true) last.unsuccessful = true;
 				} else {
-					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status });
+					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status, unsuccessful: tc.unsuccessful === true });
 				}
 			}
 		}
@@ -669,6 +682,10 @@
 	}
 
 	let inputText = $state('');
+	/** Whether something other than the person put text into the composer since it was last
+	 *  empty (a draft handed back, a prefill): such a message does not say it was typed. */
+	let composerPrefilled = false;
+	$effect(() => { if (inputText === '') composerPrefilled = false; });
 	let messagesEl: HTMLDivElement;
 	let autoScroll = $state(true);
 	// DK-UX: inline edit state for the untrusted-knowledge review chip (edit_approve).
@@ -683,6 +700,67 @@
 	let isDragging = $state(false);
 	let recording = $state(false);
 	let selectedOptions = $state<string[]>([]);
+	/** Set by the confirmation's question field when too little height is left for about four of its
+	 *  lines: the card then keeps its height and the stack scrolls, buttons included. */
+	let promptTooLow = $state(false);
+	/** Lines of a question without a consent kind (the model's own, a tool's confirmation) that lie
+	 *  below its box's edge. Such a question is rendered markup in a box of fixed height; without a
+	 *  count and a fade the end of it is not seen, and it may be what the yes is for. */
+	let questionBelow = $state(0);
+	const questionBelowLabel = $derived(questionBelow === 1 ? t('chat.prompt_read_more_one') : tf('chat.prompt_read_more', { n: String(questionBelow) }));
+	function questionBox(): HTMLElement | null {
+		return typeof document === 'undefined' ? null : document.querySelector<HTMLElement>('[data-pending-prompt] [data-prompt-markdown]');
+	}
+	function measureQuestion(): void {
+		const el = questionBox();
+		if (!el) { questionBelow = 0; return; }
+		const contentBottom = contentBottomOf(el.lastChild);
+		const left = contentLeftBelow({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, scrollTop: el.scrollTop, bottom: el.getBoundingClientRect().bottom }, contentBottom);
+		questionBelow = linesLeftBelow(left, parseFloat(getComputedStyle(el).lineHeight) || 22);
+	}
+	/** On by the whole lines seen above the fade (`readOnStep`): no line is passed over. */
+	function readOnQuestion(): void {
+		const el = questionBox();
+		if (!el) return;
+		const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22;
+		const fade = el.parentElement?.querySelector<HTMLElement>(':scope > [data-prompt-fade]')?.offsetHeight ?? 32;
+		el.scrollBy({ top: readOnStep(el.clientHeight, lineHeight, fade), behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
+	}
+	$effect(() => {
+		void pendingPermission?.promptId;
+		void pendingPermission?.question;
+		void pendingPermission?.segments;
+		void inBatchMode;
+		let frame = 0;
+		const schedule = (): void => {
+			if (typeof requestAnimationFrame === 'undefined') { measureQuestion(); return; }
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(measureQuestion);
+		};
+		questionBelow = 0;
+		let ro: ResizeObserver | null = null;
+		let disposed = false;
+		// The box renders after this effect's own pass; it is looked up once the DOM is updated, and
+		// measured at once, so the count is there on the first painted frame.
+		void tick().then(() => {
+			if (disposed) return;
+			measureQuestion();
+			const el = questionBox();
+			if (el && typeof ResizeObserver !== 'undefined') {
+				ro = new ResizeObserver(schedule);
+				ro.observe(el);
+				for (const child of el.children) ro.observe(child);
+			}
+			schedule();
+		});
+		if (typeof window !== 'undefined') window.addEventListener('resize', schedule);
+		return () => {
+			disposed = true;
+			ro?.disconnect();
+			if (typeof window !== 'undefined') window.removeEventListener('resize', schedule);
+			if (typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(frame);
+		};
+	});
 	// Clear the multi-select working set whenever the ACTIVE prompt changes, so a
 	// selection from a prompt that was replaced without a click (server timeout →
 	// next ask_user, or a thread switch) can't leak pre-checked into the next
@@ -845,6 +923,7 @@
 	);
 
 	const pendingChangeset = $derived(getPendingChangeset());
+	const rollbackStopped = $derived(getRollbackStopped());
 	const changesetLoading = $derived(getChangesetLoading());
 
 	const UNSUPPORTED_FORMATS = new Set(['image/heic', 'image/heif']);
@@ -1075,8 +1154,7 @@
 
 						if (!res.ok || !res.body) {
 							removePlaceholder(placeholderIdx);
-							if (res.status === 503) addToast(t('chat.whisper_unavailable'), 'error');
-							else addToast(t('chat.transcribe_failed'), 'error');
+							addToast(res.ok ? t('chat.transcribe_failed') : transcribeFailureText(res.status), 'error');
 							return;
 						}
 
@@ -1129,7 +1207,7 @@
 								// through `await sendMessage` would freeze the composer on
 								// "Transcribing…" for the entire answer.
 								transcribing = false;
-								void sendMessage(`🎤 ${trimmed}`, undefined, undefined, { typed: true });
+								void sendMessage(`🎤 ${trimmed}`, undefined, undefined, { typed: true, composedFromEmpty: true });
 							} else {
 								// Append rather than replace so a typed prefix isn't
 								// clobbered when the user dictates after typing.
@@ -1293,14 +1371,16 @@
 		// and pushing the chat off-screen. Users only need the last answer
 		// to reconsider via the "edit" button below.
 		answeredPrompts = [{ question: pendingPermission.question, answer: display ?? answer }];
-		// Permission-guard answers ('y'/'n') hand off to a tool that takes
+		// Answers to the engine's confirmations (its keys) hand off to a tool that takes
 		// seconds to run. The store clears `pendingPermission` synchronously
 		// inside replyPermission(), so without this we'd swap straight from
 		// the prompt card to the streaming spinner with no acknowledgment
 		// that the click landed. Hold a transient confirmation in the same
 		// slot until the next assistant token streams or a short timeout.
-		if (answer === 'y' || answer === 'n') {
-			approvalInflight = { question: pendingPermission.question, answer };
+		// A click on one of the engine's confirmations, by its key; typed text is no key.
+		const decided = pendingPermission.consent !== undefined ? consentAnswer(pendingPermission.consent, answer) : undefined;
+		if (decided !== undefined) {
+			approvalInflight = { question: pendingPermission.question, answer: decided === 'deny' || decided === 'cancel' ? 'n' : 'y' };
 			if (approvalInflightTimer) clearTimeout(approvalInflightTimer);
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
 		}
@@ -1335,8 +1415,14 @@
 		// answer. Fixed timing (setTimeout) raced on slow connections; the
 		// observer approach below removes that race for legacy engines.
 		for (let idx = 0; idx < batchAnswers.length; idx++) {
+			// A model's answers answer the model's questions only: the engine's own confirmation,
+			// arrived between two of them, is left for its own card.
+			if (getPendingPermission()?.consent !== undefined) break;
 			const prevPromptId = getPendingPermission()?.promptId;
 			void replyPermission(batchAnswers[idx]!); /* never rejects; a reply that does not arrive is reported */
+			// A question without its id is not answered (`replyPermission` brings the open one back
+			// instead), and that one is not the next of this batch: stop, so no later answer lands on it.
+			if (prevPromptId === undefined) break;
 			if (idx + 1 < batchAnswers.length) {
 				const arrived = await waitForNextPrompt(prevPromptId);
 				if (!arrived) break; // tool errored or completed early — stop sending
@@ -1402,6 +1488,12 @@
 		if (pendingTabsPrompt) return; // v2 path owns it
 		if (!pendingPermission) {
 			if (!isStreaming && inBatchMode && batchMode === 'v1') resetBatch();
+			return;
+		}
+		// The engine's own confirmation is never one of the model's batched questions: its card
+		// is shown, and no batch answer can reach it.
+		if (pendingPermission.consent !== undefined) {
+			if (inBatchMode && batchMode === 'v1') resetBatch();
 			return;
 		}
 		const lastMsg = messages[messages.length - 1];
@@ -1509,7 +1601,7 @@
 		switch (err.code) {
 			case 'unavailable': return t('chat.speak_failed_unavailable');
 			case 'too_long':    return t('chat.speak_failed_too_long');
-			case 'http':        return `${t('chat.speak_failed_http')} ${String(err.status)}`;
+			case 'http':        return speakHttpFailureText(err.status);
 			case 'network':     return t('chat.speak_failed_network');
 			case 'stream':      return t('chat.speak_failed_stream');
 			case 'synth':       return t('chat.speak_failed_synth');
@@ -1658,6 +1750,15 @@
 	);
 	const pendingMailConnect = $derived(getPendingMailConnect());
 	const chatError = $derived(getChatError());
+	// After an answer that named no question, focus goes to the sentence, not to a button of the
+	// card that came back: that card may ask something else, and a button with focus is one key away.
+	let chatErrorBanner = $state<HTMLDivElement | null>(null);
+	// Runs on each such answer, and only then: not on a language switch or a later error.
+	let unmatchedSeen = untrack(() => getUnmatchedAnswerCount());
+	$effect(() => {
+		const n = getUnmatchedAnswerCount();
+		if (n > unmatchedSeen) { unmatchedSeen = n; untrack(() => chatErrorBanner)?.focus(); }
+	});
 	const chatErrorDetail = $derived(getChatErrorDetail());
 	const runInterrupted = $derived(getRunInterrupted());
 	const retryStatus = $derived(getRetryStatus());
@@ -1693,6 +1794,7 @@
 	function openPlanInNewChat() {
 		planInNewChat();
 		inputText = getContainedPrefill() ?? '';
+		composerPrefilled = inputText !== '';
 		void tick().then(() => {
 			if (!textareaEl) return;
 			autoResize({ target: textareaEl } as unknown as Event);
@@ -1814,6 +1916,7 @@
 	$effect(() => registerComposerDraft((text) => {
 		if (inputText.trim() !== '') return false;
 		inputText = text;
+		composerPrefilled = true;
 		focusInput();
 		return true;
 	}));
@@ -1824,6 +1927,7 @@
 	afterNavigate(() => {
 		// A chat opened with "Plan in a new chat" keeps its prefill until its first run.
 		inputText = getContainedPrefill() ?? '';
+		composerPrefilled = inputText !== '';
 		focusInput();
 		stopSpeech();
 		releaseMicNow();
@@ -1895,6 +1999,7 @@
 		// An open changeset review holds the send. Ask before clearing, so the text stays.
 		if (sendBlockedByReview()) return;
 		const files = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
+		const fromEmpty = !composerPrefilled;
 		inputText = '';
 		pendingFiles = [];
 		if (textareaEl) textareaEl.style.height = 'auto';
@@ -1906,7 +2011,7 @@
 		// after) is what makes it robust.
 		pinToBottomFor(1500);
 		// Only text the user typed is marked: the stand-in for a files-only send is the app's.
-		await sendMessage(task || t('chat.analyze_files'), undefined, files, task ? { typed: true } : undefined);
+		await sendMessage(task || t('chat.analyze_files'), undefined, files, task ? { typed: true, ...(fromEmpty ? { composedFromEmpty: true } : {}) } : undefined);
 	}
 
 	function isAtBottom(): boolean {
@@ -2192,7 +2297,7 @@
 						{/if}
 						{#if child.tier}
 							<span class="text-text-subtle/50" aria-hidden="true">·</span>
-							<span class="uppercase tracking-wide text-[9px] {child.downgraded ? 'text-warning/80' : 'text-text-subtle/50'}">{child.tier}</span>
+							<span class="uppercase tracking-wide text-[9px] {child.downgraded ? 'text-warning/80' : 'text-text-subtle/50'}">{tierName(child.tier) ?? child.tier}</span>
 						{/if}
 						{#if child.downgraded}
 							<span class="text-warning/80">{t('spawn.downgraded_note')}</span>
@@ -2534,15 +2639,20 @@
 	     overscroll-locked this is belt-and-suspenders, not load-bearing —
 	     it stays so the transcript's overscroll semantics remain local even
 	     if an ancestor becomes scrollable again someday. -->
-	<div class="relative flex min-h-0 flex-1 flex-col">
-	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
+	<!-- `min-h-12`: with little height (a phone in landscape with the keyboard open) the
+	     transcript keeps a strip of its own instead of running under the prompt stack. -->
+	<div data-chat-transcript class="relative flex min-h-12 flex-1 flex-col">
+	<div class="flex flex-1 min-w-0 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
+		<!-- The passkey hint (U-454): a strip at the top of the transcript, in its column, the only place
+		     it shows. It scrolls away with a long thread and never covers the composer or a work page. -->
+		<PasskeyPrompt />
 		{#if threadReadRefusal !== null && messages.length === 0}
 			<!-- Not this reader's chat to read: the reason, not an empty start page. -->
-			<div class="flex h-full items-center justify-center">
+			<div class="flex flex-1 items-center justify-center">
 				<p class="max-w-md text-center text-sm text-text-muted" role="status" data-thread-read-refused>{t(threadReadRefusal)}</p>
 			</div>
 		{:else if messages.length === 0 && !isStreaming}
-			<div class="flex h-full items-center justify-center">
+			<div class="flex flex-1 items-center justify-center">
 				{#if hasApiKey === false}
 					{@const variant = inlineProviderVariant()}
 					{@const labelText = variant === 'mistral' ? 'Mistral API Key' : variant === 'openai-custom' ? 'API Key' : t('onboard.api_key_label')}
@@ -2755,7 +2865,7 @@
 			</div>
 		{/if}
 
-		<div class="mx-auto max-w-3xl lg:max-w-4xl xl:max-w-5xl space-y-5">
+		<div class="mx-auto w-full max-w-3xl lg:max-w-4xl xl:max-w-5xl space-y-5">
 			{#each messages as msg, msgIdx (msg.queueId ?? msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.compactionNote}
 					<!-- Rendered as a left-bordered inline block, the same visual
@@ -2786,7 +2896,7 @@
 					{@const noteBody = t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey)}
 					{@const titleKey = `chat.note.${msg.note.code}.title`}
 					{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
-					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'thinking_loop' || msg.note.code === 'tool_call_imitation' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget' || msg.note.code === 'input_required' || msg.note.code === 'approval_sent'}
+					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'thinking_loop' || msg.note.code === 'tool_call_imitation' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget' || msg.note.code === 'input_required' || msg.note.code === 'approval_sent' || msg.note.code === 'hold_exhausted'}
 					<div class="flex items-start gap-2 text-[13px] md:text-[12px] border-l-2 {isInfoNote ? 'border-border' : 'border-danger/40'} pl-3 py-1 my-1" role="status">
 						{#if isInfoNote}
 							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-text-subtle mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
@@ -2811,10 +2921,26 @@
 									<button type="button" class="mt-1 inline-flex min-h-6 items-center rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text" onclick={() => rewriteApprovalInChat(rewriteId)} data-approval-rewrite>{t('chat.note.approval_rewrite')}</button>
 								</div>
 							{/if}
-							{#if msg.note.detail}
+							<!-- A hold_exhausted note's code carries the whole sentence; its detail is the engine's English copy of it. -->
+							{#if msg.note.detail && msg.note.code !== 'hold_exhausted'}
 								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>
 							{/if}
 						</div>
+					</div>
+				{:else if msg.role === 'user' && scheduledTaskTurn(stripLoadedContext(stripNowMarker(msg.content)))}
+					<!-- A scheduled run's opening turn: the engine wrote it, not the owner, so it is
+					     shown as the task it carries out, not as the owner's bubble (U-160). -->
+					{@const task = scheduledTaskTurn(stripLoadedContext(stripNowMarker(msg.content)))!}
+					<div class="rounded-[var(--radius-md)] border border-border bg-bg-muted px-4 py-2.5 text-sm" data-scheduled-task>
+						<div class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('chat.scheduled_task')}</div>
+						<div class="mt-1 font-medium text-text whitespace-pre-wrap break-words">{task.title}</div>
+						{#if task.description}
+							<div class="mt-1 text-text-muted whitespace-pre-wrap break-words">{task.description}</div>
+						{/if}
+						{#if task.question !== undefined}
+							<div class="mt-2 text-text-muted whitespace-pre-wrap break-words" data-scheduled-task-question><span class="text-text-subtle">{t('chat.scheduled_task_question')}</span> {task.question}</div>
+							<div class="mt-1 text-text-muted whitespace-pre-wrap break-words" data-scheduled-task-answer><span class="text-text-subtle">{t('chat.scheduled_task_answer')}</span> {task.answer}</div>
+						{/if}
 					</div>
 				{:else if msg.role === 'user'}
 					{@const userText = stripLoadedContext(stripNowMarker(msg.content))}
@@ -2827,6 +2953,16 @@
 							{@const ts = formatMessageTime(msg.createdAt)}
 							{#if ts}<span class="mr-auto mt-2.5 shrink-0 text-[10px] text-text-subtle/50 select-none tabular-nums">{ts}</span>{/if}
 						{/if}
+						{#if msg.held}
+							<button
+								onclick={() => removeHeldMessage(msg)}
+								aria-label={t('chat.remove_held')}
+								title={t('chat.remove_held')}
+								class="mt-1 shrink-0 rounded-full p-1 text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+							</button>
+						{/if}
 						{#if msg.queued}
 							<button
 								onclick={() => removeQueuedMessage(msg)}
@@ -2838,8 +2974,8 @@
 							</button>
 						{/if}
 						<button
-							onclick={() => { if (msg.failed) void retryFailedTurn(msg, userText); /* never rejects; asks the server before sending again */ else void copyWithToast(userText); }}
-							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
+							onclick={() => { if (msg.held) void sendHeldMessage(msg); /* never rejects; asks the server before sending */ else if (msg.failed) void retryFailedTurn(msg, userText); /* never rejects; asks the server before sending again */ else void copyWithToast(userText); }}
+							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.held || msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
 							{#if hasVoicePrefix(userText)}
 								<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3.5 w-3.5 mr-1.5 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(userText)}
@@ -2848,6 +2984,8 @@
 							{/if}
 							{#if msg.failed}
 								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-danger/70 mt-1">{t('chat.send_failed')}</span>
+							{:else if msg.held}
+								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-text-subtle mt-1">{t('chat.send_held')}</span>
 							{:else if msg.queued}
 								<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle ml-2">{t('chat.queued')}</span>
 							{/if}
@@ -2915,8 +3053,14 @@
 										</svg>
 									{/if}
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
-									{#if !isRunning}
-										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}">{isError ? '✗' : '✓'}</span>
+									{#if isError}
+										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] text-danger">✗</span><span class="sr-only">{t('chat.tool.status_error')}</span>
+									{:else if !isRunning && gBlock.unsuccessful}
+										<!-- A call that returned without doing what was asked: muted, in the row's own colour,
+										     not danger. The model reads the failure and usually deals with it in its answer. -->
+										<span class="ml-auto md:ml-1 text-[11px] md:text-[10px]">{t('chat.tool.unsuccessful')}</span>
+									{:else if !isRunning}
+										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] text-success">✓</span><span class="sr-only">{t('chat.tool.status_done')}</span>
 									{/if}
 								</div>
 							{:else if gBlock.type === 'spawn'}
@@ -2941,7 +3085,7 @@
 										aria-label={t('chat.ai_generated_aria')}
 									>{t('chat.ai_generated_badge')}</span>
 								{/if}
-								<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
+								<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} containedChat={threadContained} />
 						{/if}
 						{/each}
 						<!-- One footer per logical reply, not per text-block. A single
@@ -2977,12 +3121,12 @@
 									<!-- Artifact card (the only non-prose text group here) the
 									     pre-blocks path used to drop. Prose (=== msg.content)
 									     renders once below, so it's skipped here. -->
-									<MarkdownRenderer content={lg.text} streaming={isStreaming && msgIdx === messages.length - 1} />
+									<MarkdownRenderer content={lg.text} streaming={isStreaming && msgIdx === messages.length - 1} containedChat={threadContained} />
 								{/if}
 							{/each}
 							{#if msg.content}
 								{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
-								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
+								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} containedChat={threadContained} />
 								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 							{/if}
 						{/if}
@@ -3232,7 +3376,7 @@
 			{/if}
 
 			{#if chatError}
-				<div role="alert" class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
+				<div role="alert" tabindex="-1" bind:this={chatErrorBanner} class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
 					<!-- eslint-disable-next-line svelte/no-at-html-tags -- chatError is HTML-escaped right here before the one link substitution, which keeps http(s) and relative URLs only -->
 					<span class="flex-1">{@html chatError
@@ -3296,7 +3440,10 @@
 		 worse than the bug. `max-h-[60%]` keeps the transcript from collapsing
 		 to 0px behind a tall block (flex-1 has basis 0, so in the shrink phase
 		 it loses everything without the cap). -->
-	<div data-chat-stack class="min-h-0 max-h-[60%] shrink overflow-y-auto scrollbar-thin">
+	<!-- A flex column, so a permission card can shrink inside it: its question block scrolls and
+	     its buttons stay in view. The other blocks keep their content height and scroll with the
+	     stack as before. -->
+	<div data-chat-stack class="flex min-h-0 max-h-[60%] shrink flex-col overflow-y-auto scrollbar-thin">
 	<!-- Pipeline progress: sticky above input during active execution only -->
 	{#if activePipeline && isStreaming && pipelineRunning}
 		<div class="border-t border-border bg-bg-subtle px-4 py-2">
@@ -3316,6 +3463,8 @@
 					<ChangesetReview
 						files={pendingChangeset}
 						onReview={(action, rolledBackFiles) => submitChangesetReview(action, rolledBackFiles)}
+						messageWaiting={queueLength > 0}
+						{rollbackStopped}
 					/>
 				{/if}
 			</div>
@@ -3462,15 +3611,24 @@
 	<!-- Permission / Ask User prompt (hidden in batch mode) -->
 	{#if pendingPermission && !inBatchMode}
 		{@const opts = pendingPermission.options ?? []}
-		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
-		{@const isDeepConsent = opts.includes('Run on balanced')}
+		<!-- The engine's own confirmation is known by its marker alone, never by its option texts:
+		     a question the model writes may offer "Allow" and "Deny" and stays an ordinary one. -->
+		{@const isPermissionGuard = pendingPermission.consent === 'guard'}
+		{@const isDeepConsent = pendingPermission.consent === 'deep'}
 		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
-		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
-			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
+		<!-- The engine's own confirmation: with little height the card shrinks, not its buttons. Only
+		     the question row gives way; its head stays and its value scrolls, with a count of the lines
+		     below. When not even about four lines would fit, the card keeps its height and the stack
+		     scrolls instead: the question wins over the buttons. A model's own question keeps its
+		     height as before. -->
+		{@const shrinks = (isPermissionGuard || isDeepConsent) && !promptTooLow}
+		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="flex {shrinks ? 'min-h-0' : ''} flex-col border-t border-border bg-bg-subtle px-4 py-3">
+			<div class="flex {shrinks ? 'min-h-0' : ''} w-full flex-col max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
 				{@render promptOrigin(pendingPermission.origin)}
-				<div class="flex items-start gap-2">
+				<div data-prompt-question-row class="flex {shrinks ? 'min-h-0' : ''} items-stretch gap-2">
 					{#if isPermissionGuard || isDeepConsent}
-						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
+						{@const split = splitPromptHead(pendingPermission.question, pendingPermission.segments)}
+						<PromptQuestionField head={split.head} lines={split.lines} bind:tooLow={promptTooLow} />
 					{:else}
 						<!-- renderPromptMarkdown, NOT MarkdownRenderer: the chat renderer
 						     keeps DOMPurify's defaults, which permit `div`, `style` and
@@ -3481,14 +3639,28 @@
 						     with MarkdownRenderer's own stylesheet: without them a single
 						     long token — a tracking URL in a body preview — scrolls the
 						     prompt sideways. -->
-						<div class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
+						<!-- While its end lies below the box's edge, a fade on the box and a button on its own row
+						     under it say how many lines, as the engine's own confirmation does. -->
+						<div class="flex flex-1 min-w-0 flex-col">
+						<div class="relative flex min-w-0 flex-col">
+						<div data-prompt-question data-prompt-markdown onscroll={measureQuestion} class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
 							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list; segment values are spliced in afterwards, HTML-escaped -->
 							{@html pendingPermission.segments
 								? renderPromptSegments(pendingPermission.segments)
 								: renderPromptMarkdown(pendingPermission.question)}
 						</div>
+						{#if questionBelow > 0}
+							<div data-prompt-fade class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-bg-subtle to-transparent"></div>
+						{/if}
+						</div>
+						{#if questionBelow > 0}
+							<div class="flex shrink-0 justify-end pt-1">
+								<button data-prompt-read-more type="button" onclick={readOnQuestion} class="whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-xs text-text-muted hover:text-text">{questionBelowLabel} <span aria-hidden="true">↓</span></button>
+							</div>
+						{/if}
+					</div>
 					{/if}
-					<div class="flex items-center gap-1.5 shrink-0">
+					<div class="flex items-center gap-1.5 shrink-0 self-start">
 						{#if promptSecondsLeft !== null && promptSecondsLeft !== undefined}
 							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
 						{/if}
@@ -3502,14 +3674,14 @@
 
 				{#if isDeepConsent}
 					<div class="flex flex-wrap gap-2">
-						<button onclick={() => answerPrompt('allow deep')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.consent_allow_deep')}</button>
-						<button onclick={() => answerPrompt('run on balanced')} class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/25 transition-opacity">{t('chat.consent_run_balanced')}</button>
-						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.consent_cancel')}</button>
+						<button onclick={() => answerPrompt('deep', t('chat.consent_allow_deep'))} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.consent_allow_deep')}</button>
+						<button onclick={() => answerPrompt('balanced', t('chat.consent_run_balanced'))} class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/25 transition-opacity">{t('chat.consent_run_balanced')}</button>
+						<button onclick={() => answerPrompt('cancel', t('chat.consent_cancel'))} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.consent_cancel')}</button>
 					</div>
 				{:else if isPermissionGuard}
 					<div class="flex flex-wrap gap-2">
-						<button onclick={() => answerPrompt('y')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
-						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
+						<button onclick={() => answerPrompt('allow', t('chat.allow'))} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
+						<button onclick={() => answerPrompt('deny', t('chat.deny'))} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
 					</div>
 				{:else if pendingPermission.multiSelect && visibleOptions.length > 0}
 					<!-- Multi-select: toggle several, then Send. -->
@@ -3820,11 +3992,15 @@
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-bar>
 				<span>{containedTextKeys('bar', threadContainedUnknown).map((k) => t(k)).join(' ')}</span>
 				{#if threadContainedUnknown === null}{@render planNewChatButton()}{/if}
+				<!-- Said where the button is, before it is pressed: lynox's answers stay behind. -->
+				{#if threadContainedUnknown === null}<p class="basis-full" data-plan-new-chat-note>{t('contained.plan_new_chat_note')}</p>{/if}
 			</div>
 		{:else if containedOrigin}
 			<!-- A chat opened with "Plan in a new chat", before its first run. -->
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 space-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-origin>
 				{#if originKeys && originKeys.length > 0}<p data-contained-origin-line>{originKeys.map((k) => t(k)).join(' ')}</p>{/if}
+				<!-- Only while the input still holds what was carried over: after an edit or a paste it may not. -->
+				{#if inputText !== '' && inputText === getContainedPrefill()}<p data-contained-input-note>{t('contained.new_chat_input_note')}</p>{/if}
 				{#if containedOrigin.removedHidden}<p data-contained-removed-hidden>{t('contained.removed_hidden')}</p>{/if}
 			</div>
 		{/if}

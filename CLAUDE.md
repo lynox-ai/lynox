@@ -91,7 +91,7 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 - Background tasks: WorkerLoop + CronParser + NotificationRouter
 - Agent Memory: SQLite (AgentMemoryDb, `~/.lynox/agent-memory.db`) — entity graph, thread insights (per-thread aggregated stats), pattern detection, KPI metrics, confidence evolution, memory consolidation, retrieval feedback loop. ONNX embeddings, brute-force cosine search, recursive CTE graph traversal. The Foundation-Rework-v2 subject-graph store (`engine.db`, `engine-db.ts`/`subject-store.ts`) is flag-gated OFF (`subject_graph_enabled` config / `LYNOX_SUBJECT_GRAPH_ENABLED` env) — legacy agent-memory path stays default until a per-tenant cutover
 - Backup: VACUUM INTO + AES-256-GCM encryption + GDrive upload
-- Migration: Zero-knowledge self-hosted→managed transfer. X25519 ECDH + AES-256-GCM chunk encryption + HMAC-signed handshake. Engine-to-engine (browser orchestrates via SSE). Migration token auth, DB name whitelist, 64 chunks × 8 MB each (~512 MB total ceiling).
+- Migration: Zero-knowledge self-hosted→managed transfer. X25519 ECDH + AES-256-GCM chunk encryption + HMAC-signed handshake. Engine-to-engine (browser orchestrates via SSE). Migration token auth, DB name whitelist, at most 64 chunks of up to 8 MiB and 500 MiB in total (`MIGRATION_MAX_CHUNKS`, `MIGRATION_MAX_TOTAL_BYTES`), checked on the source before encryption and again on the destination.
 - API Store: profile-first enforcement, agent-driven setup
 - CRM: agent-driven contacts/deals, entity-primary, DataStore for structured tracking
 - Bugsink: error reporting, PII scrubbed. Managed: always active (Art. 6(1)(f) legitimate interest, self-hosted EU). Self-hosted: opt-in via LYNOX_BUGSINK_DSN.

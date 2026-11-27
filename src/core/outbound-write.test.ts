@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { SecretStore } from './secret-store.js';
 import {
-  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
+  bodyFieldNames, bodyForQuestion, bodyMayWriteGraphql, urlMayWriteGraphql, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
+  readAddressWrites, queryForQuestion, headersForQuestion, pathHoldsSecret,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -70,6 +71,25 @@ describe('a query or form name a server may read as the override', () => {
   ] as const)('%s=DELETE is gated as %s, in the query and in a form body', (name, want) => {
     expect(effectiveWriteMethod('POST', {}, `${U}?${name}=DELETE`)).toBe(want);
     expect(effectiveWriteMethod('POST', FORM, U, `${name}=DELETE`)).toBe(want);
+  });
+
+  // A server that splits the query on `;` too (Rack before 3, Python's `parse_qs` before 3.9.2,
+  // servlet containers on request) or decodes `%uXXXX` (IIS) reads an override `searchParams` does
+  // not see as a field of its own.
+  it.each([
+    ['x=1;_method=DELETE', 'DELETE'],
+    ['%u005fmethod=DELETE', 'DELETE'],
+    ['x=1;y=2', 'GET'],
+  ] as const)('reads ?%s on a GET as %s', (query, want) => {
+    expect(effectiveWriteMethod('GET', {}, `${U}?${query}`)).toBe(want);
+  });
+
+  // A proxy that decodes the path before it forwards hands the server what follows a `%3F` as a
+  // query string, as the GraphQL check reads it (`urlQueryStrings`).
+  it('reads an override behind an escaped ? in the path', () => {
+    expect(effectiveWriteMethod('GET', {}, `${U}%3F_method=DELETE`)).toBe('DELETE');
+    expect(effectiveWriteMethod('GET', {}, `${U}%253F_method=DELETE`)).toBe('DELETE');
+    expect(effectiveWriteMethod('GET', {}, `${U}%3Fq=1`)).toBe('GET');
   });
 
   it('reads a multipart part name the same way', () => {
@@ -410,7 +430,7 @@ describe('bodyFieldNames', () => {
   it('makes a name single-line and clips count and length', () => {
     const many = Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`k${i}`, i]));
     expect(bodyFieldNames(JSON.stringify(many))).toMatch(/"k11" and 3 more$/);
-    expect(bodyFieldNames(JSON.stringify({ 'a\nb‮c': 1 }))).toBe('fields "a bc"');
+    expect(bodyFieldNames(JSON.stringify({ 'a\nb\u202Ec': 1 }))).toBe('fields "a bc"');
     expect(bodyFieldNames(JSON.stringify({ ['x'.repeat(60)]: 1 }))).toBe(`fields "${'x'.repeat(40)}…"`);
   });
   it('describes any other body by its size', () => {
@@ -768,6 +788,117 @@ describe('graphqlWrite', () => {
   });
 });
 
+describe('bodyMayWriteGraphql — a body a GraphQL server on any path may run as a write', () => {
+  const JSON_CT = { 'Content-Type': 'application/json' };
+  it.each([
+    ['a mutation under query', '{"query":"mutation{a}"}'],
+    ['a named mutation with variables', '{"query":"mutation M($a:Int){a(x:$a)}"}'],
+    ['a subscription', '{"query":"subscription{a}"}'],
+    ['a comma after the word', '{"query":"mutation,{a}"}'],
+    ['a comment after the word', '{"query":"mutation #c\\n{a}"}'],
+    ['a directive', '{"query":"mutation @live {a}"}'],
+    ['a # inside a string before it', '{"query":"query{a(s:\\"#\\")} mutation{b}"}'],
+    ['the word escaped in JSON', '{"query":"\\u006dutation{a}"}'],
+    ['the key in another case', '{"QUERY":"mutation{a}"}'],
+    ['the word in another case (read wider than GraphQL)', '{"query":"MUTATION{a}"}'],
+    ['a batch', '[{"query":"{a}"},{"query":"mutation{b}"}]'],
+    ['a key named twice (a server may keep the first)', '{"query":"mutation{b}","query":"{a}"}'],
+    ['a persisted query by documentId', '{"documentId":"abc","variables":{}}'],
+    ['a persisted query by doc_id', '{"doc_id":"1"}'],
+    ['a persisted query by queryId', '{"queryId":"1"}'],
+    ['an Apollo persisted query', '{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"x"}}}'],
+  ])('JSON: %s', (_k, body) => {
+    expect(bodyMayWriteGraphql(body, JSON_CT)).toBe(true);
+  });
+
+  it.each([
+    ['a form pair', 'query=mutation%7Ba%7D'],
+    ['a form pair after ;', 'x=1;query=mutation%7Ba%7D'],
+    ['a form pair with %u', 'query=%u006Dutation%7Ba%7D'],
+    ['a form key as PHP names it', 'query%5B%5D=mutation%7Ba%7D'],
+    ['a persisted query in a form', 'documentId=abc'],
+    ['a document as the whole body (application/graphql)', 'mutation { a }'],
+  ])('other bodies: %s', (_k, body) => {
+    expect(bodyMayWriteGraphql(body, { 'Content-Type': 'application/x-www-form-urlencoded' })).toBe(true);
+  });
+
+  it('reads every body as a form as well, one that parses as JSON included', () => {
+    const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    expect(bodyMayWriteGraphql('{"a":"&query=%6Dutation%7Bx%7D&"}', FORM)).toBe(true);
+    expect(bodyMayWriteGraphql('{"a":"&documentId=x&"}', FORM)).toBe(true);
+    // CONTROL: the same JSON without the pair.
+    expect(bodyMayWriteGraphql('{"a":"query mutation x"}', FORM)).toBe(false);
+  });
+
+  it('refuses a body a lenient server reads as JSON and JSON.parse does not', () => {
+    // The word escaped, so only a JSON reading would see it.
+    expect(bodyMayWriteGraphql('\ufeff{"query":"\\u006dutation{x}"}', {})).toBe(true);
+    expect(bodyMayWriteGraphql('{"query":"\\u006dutation{x}"} x', {})).toBe(true);
+    expect(bodyMayWriteGraphql('  [{"query":"\\u006dutation{x}"}]{}', {})).toBe(true);
+    expect(bodyMayWriteGraphql('not json', { 'Content-Type': 'application/json' })).toBe(true);
+    // CONTROL: a text body that is no JSON and names no write.
+    expect(bodyMayWriteGraphql('Hallo, neue Mutation geplant', { 'Content-Type': 'text/plain' })).toBe(false);
+  });
+
+  it('a multipart body with an operations part, and a body that is not a string', () => {
+    const multipart = '--b\r\nContent-Disposition: form-data; name="operations"\r\n\r\n{"query":"\\u006dutation{a}"}\r\n--b--';
+    expect(bodyMayWriteGraphql(multipart, { 'content-type': 'multipart/form-data; boundary=b' })).toBe(true);
+    expect(bodyMayWriteGraphql({ query: 'mutation{a}' }, JSON_CT)).toBe(true);
+  });
+
+  it.each([
+    ['no body', undefined],
+    ['an empty body', ''],
+    ['a read under query', '{"query":"query{a}"}'],
+    ['a read with a field named mutation', '{"query":"{ mutation }"}'],
+    ['a REST body with the word as a key (the regression of an earlier cut)', '{"subscription":"premium"}'],
+    ['a description that says Mutation (…)', '{"description":"Mutation (Variante) {neu}"}'],
+    ['a longer word', '{"query":"mutations {a}"}'],
+    ['a word that ends in it', '{"query":"{ remutation { a } }"}'],
+    ['a search API whose query is an object', '{"query":{"match":{"text":"mutation{a}"}}}'],
+    ['a form pair under another key', 'text=mutation%7Ba%7D&x=1'],
+    ['a multipart upload without an operations part', '--b\r\nContent-Disposition: form-data; name="file"\r\n\r\nabc\r\n--b--'],
+  ])('CONTROL, no write: %s', (_k, body) => {
+    const type = body?.startsWith('--b') ? 'multipart/form-data; boundary=b' : body?.startsWith('{') ? 'application/json' : 'application/x-www-form-urlencoded';
+    expect(bodyMayWriteGraphql(body, { 'content-type': type })).toBe(false);
+  });
+
+  it('reads in linear time: a long run of blanks after the word, and the word many times', () => {
+    const started = Date.now();
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: `mutation${' '.repeat(200_000)}x` }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: 'mutation '.repeat(50_000) }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: `mutation #${'#'.repeat(100_000)}` }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql(`mutation${' ,'.repeat(100_000)}`, {})).toBe(false);
+    // A comment with no line break after it, at each of many words.
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: 'mutation#'.repeat(50_000) }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql('mutation#'.repeat(50_000), {})).toBe(false);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('walks a deeply nested body without a stack', () => {
+    // Escaped, so only the walk of the parsed body reads the word; the text as a whole does not.
+    const deep = `${'['.repeat(100_000)}{"query":"\\u006dutation{a}"}${']'.repeat(100_000)}`;
+    expect(bodyMayWriteGraphql(deep, JSON_CT)).toBe(true);
+    expect(bodyMayWriteGraphql(`${'['.repeat(100_000)}{"query":"{a}"}${']'.repeat(100_000)}`, JSON_CT)).toBe(false);
+  });
+});
+
+describe('urlMayWriteGraphql — a URL a GraphQL server on any path may run as a write', () => {
+  it.each([
+    ['https://api.x.example/api?query=mutation%7Bx%7D', true],
+    ['https://api.x.example/api?x=1;query=mutation%7Bx%7D', true],
+    ['https://api.x.example/api?QUERY%5B%5D=mutation%7Bx%7D', true],
+    ['https://api.x.example/api?documentId=abc', true],
+    ['https://api.x.example/api%3Fquery=mutation%7Bx%7D', true],
+    // CONTROL: a read, a search for the word, another key.
+    ['https://api.x.example/api?query=%7Bx%7D', false],
+    ['https://api.x.example/api?query=mutation', false],
+    ['https://api.x.example/api?q=mutation%7Bx%7D', false],
+  ] as const)('%s → %s', (url, want) => {
+    expect(urlMayWriteGraphql(url)).toBe(want);
+  });
+});
+
 describe('graphqlUrlWrites', () => {
   it.each([
     ['https://h.example/graphql?query=mutation%7Ba%7D', true],
@@ -830,5 +961,335 @@ describe('a short secret through the store\'s own mask', () => {
       expect(bodyForQuestion(JSON.stringify({ a: enc(pin) }), mask)).toEqual({ unshowable: 'escaped-secret' });
       expect(bodyForQuestion(JSON.stringify({ a: pin }), mask)).toEqual({ text: '{\n  "a": "***"\n}', escapedSecret: false });
     }
+  });
+});
+
+describe('readAddressWrites', () => {
+  it('reads a method override or a GraphQL mutation as a write, and nothing else', () => {
+    expect(readAddressWrites('https://h.example/items/5?_method=DELETE')).toBe(true);
+    expect(readAddressWrites('https://h.example/items/5?_method=FROB')).toBe(true);
+    expect(readAddressWrites('https://h.example/graphql?query=mutation%7BdeleteAll%7D')).toBe(true);
+    expect(readAddressWrites('https://h.example/graphql?query=%7Bitems%7Bid%7D%7D')).toBe(false);
+    expect(readAddressWrites('https://h.example/items?page=2;size=10')).toBe(false);
+    // An address that does not parse is no write: it fails when it is fetched, under its own error.
+    expect(readAddressWrites('h.example/page')).toBe(false);
+  });
+});
+
+// A value that is JSON text, as a server that parses it reads it: a string in it is the
+// value it unescapes, so a secret written there with an escape (`s…`) is one the mask
+// did not see in the text. Each form has a control with the secret written plainly.
+describe('a secret inside JSON text inside a value', () => {
+  const STORED = 'hunter2secret';
+  const mask = (t: string) => t.replaceAll(STORED, `***${STORED.slice(-4)}`);
+  const escaped = `{"token":"\\u0068${STORED.slice(1)}"}`;
+  const plainInner = JSON.stringify({ token: STORED });
+  const wrap = (inner: string) => JSON.stringify({ wrap: inner });
+  const FORM = 'application/x-www-form-urlencoded';
+
+  it('the escape is what a parse reads as the secret', () => {
+    expect((JSON.parse(escaped) as { token: string }).token).toBe(STORED);
+    expect(mask(escaped)).toBe(escaped);
+  });
+
+  it('a JSON body whose string is JSON text with the secret escaped is not shown; written plainly it is masked', () => {
+    expect(bodyForQuestion(JSON.stringify({ value: escaped }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    const plain = bodyForQuestion(JSON.stringify({ value: STORED }), mask);
+    expect(plain).toEqual({ text: '{\n  "value": "***cret"\n}', escapedSecret: false });
+    const inner = bodyForQuestion(JSON.stringify({ value: plainInner }), mask);
+    expect(inner).toEqual({ text: '{\n  "value": "{\\"token\\":\\"***cret\\"}"\n}', escapedSecret: false });
+  });
+
+  it('as a key of the JSON text too', () => {
+    expect(bodyForQuestion(JSON.stringify({ value: `{"\\u0068${STORED.slice(1)}":1}` }), mask)).toEqual({ unshowable: 'escaped-secret' });
+  });
+
+  it('as a top-level JSON string, and inside an array', () => {
+    expect(bodyForQuestion(JSON.stringify({ value: `"\\u0068${STORED.slice(1)}"` }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(JSON.stringify({ value: `[1,["\\u0068${STORED.slice(1)}"]]` }), mask)).toEqual({ unshowable: 'escaped-secret' });
+  });
+
+  it('in a non-canonical JSON body, where each literal is read on its own', () => {
+    expect(bodyForQuestion(`{"value":${JSON.stringify(escaped)},"n":1.0}`, mask)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`{"value":${JSON.stringify(plainInner)},"n":1.0}`, mask)).toEqual({ text: '{"value":"{\\"token\\":\\"***cret\\"}","n":1.0}', escapedSecret: false });
+  });
+
+  it('a second and a third level of JSON text are read too', () => {
+    expect(bodyForQuestion(JSON.stringify({ value: wrap(escaped) }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(JSON.stringify({ value: wrap(wrap(escaped)) }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    // Control: the same nesting with no secret is shown.
+    expect('text' in bodyForQuestion(JSON.stringify({ value: wrap(wrap('{"a":"b"}')) }), mask)).toBe(true);
+  });
+
+  it('JSON text nested deeper than it is read is not shown, with no secret in it', () => {
+    expect(bodyForQuestion(JSON.stringify({ value: wrap(wrap(wrap('{"a":"b"}'))) }), mask)).toEqual({ unshowable: 'escaped-secret' });
+  });
+
+  it('JSON text whose strings, read, add up past the budget is not shown, with no secret in it', () => {
+    // Each string of about 1 KB costs about 2 KB of the 2 M budget: parsed once, read once.
+    const many = (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => `${'x'.repeat(1000)}${i}`));
+    expect('text' in bodyForQuestion(JSON.stringify({ value: many(800) }), mask)).toBe(true);
+    expect(bodyForQuestion(JSON.stringify({ value: many(1200) }), mask)).toEqual({ unshowable: 'escaped-secret' });
+  });
+
+  it('JSON text with many short strings and no secret is shown, not counted as unread', () => {
+    const many = JSON.stringify(Array.from({ length: 8000 }, (_, i) => `v${i}`));
+    expect('text' in bodyForQuestion(JSON.stringify({ value: many }), mask)).toBe(true);
+  });
+
+  it('a wide array in JSON text with no secret is shown, without running out of stack', () => {
+    const wide = `[${Array(200_000).fill('1').join(',')}]`;
+    expect(() => bodyForQuestion(JSON.stringify({ value: wide }), mask)).not.toThrow();
+    expect('text' in bodyForQuestion(JSON.stringify({ value: wide }), mask)).toBe(true);
+  });
+
+  it('the first of two equal keys in JSON text is read too, which a parse drops and a server may keep', () => {
+    const dup = `{"a":"\\u0068${STORED.slice(1)}","a":"x"}`;
+    expect((JSON.parse(dup) as { a: string }).a).toBe('x');
+    expect(bodyForQuestion(JSON.stringify({ value: dup }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`value=${encodeURIComponent(dup)}`, mask, FORM)).toEqual({ text: 'value = ***', escapedSecret: true });
+  });
+
+  it('JSON text in a form inside a decoded form value is read', () => {
+    expect(bodyForQuestion(`p=${encodeURIComponent(`b=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+    expect(bodyForQuestion(`p=b%3D${encodeURIComponent(encodeURIComponent(escaped))}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+    expect(bodyForQuestion(`p=${encodeURIComponent(`b=${plainInner}`)}`, mask, FORM)).toEqual({ text: 'p = b={"token":"***cret"}', escapedSecret: false });
+    // A name with brackets, as many frameworks write a nested field.
+    expect(bodyForQuestion(`p=${encodeURIComponent(`meta[value]=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+  });
+
+  it('one JSON document per line, and a multipart part, are read line by line', () => {
+    expect(bodyForQuestion(`{"a":1}\n${escaped}`, mask, 'application/x-ndjson')).toEqual({ unshowable: 'escaped-secret' });
+    const part = (inner: string) => `--b\r\nContent-Type: application/json\r\n\r\n${inner}\r\n--b--`;
+    expect(bodyForQuestion(part(escaped), mask, 'multipart/form-data; boundary=b')).toEqual({ unshowable: 'escaped-secret' });
+    expect('text' in bodyForQuestion(part(plainInner), mask, 'multipart/form-data; boundary=b')).toBe(true);
+  });
+
+  it('JSON text after a byte order mark is read', () => {
+    expect(bodyForQuestion(`value=%EF%BB%BF${encodeURIComponent(escaped)}`, mask, FORM)).toEqual({ text: 'value = ***', escapedSecret: true });
+    expect(bodyForQuestion(`\uFEFF${escaped}`, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+  });
+
+  it('JSON text percent-encoded in a form body: the value is starred and the body counts as sending the secret', () => {
+    const shown = bodyForQuestion(`value=${encodeURIComponent(escaped)}&n=1`, mask, FORM);
+    expect(shown).toEqual({ text: 'value = ***\nn = 1', escapedSecret: true });
+    // As the name of a pair too.
+    const named = bodyForQuestion(`${encodeURIComponent(escaped)}=1`, mask, FORM);
+    expect(named).toEqual({ text: '*** = 1', escapedSecret: true });
+    // Control: written plainly, the value is masked and shown.
+    expect(bodyForQuestion(`value=${encodeURIComponent(plainInner)}`, mask, FORM)).toEqual({ text: 'value = {"token":"***cret"}', escapedSecret: false });
+  });
+
+  it('JSON text percent-encoded as a form value, with a `&` inside one of its strings, is read whole: as text it is not shown, in a form the body counts as sending the secret', () => {
+    // Decoded first, the `&` would cut the JSON text in two; read from the value side of the pair, split before it is decoded, it parses.
+    const withAmp = `{"a":"p&q","token":"\\u0068${STORED.slice(1)}"}`;
+    expect(bodyForQuestion(`value=${encodeURIComponent(withAmp)}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`value=${encodeURIComponent(withAmp)}&n=1`, mask, FORM)).toEqual({ text: 'value = ***\nn = 1', escapedSecret: true });
+  });
+
+  it('JSON text as a form value in a body sent as text, unencoded or encoded, is not shown', () => {
+    expect(bodyForQuestion(`value=${escaped}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`value=${encodeURIComponent(escaped)}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`value=${plainInner}`, mask, 'text/plain')).toEqual({ text: 'value={"token":"***cret"}', escapedSecret: false });
+  });
+
+  it('JSON text in a query value is starred and the query counts as sending the secret', () => {
+    expect(queryForQuestion(`?value=${encodeURIComponent(escaped)}`, mask)).toEqual({ text: 'value = ***', secret: true, escaped: true });
+    expect(queryForQuestion(`?value=${encodeURIComponent(plainInner)}`, mask)).toEqual({ text: 'value = {"token":"***cret"}', secret: true, escaped: false });
+  });
+
+  it('JSON text in a header value is not shown', () => {
+    expect(headersForQuestion({ 'X-Meta': escaped }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+    expect(headersForQuestion({ 'X-Meta': plainInner }, mask, () => 'show')).toMatchObject({ lines: ['X-Meta: {"token":"***cret"}'] });
+  });
+
+  it('JSON text in a path segment is starred, and the path counts as holding the secret', () => {
+    const url = `https://h.example/a/${encodeURIComponent(escaped)}`;
+    expect(pathForQuestion(url, mask)).toBe('/a/***');
+    expect(pathHoldsSecret(url, mask)).toBe(true);
+    expect(pathHoldsSecret(`https://h.example/a/${encodeURIComponent('{"a":"b"}')}`, mask)).toBe(false);
+  });
+
+  // JSON text a server's parser reads and `JSON.parse` does not: the literals are read on their
+  // own. Each form, with the secret escaped, is not shown; written plainly it is masked.
+  describe('JSON text a lenient parser reads', () => {
+    const esc = `"\\u0068${STORED.slice(1)}"`;
+    const lenient = [
+      ['NaN', `{"a":NaN,"token":${esc}}`, `{"a":NaN,"token":"${STORED}"}`],
+      ['Infinity', `[-Infinity,${esc}]`, `[-Infinity,"${STORED}"]`],
+      ['a comma at the end', `{"token":${esc},}`, `{"token":"${STORED}",}`],
+      ['text after the value', `{"token":${esc}} x`, `{"token":"${STORED}"} x`],
+    ] as const;
+
+    // A `&` in a string of the JSON text cuts it once the whole body is decoded; the escaped literal is still read.
+    const withAmp = `{"a":"p&q","token":${esc}}`;
+    const plainAmp = `{"a":"p&q","token":"${STORED}"}`;
+
+    it('a form inside a decoded form value, its JSON text carrying a `&` in a string: not shown as text, starred in a form', () => {
+      const nested = (json: string) => `p=${encodeURIComponent(`b=${encodeURIComponent(json)}`)}`;
+      expect(bodyForQuestion(nested(withAmp), mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(nested(withAmp), mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+      // Control: written plainly, nothing counts as an escaped secret.
+      expect(bodyForQuestion(nested(plainAmp), mask, FORM)).toMatchObject({ escapedSecret: false });
+    });
+
+    it('`;` between pairs, with a `&` in a string of the JSON text: not shown as text, starred in a form', () => {
+      const semi = (json: string) => `a=1;value=${encodeURIComponent(json)}`;
+      expect(bodyForQuestion(semi(withAmp), mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(semi(withAmp), mask, FORM)).toEqual({ text: 'a = ***', escapedSecret: true });
+      // Control: written plainly, nothing counts as an escaped secret.
+      expect(bodyForQuestion(semi(plainAmp), mask, FORM)).toMatchObject({ escapedSecret: false });
+    });
+
+    it.each(lenient)('with %s, as a JSON body and inside a JSON value', (_f, hidden, plain) => {
+      expect(bodyForQuestion(hidden, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(JSON.stringify({ v: hidden }), mask)).toEqual({ unshowable: 'escaped-secret' });
+      const shown = bodyForQuestion(plain, mask, 'application/json');
+      expect('text' in shown && shown.text).toContain('***cret');
+      expect(JSON.stringify(shown)).not.toContain(STORED);
+    });
+
+    it.each(lenient)('with %s, in a form, a query, a header and a path', (_f, hidden, plain) => {
+      expect(bodyForQuestion(`v=${encodeURIComponent(hidden)}`, mask, FORM)).toEqual({ text: 'v = ***', escapedSecret: true });
+      expect(queryForQuestion(`?v=${encodeURIComponent(hidden)}`, mask)).toEqual({ text: 'v = ***', secret: true, escaped: true });
+      expect(headersForQuestion({ 'X-Meta': hidden }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+      expect(pathHoldsSecret(`https://h.example/a/${encodeURIComponent(hidden)}`, mask)).toBe(true);
+      expect(pathForQuestion(`https://h.example/a/${encodeURIComponent(hidden)}`, mask)).toBe('/a/***');
+      // Control: written plainly it is masked where it is shown.
+      expect(bodyForQuestion(`v=${encodeURIComponent(plain)}`, mask, FORM)).toEqual({ text: `v = ${plain.replace(STORED, '***cret')}`, escapedSecret: false });
+      expect(headersForQuestion({ 'X-Meta': plain }, mask, () => 'show')).toMatchObject({ lines: [`X-Meta: ${plain.replace(STORED, '***cret')}`] });
+    });
+
+    it('JSON text over several lines, in a multipart part and in a text body', () => {
+      const pretty = (token: string) => JSON.stringify({ token }, null, 2);
+      const part = (inner: string, eol: string) => `--b${eol}Content-Type: application/json${eol}${eol}${inner.replaceAll('\n', eol)}${eol}--b--`;
+      for (const eol of ['\r\n', '\n']) {
+        expect(bodyForQuestion(part(pretty('\\u0068' + STORED.slice(1)).replaceAll('\\\\', '\\'), eol), mask, 'multipart/form-data; boundary=b')).toEqual({ unshowable: 'escaped-secret' });
+        const shown = bodyForQuestion(part(pretty(STORED), eol), mask, 'multipart/form-data; boundary=b');
+        expect('text' in shown && shown.text).toContain('***cret');
+      }
+      expect(bodyForQuestion(`note\n{\n  "token": ${esc}\n}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      // A stray quote on a line before does not pair the quotes wrongly: each line is read on its own.
+      expect(bodyForQuestion(`say "hi\n{"token":${esc}}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(`a=say "hi&b={"token":${esc}}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    });
+
+    it('wherever its literals sit: after a stray quote, two literals deep, across an encoded &, or percent-encoded inside a literal', () => {
+      const comma = `{"token":${esc},}`;
+      // A stray quote earlier in the text: the piece after `&` and `=` is read on its own.
+      expect(bodyForQuestion(`a=x "y&b=z ${comma}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      // Lenient JSON text inside a string of JSON text: the literal inside the literal is read.
+      expect(headersForQuestion({ 'X-Meta': JSON.stringify({ v: comma }) }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+      // An encoded `&` inside the JSON text, and a quote in another pair: each side is read before it is decoded.
+      expect(bodyForQuestion(`q=%22&v=${encodeURIComponent(`{"a":"x&y","token":${esc},}`)}`, mask, FORM)).toMatchObject({ escapedSecret: true });
+      // A literal whose escapes spell a percent-encoding of the secret: its server reading is read.
+      expect(headersForQuestion({ 'X-Meta': `{"t":"\\u0025\\u0036\\u0038${STORED.slice(1)}",}` }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+      // Controls: the same shapes with no secret are shown.
+      expect('text' in bodyForQuestion(`a=x "y&b=z {"token":"\\u0061",}`, mask, 'text/plain')).toBe(true);
+      expect('lines' in headersForQuestion({ 'X-Meta': JSON.stringify({ v: '{"token":"\\u0061",}' }) }, mask, () => 'show')).toBe(true);
+      expect(bodyForQuestion(`q=%22&v=${encodeURIComponent('{"a":"x&y","token":"\\u0061",}')}`, mask, FORM)).toMatchObject({ escapedSecret: false });
+    });
+
+    it('a literal with an escape JSON does not know is still read, the way a lenient parser unescapes it', () => {
+      const rest = STORED.slice(1);
+      const forms = [
+        ['an escaped quote', `{"t":"\\u0068${rest}\\'"}`],
+        ['a \\x escape', `{"t":"\\x68${rest}"}`],
+        ['an octal escape', `{"t":"\\150${rest}"}`],
+        ['a \\U escape', `{"t":"\\U00000068${rest}"}`],
+        ['a line continuation', `{"t":"hunter\\\n2secret"}`],
+      ] as const;
+      for (const [, body] of forms) {
+        expect(bodyForQuestion(body, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+        expect(bodyForQuestion(`v=${encodeURIComponent(body)}`, mask, FORM)).toEqual({ text: 'v = ***', escapedSecret: true });
+      }
+      // In a header too, which carries no line break.
+      for (const [, body] of forms.slice(0, 4)) {
+        expect(headersForQuestion({ 'X-Meta': body }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+      }
+      // Control: the same escapes around no secret are shown.
+      expect('text' in bodyForQuestion(`{"t":"\\x61b\\150\\'"}`, mask, 'application/json')).toBe(true);
+      // A line continuation before CRLF, and an escaped quote ahead of the secret in a literal.
+      expect(bodyForQuestion(`{"t":"hunter\\\r\n2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      // A stray quote on one line, then a literal a backslash continues over the next line break.
+      expect(bodyForQuestion(`say "hi\n{"t":"hunter\\\n2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect('text' in bodyForQuestion(`say "hi\n{"t":"hunter\\\n2",}`, mask, 'text/plain')).toBe(true);
+      // A raw CR, U+2028 or U+2029 inside a literal behind a stray quote, and a backslash before one.
+      for (const brk of ['\r', '\u2028', '\u2029']) {
+        expect(bodyForQuestion(`k" v=w "\\u0068${rest}${brk}"`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+        expect(headersForQuestion({ 'X-Meta': `k" v=w "\\u0068${rest}${brk}"` }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+        expect(bodyForQuestion(`{"t":"hunter\\${brk}2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+        expect('text' in bodyForQuestion(`k" v=w "\\u0061${brk}"`, mask, 'text/plain')).toBe(true);
+        expect('text' in bodyForQuestion(`{"t":"hunter\\${brk}2",}`, mask, 'text/plain')).toBe(true);
+      }
+      // A backslash before CR or U+2028 joins the lines into one literal, yet each line is still read.
+      for (const brk of ['\r', '\u2028', '\u2029']) {
+        expect(bodyForQuestion(`"x\\${brk}y "\\u0068${rest}"`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      }
+      expect(bodyForQuestion(`{"t":"say \\"\\u0068${rest}",}`, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+      expect('text' in bodyForQuestion(`{"t":"hunter\\\r\n2",}`, mask, 'text/plain')).toBe(true);
+    });
+
+    it('reads a line of escaped quotes that never closes in time linear in its length', () => {
+      // A quote, then escaped quotes to the end: each quote opens a literal no quote closes.
+      const run = (n: number) => `"${'\\"'.repeat(n)}`;
+      const tail = '%252580+%E9%u0041';
+      const time = (text: string) => { const t0 = performance.now(); bodyForQuestion(text, mask, 'text/plain'); return performance.now() - t0; };
+      time(`a=${run(1000)}${tail}`);
+      const small = time(`a=${run(4_000)}${tail}`);
+      const large = time(`a=${run(32_000)}${tail}`);
+      // Eight times the text: linear stays well under 64 times the time, quadratic does not.
+      expect(large).toBeLessThan(Math.max(small, 20) * 24);
+      expect(large).toBeLessThan(3_000);
+    });
+
+    it('a form in a decoded value whose name has a space or starts with a bracket', () => {
+      for (const name of ['my name', '[0]', 'a b[c]']) {
+        expect(bodyForQuestion(`p=${encodeURIComponent(`${name}=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+        expect(queryForQuestion(`?p=${encodeURIComponent(`${name}=${escaped}`)}`, mask)).toEqual({ text: 'p = ***', secret: true, escaped: true });
+        // Control: written plainly it is masked.
+        expect(bodyForQuestion(`p=${encodeURIComponent(`${name}=${plainInner}`)}`, mask, FORM)).toEqual({ text: `p = ${name}={"token":"***cret"}`, escapedSecret: false });
+      }
+      expect(bodyForQuestion(`p=my%2520name%3D${encodeURIComponent(encodeURIComponent(escaped))}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+    });
+  });
+
+  // What the reading of the literals must not do: make text unshowable that holds no secret.
+  describe('JSON text with no secret stays shown', () => {
+    const urls = Array.from({ length: 40 }, (_, i) => `https://cdn.example.com/a%20b/${i}?q=a+b&r=%2F`);
+    const record = (i: number) => ({ id: i, name: `item ${i}`, links: urls, note: 'x'.repeat(200) });
+
+    it('canonical JSON three levels deep, about 53 KB, with + and % in its URLs', () => {
+      const three = JSON.stringify({ v: JSON.stringify({ v: JSON.stringify(Array.from({ length: 22 }, (_, i) => record(i))) }) });
+      expect(three.length).toBeGreaterThan(45_000);
+      expect(three.length).toBeLessThan(64_000);
+      expect('text' in bodyForQuestion(three, mask, 'application/json')).toBe(true);
+    });
+
+    it('two such lines of NDJSON, about 43 KB', () => {
+      const line = JSON.stringify({ v: JSON.stringify(Array.from({ length: 8 }, (_, i) => record(i))) });
+      const nd = `${line}\n${line}`;
+      expect(nd.length).toBeGreaterThan(35_000);
+      expect(nd.length).toBeLessThan(64_000);
+      expect('text' in bodyForQuestion(nd, mask, 'application/x-ndjson')).toBe(true);
+    });
+
+    it('JSON at full depth whose innermost string holds a written backslash, in a header, NDJSON and a body', () => {
+      for (const inner of ['C:\\temp\\x', 'caf\\u00e9', 'line\\nbreak']) {
+        const deep = JSON.stringify({ v: JSON.stringify({ v: JSON.stringify({ path: inner }) }) });
+        expect('lines' in headersForQuestion({ 'X-Meta': deep }, mask, () => 'show')).toBe(true);
+        expect('text' in bodyForQuestion(`${deep}\n${deep}`, mask, 'application/x-ndjson')).toBe(true);
+        expect('text' in bodyForQuestion(deep, mask, 'application/json')).toBe(true);
+      }
+    });
+  });
+
+  it('JSON text in a path segment nested past what is read counts as holding a secret, as it is starred', () => {
+    const deep = (inner: string) => `https://h.example/a/${encodeURIComponent(wrap(wrap(wrap(inner))))}`;
+    expect(pathForQuestion(deep(escaped), mask)).toBe('/a/***');
+    expect(pathHoldsSecret(deep(escaped), mask)).toBe(true);
+    expect(pathHoldsSecret(deep('{"a":"b"}'), mask)).toBe(true);
+    // Control: one level less is read, and holds nothing.
+    expect(pathHoldsSecret(`https://h.example/a/${encodeURIComponent(wrap(wrap('{"a":"b"}')))}`, mask)).toBe(false);
   });
 });

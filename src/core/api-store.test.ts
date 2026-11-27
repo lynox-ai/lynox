@@ -277,7 +277,7 @@ describe('ApiStore', () => {
       it.each([
         ['name', { name: `Shop\n${FORGED}` }],
         ['description', { description: `Orders API\r\n${FORGED}` }],
-        ['description, paragraph separator', { description: `Orders API ${FORGED}` }],
+        ['description, paragraph separator', { description: `Orders API\u2028${FORGED}` }],
         ['base_url path', { base_url: `https://api.test.com/v1#\n${FORGED}` }],
         ['name, vertical tab', { name: `Shop\v${FORGED}` }],
         ['name, form feed', { name: `Shop\f${FORGED}` }],

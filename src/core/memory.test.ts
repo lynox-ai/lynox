@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
+import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
+
 const mockCreate = vi.fn().mockResolvedValue({
   content: [{ type: 'text', text: '{}' }],
 });
@@ -56,6 +58,7 @@ import type { MemoryScopeRef, ScopeClassification } from '../types/index.js';
 import { Memory } from './memory.js';
 import { classifyScope } from './scope-classifier.js';
 import { channels } from './observability.js';
+import { RunAdmissionRefusedError } from './run-admission.js';
 
 const mockClassifyScope = vi.mocked(classifyScope);
 const mockPublish = vi.mocked(channels.memoryStore.publish);
@@ -679,6 +682,45 @@ describe('Memory', () => {
       expect(onAfterRun).not.toHaveBeenCalled();      // nothing debited
     });
 
+    it('an extraction refused within the balance hands over exactly one retry, which is never deferred again', async () => {
+      // Kills: no retry handed over (the turn's extraction would be lost), and a retry that defers
+      // itself again (a loop while the balance stays held).
+      const mem = new Memory(dir);
+      let held = true;
+      const onBeforeRun = vi.fn(() => { if (held) throw new RunAdmissionRefusedError('AI budget for this period reached.'); });
+      mem.setMeteredHost({ getHooks: () => [{ onBeforeRun }], getContext: () => undefined });
+      mockCreate.mockClear();
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"status": "shipped auth"}' }], usage: { input_tokens: 10, output_tokens: 5 } });
+      const retries: Array<() => void> = [];
+      const onRefused = vi.fn((retry: () => void) => { retries.push(retry); });
+
+      await mem.maybeUpdate(LONG_ANSWER, 1, undefined, undefined, undefined, undefined, undefined, { onRefused });
+      expect(onRefused).toHaveBeenCalledOnce();
+      expect(mockCreate).not.toHaveBeenCalled();
+
+      // Still held at the retry: refused again, silently, and nothing new is handed over.
+      retries[0]!();
+      await vi.waitFor(() => expect(onBeforeRun).toHaveBeenCalledTimes(2));
+      await new Promise(r => setImmediate(r));
+      expect(onRefused).toHaveBeenCalledOnce();
+      expect(mockCreate).not.toHaveBeenCalled();
+
+      // A fresh refusal whose retry finds the balance free extracts.
+      await mem.maybeUpdate(LONG_ANSWER, 1, undefined, undefined, undefined, undefined, undefined, { onRefused });
+      held = false;
+      retries[1]!();
+      await vi.waitFor(() => expect(mockCreate).toHaveBeenCalledOnce());
+    });
+
+    it('an extraction refused for another reason hands over no retry', async () => {
+      // Kills: a retry on every refusal (an exhausted tenant would get a second paid attempt).
+      const mem = new Memory(dir);
+      mem.setMeteredHost({ getHooks: () => [{ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } }], getContext: () => undefined });
+      const onRefused = vi.fn();
+      await mem.maybeUpdate(LONG_ANSWER, 1, undefined, undefined, undefined, undefined, undefined, { onRefused });
+      expect(onRefused).not.toHaveBeenCalled();
+    });
+
     it('runs the extraction ungated + undebited when no metered host is set (self-host)', async () => {
       const mem = new Memory(dir);
       mockCreate.mockClear();
@@ -690,6 +732,52 @@ describe('Memory', () => {
       await mem.maybeUpdate(LONG_ANSWER);
 
       expect(mockCreate).toHaveBeenCalledOnce();       // extraction still runs on self-host
+    });
+
+    it('skips the extraction call when the daily cap is reached, even with no metered host', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        const mem = new Memory(dir);
+        mockCreate.mockClear();
+        mockCreate.mockResolvedValueOnce({
+          content: [{ type: 'text', text: '{"status": "x"}' }],
+          usage: { input_tokens: 100, output_tokens: 10 },
+        });
+
+        await mem.maybeUpdate(LONG_ANSWER);
+
+        expect(mockCreate).not.toHaveBeenCalled();
+      } finally {
+        resetPersistentBudget();
+        mockCreate.mockReset();
+        mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{}' }] });
+      }
+    });
+
+    it('runs the extraction call with no metered host when spend is under the cap', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 4.99, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        const mem = new Memory(dir);
+        mockCreate.mockClear();
+        mockCreate.mockResolvedValueOnce({
+          content: [{ type: 'text', text: '{}' }],
+          usage: { input_tokens: 100, output_tokens: 10 },
+        });
+
+        await mem.maybeUpdate(LONG_ANSWER);
+
+        expect(mockCreate).toHaveBeenCalledOnce();
+      } finally {
+        resetPersistentBudget();
+      }
     });
 
     it('debits the spend even when the response carries no usable text (bills before the early return)', async () => {
