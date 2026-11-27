@@ -1023,7 +1023,7 @@ export const READING_BUDGET_CHARS = 600_000;
 /** What one more distinct reading costs beyond its length: it is masked as a call of its own. */
 const READING_OVERHEAD_CHARS = 64;
 let readingBudgetLeft: number | null = null;
-/** While JSON text is read (`jsonTextHides`): its readings are charged to its own budget, not this one. */
+/** While JSON text is read (`jsonTextHides`): no reading is charged to this budget. */
 let readingBudgetPaused = false;
 /** The JSON text budget one part shares while it is read under {@link withinReadingBudget}. */
 let jsonBudgetLeft: number | null = null;
