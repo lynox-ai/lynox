@@ -249,7 +249,7 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     expect(records).toEqual([de]);
     expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual([
       `${de} Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.`,
-      `${de} Der Inhaber kann den Lauf fortsetzen; hält er gleich wieder an, kann es der Inhaber später erneut versuchen.`,
+      `${de} Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, kann der Inhaber es später erneut versuchen.`,
     ]);
     // Its run is held halted: the title says so, the mark that it was a failure (U-324), on both.
     expect(notes.map((n) => n.slice(0, n.indexOf('\n')).split(' · ')[0])).toEqual(['\u2717 Beurteilung angehalten', '\u2717 Beurteilung angehalten']);

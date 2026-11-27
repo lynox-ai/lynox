@@ -538,8 +538,8 @@ const PRODUCT_WRITE_FACT: Readonly<Record<NoticeLanguage, string>> = Object.free
  */
 const ownerContinues = (): Readonly<Record<NoticeLanguage, Readonly<Record<string, string>>>> => ({
   de: {
-    [`apply|${BULK_HALT_REASONS.unavailable}`]: 'Der Inhaber kann den Lauf fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.',
-    [`judge|${BULK_HALT_REASONS.unavailable}`]: 'Der Inhaber kann den Lauf fortsetzen; hält er gleich wieder an, kann es der Inhaber später erneut versuchen.',
+    [`apply|${BULK_HALT_REASONS.unavailable}`]: 'Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, ist das Zielsystem noch nicht erreichbar.',
+    [`judge|${BULK_HALT_REASONS.unavailable}`]: 'Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, kann der Inhaber es später erneut versuchen.',
     [BULK_HALT_REASONS.shopifyNotSetUp]: 'Sobald lynox Shopify eingerichtet hat, kann der Inhaber den Lauf fortsetzen.',
     [BULK_HALT_REASONS.shopifyNotCleared]: 'Sobald lynox Shopify freigegeben hat, kann der Inhaber den Lauf fortsetzen.',
     [BULK_HALT_REASONS.shopifyUnconfirmed]: 'Der Inhaber kann den Lauf in ein paar Minuten fortsetzen.',

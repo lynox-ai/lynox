@@ -668,10 +668,10 @@ describe('a halt only the owner can resolve, as each reader gets it (bulkHaltFor
     credential: { de: closing('lynox findet keinen gespeicherten Zugang zum Zielsystem.', 'de'), en: closing('lynox finds no stored access to the target system.', 'en') },
     unauthorized: { de: closing('Das Zielsystem hat den gespeicherten Zugang abgelehnt.', 'de'), en: closing('The target system refused the stored access.', 'en') },
     unavailable: {
-      de: goesOn('Zielsystem nicht erreichbar oder Fehler in lynox.', 'Der Inhaber kann den Lauf fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.'),
+      de: goesOn('Zielsystem nicht erreichbar oder Fehler in lynox.', 'Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, ist das Zielsystem noch nicht erreichbar.'),
       en: goesOn('Target system not reachable, or an error in lynox.', 'The owner can continue the run; if it halts again right away, the target system is not reachable yet.'),
       judge: {
-        de: goesOn('KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox.', 'Der Inhaber kann den Lauf fortsetzen; hält er gleich wieder an, kann es der Inhaber später erneut versuchen.'),
+        de: goesOn('KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox.', 'Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, kann der Inhaber es später erneut versuchen.'),
         en: goesOn('AI model or target system not reachable, or an error in lynox.', 'The owner can continue the run; if it halts again right away, the owner can try again later.'),
       },
     },
