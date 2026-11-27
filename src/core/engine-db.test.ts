@@ -639,7 +639,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     again.close();
   });
 
-  it('v76 migration alone, from a v75 database, adds an empty refusal detail to a target that already has a title', () => {
+  it('v76 migration and those after it, from a v75 database, add an empty refusal detail to a target that already has a title', () => {
     // A v75 database: every column and version from v76 on taken back out, `target_title` (v75) kept.
     const dir = mkdtempSync(join(tmpdir(), 'lynox-mig76-'));
     tmpDirs.push(dir);

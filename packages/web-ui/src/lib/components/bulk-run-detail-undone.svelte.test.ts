@@ -138,7 +138,7 @@ describe('an undone run’s page', () => {
 		expect(befores[2]!.classList.contains('text-text')).toBe(true);
 	});
 
-	it('shows a before-value with hidden characters marked, taken back or struck, in a cell that breaks a long value', async () => {
+	it('shows a before-value with hidden characters marked, taken back or tinted, in a cell that breaks a long value', async () => {
 		const odd = 'Alt\u202Eb\u200Bc\u0007';
 		const marked = 'Alt⟨U+202E⟩b⟨U+200B⟩c⟨U+0007⟩';
 		const back = { ...written(1, true), diff: fieldsDiff(odd, 'Neu 1') } as BulkTarget;

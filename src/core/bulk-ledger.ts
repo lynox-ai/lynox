@@ -2866,9 +2866,9 @@ export class BulkLedger {
    */
   /**
    * An undo of `sourceRunId` may put back a run further up its chain that an undo took back before
-   * the phase it stood in was stored (v69), with a halt reason: it stood halted or aborted, and
+   * the phase it stood in was stored (v79), with a halt reason: it stood halted or aborted, and
    * which one is not known. Refused for any such run above the source, not only one this undo
-   * would put back (an even distance up): such chains predate v69, and refusing is the safe side.
+   * would put back (an even distance up): such chains predate v79, and refusing is the safe side.
    * Bounded like `listFormOfFamily`: a cycle or an overlong chain ends the walk instead of hanging
    * the caller; a chain no run of the product writes, so nothing past that point is refused here.
    */
@@ -4116,10 +4116,10 @@ export class BulkLedger {
         if (depth % 2 === 1 && left === 0) {
           db.prepare(`UPDATE bulk_runs SET phase_before_undo = phase, phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(r.id);
         } else if (depth % 2 === 0 && left > 0) {
-          // Back in the phase the undo took it from. Taken back before that was stored (v69), a run
+          // Back in the phase the undo took it from. Taken back before that was stored (v79), a run
           // without a halt reason stood done. One with a reason stays undone: the undo that would
           // put it back is refused at plan, approval and resume ({@link phaseNotKept}), and only one
-          // approved before v69 and started after it reaches this point.
+          // approved before v79 and started after it reaches this point.
           db.prepare(
             `UPDATE bulk_runs SET phase = CASE WHEN phase_before_undo IS NOT NULL THEN phase_before_undo
                  WHEN halt_reason IS NULL THEN 'done' ELSE phase END,

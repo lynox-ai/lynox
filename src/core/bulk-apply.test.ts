@@ -1318,7 +1318,7 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     expect([...state.values()]).toEqual(['w0', 'w1', 'w2', 'w3']);
   });
 
-  /** A run taken back before v69 kept no phase: as an older engine left it. */
+  /** A run taken back before v79 kept no phase: as an older engine left it. */
   const forgetPhase = (runId: string): void => {
     engineDb.getDb().prepare('UPDATE bulk_runs SET phase_before_undo = NULL WHERE id = ?').run(runId);
   };
