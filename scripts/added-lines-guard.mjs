@@ -58,7 +58,9 @@
  *     none by file, also not for an image or a font: a `.png` can be loaded as code
  *     (a symlink, or `require`, which reads an unknown extension as JavaScript), so a
  *     binary file is read like any other, and its bytes are refused when they hold
- *     one. The pragma does not let one pass: a direction control can rearrange
+ *     one. In practice no image, font or archive can be added or changed past this
+ *     check today: nearly every one holds a NUL byte, and there is no approval of a
+ *     binary file yet. The pragma does not let one pass: a direction control can rearrange
  *     how the pragma's own line reads. A file NAME is read for them too, and printed
  *     with them escaped. Only added lines are read, so a file that already carries
  *     one is not refused until a commit adds such a line.
@@ -221,7 +223,7 @@ export function formatCharsIn(line) {
 /** How to write a code point instead, for the message. */
 export function wayFor(name) {
   const cp = parseInt(name.slice(2), 16);
-  if (cp === 0) return 'a text file carries no NUL byte: write \\0 in a string; a text file saved as UTF-16 carries them too (save it as UTF-8); a binary file is not exempt here, since its bytes can be loaded as code (an approval by hash comes first, in a pull request of its own)';
+  if (cp === 0) return 'a text file carries no NUL byte: write \\0 in a string; a text file saved as UTF-16 carries them too (save it as UTF-8); a binary file cannot be added or changed past this check today, since its bytes can be loaded as code and there is no approval for one yet (see the header of scripts/added-lines-guard.mjs)';
   if (cp === 0x0d) return 'write \\r in a string';
   if (cp === 0xad) return `write ${escaped(cp)} in a string, &shy; in markup`;
   return `write ${escaped(cp)}`;

@@ -407,7 +407,8 @@ describe('a raw invisible character in an added line', () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain('img/a.png:1: raw invisible character U+0000');
     expect(r.out).toContain('U+061C');
-    expect(r.out).toContain('an approval by hash comes first');
+    expect(r.out).toContain('a binary file cannot be added or changed past this check today');
+    expect(r.out).not.toContain('approval by hash');
   });
 
   it('refuses code hidden behind a NUL in a file named as an image, which a symlink can load as source', () => {
@@ -423,7 +424,7 @@ describe('a raw invisible character in an added line', () => {
 
   it('refuses the same file when it is meant for require, which loads an unknown extension as JavaScript', () => {
     const base = git('rev-parse', 'HEAD');
-    commitBytes('lib/x.png', Buffer.from(`// \xFF\nmodule.exports = 'a${RLO}b';\n`.replace('\xFF', '\uFFFD'), 'utf8'), 'image name');
+    commitBytes('lib/x.png', Buffer.from(`//${NUL}\nmodule.exports = 'a${RLO}b';\n`, 'utf8'), 'image name, a NUL in its first line');
     commit('lib/use.js', "module.exports = require('./x.png');\n", 'load it');
     const r = guard(base, 'HEAD');
     expect(r.code).toBe(1);
@@ -439,15 +440,16 @@ describe('a raw invisible character in an added line', () => {
     expect(r.out).toContain(`commit ${adding.slice(0, 9)} y.png:2: raw invisible character U+202E`);
   });
 
-  it('reads a copy of a file as added', () => {
+  it('reads a verbatim copy of a file from before the range as added, line for line', () => {
+    commit('c.md', `x${RLO}y\nsecond\n`, 'legacy, before the range');
     const base = git('rev-parse', 'HEAD');
-    commit('c.md', 'plain\n', 'plain');
-    writeFileSync(join(dir, 'c.ts'), `x${RLO}y\n`);
+    copyFileSync(join(dir, 'c.md'), join(dir, 'c.ts'));
     git('add', '-A');
-    git('commit', '-qm', 'copy, changed');
+    git('commit', '-qm', 'verbatim copy');
     const r = guard(base, 'HEAD');
     expect(r.code).toBe(1);
     expect(r.out).toContain('c.ts:1: raw invisible character U+202E');
+    expect(r.out).not.toContain('c.md');
   });
 
   it('refuses a line break anywhere in a file name, also at its end', () => {
