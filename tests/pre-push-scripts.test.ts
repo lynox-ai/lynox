@@ -571,7 +571,7 @@ describe('a push that merges main scans what main does not carry, and all of it'
     merge(c);
     const r = pushHead(c);
     expect(r.head, r.out).toBe(true);
-    expect(r.out).toContain('contains a merge; commits already on origin/main are not scanned');
+    expect(r.out).toContain('merges main; commits already on origin/main are not scanned');
   }, T);
 
   it('an own dirty commit behind a main merge is refused', () => {
@@ -589,7 +589,10 @@ describe('a push that merges main scans what main does not carry, and all of it'
     expect(pushHead(dirty).head).toBe(false);
     const clean = pushedOnce();
     own(clean, 'b.md', 'neutral\n');
-    expect(pushHead(clean).head).toBe(true);
+    const r = pushHead(clean);
+    expect(r.head, r.out).toBe(true);
+    expect(r.out).not.toContain('contains a merge');  // no merge, no hint
+    expect(r.out).not.toContain('merges main');
   }, 2 * T);
 
   it('an own dirty commit BETWEEN two main merges is refused (the new base swallows none of the branch)', () => {
@@ -610,6 +613,21 @@ describe('a push that merges main scans what main does not carry, and all of it'
     merge(t);
     expect(pushHead(t).head).toBe(true);
   }, 2 * T);
+
+  it('an origin/main between the branch and the merged main: the base moves, main\'s newer dirty commit is still scanned', () => {
+    // Reaches the moved base: origin/main is newer than where feat/x was pushed, older than the merge.
+    const c = pushedOnce();
+    const between = onMain(c, 'm1.md', 'neutral\n');
+    onMain(c, 'm2.md', DIRTY);
+    merge(c);
+    c.git('update-ref', 'refs/remotes/origin/main', between);
+    const r = pushHead(c);
+    expect(r.head, r.out).toBe(false);
+    expect(r.out).toContain('merges main; commits already on origin/main are not scanned');
+    expect(r.out).toContain(FETCH);
+    c.git('fetch', '-q', 'origin', 'main:refs/remotes/origin/main');
+    expect(pushHead(c).head).toBe(true);
+  }, T);
 
   it('an origin/main older than the merged main fails closed and names the fetch', () => {
     const c = pushedOnce();

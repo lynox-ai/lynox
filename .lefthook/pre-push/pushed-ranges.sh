@@ -90,13 +90,14 @@ else
 fi
 for pair in "${pairs[@]}"; do
   read -r tip remote remote_ref <<<"$pair"
+  switched=''
   if ! is_zero "$remote" && git cat-file -e "${remote}^{commit}" 2>/dev/null; then
     base="$remote"
     # A merge base that is not under the remote sha means the push brings main in: measure from it.
     if git rev-parse -q --verify refs/remotes/origin/main >/dev/null &&
       mb="$(git merge-base origin/main "$tip" 2>/dev/null)" &&
       ! git merge-base --is-ancestor "$mb" "$remote"; then
-      base="$mb"
+      base="$mb" switched=1
     fi
   elif ! git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
     if ! is_zero "$remote"; then
@@ -114,15 +115,18 @@ for pair in "${pairs[@]}"; do
     exit 2
   fi
   # A range with a merge in it is where a stale origin/main shows: main's commits between it and the
-  # merged main are scanned as if they were this push's. Say so once per ref, on stderr.
+  # merged main are scanned as if they were this push's. Say so once per ref, on stderr; the first
+  # line says which of the three cases it is, so it never claims a skip that did not happen.
   if [ -n "$(git rev-list --merges -n 1 "$base..$tip" 2>/dev/null)" ]; then
-    if git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
-      echo "$label: ${remote_ref:-the pushed ref} contains a merge; commits already on origin/main are not scanned." >&2
-      echo "  If a commit of main is refused here, origin/main is older than what was merged:" >&2
+    if [ -n "$switched" ]; then
+      echo "$label: ${remote_ref:-the pushed ref} merges main; commits already on origin/main are not scanned." >&2
+    elif git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
+      echo "$label: ${remote_ref:-the pushed ref} contains a merge; whatever it brings in is scanned with it." >&2
     else
       echo "$label: ${remote_ref:-the pushed ref} contains a merge, and without origin/main the commits it" >&2
-      echo "  brings in are scanned as well. If a commit of main is refused here:" >&2
+      echo "  brings in are scanned as well." >&2
     fi
+    echo "  If a commit of main is refused here, origin/main is older than what was merged:" >&2
     echo "  git fetch origin main:refs/remotes/origin/main, then push again." >&2
   fi
   printf '%s %s\n' "$base" "$tip"
