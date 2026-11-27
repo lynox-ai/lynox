@@ -383,6 +383,18 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       expect(String(half.relations[0]?.['description']), 'masked').toMatch(/^badge (?!sk-ant-)/);
       expect(text.includes(key), 'the key is not in the export').toBe(false);
       expect(body.knowledge_graph_may_be_incomplete, 'carried, so not marked').toBe(false);
+
+      // Without engine.db the graph block falls back to the older store: its rows once, there.
+      const getEngineDb = h.engine().getEngineDb;
+      h.engine().getEngineDb = () => null;
+      try {
+        const fallback = await h.exportBody();
+        const fallbackHalf = fallback.knowledge_graph.memories!['agent-memory.db'] as unknown as { entities: unknown[]; relations: unknown[] };
+        expect([fallbackHalf.entities, fallbackHalf.relations], 'not here').toEqual([[], []]);
+        expect((fallback.knowledge_graph.entities as Array<{ id?: string }>).map(e => e.id).sort(), 'in the graph block').toEqual(expect.arrayContaining(['le-a', 'le-b']));
+      } finally {
+        h.engine().getEngineDb = getEngineDb;
+      }
     } finally {
       h.engine().getKnowledgeLayer = getKnowledgeLayer;
       h.engine().getUserConfig = getUserConfig;

@@ -311,6 +311,19 @@ describe('readMemoryTextsForExport', () => {
     expect([off.entities, off.relations], 'with it off the graph block lists them').toEqual([[], []]);
   });
 
+  it('with the subject graph on, marks the block when the agent-memory.db entities or relations cannot be read', () => {
+    for (const table of ['entities', 'relations']) {
+      rmSync(file, { force: true });
+      new AgentMemoryDb(file).close();
+      const raw = new Database(file);
+      raw.exec(`PRAGMA foreign_keys = OFF; DROP TABLE ${table}`);
+      raw.close();
+      const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, subjectGraph: true });
+      expect(texts.mayBeIncomplete, `without its ${table} table`).toBe(true);
+      expect(readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, subjectGraph: false }).mayBeIncomplete, `control: with it off ${table} is not read here`).toBe(false);
+    }
+  });
+
   it('carries the link and history tables of both stores, row by row, the reason a text was replaced masked', () => {
     const { oldId, newId, entity } = seedLegacy();
     const legacy = new AgentMemoryDb(file);
@@ -687,7 +700,17 @@ describe('graphHoldsRowsNotExported', () => {
     copyFileSync(`${file}-wal`, `${image}-wal`);
     raw.close();
     writer.close();
-    expect(statSync(`${image}-wal`).size, 'fixture: the relation is in the -wal').toBeGreaterThan(0);
+    expect(statSync(`${image}-wal`).size, 'fixture: the -wal holds pages').toBeGreaterThan(0);
+    const mainOnly = join(dir, 'main-only.db');
+    copyFileSync(image, mainOnly);
+    const probe = new Database(mainOnly, { readonly: true });
+    try {
+      const hasTable = (probe.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'relations'").get() as { n: number }).n === 1;
+      const inMain = hasTable ? (probe.prepare("SELECT COUNT(*) AS n FROM relations WHERE id = 'r-orphan'").get() as { n: number }).n : 0;
+      expect(inMain, 'fixture: the relation is not in the main file').toBe(0);
+    } finally {
+      probe.close();
+    }
     const before = fileState(image);
 
     expect(graphHoldsRowsNotExported({ agentMemoryFile: image, engineDb, subjectGraph: false }), 'the row in the -wal is counted').toBe(true);

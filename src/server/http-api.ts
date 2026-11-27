@@ -15088,15 +15088,19 @@ export class LynoxHTTPApi {
       // With the subject graph on, the older store's entities and relations are carried here too.
       // Graph rows no block carries (subjects the graph block does not list) are counted, and any
       // marks the block too: the export says "complete" only when nothing stored is left out.
+      // Which store the graph block is read from. With a layer, the setting it started with: a
+      // config reload does not rebuild it. Off as well where the block falls back to the older
+      // store (the subject-graph store did not open, or engine.db is missing), so the older
+      // store's entities and relations are carried once, not in both blocks.
+      const exportLayer = engine.getKnowledgeLayer();
+      const subjectGraph = (exportLayer ? exportLayer.readsSubjectGraph === true && !exportLayer.subjectGraphUnavailable : engine.getUserConfig().subject_graph_enabled === true)
+        && engine.getEngineDb() !== null;
       let memoryTexts: { block: Record<string, unknown>; mayBeIncomplete: boolean };
       try {
         const { graphHoldsRowsNotExported, readMemoryTextsForExport } = await import('../core/graph-export.js');
         const exportSecrets = engine.getSecretStore();
         const agentMemoryFile = join(getLynoxDir(), 'agent-memory.db');
-        // With a layer, the setting it started with: a config reload does not rebuild it, and what
-        // this block and the count read must agree with what the layer lists.
-        const layer = engine.getKnowledgeLayer();
-        const subjectGraph = layer ? layer.readsSubjectGraph === true : engine.getUserConfig().subject_graph_enabled === true;
+        // What this block and the count read must agree with what the graph block lists.
         const read = readMemoryTextsForExport({
           agentMemoryFile,
           engineDb: engine.getEngineDb(),
