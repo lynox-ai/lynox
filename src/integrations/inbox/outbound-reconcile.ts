@@ -55,6 +55,6 @@ export function reconcileOutboundReply(
     itemId: item.id,
     action: 'replied',
     actor: 'system',
-    payloadJson: JSON.stringify({ trigger: 'outbound_reply', via: 'chat', matchedBy }),
+    payloadJson: JSON.stringify({ trigger: 'outbound_reply', via: 'chat', matchedBy, undo_logged: true }),
   });
 }

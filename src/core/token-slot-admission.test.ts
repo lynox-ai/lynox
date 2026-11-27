@@ -523,7 +523,7 @@ describe('the predicate: a request carries only a registered owner\'s access tok
     mockProcess
       .mockResolvedValueOnce({ content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'http_request', input: { url, method: 'GET', headers: { 'X-Data': `secret:${name}` } } }], stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } })
       .mockResolvedValueOnce({ content: [{ type: 'text' as const, text: 'Done' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } });
-    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: await agentVault({ SHOPIFY_ACCESS_TOKEN: value('shop', 'access') }), toolContext: ctx, promptUser: vi.fn().mockResolvedValue('Allow') });
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: await agentVault({ SHOPIFY_ACCESS_TOKEN: value('shop', 'access') }), toolContext: ctx, promptUser: vi.fn().mockResolvedValue('allow') });
     await agent.send('go');
     return JSON.stringify(agent.getMessages()[2]);
   }
@@ -592,7 +592,7 @@ describe('an update that ends sharing empties the reader\'s token slots before i
       principal: { kind: 'owner' },
       sessionCounters: { httpRequests: 0 },
       secretStore: vault,
-      promptUser: async () => 'Allow',
+      promptUser: async () => 'allow',
       getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
       toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
     } as never;
@@ -650,7 +650,7 @@ describe('an update that ends sharing empties the reader\'s token slots before i
       mockProcess
         .mockResolvedValueOnce({ content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'http_request', input: { url: 'https://bexio-b.example/v1/x', method: 'GET', headers } }], stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } })
         .mockResolvedValueOnce({ content: [{ type: 'text' as const, text: 'Done' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } });
-      await new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: agentStore, toolContext: ctx, promptUser: vi.fn().mockResolvedValue('Allow') }).send('go');
+      await new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: agentStore, toolContext: ctx, promptUser: vi.fn().mockResolvedValue('allow') }).send('go');
     };
     await run({ 'X-Data': 'secret:B_OUT' });
     expect(sent.some((s) => JSON.stringify(s.headers).includes(VAULT()['B_OUT']!))).toBe(false);
@@ -782,6 +782,31 @@ describe('an update that ends sharing empties the reader\'s token slots before i
     expect(result).toContain('None of them was emptied');
   });
 
+  // After the delete, whether a value is still there is asked without reading it
+  // out where the store can (`holds`), and as before where it cannot.
+  it.each([
+    ['asks holds, and reads no slot out', true],
+    ['control: a store without holds is asked as before', false],
+  ])('a delete that leaves the values in place is not taken for an emptying: %s', async (_label, withHolds) => {
+    const store = booted();
+    const base = vaultOf(VAULT());
+    const kept = base.entries();
+    const read: string[] = [];
+    const vault = {
+      ...base,
+      deleteSecret: () => true,
+      resolve: (name: string) => { read.push(name); return kept[name] ?? null; },
+      ...(withHolds ? { holds: (name: string) => kept[name] !== undefined } : {}),
+    } as Vault;
+    const result = await update(store, vault, bexio('bexio-b'));
+    // Every slot that held a value still does; the one that held none counts as emptied.
+    expect(result).toContain('so BEXIO_B_ACCESS_TOKEN, B_OUT must be emptied first');
+    expect(result).toContain('Nothing was saved');
+    const slots = ['BEXIO_B_ACCESS_TOKEN', 'BEXIO_B_REFRESH_TOKEN', 'B_OUT'];
+    if (withHolds) expect(read.filter((n) => slots.includes(n))).toEqual([]);
+    else expect(read.filter((n) => slots.includes(n)).length).toBeGreaterThan(0);
+  });
+
   it('the admission asked before the emptying registers nothing and stores nothing', () => {
     const store = new ApiStore();
     expect(store.saveRefusal(oauth('fresh'))).toBeNull();
@@ -836,7 +861,7 @@ describe('an update of a profile the boot held back', () => {
     const agent = {
       principal: { kind: 'owner' }, sessionCounters: { httpRequests: 0 },
       secretStore: { resolve: () => null, resolveSecretRefs: (i: unknown) => i, listNames: () => [] },
-      promptUser: async () => 'Allow',
+      promptUser: async () => 'allow',
       getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
       toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
     } as never;
@@ -849,7 +874,7 @@ describe('an update of a profile the boot held back', () => {
   const heldAgent = (store: ApiStore, principal: unknown): never => ({
     principal, sessionCounters: { httpRequests: 0 },
     secretStore: { resolve: () => null, resolveSecretRefs: (i: unknown) => i, listNames: () => [] },
-    promptUser: async () => 'Allow',
+    promptUser: async () => 'allow',
     getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
     toolContext: { auditLog: testAuditLog().log, vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   }) as never;

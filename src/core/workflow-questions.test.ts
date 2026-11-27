@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RunHistory } from './run-history.js';
-import { PromptStore } from './prompt-store.js';
+import { PromptStore, UNATTENDED_BLOCK_ANSWER, consentOfPayload, consentActionOfPayload } from './prompt-store.js';
 import { principalFromTag } from './request-principal.js';
 import { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
@@ -121,6 +121,17 @@ describe('a question of a scheduled workflow run', () => {
     expect(h.q.unanswered).toBe(false);
   });
 
+  it('keeps a tool confirmation\'s kind and action on the stored row, for the card it is answered on', async () => {
+    const h = makeHarness();
+    const answer = h.q.ask('Delete event e1', ['confirm', 'cancel'], { consent: 'google', consentAction: 'delete' });
+    const id = await openQuestion(h);
+    const payload = h.prompts.getById(id)!.payload_json;
+    expect(consentOfPayload(payload)).toBe('google');
+    expect(consentActionOfPayload(payload)).toBe('delete');
+    h.prompts.answerUser(id, 'cancel', OWNER_PRINCIPAL);
+    await expect(answer).resolves.toBe('cancel');
+  });
+
   it('seeds the thread\'s turns without the characters that render as nothing in the schedule\'s title', async () => {
     // A schedule saved before the write paths refused them: a tag-spelled clause after the title.
     const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
@@ -143,6 +154,11 @@ describe('a question of a scheduled workflow run', () => {
     // The channel only carries ask_user today; a hard block reaching it is refused all the same.
     const asked = h.q.ask('rm -rf /?', ['Allow', 'Deny'], { blocked: true });
     expect(await stillPending(asked), 'refused at once, not waiting for an answer').toBe(false);
+    // The asker gets the unattended answer, so the model reads why it was refused (where the
+    // target came from), not that the user said no; and the run ends there, as not asked.
+    await expect(asked).resolves.toBe(UNATTENDED_BLOCK_ANSWER);
+    expect(h.q.unanswered).toBe(true);
+    expect(h.q.unansweredBecause).toBe('not_asked');
     expect(h.prompts.getPending(RUN_ID)).toBeUndefined();
     expect(h.notified).toEqual([]);
     // Twin, on a fresh run (the refusal ends the run's questions, as a failed write does): the

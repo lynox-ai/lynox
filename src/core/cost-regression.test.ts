@@ -487,7 +487,22 @@ function measureStaticPrefixTokens(): number {
 // way to repair a stored step whose `{{<id>.result}}` reference names a step missing from its
 // `input_from`, which the save and every run now refuse. The field's text is one short phrase; how
 // to repair a reference stays in the refusals.
-const STATIC_PREFIX_BUDGET = 24075;
+// 2026-11-21: +21 (24075 → 24096, both measured with the budget set to 1, the base at c1b060ba;
+// artifact.ts is the only file of the prefix that differs) — `artifact_save`'s `content` says,
+// at its html part, that images load only as inline SVG or data: URLs. The artifact policy
+// refuses every remote image, and `detailedGuidance` reaches the model only after its first
+// call, so without this the first html artifact would be written with images that never load.
+// The full rule, the ways around it and what to tell the user stay in `detailedGuidance`.
+// 2026-11-17: +56 (24061 → 24117, both measured the same day with the budget set to 1, the base
+// main 22d3046b, the only prefix file that differs being http.ts; on 2026-11-25, after merging
+// main 565661445 whose budget was 24096, the merge measured 24152) — `http_request`'s description
+// says that a bearer, header or oauth2 profile gets its credential from the engine, so the model
+// writes no auth header, `secret:` reference or token request for it. Without it, models guess a
+// connection's derived token name and write it as `secret:NAME`; the online eval
+// tests/online/ask-secret-token-slot-eval.test.ts measured runs with such a reference at 13 of 24
+// on main 22d3046b and 3 of 24 with this sentence and the refusal texts that go with it. The refusal texts
+// are not part of this prefix; they reach the model when a reference is refused.
+const STATIC_PREFIX_BUDGET = 24152;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

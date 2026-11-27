@@ -4,6 +4,11 @@
 
 ### Upgrade notes
 
+- Managed instances now sign the Google connect start token in the
+  provider-bound v2 format. A control plane that does not accept v2 yet answers
+  every Connect with `bad_signature`, so the control plane has to be updated
+  before the engine. Self-hosted instances are unaffected: the brokered connect
+  only exists on managed hosting.
 - `docker-compose.yml` and the compose file the installer writes no longer pin
   `platform: linux/amd64`. ARM and Apple Silicon hosts get the native arm64 image
   after `docker compose pull && docker compose up -d` instead of the amd64 image
@@ -15,6 +20,16 @@
   `web_search`), which runs at the provider rather than through this
   instance's network settings. It is offered only under no policy,
   `allow-all` or `guarded`, and never to an agent whose policy cannot be read.
+- A watch (`task_create` with `watch_url`) now follows `network_policy` like
+  every other credential-free read: under `allow-list` a page outside the list
+  is not watched, under `deny-all` no page is, and with `enforce_https` a plain
+  `http://` page is not either; an address that is not http or https is refused
+  when the watch is set up instead of failing at every check. A new watch is refused when it is
+  set up; an existing one stops being read at its next check and records why,
+  and the Triggers view says on its row why the page is not read and who can
+  change that.
+  Apart from that, watches on a page in the list and watches under `guarded`
+  and `allow-all` are unchanged.
 - `POST /api/tasks/:id/confirm` now requires `{ "expect": "<digest>" }`, the
   digest from `GET /api/tasks/:id/stamp-preview`, and answers 400 without it.
   Until now a confirm without it stamped whatever the schedule held when the
@@ -22,6 +37,110 @@
   from the release that carries #2207 on; a tab opened before the upgrade gets
   "confirm failed" until it is reloaded. An API client that confirms schedules
   reads the preview first.
+- In sidecar mode with the egress proxy, a `bash` call whose tool round started after
+  the conversation read outside content (a web page, a search, a mail, a
+  previous `bash` call) no longer reaches every host under `allow-all` or no
+  policy. Its proxy credential then names the built-in provider hosts, the
+  operator's `network_allowed_hosts` and the hosts the owner typed in the thread; under
+  `guarded` a connected API's host is left out. `allow-list` and `deny-all` are
+  unchanged. A command that needs another host after that reaches it once the
+  owner names the host in the chat.
+- `GET /api/export` now sets `contacts_may_be_incomplete`,
+  `deals_may_be_incomplete`, `datastore_may_be_incomplete`,
+  `threads_may_be_incomplete` and `durable_knowledge.may_be_incomplete` to
+  `true` when the store behind the block could not be opened at boot. Until now
+  those blocks came out empty and marked complete, as if the account held no
+  contacts, deals, tables, chats or memory entries. A client that reads the
+  flags only as "a cap was reached" also sees them on such an instance.
+- With durable memory switched off, `GET /api/export` now carries the durable
+  knowledge entries and memory blocks still held from when it was on, read
+  without changing anything. Switching it off never deleted them, and until now
+  the block came out empty and marked complete. The block's new `enabled` field
+  says whether durable memory is switched on. The same read runs when durable
+  memory is on but its store did not open, and the block is marked incomplete
+  while entries the owner rejected or that were superseded are stored, since
+  the export does not carry those yet.
+- `GET /api/export` has three new fields. `knowledge_graph_may_be_incomplete`
+  is `true` when the knowledge graph was not read in full: reading it failed,
+  a read fell back to the older store, the subject graph is on without
+  `engine.db`, an entity reached the per-entity relation limit, or a remembered
+  text could not be read (see `knowledge_graph.memories` below). While the graph is switched off, or on
+  without its layer, the export still reads what the graph holds, since
+  switching it off deletes nothing: the block carries those entities and
+  relations with `enabled: false` (or `true`). `agent-memory.db` is opened
+  read-only for that: no migration and no checkpoint, so the file and its
+  `-wal` stay as they are; SQLite may create the `-shm`, and an empty `-wal`
+  where none was, beside them. A file from a newer build is left unread, and
+  one that cannot be read gives an empty block, both with the flag `true`; one
+  stamped with an older schema is read, and the flag is `true`. `secrets` now also lists names
+  written to the vault after boot (mail and OAuth credentials, for example).
+  `secrets_may_be_incomplete` is `true` when the secret store or its vault did
+  not open. `secrets_note` says that only secret names are exported, never
+  values.
+- With the subject graph on, `GET /api/export` reads the knowledge graph's
+  entities by key instead of by offset, so its time grows with the number of
+  subjects rather than with the square of that number;
+  `knowledge_graph.entities` is then in id order, unless a key read fails and
+  the export pages by offset instead. Without a search term, the entity list
+  of the web app on the subject graph cuts its page in the query and breaks
+  ties in its order by id.
+- `GET /api/export` now carries the remembered texts of the knowledge graph,
+  under `knowledge_graph.memories`, keyed by the store that holds them:
+  `agent-memory.db` with its `memories`, `mentions`, `supersedes`,
+  `cooccurrences` and `metrics` (with the subject graph on also its `entities`
+  and `relations`, which the graph block then reads from `engine.db`; where the
+  subject graph's store did not open, or `engine.db` is missing, the graph block
+  reads them instead), and `engine.db` with its `memories`, `memory_subjects`,
+  every row of `relationships` (with `source_deleted` and a
+  `relationships_note`), `supersedes`, `subject_cooccurrences` and
+  `subject_mints`; the graph block lists only the subjects it maps to entities,
+  so relations between other subjects were in no block. Every stored column is
+  included except the embedding, and replaced or retired texts are included as
+  well, with their `is_active` and `superseded_by`. Texts, the names, aliases,
+  descriptions and metadata of those legacy entities, their relations' types and
+  descriptions, relationship descriptions, relationship notes, and the reason
+  one text replaced another are masked the way durable knowledge is. A text that
+  cannot be decrypted, or is not stored as text, is written as a marker, never
+  as what is stored. `knowledge_graph_may_be_incomplete` no longer turns `true`
+  just because such texts are stored. It turns `true` when one of these tables
+  could not be read, a table returned more than 20,000 rows (the rest is left
+  out), a text could not be decrypted, `engine.db` is not open, or
+  `agent-memory.db` comes from a newer build. It also stays `true` while graph
+  rows are stored that no block carries: subjects the graph block does not list
+  (archived ones and those of kind `service` or `other` with the subject graph
+  on, every subject with it off), rows in an `agent-memory.db` table this build
+  does not export (one an older schema kept), and with the subject graph off
+  relations neither of whose entities is stored. Those are counted, not read.
+  Both files are only read, as for the entities and relations.
+- When a database was set aside as corrupt (`<name>.corrupt-<ms>`: by the boot
+  for `history.db` and `engine.db`, by a restore for those and `datastore.db`
+  and `agent-memory.db`, and an `engine.db.migration-tmp.corrupt-<ms>` left by
+  older builds), `GET /api/export` now names the set-aside files in
+  `set_aside_databases` (names only) and marks the blocks read from that
+  database incomplete: the threads for `history.db`; durable knowledge for
+  `engine.db`, and the knowledge graph too; the
+  knowledge graph for `agent-memory.db`; contacts, deals and tables for
+  `datastore.db`. Until now the database opened in its place exported as
+  complete, while the older data sat in the set-aside file. When the data
+  directory cannot be listed, `set_aside_databases_unknown` is set and all
+  of those blocks are marked.
+- The person erasure's preview and answer now name the set-aside copies of the
+  databases it deletes in (`engine.db`, its `migration-tmp` staging copy, and
+  `agent-memory.db`) in `setAsideCopies` (file names only, never content):
+  each copy with the `-wal` and `-shm` beside it in `companions`, and a `-wal`
+  or `-shm` whose copy is gone as a copy itself. The web app lists them under
+  "Not covered" with the way to them for the instance's hosting; self-hosted,
+  the companions are named with it. Such a copy may still hold data about the
+  person, and the erasure does not reach it; until now the answer did not say
+  so. When the data directory cannot be listed, `setAsideCopies` is `null` and
+  the web app says the copies could not be checked.
+
+### Changed: web UI
+
+- The person erasure's done line uses the singular for a count of one, leaves
+  out a count of zero, and says "no entries and no memories" when both are zero.
+  On a narrow screen the subject panel is now opaque, so the page behind it no
+  longer shows through.
 
 ## 2.18.0 — 2026-11-17
 

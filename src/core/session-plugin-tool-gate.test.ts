@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import { applyPluginToolGate } from './session.js';
+import { applyPluginToolGate, PLUGIN_GATE_TIMEOUT_MS } from './session.js';
+import { runInCallSlot } from './call-connection.js';
+import { TOOL_ABANDONED_MESSAGE } from './agent.js';
 import type { ToolEntry, IAgent } from '../types/index.js';
 import type { PluginManager } from './plugins.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
@@ -98,5 +100,40 @@ describe('applyPluginToolGate — preserves ToolEntry fields through the plugin 
       makePluginManager(true),
     );
     await expect(wrapped!.handler({}, {} as IAgent)).rejects.toBe(soft);
+  });
+});
+
+describe('applyPluginToolGate — the wait on the gate hears the stop and has a bound', () => {
+  const never = (): PluginManager => ({ fireToolGate: vi.fn(() => new Promise<boolean | undefined>(() => undefined)) } as unknown as PluginManager);
+
+  it('ends the wait when the run is stopped, without running the tool', async () => {
+    const tool: ToolEntry = { ...nonTerminalTool, handler: vi.fn().mockResolvedValue('ran') };
+    const [wrapped] = applyPluginToolGate([tool], never());
+    const stop = new AbortController();
+    const call = runInCallSlot({ abort: stop }, () => wrapped!.handler({}, {} as IAgent));
+    stop.abort();
+    await expect(call).rejects.toThrow(TOOL_ABANDONED_MESSAGE);
+    expect(tool.handler).not.toHaveBeenCalled();
+  });
+
+  it('refuses the call when the gate gives no answer within its bound', async () => {
+    vi.useFakeTimers();
+    try {
+      const tool: ToolEntry = { ...nonTerminalTool, handler: vi.fn().mockResolvedValue('ran') };
+      const [wrapped] = applyPluginToolGate([tool], never());
+      const call = wrapped!.handler({}, {} as IAgent);
+      const settled = expect(call).rejects.toThrow('the plugin gate gave no answer within 30 s; the call was not made.');
+      await vi.advanceTimersByTimeAsync(PLUGIN_GATE_TIMEOUT_MS);
+      await settled;
+      expect(tool.handler).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('control: a gate that answers in time lets the tool run, and a refusing one blocks it', async () => {
+    const tool: ToolEntry = { ...nonTerminalTool, handler: vi.fn().mockResolvedValue('ran') };
+    await expect(applyPluginToolGate([tool], makePluginManager(undefined))[0]!.handler({}, {} as IAgent)).resolves.toBe('ran');
+    await expect(applyPluginToolGate([tool], makePluginManager(false))[0]!.handler({}, {} as IAgent)).rejects.toThrow('blocked by plugin gate');
   });
 });

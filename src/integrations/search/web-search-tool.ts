@@ -7,10 +7,14 @@ import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { recordSessionCost } from '../../core/session-budget.js';
 import { rerankSearchResults } from './search-reranker.js';
-import { currentCallSignal } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTargetOrigin } from '../../core/call-connection.js';
 import { delegatedRedirects, httpTarget, outwardReadRecorder } from '../../core/audit-log.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { turnIsLocked } from '../../core/mandate-tool-lock.js';
+import { carriesAddress, hostTargets } from '../../core/send-target.js';
+
+export { crossHostRedirectGuard, maskedHost, readHopsGuarded } from '../../core/read-hops.js';
+import { crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 
 interface WebSearchInput {
   action: 'search' | 'read';
@@ -118,6 +122,16 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
     // A read of a page names it, host and path. A search names only that it searched: its
     // text can carry a customer's name, and the trail holds no content.
     outwardRead: (input) => (input.action === 'read' && typeof input.url === 'string' ? httpTarget('GET', input.url) : 'search'),
+    // Once foreign content is in the conversation, a read address can carry data out: a page that
+    // was read can ask for `https://<what the chat holds>.host/<more of it>?q=<and more>`. Such a
+    // read goes through the same origin check as a send, to the host of its address; an address
+    // that carries another one is asked about whatever its host (`readCarriesAddress`). Without a
+    // question it passes when the owner named that host, or when a search in this conversation
+    // listed exactly this address as a result (`readAddress`). A read the check stopped at follows
+    // no redirect to another host (`crossHostRedirectGuard`).
+    sendTargetsWhenLatched: (input) => (input.action === 'read' && typeof input.url === 'string' ? hostTargets(input.url) : null),
+    readCarriesAddress: (input) => input.action === 'read' && typeof input.url === 'string' && carriesAddress(input.url),
+    readAddress: (input) => (input.action === 'read' && typeof input.url === 'string' ? input.url : null),
     definition: {
       name: 'web_research',
       description: `Search the web or read a URL. Provider: ${provider.name}.
@@ -205,17 +219,24 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // tool run — account its spend to the local session cap + the tenant
           // balance. No-op when reranking was skipped (no cost) or self-host.
           if (reranked.costUsd !== undefined) {
+            // Charged to this run's cost ceiling too, like the agent's own helper calls.
+            agent.chargeExternalCost?.(reranked.costUsd);
             debitInRunHelperCost(ctx.meteredHost, agent.sessionCounters, reranked.costUsd, 'fast');
           }
           // A rerank aborted at its timeout returned no reply to book. Its upper bound goes to
           // the session cap only — never to the tenant debit (aborted-call.ts).
           if (reranked.abortedCost) {
+            // And to this run's ceiling, as a bound it counts but does not bill.
+            agent.chargeExternalCapOnlyCost?.(reranked.abortedCost.upperBoundUsd);
             recordSessionCost(agent.sessionCounters, reranked.abortedCost.upperBoundUsd);
           }
           results = reranked.results;
           // A delegated session gets the results as the engine found them: the pages behind
           // them would be reads whose hosts no row named before they were sent.
           if (isOwnerPrincipal(agent.principal)) results = await enrichResults(results, ctx);
+          // The addresses this search lists, as the provider gave them: a later read of exactly one of
+          // them passes the origin check without a question (`readAddress`).
+          agent.searchResultAddresses?.noteResults(input.query, results.map((r) => r.url));
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
@@ -236,7 +257,11 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           throw new ToolSoftFailure('Error: "url" is required for action "read".', 'missing url');
         }
         try {
-          const result = await extractContent(input.url, undefined, ctx, delegatedRedirects(outwardReadRecorder(agent, 'web_research:redirect')));
+          // `currentCallTargetOrigin()` is set exactly when this call's address went through the origin
+          // check (`sendTargetsWhenLatched` above declared it); `readHopsGuarded` says when that holds
+          // its hops to the host.
+          const onRedirect = crossHostRedirectGuard(input.url, readHopsGuarded(currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'web_research:redirect')));
+          const result = await extractContent(input.url, undefined, ctx, onRedirect);
           const parts = [`# ${result.title}`, `Source: ${result.url}`, `Words: ${result.wordCount}`];
           if (result.truncated) parts.push('(Content truncated)');
           parts.push('', result.content);

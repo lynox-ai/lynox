@@ -291,7 +291,7 @@ describe('a list with a judge (PRD bulk-loop §3.1, two starts)', () => {
     start(id);
     expect(ledger.recordListPage(id, { page: 1, items: [item(1), item(2)], bytes: 10 })).toMatchObject({ ok: true, added: 2 });
     expect(ledger.finishList(id, mint)).toBe('listed');
-    expect(ledger.getStatus(id)!.judge).toEqual({ tier: 'fast', unjudged: 2 });
+    expect(ledger.getStatus(id)!.judge).toEqual({ tier: 'fast', unjudged: 2, judged: 0 });
     const hash = ledger.getJudgeRuleForOwner(id)!.hash;
     expect(ledger.resumePreview(id, Date.now(), { judgeRuleHash: hash })).toEqual({ ok: false, reason: 'cost_cap' });
     const two = ledger.resumePreview(id, Date.now(), { judgeRuleHash: hash, costCapUsd: 2 });

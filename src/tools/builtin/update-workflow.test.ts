@@ -12,6 +12,7 @@ import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-princ
 import type { IAgent, LynoxUserConfig, PlannedPipeline, InlinePipelineStep } from '../../types/index.js';
 import type { CapabilityContract } from '../../types/capability-contract.js';
 import { testAuditLog } from '../../../tests/helpers/audit-log.js';
+import { RESERVED_STEP_IDS } from '../../orchestrator/step-id.js';
 
 const mockConfig = { api_key: 'test-key' } as LynoxUserConfig;
 
@@ -212,6 +213,31 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(await rename(`a${ZWSP}`, 'b')).toBe('Error: Step "b" already exists — cannot rename step #1 to it.');
     // The exact id typed with its character still names its step; the other one stays as it was.
     expect(await rename(`a${ZWSP}`, 'x')).toMatch(/^Error: This workflow holds text saved with a character that does not show[^]*rename_step for step #2 \(lynox does not show its id\): step_id "#2"/);
+  });
+
+  // A step id a run already uses (`params`), stored before a save refused it: no run of it starts
+  // (`runManifest`), so the edit names the rename that is its way out, and the rename saves.
+  it('names the rename a stored reserved step id needs, and saves it', async () => {
+    storePipeline('wf-1', makePlanned({ steps: [{ id: 'params', task: 'Fetch' }, { id: 'b', task: 'Use {{params.result}}', input_from: ['params'] }] }));
+    const edit = (modifications: unknown[]): Promise<string> =>
+      updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications } as never, makeAgent(history)) as Promise<string>;
+    const refusal = await edit([{ action: 'update_task', step_id: 'b', value: 'Use it' }]);
+    expect(refusal).toBe(
+      'Error: This workflow holds a step id a run already uses for something else ("params", "__proto__" or "constructor"), which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:\n- rename_step for step #1 (a reserved id): step_id "#1", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), other than params, __proto__ or constructor, for example fetch_orders; the steps that read it follow');
+    // The fix rules out every reserved id, read from the set itself, so the next id it asks for is not one either.
+    const fix = refusal.slice(refusal.indexOf('rename_step for step #1'));
+    for (const id of RESERVED_STEP_IDS) expect(fix).toMatch(new RegExp(`[ ,]${id.replace(/[^a-z]/g, '\\$&')}[ ,]`));
+    expect(await edit([{ action: 'rename_step', step_id: '#1', value: 'fetch' }])).toContain('✓ Updated workflow');
+    _resetPipelineStore();
+    const saved = getPipeline('wf-1', history)!.steps;
+    expect(saved.map((s) => s.id)).toEqual(['fetch', 'b']);
+    expect(saved[1]!.input_from).toEqual(['fetch']);
+    expect(saved[1]!.task).toBe('Use {{fetch.result}}');
+  });
+
+  it('the save refuses a plan with a reserved step id', () => {
+    expect(() => history.insertPlannedPipeline(makePlanned({ steps: [{ id: 'a', task: 'A' }, { id: 'constructor', task: 'B' }] }), null))
+      .toThrow('step #2 (steps[1].id): "params", "__proto__" and "constructor" cannot be step ids');
   });
 
   // Two ids the model reads alike (review of 1099): the one it can see does not hide the other.
