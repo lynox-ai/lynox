@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.20.0 — 2026-12-01
+## 2.20.0 — 2026-11-27
 
 This release adds the workflow takeover, turns inbox rules on by default,
 holds reads, watches and shell calls after outside content to the owner's
