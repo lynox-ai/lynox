@@ -4,9 +4,10 @@ import { isMandateConnection } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import type { StampEntry } from './plan-run-context.js';
 import { bindingOf, connectionShown, connectionWaits, memberConnectionReader } from './profile-secret-view.js';
-import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalTag, type RequestPrincipal } from './request-principal.js';
+import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { RunHistory } from './run-history.js';
-import type { TriggerRecord } from '../types/index.js';
+import type { InlinePipelineStep, PipelineMode, TriggerRecord } from '../types/index.js';
+import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 
 /**
  * The connections the owner's stamp of a plan lets that plan's runs use: the ones the mandate the
@@ -99,9 +100,12 @@ export function stampSubject(trigger: TriggerRecord, wf: string | null): StampSu
  * an instruction the owner did not see next to it. By content, not by a change time: those are
  * kept to the second.
  */
-export function stampExpect(trigger: TriggerRecord, wf: string | null, entries: readonly StampEntry[]): string {
+export function stampExpect(trigger: TriggerRecord, wf: string | null, entries: readonly StampEntry[], asks?: string | null): string {
   const subject = stampSubject(trigger, wf);
-  return createHash('sha256').update(JSON.stringify([SUBJECT_ORDER.map((k) => subject[k]), entries])).digest('hex');
+  // Whom the stamp says the questions reach (`planAsks`) is chosen by change times the subject does
+  // not hold: held here, a change of that person between preview and confirm refuses the confirm.
+  const read = asks === undefined ? [SUBJECT_ORDER.map((k) => subject[k]), entries] : [SUBJECT_ORDER.map((k) => subject[k]), entries, asks];
+  return createHash('sha256').update(JSON.stringify(read)).digest('hex');
 }
 
 /** A watch's config without its baseline (`last_hash`, `last_summary`), which every run of the
@@ -256,6 +260,84 @@ export async function planOfTrigger(
   } catch {
     return only(true);
   }
+}
+
+/**
+ * Whom a plan's run acts for once the owner's stamp holds, read the way the run reads it
+ * (`planOfTrigger`, then the run's access gate): the mandate, or none. None for the owner's plan,
+ * for a plan whose authorship cannot be read, for a bulk effect (its run carries its own planner),
+ * and for a plan one of whose members has ended or names no grant: that run does not start.
+ */
+export async function planActsFor(
+  task: TriggerRecord,
+  runHistory: RunHistory | null,
+  isLive: (mandateId: string) => boolean,
+): Promise<RequestPrincipal | undefined> {
+  if (task.effect.startsWith('bulk_')) return undefined;
+  const plan = await planOfTrigger(task, runHistory);
+  if (plan.unreadable || plan.of === undefined) return undefined;
+  if (plan.members.some((m) => principalHasEnded(m, isLive))) return undefined;
+  return plan.of;
+}
+
+/**
+ * Who besides the owner may answer a plan's questions once it is stamped: whom its run acts for
+ * ({@link planActsFor}), where that run can ask. An agent run asks through `ask_user` under that
+ * principal; a watch has no tools. A workflow run asks only for an interactive workflow a schedule
+ * may run (the run's own rule), found the way the run finds it (`getPipeline`), and never from a
+ * webhook, which refuses an asking workflow outright.
+ */
+export async function planAsks(
+  task: TriggerRecord,
+  runHistory: RunHistory | null,
+  isLive: (mandateId: string) => boolean,
+): Promise<RequestPrincipal | undefined> {
+  if (task.effect === 'run_workflow') {
+    if (task.source === 'webhook' || !task.pipeline_id) return undefined;
+    const { getPipeline } = await import('../tools/builtin/pipeline.js');
+    // A workflow that cannot be read throws on: the preview fails instead of saying no one else answers.
+    const planned = runHistory ? getPipeline(task.pipeline_id, runHistory) : undefined;
+    if (planned === undefined || !workflowAsksOnSchedule(planned)) return undefined;
+  } else if (task.effect !== 'run_agent' || task.source === 'watch') {
+    return undefined;
+  }
+  return planActsFor(task, runHistory, isLive);
+}
+
+/** Whether a workflow's questions reach anyone on a schedule: an interactive one a schedule may run. */
+export function workflowAsksOnSchedule(planned: { mode?: PipelineMode | undefined; steps: InlinePipelineStep[] }): boolean {
+  return planned.mode === 'interactive' && isSchedulableWorkflow(planned);
+}
+
+/**
+ * Who may be asked a workflow's questions besides the owner when it runs on a schedule, one entry
+ * per person: whom each plan of it asks ({@link planAsks}), and whom a plan without a mark of its
+ * own would ask, the workflow's mandate. Empty when the workflow's own mandate has ended or names no
+ * grant (no plan of it runs), or its authorship cannot be read.
+ */
+export async function workflowAsks(
+  workflowId: string,
+  plans: readonly TriggerRecord[],
+  runHistory: RunHistory | null,
+  isLive: (mandateId: string) => boolean,
+): Promise<RequestPrincipal[]> {
+  let a: ReturnType<RunHistory['getWorkflowAuthorship']>;
+  try {
+    a = runHistory?.getWorkflowAuthorship(workflowId);
+  } catch {
+    return [];
+  }
+  if (a === undefined) return [];
+  const own = planMandate(planAuthorshipOfWorkflow(a))?.principal;
+  if (own !== undefined && principalHasEnded(own, isLive)) return [];
+  const asked = new Map<string, RequestPrincipal>();
+  if (own !== undefined) asked.set(principalTag(own), own);
+  for (const t of plans) {
+    if (t.effect !== 'run_workflow' || t.pipeline_id !== workflowId) continue;
+    const p = await planAsks(t, runHistory, isLive);
+    if (p !== undefined) asked.set(principalTag(p), p);
+  }
+  return [...asked.values()];
 }
 
 export const FOREIGN_WORKFLOW_SCHEDULE_REFUSAL =

@@ -25,9 +25,10 @@ const before = getLocale();
 let watchUrl = '';
 
 let modelTier: string | null = null;
+let asks: unknown;
 
 const preview = () => ({
-	expect: 'digest-1', by: null, workflow: null, connections: [],
+	expect: 'digest-1', by: null, workflow: null, connections: [], ...(asks === undefined ? {} : { asks }),
 	subject: {
 		id: 'w1', effect: 'run_agent', source: 'watch', title: 'Preisseite', description: null, schedule_cron: null,
 		watch: JSON.stringify({ url: watchUrl, interval_minutes: 60 }), pipeline_id: null, pipeline_params: null, model_tier: modelTier, wf: null,
@@ -37,6 +38,7 @@ const json = (status: number, body: unknown): Response => new Response(JSON.stri
 
 beforeEach(() => {
 	modelTier = null;
+	asks = undefined;
 	setLocale('de');
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => (String(url).endsWith('/tasks/w1/stamp-preview') ? json(200, preview()) : json(200, {}))));
 	target = document.createElement('div');
@@ -154,5 +156,57 @@ describe('the stamp of a plan names its model tier as the settings do', () => {
 		await open();
 		expect(target.querySelector('[data-stamp-model]')?.textContent).toContain('Deep');
 		expect(target.querySelector('[data-stamp-model]')?.textContent).not.toContain('deep');
+	});
+});
+
+describe('the stamp of a plan says whom its questions reach besides the owner', () => {
+	it('names the person, set apart, in both languages', async () => {
+		watchUrl = 'https://shop.example/preise';
+		asks = 'lena@kanzlei.example';
+		await open();
+		const line = target.querySelector('[data-stamp-asks]');
+		expect(line?.textContent).toBe('Fragen dieses Plans beantworten du und lena@kanzlei.example. Wer zuerst antwortet, lenkt den Lauf.');
+		expect([...line!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual(['lena@kanzlei.example']);
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		setLocale('en');
+		await open();
+		const en = target.querySelector('[data-stamp-asks]');
+		expect(en?.textContent).toBe('You and lena@kanzlei.example can answer this plan’s questions. Whoever answers first steers the run.');
+		expect([...en!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual(['lena@kanzlei.example']);
+	});
+
+	it('shows an address past the display length whole: its end, the domain, is what says whose it is', async () => {
+		watchUrl = 'https://shop.example/preise';
+		asks = 'k'.repeat(90) + '@kanzlei.example';
+		await open();
+		expect([...target.querySelector('[data-stamp-asks]')!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual([asks]);
+	});
+
+	it('says nothing for a plan that asks only the owner, and the preview stands', async () => {
+		watchUrl = 'https://shop.example/preise';
+		for (const value of [undefined, null]) {
+			asks = value;
+			await open();
+			expect(target.querySelector('[data-stamp-asks]')).toBeNull();
+			expect(target.querySelector('[data-stamp-watch]')).not.toBeNull();
+			if (component) unmount(component);
+			component = undefined;
+			target.innerHTML = '';
+		}
+	});
+
+	it('refuses a preview whose answerer has another shape: a fault never reads as only the owner answering', async () => {
+		watchUrl = 'https://shop.example/preise';
+		for (const value of ['', 42, { email: 'lena@kanzlei.example' }]) {
+			asks = value;
+			await open();
+			expect(target.querySelector('[data-stamp-failed]')).not.toBeNull();
+			expect(target.querySelector('[data-stamp-watch]')).toBeNull();
+			if (component) unmount(component);
+			component = undefined;
+			target.innerHTML = '';
+		}
 	});
 });

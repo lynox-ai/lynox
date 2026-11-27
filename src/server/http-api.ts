@@ -40,7 +40,7 @@ import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
+import { planAsks, planOfTrigger, stampEntriesFor, workflowAsks, workflowAsksOnSchedule, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -2864,6 +2864,32 @@ export class LynoxHTTPApi {
    */
   async #stampListFor(trigger: TriggerRecord): Promise<{ wf: string | null; entries: readonly StampEntry[] } | null> {
     return (await this.#stampPlanOf(trigger)).listed;
+  }
+
+  /**
+   * Who besides the owner may answer the questions of a plan once it is stamped, as the address the
+   * view names: read by `planAsks`, the run's own reading. Null for a plan that asks only the owner,
+   * or none at all.
+   */
+  async #planAsksShown(trigger: TriggerRecord): Promise<string | null> {
+    const history = this.engine?.getRunHistory();
+    if (!history) return null;
+    const p = await planAsks(trigger, history, (id) => this._mandateLive(id));
+    return p !== undefined && p.kind === 'mandate' ? p.email : null;
+  }
+
+  /**
+   * Who may be asked an interactive workflow's questions besides the owner when it runs on a
+   * schedule (`workflowAsks`, over every plan of it that may still run): how many people, and the
+   * address only when it is one — with more, each plan's own stamp says who it is. Null when that is
+   * no one, or the workflow does not ask on a schedule.
+   */
+  async #workflowAsksShown(planned: PlannedPipeline): Promise<{ count: number; name: string | null } | null> {
+    const history = this.engine?.getRunHistory();
+    if (!history || !workflowAsksOnSchedule(planned)) return null;
+    const asked = (await workflowAsks(planned.id, history.getPlansOfWorkflow(planned.id), history, (id) => this._mandateLive(id))).filter((p) => p.kind === 'mandate');
+    if (asked.length === 0) return null;
+    return { count: asked.length, name: asked.length === 1 && asked[0]!.kind === 'mandate' ? asked[0]!.email : null };
   }
 
   /**
@@ -9752,6 +9778,7 @@ export class LynoxHTTPApi {
         changedBy: shaped ? 'mandate' : 'owner',
         awaitsStamp: state === 'awaits_owner_stamp',
         ...stampShown(planned),
+        asks: await this.#workflowAsksShown(planned),
         steps: await stepsShown(planned),
       });
     }, ownerOnly('see what stamping a workflow would confirm')));
@@ -10399,6 +10426,7 @@ export class LynoxHTTPApi {
       const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
       const { listed, by, workflow } = await this.#stampPlanOf(trigger);
+      const asks = await this.#planAsksShown(trigger);
       const entries = listed?.entries ?? [];
       const apiStore = engine.getApiStore();
       const profiles = apiStore ? stampProfiles(entries, apiStore) : [];
@@ -10408,10 +10436,11 @@ export class LynoxHTTPApi {
       // (The list row carries the ids already, `triggerForRoute`; the preview does not repeat them.)
       const { created_mandate_id: _created, mandate_editor_id: _editor, ...subject } = stampSubject(trigger, listed?.wf ?? null);
       jsonResponse(res, 200, {
-        expect: stampExpect(trigger, listed?.wf ?? null, entries),
+        expect: stampExpect(trigger, listed?.wf ?? null, entries, asks),
         subject,
         by,
         workflow,
+        asks,
         connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
       });
     }, ownerOnly('see what a schedule would be confirmed with')));
@@ -10436,11 +10465,13 @@ export class LynoxHTTPApi {
       const current = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
       const listed = await this.#stampListFor(current);
+      const asks = await this.#planAsksShown(current);
       // Read again after the await, and stamp with no await in between: what is compared is
-      // what is stamped.
+      // what is stamped. Whom the questions reach is read from `current`; a mandate's change since
+      // moves its change time, which the subject does not hold, so that refuses as well.
       const now = engine.getRunHistory()?.getTrigger(params['id']!);
-      if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
-        errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
+      if (!now || (now.mandate_edited_at ?? null) !== (current.mandate_edited_at ?? null) || stampExpect(now, listed?.wf ?? null, listed?.entries ?? [], asks) !== expected) {
+        errorResponse(res, 409, 'This schedule changed since you looked: what it runs, its connections, or who besides you answers its questions. Look at it again, then confirm.', 'changed');
         return;
       }
       if (listed !== null && listed.entries.length > 0) connections = listed;

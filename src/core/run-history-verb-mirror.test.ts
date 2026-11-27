@@ -480,6 +480,26 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     history.close();
   });
 
+  it('getPlansOfWorkflow reads every plan of a workflow that may still run: switched off ones in, finished ones out, no limit', () => {
+    const { history, engine } = make();
+    seedWorkflow(history, 'wf-p');
+    seedWorkflow(history, 'wf-other');
+    history.insertTrigger(trig({ id: 'on', taskType: 'pipeline', pipelineId: 'wf-p' }));
+    // Switched on again, it runs without a new stamp: its person may be asked.
+    history.insertTrigger(trig({ id: 'off', taskType: 'pipeline', pipelineId: 'wf-p' }));
+    history.setTriggerEnabled('off', false);
+    history.insertTrigger(trig({ id: 'done', taskType: 'pipeline', pipelineId: 'wf-p', status: 'completed' }));
+    history.insertTrigger(trig({ id: 'stopped', taskType: 'pipeline', pipelineId: 'wf-p' }));
+    history.updateTrigger('stopped', { status: 'stopped' });
+    history.insertTrigger(trig({ id: 'elsewhere', taskType: 'pipeline', pipelineId: 'wf-other' }));
+    expect(history.getPlansOfWorkflow('wf-p').map(t => t.id).sort()).toEqual(['off', 'on']);
+    // More than the hundred a list reads: none falls off.
+    for (let i = 0; i < 120; i++) history.insertTrigger(trig({ id: `more-${i}`, taskType: 'pipeline', pipelineId: 'wf-p' }));
+    expect(history.getPlansOfWorkflow('wf-p')).toHaveLength(122);
+    engine.close();
+    history.close();
+  });
+
   it('getDue (MONEY-PATH): reverse-maps watch_config for a due WATCH trigger', () => {
     // The money-path test above covers the pipeline fields; watch_config is the OTHER
     // fired-config field the WorkerLoop reads (executeWatch). A regression in the

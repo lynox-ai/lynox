@@ -68,6 +68,11 @@ export interface StampParameter {
 export const STAMP_RUNS = ['anywhere', 'chat_and_schedule', 'chat'] as const;
 export type StampRuns = (typeof STAMP_RUNS)[number];
 
+export interface StampAsks {
+  count: number;
+  name: string | null;
+}
+
 export interface StampPreview {
   expect: string;
   stampedAt: string | null;
@@ -76,6 +81,11 @@ export interface StampPreview {
   mode: string | null;
   /** Where it may run, by the engine's rule (`isSchedulableWorkflow`), or null when not sent. */
   runs: StampRuns | null;
+  /**
+   * Who may be asked its questions besides the owner when it runs on a schedule: how many people,
+   * and the address only when it is one. Null when no one, or when not sent.
+   */
+  asks: StampAsks | null;
   parameters: StampParameter[];
   onFailure: string | null;
   limits: unknown;
@@ -96,6 +106,16 @@ const optOneOf = <T extends string>(v: unknown, values: readonly T[]): T | null 
 /** Absent or null is none; a finite, non-negative number is itself; anything else is BAD. */
 const optMs = (v: unknown): number | null | typeof BAD =>
   v === undefined || v === null ? null : typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : BAD;
+/** `asks` read whole: absent or null is none; one person with an address, or two and more with none; anything else is BAD. */
+function readAsks(v: unknown): StampAsks | null | typeof BAD {
+  if (v === undefined || v === null) return null;
+  if (!isRecord(v) || typeof v['count'] !== 'number' || !Number.isInteger(v['count'])) return BAD;
+  const count = v['count'];
+  const name = v['name'];
+  if (count === 1 && typeof name === 'string' && name !== '') return { count, name };
+  if (count >= 2 && (name === null || name === undefined)) return { count, name: null };
+  return BAD;
+}
 /**
  * Absent or null is none; what a contract allows read whole is itself; anything else is BAD. A list
  * holds only values a parameter can equal (text, a number, true or false), a bound is a finite
@@ -185,6 +205,10 @@ export function parseStampPreview(body: unknown): StampPreview | null {
   // Where it may run only informs: a value this view does not know shows no line, and the preview stands.
   const runsRead = optOneOf(body['runs'], STAMP_RUNS);
   const runs = runsRead === BAD ? null : runsRead;
+  // Who else may answer is part of what the owner consents to: absent (an older engine) is no line,
+  // present in any other shape refuses the preview, so a fault never reads as "only you".
+  const asks = readAsks(body['asks']);
+  if (asks === BAD) return null;
   if (mode === BAD || onFailure === BAD || stampedAt === BAD) return null;
   const changedBy = body['changedBy'];
   return {
@@ -194,6 +218,7 @@ export function parseStampPreview(body: unknown): StampPreview | null {
     awaitsStamp: body['awaitsStamp'] === true,
     mode,
     runs,
+    asks,
     parameters,
     onFailure,
     limits: body['limits'] ?? null,

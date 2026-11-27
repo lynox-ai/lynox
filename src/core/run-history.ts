@@ -3898,6 +3898,11 @@ export class RunHistory {
     return this._triggerStore?.getDue() ?? [];
   }
 
+  /** Every plan of a workflow that may still run, switched off ones included (`getPlansOfWorkflow`). */
+  getPlansOfWorkflow(workflowId: string): TriggerRecord[] {
+    return this._triggerStore?.getPlansOfWorkflow(workflowId) ?? [];
+  }
+
   /** Triggers that actively reference a saved workflow (Slice C destructive-edit
    *  guard): enabled + not-completed rows whose `pipeline_id` matches. */
   getTriggersByPipelineId(pipelineId: string): TriggerRecord[] {
