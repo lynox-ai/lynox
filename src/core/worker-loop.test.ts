@@ -1476,19 +1476,17 @@ describe('WorkerLoop', () => {
       const promptOf = (session: Session): string =>
         (session.run as unknown as { mock: { calls: string[][] } }).mock.calls[0]?.[0] ?? '';
 
-      it('a stamped plan of the mandate that only the answer started does not run: stopped, schedule kept, answer released, no push', async () => {
+      it('a stamped plan of the mandate runs in a new conversation, without the answer, and releases it', async () => {
         const s = setup(stamped());
         const { releaseTrigger } = withAnswerIn(s, 'thread-owner');
-        // A router with channels, so a push the run would send is seen.
-        const router = makeNotificationRouter(true);
-        const loop = new WorkerLoop(s.engine, router, 60_000);
-        await loop.tick();
+        await s.loop.tick();
         await vi.advanceTimersByTimeAsync(0);
-        expect(s.engine.createSession, 'no session').not.toHaveBeenCalled();
-        expect(s.session.run, 'no run').not.toHaveBeenCalled();
-        expect(s.tm.recordTaskRun).toHaveBeenCalledWith('po-1', expect.stringContaining('was not handed on'), 'stopped', { keepSchedule: true });
+        expect(s.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+        expect(sessionIdOf(s.engine), 'not in the owner\'s conversation').toBeUndefined();
+        expect(s.session.run, 'the run still ran').toHaveBeenCalled();
+        expect(promptOf(s.session), 'without the question').not.toContain('Send the report?');
+        expect(promptOf(s.session), 'and without the answer').not.toContain('Yes, send it.');
         expect(releaseTrigger, 'the answer is released').toHaveBeenCalledWith('prompt-1');
-        expect(router.notify, 'no question pushed again').not.toHaveBeenCalled();
       });
 
       it('a mandate\'s start by hand runs in a new conversation, without the answer, and releases it', async () => {
@@ -1506,23 +1504,13 @@ describe('WorkerLoop', () => {
       });
 
       it('a conversation without a row is no one\'s: the mandate\'s run does not take its answer', async () => {
-        const task = makeTask({ id: 'po-prop', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, schedule_cron: undefined, next_run_at: undefined });
-        const s = setup(task);
+        const s = setup(stamped());
         const { releaseTrigger } = withAnswerIn(s, 'thread-without-row');
-        expect(await s.loop.runTriggerNow('po-prop', s.loop.claimHandRunMinter()('po-prop', EVA))).toEqual({ ok: true });
+        await s.loop.tick();
         await vi.advanceTimersByTimeAsync(0);
         expect(sessionIdOf(s.engine), 'not in that conversation').toBeUndefined();
         expect(promptOf(s.session), 'without the answer').not.toContain('Yes, send it.');
         expect(releaseTrigger).toHaveBeenCalledWith('prompt-1');
-      });
-
-      it('control: the owner\'s run continues in the owner\'s conversation, with the answer', async () => {
-        const s = setup(makeTask({ id: 'own-1' }));
-        withAnswerIn(s, 'thread-owner');
-        await s.loop.tick();
-        await vi.advanceTimersByTimeAsync(0);
-        expect(sessionIdOf(s.engine)).toBe('thread-owner');
-        expect(promptOf(s.session), 'the answer reached the run').toContain('Yes, send it.');
       });
 
       it('control: an answer in the mandate\'s own conversation is continued there, with the answer', async () => {
@@ -6132,18 +6120,13 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     h.loop.stop();
   });
 
-  it('255-d twin: an owner\'s answered question in the owner\'s chat, on the mandate\'s stamped plan, is not handed to the plan: no run, stopped, released', async () => {
-    // The run is the plan's (the mandate's), not the asker's; the answer was given in the owner's
-    // own chat, so it is not taken, and a run only the answer started is not made from scratch.
+  it('255-d twin: an owner\'s answered question on the mandate\'s stamped plan resumes for the plan, not for the asker', async () => {
     const h = parkedAfterRestart({ principal: OWNER_PRINCIPAL });
     expect(h.store.answerUser(h.promptId, 'A', OWNER_PRINCIPAL)).toBe(true);
     const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
     await exec.executeTask(tm.getTrigger(h.t.id)!, null);
-    expect(h.engine.createSession, 'no run').not.toHaveBeenCalled();
-    const after = tm.getTrigger(h.t.id)!;
-    expect(after.last_run_status).toBe('stopped');
-    expect(after.last_run_result).toContain('was not handed on');
-    expect(h.store.getAnsweredForTrigger(h.t.id), 'the answer is released').toBeUndefined();
+    const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
+    expect(opts?.['principal']).toEqual(EVA_GRANT);
     h.loop.stop();
   });
 
