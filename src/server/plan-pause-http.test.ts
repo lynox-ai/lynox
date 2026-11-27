@@ -320,7 +320,7 @@ describe('the pause is held to its takeover (real engine)', () => {
     }
   });
 
-  it('the list gives the owner why a wakeup reached nobody and its chat while that chat stands and holds the question, and a helper neither', async () => {
+  it('the list gives the owner why a wakeup reached nobody and its chat while that chat stands and holds a message, and a helper neither', async () => {
     const id = pausedPlan();
     const threadId = `question-chat-${id}`;
     const threads = engine.getThreadStore()!;
@@ -328,7 +328,7 @@ describe('the pause is held to its takeover (real engine)', () => {
     db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered', last_escalation_case = 'no_subscription', last_escalation_thread_id = ?, last_escalation_chat_kind = 'question' WHERE id = ?").run(threadId, id);
     const rowOf = async (cookie: string): Promise<Record<string, unknown> | undefined> =>
       ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((t) => t['id'] === id);
-    // The thread stands but the question was never written into it: no link to an empty chat.
+    // The thread stands but nothing was written into it: no link to an empty chat.
     const empty = await rowOf(ownerCookie);
     expect([empty?.['last_escalation_case'], empty?.['last_escalation_kind']]).toEqual(['no_subscription', 'question']);
     expect(empty).not.toHaveProperty('last_escalation_chat');

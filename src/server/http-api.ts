@@ -9877,8 +9877,9 @@ export class LynoxHTTPApi {
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
       // A trigger links to its escalation's chat only while that chat stands (a deleted one is gone)
-      // and holds a message: a run's question whose write failed after its thread was created
-      // leaves an empty chat, and a link there would show nothing of the question.
+      // and holds a message of any kind: a run's question whose write failed after its thread was
+      // created leaves an empty chat, and a link there would show nothing. Whether the latest
+      // question itself is in it is not checked.
       // Only the owner is shown the chat, so only the owner's list looks it up.
       const threadsForList = isOwnerPrincipal(principal) ? engine.getThreadStore() : null;
       const chatExists = (threadId: string): boolean =>
