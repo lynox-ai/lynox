@@ -113,6 +113,8 @@ describe('a replaced run’s page', () => {
 	it('links nothing on a run that ended for another reason, even with an id', async () => {
 		run = makeRun({ haltKey: 'discarded', haltReason: 'the owner discarded it', supersededBy: 'r2' });
 		await render();
+		// The halt line stands, so the missing link is the case, not a page that rendered nothing.
+		expect(target.querySelector('[data-testid="bulk-halt-cause"]')).not.toBeNull();
 		expect(link()).toBeNull();
 	});
 });
