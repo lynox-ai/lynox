@@ -660,6 +660,14 @@ describe('createInboxClassifierHook — mailing list', () => {
     expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: NOREPLY, listId: LIST })), 'CONTROL: a foreign list').toBe('list_handled');
   });
 
+  // The own-group exception reads the connected accounts' domains, never the copy check: a
+  // resolver that calls every sender our own still leaves a foreign list a foreign list.
+  it('a sender the copy check calls our own does not make a foreign list our own group', async () => {
+    const ownSender: AccountResolver = { ...accounts, addresses: () => [], isOwnAddress: () => true };
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts: ownSender });
+    expect(await hook(ACCOUNT.id, envelope({ from: NOREPLY, listId: LIST }))).toBe('list_handled');
+  });
+
   it('CONTROL: a mail without a list-id is enqueued as before', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
     expect(await hook(ACCOUNT.id, envelope())).toBe('enqueued');
