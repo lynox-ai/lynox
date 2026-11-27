@@ -189,7 +189,7 @@
 
 {#snippet footprintPanel()}
 	<!-- Mobile: full-width overlay; Desktop: sticky sidebar -->
-	<div class="fixed inset-0 z-40 bg-bg/95 p-4 overflow-y-auto md:static md:inset-auto md:z-auto md:bg-bg-subtle md:w-96 md:shrink-0 md:rounded-[var(--radius-md)] md:border md:border-border md:p-4 md:self-start md:sticky md:top-4 md:max-h-[calc(100vh-8rem)] md:overflow-y-auto scrollbar-thin" style="padding-top: calc(1rem + env(safe-area-inset-top, 0px));">
+	<div class="fixed inset-0 z-40 bg-bg p-4 overflow-y-auto md:static md:inset-auto md:z-auto md:bg-bg-subtle md:w-96 md:shrink-0 md:rounded-[var(--radius-md)] md:border md:border-border md:p-4 md:self-start md:sticky md:top-4 md:max-h-[calc(100vh-8rem)] md:overflow-y-auto scrollbar-thin" style="padding-top: calc(1rem + env(safe-area-inset-top, 0px));">
 		<!-- Header -->
 		<div class="flex items-start justify-between gap-2">
 			<div>

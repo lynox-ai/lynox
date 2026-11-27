@@ -41,7 +41,7 @@ export interface BulkNotices {
   applyCounts(c: BulkApplyCounts): string;
   previewCounts(read: number, invalid: number, unread: number, total: number): string;
   judgeCounts(judged: number, invalid: number, unjudged: number, total: number): string;
-  /** The API calls of this pass at the profile's rate: an estimate, and it says so (ux U-096). */
+  /** The API calls of this pass at the price per call set in the API connection: an estimate, and it says so (U-096, U-459). */
   costs(calls: number, eachUsd: number): string;
   /** `reason` is the stored English text, one of `BULK_HALT_REASONS` or a cause the run named. */
   halted(phase: BulkPhase, reason: string): string;
@@ -62,6 +62,17 @@ export interface BulkNotices {
    * the sentence may say that nothing was written.
    */
   consentOutdated(fields: readonly string[], nothingYet: boolean): string;
+  /**
+   * A Shopify product run halted because its connection did not ask for, or was not granted,
+   * `write_products` (`shopifyProductWriteAccess`), the way on included; recorded as the run result. `nothingYet` as above.
+   */
+  productWriteNotAsked(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
+  /**
+   * The same halt as it is pushed: lead and cause without the way, which the run page shows, so
+   * that with the counts it fits the web-push cut (`REMINDER_BODY_MAX`). The run result keeps
+   * {@link BulkNotices.productWriteNotAsked}, the way included, for the owner's history and the model.
+   */
+  productWriteNotAskedPush(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /** A run another loop took over (B9). */
   readonly otherLoop: string;
   /** A run waiting for targets another loop holds (B10, recorded only). */
@@ -167,7 +178,7 @@ const EN: BulkNotices = Object.freeze({
   judgeCounts: (judged: number, invalid: number, unjudged: number, total: number) =>
     `Judged ${String(judged)}, invalid ${String(invalid)}, without a verdict ${String(unjudged)} of ${String(total)} targets.`,
   costs: (calls: number, eachUsd: number) =>
-    `${String(calls)} API calls this pass, estimated $${(calls * eachUsd).toFixed(4)} ($${String(eachUsd)} each from the profile rate).`,
+    `${String(calls)} API calls this pass, estimated $${(calls * eachUsd).toFixed(4)} ($${String(eachUsd)} each, as set in the API connection).`,
   // The sentence alone: the push title names the stage and that it halted (U-324).
   halted: (phase: BulkPhase, reason: string) =>
     (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? EN_JUDGE_UNAVAILABLE : enHaltReason(reason)) ?? `${reason}.`,
@@ -179,7 +190,15 @@ const EN: BulkNotices = Object.freeze({
   notApproved: (phase: string) => `Bulk run is ${phase}, not approved — nothing written.`,
   haltedResume: 'Bulk run is halted — resume it to continue.',
   consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
-    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} This Shopify connection does not yet let lynox change ${shopifyFieldsNamed(fields, 'en')}. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.`,
+    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} This Shopify connection does not yet let lynox change ${shopifyFieldsNamed(fields, 'en')}. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.`,
+  productWriteNotAsked: (access: 'not_asked' | 'not_granted', nothingYet: boolean) =>
+    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} ${access === 'not_asked'
+      ? 'When this Shopify connection was set up, lynox did not ask for permission to change products. Ask lynox in the chat to connect Shopify again with permission to change products, then to plan the run again.'
+      : 'Shopify did not give this connection permission to change products. Allow it in the app settings in Shopify, then ask lynox in the chat to connect Shopify again and plan the run again.'}`,
+  productWriteNotAskedPush: (access: 'not_asked' | 'not_granted', nothingYet: boolean) =>
+    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more; what it wrote stays.'} ${access === 'not_asked'
+      ? 'When connecting, lynox did not ask Shopify for permission to change products.'
+      : 'Shopify does not let this connection change products.'} What to do is under Bulk runs.`,
   otherLoop: 'Bulk run stopped by another loop.',
   otherLoopHolds: 'Bulk run waiting for targets another loop holds.',
   noJudgedRun: 'No judged bulk run with this id.',
@@ -213,8 +232,8 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   awaitingStart: 'Waiting for you to start reading.',
   expired: 'Approval expired.',
   unavailable: 'Target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, the target system is not reachable yet.',
-  credential: 'lynox finds no stored access to the target system. Reconnect it under Settings → APIs, or ask lynox in the chat to do so.',
-  unauthorized: 'The target system refused the stored access. Once it is reconnected under Settings → APIs, the run can be continued.',
+  credential: 'lynox finds no stored access to the target system. Reconnect it under Settings → API connections, or ask lynox in the chat to do so.',
+  unauthorized: 'The target system refused the stored access. Once it is reconnected under Settings → API connections, the run can be continued.',
   blocked: 'This instance is not allowed to reach this target system.',
   contract: 'A target is outside what the run may write.',
   costCap: 'The run reached its AI spend limit.',
@@ -242,10 +261,22 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   listOrder: 'A page of the list did not continue in ID order.',
   listReadFailed: 'The store answered a page of the list with an error.',
   shopInactive: 'The store is closed or frozen.',
+  storeAccessEnded: 'lynox could not renew its access to the store. Ask lynox in the chat to connect the store again, then the run can be continued.',
+  storeClientMisnamed: 'The Shopify connection keeps the app credentials under other names. Have lynox fix that in the chat, then the run can be continued.',
   formCost: 'The store refused a read as too costly.',
   shopifyReadOff: 'Reading Shopify stores in a bulk run is switched off on this instance.',
   shopifyWriteOff: 'Writing to Shopify stores in a bulk run is switched off on this instance. Once it is on again, the run can be continued.',
-  consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.',
+  // Why a request to a store got no pass, one sentence per cause and what to do (U-232), as the German one says it.
+  shopifySelfHosted: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so the run cannot go on here.',
+  shopifyNotSetUp: 'Shopify is not set up on this instance. Only lynox can set it up. Once lynox has set up Shopify, you can continue the run.',
+  shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify. You can continue the run in a few minutes.',
+  shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it. Once lynox has cleared Shopify, you can continue the run.',
+  containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent. You can continue the run later.',
+  shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
+  // True for a run and for an undo alike, which go on differently: the page says how (U-232).
+  storeRequestRefused: 'lynox did not send a request of this run to the store: lynox does not let a request of this form through to Shopify. The run\'s page says how to go on.',
+  consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.',
+  productWriteNotAsked: 'This Shopify connection may not change products. Ask lynox in the chat how to get that permission, then have the run planned again.',
   superseded: 'Another run with judging was started in its place. This one wrote nothing.',
   discarded: 'You discarded this run. lynox wrote nothing.',
   judgeModel: 'The AI provider of this run has no model for judging, or the operator does not allow it.',
@@ -277,8 +308,8 @@ function deHaltReason(reason: string): string | undefined {
     // ux U-105: the words of the run page (`bulk.halt.*`), so push and page say the same; neutral
     // as to person, since a mandate gets the same summary and only the owner resumes a run.
     [BULK_HALT_REASONS.unavailable]: 'Zielsystem nicht erreichbar oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.',
-    [BULK_HALT_REASONS.credential]: 'lynox findet keinen gespeicherten Zugang zum Zielsystem. Verbinde ihn unter Einstellungen → APIs neu oder bitte lynox im Chat darum.',
-    [BULK_HALT_REASONS.unauthorized]: 'Das Zielsystem hat den gespeicherten Zugang abgelehnt. Ist er unter Einstellungen → APIs neu verbunden, lässt sich der Lauf fortsetzen.',
+    [BULK_HALT_REASONS.credential]: 'lynox findet keinen gespeicherten Zugang zum Zielsystem. Verbinde ihn unter Einstellungen → API-Verbindungen neu oder bitte lynox im Chat darum.',
+    [BULK_HALT_REASONS.unauthorized]: 'Das Zielsystem hat den gespeicherten Zugang abgelehnt. Ist er unter Einstellungen → API-Verbindungen neu verbunden, lässt sich der Lauf fortsetzen.',
     [BULK_HALT_REASONS.blocked]: 'Die Instanz darf dieses Zielsystem nicht erreichen.',
     [BULK_HALT_REASONS.contract]: 'Ein Ziel liegt ausserhalb dessen, was der Lauf schreiben darf.',
     [BULK_HALT_REASONS.costCap]: 'Der Lauf hat seine KI-Kostengrenze erreicht.',
@@ -308,11 +339,22 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.listOrder]: 'Eine Seite der Liste ging nicht in der Reihenfolge der IDs weiter.',
     [BULK_HALT_REASONS.listReadFailed]: 'Der Shop hat eine Seite der Liste mit einem Fehler beantwortet.',
     [BULK_HALT_REASONS.shopInactive]: 'Der Shop ist geschlossen oder gesperrt.',
+    [BULK_HALT_REASONS.storeAccessEnded]: 'lynox konnte den Zugang zum Shop nicht erneuern. Bitte lynox im Chat, den Shop neu zu verbinden, dann lässt sich der Lauf fortsetzen.',
+    [BULK_HALT_REASONS.storeClientMisnamed]: 'In der Shopify-Verbindung liegen die App-Zugangsdaten unter anderen Namen. Lass das im Chat von lynox anpassen, dann lässt sich der Lauf fortsetzen.',
     [BULK_HALT_REASONS.formCost]: 'Der Shop hat eine Abfrage als zu aufwendig abgelehnt.',
     [BULK_HALT_REASONS.shopifyReadOff]: 'Lesen von Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.',
     [BULK_HALT_REASONS.shopifyWriteOff]: 'Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen.',
+    // Why a request to a store got no pass, one sentence per cause (U-232).
+    [BULK_HALT_REASONS.shopifySelfHosted]: 'Shopify-Shops erreicht lynox nur auf Instanzen, die lynox betreibt. Diese Instanz wird selbst betrieben, deshalb lässt sich der Lauf hier nicht fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNotSetUp]: 'Shopify ist auf dieser Instanz nicht eingerichtet. Einrichten kann das nur lynox. Sobald lynox Shopify eingerichtet hat, kannst du den Lauf fortsetzen.',
+    [BULK_HALT_REASONS.shopifyUnconfirmed]: 'lynox konnte nicht bestätigen, dass diese Instanz Shopify erreichen darf. Du kannst den Lauf in ein paar Minuten fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNotCleared]: 'Shopify ist für diese Instanz zurzeit nicht freigegeben. Freigeben kann nur lynox. Sobald lynox Shopify freigegeben hat, kannst du den Lauf fortsetzen.',
+    [BULK_HALT_REASONS.containmentUnwritable]: 'lynox konnte nicht festhalten, dass dieser Lauf den Shop liest; gesendet wurde nichts. Du kannst den Lauf später fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNoApiVersion]: 'Für Shopify fehlt in lynox eine Einstellung. Beheben kann das nur lynox (support@lynox.ai).',
+    [BULK_HALT_REASONS.storeRequestRefused]: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch. Wie es weitergeht, steht auf der Laufseite.',
     // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
-    [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.',
+    [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung lässt lynox diese Felder noch nicht ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen) und plane den Lauf im Chat neu.',
+    [BULK_HALT_REASONS.productWriteNotAsked]: 'Diese Shopify-Verbindung darf keine Produkte ändern. Frag lynox im Chat, wie du die Erlaubnis bekommst, und plane den Lauf dann neu.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
     // Said to the owner, on whose device a push lands (U-324).
     [BULK_HALT_REASONS.discarded]: 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.',
@@ -364,7 +406,7 @@ const DE: BulkNotices = Object.freeze({
   judgeCounts: (judged: number, invalid: number, unjudged: number, total: number) =>
     `Beurteilt ${String(judged)}, ungültig ${String(invalid)}, ohne Urteil ${String(unjudged)} von ${String(total)} Zielen.`,
   costs: (calls: number, eachUsd: number) =>
-    `${String(calls)} API-Abrufe in diesem Durchgang, geschätzt $${(calls * eachUsd).toFixed(4)} (je $${String(eachUsd)} laut Profil).`,
+    `${String(calls)} API-Abrufe in diesem Durchgang, geschätzt $${(calls * eachUsd).toFixed(4)} (je $${String(eachUsd)}, wie in der API-Verbindung eingetragen).`,
   // The sentence alone: the push title names the stage and that it halted (U-324).
   halted: (phase: BulkPhase, reason: string) =>
     (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? DE_JUDGE_UNAVAILABLE : deHaltReason(reason)) ?? `${reason}.`,
@@ -377,7 +419,15 @@ const DE: BulkNotices = Object.freeze({
   notApproved: () => 'Massenlauf nicht freigegeben; nichts geschrieben.',
   haltedResume: 'Massenlauf angehalten; geschrieben wird erst nach dem Fortsetzen.',
   consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
-    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} Diese Shopify-Verbindung erlaubt lynox noch nicht, ${shopifyFieldsNamed(fields, 'de')} zu ändern. Verbinde Shopify neu (Einstellungen → APIs); dann bitte lynox im Chat, den Lauf neu zu planen.`,
+    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} Diese Shopify-Verbindung erlaubt lynox noch nicht, ${shopifyFieldsNamed(fields, 'de')} zu ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen); dann bitte lynox im Chat, den Lauf neu zu planen.`,
+  productWriteNotAsked: (access: 'not_asked' | 'not_granted', nothingYet: boolean) =>
+    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} ${access === 'not_asked'
+      ? 'Beim Einrichten dieser Shopify-Verbindung hat lynox nicht um die Erlaubnis gebeten, Produkte zu ändern. Bitte lynox im Chat, Shopify mit dieser Erlaubnis neu zu verbinden und den Lauf dann neu zu planen.'
+      : 'Shopify hat dieser Verbindung nicht erlaubt, Produkte zu ändern. Erlaube es in den App-Einstellungen in Shopify und bitte lynox dann im Chat, Shopify neu zu verbinden und den Lauf neu zu planen.'}`,
+  productWriteNotAskedPush: (access: 'not_asked' | 'not_granted', nothingYet: boolean) =>
+    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt nichts mehr; Geschriebenes bleibt.'} ${access === 'not_asked'
+      ? 'Beim Verbinden hat lynox Shopify nicht um das Recht gebeten, Produkte zu ändern.'
+      : 'Shopify erlaubt dieser Verbindung nicht, Produkte zu ändern.'} Was zu tun ist, steht unter Massenläufe.`,
   otherLoop: 'Massenlauf beendet: Ein anderer Durchgang bearbeitet ihn.',
   otherLoopHolds: 'Massenlauf wartet auf Ziele, die ein anderer Durchgang hält.',
   noJudgedRun: 'Diesen Massenlauf mit Beurteilung gibt es nicht.',
@@ -426,3 +476,32 @@ export function bulkPushTitle(effect: BulkTriggerEffect, end: BulkPushEnd, targe
   const host = targetSystem === null ? null : externalHostOf(targetSystem);
   return `${PUSH_STAGE[lang][effect]} ${PUSH_END[lang][end]}${host === null || host === '' ? '' : ` · ${host}`}`;
 }
+
+/** A store's own cause a bulk run's start check names (U-232): the attach's causes, and a store
+ *  without the API version lynox writes to. */
+export type StoreReachCause = import('./shopify-host.js').StoreAttachRefusal | 'shopifyNoApiVersion';
+/**
+ * The start check's sentence for a store's own cause, in the run page's English (U-232): on
+ * approving, the run has not started, so the sentence says to approve again
+ * (`bulk.reach.approve.<cause>`); on writing on, the halt's own cause (`bulk.halt.<cause>`).
+ * The route also sends a code (`reach_approve_<cause>`, `reach_resume_<cause>`), by which the page
+ * says it in its language.
+ */
+export const BULK_STORE_REACH_REFUSALS: Readonly<Record<'approve' | 'resume', Readonly<Record<StoreReachCause, string>>>> = Object.freeze({
+  approve: {
+    shopifySelfHosted: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so this run cannot start here.',
+    shopifyNotSetUp: 'Shopify is not set up on this instance. Only lynox can set it up (support@lynox.ai); after that you can approve the run.',
+    shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify. Try approving again in a few minutes.',
+    shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it (support@lynox.ai); after that you can approve the run.',
+    containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent. Try approving again later.',
+    shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai); until then the run cannot be approved.',
+  },
+  resume: {
+    shopifySelfHosted: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so the run cannot go on here.',
+    shopifyNotSetUp: 'Shopify is not set up on this instance. Only lynox can set it up (support@lynox.ai).',
+    shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify.',
+    shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it (support@lynox.ai).',
+    containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent.',
+    shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
+  },
+});

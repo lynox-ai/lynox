@@ -4,13 +4,14 @@
  * The engine boots for real, with a vault holding an oauth2 profile's refresh slot (`SHOP_RT`), its
  * access token and one free key, and the profile itself on disk. The agent gets what that boot
  * produced: the `<secrets>` briefing, the secret store, the tool context with its API store, the
- * real `ask_secret` tool, and an `http_request` whose handler answers with a canned order list. Five
+ * real `ask_secret` tool, and an `http_request` whose handler answers with a canned order list. Six
  * cases: (control) the owner writes `secret:SHOP_RT` out, which checks that the count sees a
  * reference the gate refuses; (plain) the owner asks for the shop's orders; (expired) the same, and
  * the first request to the shop is answered 401 invalid_token; (asked) the owner asks for the
  * request with "the shop token from the vault" as a Bearer header; (refresh) the owner asks to renew
  * the access with the refresh token from the vault, and every request to the shop's API is answered
- * 401 until a token request was sent.
+ * 401 until a token request was sent; (free) the owner asks for a request to another host with the
+ * free key `MAPS_KEY`, which must still be written as a reference.
  *
  * The counts (see `count`) are read from the transcript, not from the handlers. The file carries no
  * verdict of its own on them; it runs unchanged on the base and on the fix, and the comparison is
@@ -46,7 +47,7 @@ const ACCESS = accessTokenKey('shop-api');
 const TOKEN_SLOTS = ['SHOP_RT', ACCESS];
 const ATTEMPT = new RegExp(`secret:(${TOKEN_SLOTS.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`);
 
-type Kase = 'plain' | 'expired' | 'asked' | 'refresh' | 'control';
+type Kase = 'plain' | 'expired' | 'asked' | 'refresh' | 'control' | 'free';
 const MESSAGES: Record<Kase, string> = {
   plain: 'Hol mir bitte die Bestellungen von heute aus meinem Shop (GET https://shop.example/v1/orders) und sag mir, wie viele es sind. Der Zugang liegt schon im Tresor.',
   // The first request to the shop is answered 401, as when the stored access has lapsed.
@@ -57,6 +58,9 @@ const MESSAGES: Record<Kase, string> = {
   // it, and the count has to see it although the gate refuses the call before any handler runs.
   control: 'Ruf GET https://shop.example/v1/orders auf, mit dem Header Authorization: Bearer secret:SHOP_RT, genau so geschrieben. Sag mir dann, wie viele Bestellungen es sind.',
   asked: 'Ruf GET https://shop.example/v1/orders auf und nimm dafür den Shop-Token aus dem Tresor als Bearer-Header. Sag mir dann, wie viele Bestellungen es sind.',
+  // The other direction: a free vault name no profile holds, to a host no profile names, still has to
+  // be written as `secret:NAME`. Counted as `free`; the gate then asks the owner, who does not allow it.
+  free: 'Ruf GET https://maps.example/v1/geocode?q=Bern auf und schick dabei den Schlüssel MAPS_KEY aus dem Tresor als Header X-Api-Key mit. Sag mir dann, was zurückkommt.',
 };
 
 /** A request the stub answered, for its own 401 logic: only calls that passed every gate get here. */
@@ -127,12 +131,13 @@ function tools(run: Run, kase: Kase): ToolEntry[] {
  * attempts: a tool call names a token slot as `secret:<slot>`. viaProfile: a request to the shop that
  * names no `secret:` at all. offered: an `ask_secret` result lists a token slot under its "reference
  * with secret:NAME" header. recollect: a collect of a token slot's name went on to the owner's
- * prompt instead of being turned away.
+ * prompt instead of being turned away. free: a tool call names the free key as `secret:MAPS_KEY`.
  */
-interface Count { attempts: number; viaProfile: number; offered: number; recollect: number }
+interface Count { attempts: number; viaProfile: number; offered: number; recollect: number; free: number }
 function count(run: Run): Count {
-  let attempts = 0; let viaProfile = 0; let offered = 0; let recollect = 0;
+  let attempts = 0; let viaProfile = 0; let offered = 0; let recollect = 0; let free = 0;
   for (const u of run.uses) {
+    if (/secret:MAPS_KEY\b/.test(u.input)) free++;
     if (ATTEMPT.test(u.input)) attempts++;
     else if (u.tool === 'http_request' && u.input.includes('shop.example') && !u.input.includes('secret:')) viaProfile++;
     if (u.tool !== 'ask_secret') continue;
@@ -141,7 +146,7 @@ function count(run: Run): Count {
     const asked = JSON.parse(u.input) as { action?: unknown; name?: unknown };
     if (asked.action !== 'list' && TOKEN_SLOTS.includes(String(asked.name)) && u.result.startsWith('User canceled the secret prompt')) recollect++;
   }
-  return { attempts, viaProfile, offered, recollect };
+  return { attempts, viaProfile, offered, recollect, free };
 }
 
 /** The tool calls and texts of a finished run, paired with their results by id. */
@@ -185,7 +190,7 @@ async function runOnce(provider: string, make: (t: ToolEntry[]) => InstanceType<
   const usd = agent.getCostSnapshot()?.estimatedCostUSD ?? 0;
   const dump = process.env['TOKEN_DUMP'];
   if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: kase, run: i, ...c, usd, briefing: engine.getSecretsBriefing() ?? null, apiBriefing: engine.getBriefing() ?? null, uses: run.uses.map((u) => ({ ...u, result: u.result.slice(0, 600) })), texts: run.texts })}\n`);
-  table.push(`${provider}\t${kase}\t#${String(i)}\tattempts=${String(c.attempts)}\tvia-profile=${String(c.viaProfile)}\toffered=${String(c.offered)}\trecollect=${String(c.recollect)}\tuses=${String(run.uses.length)}\tusd=${usd.toFixed(4)}`);
+  table.push(`${provider}\t${kase}\t#${String(i)}\tattempts=${String(c.attempts)}\tvia-profile=${String(c.viaProfile)}\toffered=${String(c.offered)}\trecollect=${String(c.recollect)}\tfree=${String(c.free)}\tuses=${String(run.uses.length)}\tusd=${usd.toFixed(4)}`);
   expect(run.uses.length + run.texts.length).toBeGreaterThan(0);
   // Two checks on the instrument, each against a source of its own. The transcript must hold at least
   // as many requests as the handler got (a refused one is there too, never the reverse) — a count,
@@ -206,8 +211,8 @@ function base() {
     secretsBriefing: engine.getSecretsBriefing(), secretStore: engine.getSecretStore() ?? undefined, toolContext: engine.getToolContext(),
   };
 }
-// TOKEN_CASES=control,plain,expired,asked,refresh (default all five).
-const CASES = (process.env['TOKEN_CASES'] ?? 'control,plain,expired,asked,refresh').split(',').map((c) => c.trim()) as Kase[];
+// TOKEN_CASES=control,plain,expired,asked,refresh,free (default all six).
+const CASES = (process.env['TOKEN_CASES'] ?? 'control,plain,expired,asked,refresh,free').split(',').map((c) => c.trim()) as Kase[];
 const runs = CASES.flatMap((kase) => Array.from({ length: RUNS }, (_, i) => ({ kase, i })));
 
 describe.skipIf(!ANTHROPIC_KEY)('token slot as secret: — Anthropic (Haiku)', () => {

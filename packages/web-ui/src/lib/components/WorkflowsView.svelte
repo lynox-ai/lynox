@@ -3,6 +3,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost, formatDuration } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { tierName } from '../utils/tier-words.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { timeAgo } from '../utils/time.js';
@@ -267,7 +268,7 @@
 															</span>
 														{/if}
 														{#if mStep?.model}
-															<span class="text-[10px] font-mono text-text-subtle shrink-0">{mStep.model}</span>
+															<span class="text-[10px] {tierName(mStep.model) !== null ? '' : 'font-mono'} text-text-subtle shrink-0">{tierName(mStep.model) ?? mStep.model}</span>
 														{/if}
 														<span class="text-[10px] text-text-subtle shrink-0">{formatDuration(step.duration_ms)}</span>
 														<span class="text-[10px] text-text-subtle shrink-0">{formatCost(step.cost_usd)}</span>
@@ -280,7 +281,7 @@
 															<!-- Meta row: model + dependencies -->
 															<div class="flex flex-wrap items-center gap-2">
 																{#if mStep?.model}
-																	<span class="text-[10px] font-mono rounded-full px-2 py-0.5 bg-accent/10 text-accent-text">{mStep.model}</span>
+																	<span class="text-[10px] {tierName(mStep.model) !== null ? '' : 'font-mono'} rounded-full px-2 py-0.5 bg-accent/10 text-accent-text">{tierName(mStep.model) ?? mStep.model}</span>
 																{/if}
 																{#if mStep?.input_from && mStep.input_from.length > 0}
 																	<span class="text-[10px] text-text-subtle">
