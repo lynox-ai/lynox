@@ -22,6 +22,10 @@ let changed: Array<{ file: string; status: string; diff: string }>;
 let holdFirstRun: Promise<void> | null;
 /** While set, the changeset answer waits until it resolves. */
 let holdChangeset: Promise<void> | null;
+/** Per thread: its changeset answer waits until the promise here resolves. */
+let holdChangesetIn: Map<string, Promise<void>>;
+/** Per thread: what its changeset answer names, in place of `changed`. */
+let changedIn: Map<string, Array<{ file: string; status: string; diff: string }>>;
 /** While set, every run after the first streams until it resolves. */
 let holdLaterRuns: Promise<void> | null;
 let reviewStatus: number;
@@ -86,6 +90,11 @@ function serve(): void {
 		}
 		if (url.endsWith('/changeset')) {
 			changesetGets++;
+			const sid = /\/sessions\/([^/]+)\/changeset$/.exec(url)?.[1] ?? '';
+			const heldIn = holdChangesetIn.get(sid);
+			if (heldIn) await heldIn;
+			const filesIn = changedIn.get(sid);
+			if (filesIn) return json({ hasChanges: filesIn.length > 0, runId: 'run-7', files: filesIn });
 			if (holdChangeset) {
 				// A time limit given to this fetch would end it here, as the network would.
 				const signal = init?.signal;
@@ -124,6 +133,8 @@ beforeEach(async () => {
 	changed = [];
 	holdFirstRun = null;
 	holdChangeset = null;
+	holdChangesetIn = new Map();
+	changedIn = new Map();
 	holdLaterRuns = null;
 	holdReopen = new Map();
 	holdReview = null;
@@ -333,6 +344,27 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		await wait(200); // past the drain delay, before the review could be asked for
 		await settle();
 		expect(runTasks, 'the earlier drain does not send past the review').toEqual(['edit the notes']);
+	});
+
+	it('the review a thread asked for, answered after another thread opened, shows no card there and holds nothing there', async () => {
+		// The first thread's run ends with a review, and its fetch is slow.
+		changed = notes; // the run says so (changeset_ready)
+		changedIn.set('t1', notes);
+		let answerT1!: () => void;
+		holdChangesetIn.set('t1', new Promise<void>((r) => { answerT1 = r; }));
+		await store.sendMessage('edit the notes');
+		await settle();
+		expect(changesetGets, 'positive control: the first thread asked for its review').toBeGreaterThan(0);
+		// Another thread opens; it holds no review.
+		changedIn.set('t9', []);
+		await store.resumeThread('t9');
+		await settle();
+		answerT1();
+		await settle();
+		expect(store.getPendingChangeset(), 'the first thread\'s review is not shown in the other one').toBeNull();
+		await store.sendMessage('in the other thread');
+		await settle();
+		expect(runTasks, 'a message typed there is sent, not held by the other thread\'s review').toEqual(['edit the notes', 'in the other thread']);
 	});
 
 	it('an answer to a review that arrives after another thread opened clears neither its review nor sends its turn', async () => {

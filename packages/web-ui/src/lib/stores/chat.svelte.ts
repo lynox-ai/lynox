@@ -3655,15 +3655,23 @@ function fetchChangeset(): Promise<boolean> {
 
 async function loadChangeset(): Promise<boolean> {
 	if (!sessionId) return false;
+	// The answer is about the thread open when it was asked for. Once another thread is shown (or
+	// this one was opened again) it says nothing about the view: it sets no card there, and it is
+	// no answer for that view's queue.
+	const sid = sessionId;
+	const gen = _resumeGeneration;
+	const stale = (): boolean => sessionId !== sid || _resumeGeneration !== gen;
 	changesetLoading = true;
 	try {
 		// No time limit of its own: a slow answer that carries a review must still show it, and a
 		// queued turn waits for it. A fetch the network ends lands in the catch and frees the queue.
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
+		const res = await fetch(`${getApiBase()}/sessions/${sid}/changeset`);
+		if (stale()) return false;
 		// No session on the server (restarted, or dropped): it holds no review, which is an answer.
 		if (res.status === 404) return true;
 		if (!res.ok) return false;
 		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
+		if (stale()) return false;
 		if (data.hasChanges && data.files.length > 0) {
 			pendingChangeset = data.files;
 			pendingChangesetRunId = data.runId ?? null;
