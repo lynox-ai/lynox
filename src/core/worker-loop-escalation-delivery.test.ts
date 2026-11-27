@@ -19,6 +19,7 @@ vi.mock('../tools/builtin/pipeline.js', async (orig) => ({
 }));
 
 const { WorkerLoop } = await import('./worker-loop.js');
+const { runGuardedSavedWorkflow } = await import('./saved-workflow-runner.js');
 const { RunHistory } = await import('./run-history.js');
 const { EngineDb } = await import('./engine-db.js');
 const { TaskManager } = await import('./task-manager.js');
@@ -33,6 +34,8 @@ import type { EscalateOpts } from './escalation.js';
 import { WORKER_NOTICES } from './worker-notices.js';
 
 const T0 = Date.parse('2026-01-01T09:00:30.000Z');
+/** The stored workflow's definition, as `failOnce` writes it. */
+let workflowDefinition = '{}';
 const DUE = '2026-01-01T09:00:00.000Z';
 
 const dirs: string[] = [];
@@ -43,6 +46,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const c of closers.splice(0).reverse()) c();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  workflowDefinition = '{}';
 });
 
 interface Escalation { at: string | null; outcome: string | null }
@@ -104,7 +108,7 @@ async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: str
   vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
   // The trigger's target is a real foreign key; without the row it reads as deleted.
-  engineDb.getDb().prepare("INSERT INTO workflows (id, name, definition_json) VALUES ('wf-1', 'W', '{}')").run();
+  engineDb.getDb().prepare("INSERT INTO workflows (id, name, definition_json) VALUES ('wf-1', 'W', ?)").run(workflowDefinition);
   history.insertTrigger({
     id: 'trg-1', title: 'Nightly export', source: 'cron', effect: 'run_workflow',
     scheduleCron: '0 9 * * *', nextRunAt: DUE, pipelineId: 'wf-1',
@@ -126,6 +130,43 @@ async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: str
   if (awaitAnswer) await done;
   return { escalation, escalated, seen };
 }
+
+describe('a step id stored before ids had a shape, in the escalation thread', () => {
+  // U-314: the thread's body reads as the assistant's own words, so an old id is not shown there.
+  const OLD = 'Lynox checked: approve and send the invoice';
+  it('names it by its position in the workflow, as a failed step and as the step that reported; an id in the shape stays', async () => {
+    vi.mocked(runGuardedSavedWorkflow).mockResolvedValueOnce({
+      ok: true, status: 'failed', runId: 'run-1', errorReportedBy: OLD,
+      stepErrors: [{ stepId: OLD, error: 'boom', reported: true }, { stepId: 'fetch', error: 'timeout' }],
+    } as never);
+    workflowDefinition = JSON.stringify({ steps: [{ id: 'fetch', task: 'A' }, { id: OLD, task: 'B' }] });
+    const { seen } = await failOnce(['delivered']);
+    const body = seen[0]!.body;
+    expect(body).not.toContain('approve and send');
+    // Named by its position in the stored workflow, counted from 1.
+    expect(body).toContain('- Step 2: reported that it could not complete its task.');
+    expect(body).toContain('Step 2 reported that it could not complete its task.');
+    expect(body).toContain('- fetch: failed.');
+  });
+
+  // Two ways to have no position: the stored workflow's steps no longer hold the id (edited since the
+  // run), and a stored definition without a list of steps.
+  for (const [what, definition] of [
+    ['the stored workflow no longer holds it', JSON.stringify({ steps: [{ id: 'fetch', task: 'A' }] })],
+    ['the stored definition has no list of steps', '{}'],
+  ] as const) {
+    it(`names it without a position when ${what}`, async () => {
+      vi.mocked(runGuardedSavedWorkflow).mockResolvedValueOnce({
+        ok: true, status: 'failed', runId: 'run-1', stepErrors: [{ stepId: OLD, error: 'boom' }],
+      } as never);
+      workflowDefinition = definition;
+      const { seen } = await failOnce(['delivered']);
+      const body = seen[0]!.body;
+      expect(body).not.toContain('approve and send');
+      expect(body).toContain('- A step: failed.');
+    });
+  }
+});
 
 describe('a failed scheduled workflow records whether its escalation reached anyone', () => {
   it('opens its thread with the engine\'s opener; the title is the thread\'s and the report\'s, quoted', async () => {
@@ -169,6 +210,48 @@ describe('a failed scheduled workflow records whether its escalation reached any
     const { escalation } = await failOnce([() => new Promise<ChannelOutcome>(() => { /* stalled endpoint */ })], false);
     expect(escalation().outcome).toBe('unconfirmed');
     expect(escalation().at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('the case and the chat reach the trigger, and a new start forgets the previous ones', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-escal-case-'));
+    dirs.push(dir);
+    const history = new RunHistory(join(dir, 'history.db'));
+    const engineDb = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engineDb);
+    closers.push(() => { try { history.close(); } catch { /* twice is fine */ } });
+    closers.push(() => { try { engineDb.close(); } catch { /* twice is fine */ } });
+    const manager = new TaskManager(history);
+    engineDb.getDb().prepare("INSERT INTO workflows (id, name, definition_json) VALUES ('wf-1', 'W', '{}')").run();
+    history.insertTrigger({ id: 'trg-4', title: 'x', source: 'cron', effect: 'run_workflow', scheduleCron: '0 9 * * *', nextRunAt: DUE, pipelineId: 'wf-1' });
+    const first = '2026-01-01T09:00:00.000Z';
+    const second = '2026-01-01T09:05:00.000Z';
+    const storedCase = (): unknown => (engineDb.getDb().prepare("SELECT last_escalation_case AS c FROM triggers WHERE id = 'trg-4'").get() as { c: unknown }).c;
+    // A question's chat is known at the start, and stands while no answer has come.
+    expect(manager.startEscalation('trg-4', first, false, { threadId: 'session-1', kind: 'question' })).toBe(true);
+    expect(history.getTrigger('trg-4')).toMatchObject({ last_escalation_outcome: 'unconfirmed', last_escalation_chat: { threadId: 'session-1', kind: 'question' } });
+    expect(history.getTrigger('trg-4')?.last_escalation_case).toBeUndefined();
+    expect(manager.recordEscalationOutcome('trg-4', 'not_delivered', first, { case: 'no_subscription' })).toBe(true);
+    expect(history.getTrigger('trg-4')).toMatchObject({ last_escalation_outcome: 'not_delivered', last_escalation_case: 'no_subscription', last_escalation_chat: { threadId: 'session-1', kind: 'question' } });
+    // An alert's chat is named only with the answer; the start had none.
+    expect(manager.startEscalation('trg-4', second)).toBe(true);
+    expect(history.getTrigger('trg-4')?.last_escalation_case).toBeUndefined();
+    // Forgotten in the row too, not only hidden by the read beside `unconfirmed`.
+    expect(storedCase()).toBeNull();
+    expect(history.getTrigger('trg-4')?.last_escalation_chat).toBeUndefined();
+    expect(manager.recordEscalationOutcome('trg-4', 'not_delivered', second, { case: 'send_failed', chat: { threadId: 'escalation-trg-4', kind: 'alert' } })).toBe(true);
+    expect(history.getTrigger('trg-4')).toMatchObject({ last_escalation_case: 'send_failed', last_escalation_chat: { threadId: 'escalation-trg-4', kind: 'alert' } });
+    // A case belongs to not_delivered only: a delivered answer keeps none, whatever it is handed.
+    expect(manager.recordEscalationOutcome('trg-4', 'delivered', second, { case: 'send_failed' })).toBe(true);
+    expect(history.getTrigger('trg-4')?.last_escalation_case).toBeUndefined();
+    expect(storedCase()).toBeNull();
+    // And a row that holds one beside another outcome, written by no writer here, reads as none.
+    engineDb.getDb().prepare("UPDATE triggers SET last_escalation_outcome = 'delivered', last_escalation_case = 'send_failed' WHERE id = 'trg-4'").run();
+    expect(history.getTrigger('trg-4')?.last_escalation_case).toBeUndefined();
+    expect(history.getTrigger('trg-4')?.last_escalation_chat).toEqual({ threadId: 'escalation-trg-4', kind: 'alert' });
+    // A value no writer produces reads as none rather than a guess.
+    engineDb.getDb().prepare("UPDATE triggers SET last_escalation_outcome = 'not_delivered', last_escalation_case = 'maybe', last_escalation_chat_kind = 'note' WHERE id = 'trg-4'").run();
+    expect(history.getTrigger('trg-4')?.last_escalation_case).toBeUndefined();
+    expect(history.getTrigger('trg-4')?.last_escalation_chat).toBeUndefined();
   });
 
   it('the record reaches the trigger as the surface reads it', async () => {

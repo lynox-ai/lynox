@@ -10,6 +10,7 @@
  *    to history.db). Here the cases that need a precise order of turns and batches are built.
  * Mocked in both: the LLM and the network below `fetchPinned`.
  */
+import { ownerNamed } from '../../tests/helpers/owner-named.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -203,7 +204,9 @@ describe('a scheduled workflow under a grant writes each call\'s facts onto its 
   });
 
   it('a step of a nested pipeline writes the same facts, naming the grant the outer run was handed', async () => {
-    const contract = withGrantId({ version: 1, grantedTools: ['http_request'], httpMethods: ['POST'], hostPatterns: [HOST], pathPatterns: ['/v1/reports'], paramConstraints: {} }, 'g-nested');
+    // Reviewed, as a grant a person accepted: only such a contract's host counts as one the owner
+    // named in a run nobody watches.
+    const contract = withGrantId({ version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['POST'], hostPatterns: [HOST], pathPatterns: ['/v1/reports'], paramConstraints: {} }, 'g-nested');
     mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('posted'));
     await runManifest({
       manifest_version: '1.0', name: 'nested-facts', triggered_by: 'test', context: {}, gate_points: [], on_failure: 'stop',
@@ -250,6 +253,8 @@ describe('an Agent with a contract reports each call\'s facts to its sink and on
       ...(opts.promptUser ? { promptUser: opts.promptUser } : {}),
       name: 'chat', model: 'claude-sonnet-4-6', tools: opts.tools ?? [httpRequestTool], autonomy: 'autonomous', capabilityContract: contract,
       toolContext: opts.toolContext ?? createToolContext({}),
+      // The owner named these hosts: this test is about the grant, not about where a target comes from.
+      ownerKnown: ownerNamed(HOST, 'example.com', 'api.dataforseo.com'),
       recordToolCall: (c) => { recs.push(c as Rec); },
       onStream: async (e) => { if (e.type === 'tool_result') events.push(e); },
     });

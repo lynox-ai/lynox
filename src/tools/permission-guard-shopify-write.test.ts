@@ -73,7 +73,9 @@ describe('withShopifyApply — what it refuses', () => {
   });
 
   it('is never minted for a write its form cannot make, nor from a contract that grants a write verb', () => {
-    for (const after of [{ seo_title: 'nur eins' }, { handle: 'x' }, { title: 3 }, {}, { descriptionHtml: '<script>x</script>' }]) {
+    // A description is a field of the form now (PRD shopify-preset §21): what keeps its markup in
+    // bounds is the ledger's filter before the mint (`shopifyApplyOf`), tested in bulk-shopify.test.ts.
+    for (const after of [{ seo_title: 'nur eins' }, { handle: 'x' }, { title: 3 }, {}, { descriptionHtml: 3 }]) {
       expect(() => withShopifyApply(base, HOST, { reads: [P1], writes: [{ form: 'shopify_product', gid: P1, after }] }), JSON.stringify(after)).toThrow(/can write/);
     }
     expect(() => withShopifyApply(base, HOST, { reads: [P1], writes: [{ form: 'shopify_product', gid: 'gid://shopify/MediaImage/1', after: { title: 'x' } }] })).toThrow(/can write/);
@@ -88,6 +90,19 @@ describe('shopifyProductWriteBody', () => {
     const b = shopifyProductWriteBody(P1, { title: 't', seo_title: 's', seo_description: 'd' });
     expect(a).toBe(b);
     expect(Object.keys((JSON.parse(a!) as { variables: object }).variables)).toEqual(['id', 'title', 'seoTitle', 'seoDescription']);
+    const withDescription = shopifyProductWriteBody(P1, { seo_description: 'd', descriptionHtml: '<p>x</p>', title: 't', seo_title: 's' });
+    expect(Object.keys((JSON.parse(withDescription!) as { variables: object }).variables)).toEqual(['id', 'title', 'descriptionHtml', 'seoTitle', 'seoDescription']);
+  });
+
+  // An unsent variable leaves its field untouched (PRD shopify-preset §16.8 M10): a run over titles
+  // cannot clear a description, as it would if the variable went as null.
+  it('sends no descriptionHtml variable for a run that does not set it, and the description as given for one that does', () => {
+    const titles = JSON.parse(shopifyProductWriteBody(P1, { title: 't' })!) as { variables: Record<string, unknown> };
+    expect(Object.hasOwn(titles.variables, 'descriptionHtml')).toBe(false);
+    const seo = JSON.parse(shopifyProductWriteBody(P1, { seo_title: 's', seo_description: 'd' })!) as { variables: Record<string, unknown> };
+    expect(Object.hasOwn(seo.variables, 'descriptionHtml')).toBe(false);
+    const described = JSON.parse(shopifyProductWriteBody(P1, { descriptionHtml: '<p>Neu &amp; gut</p>' })!) as { variables: Record<string, unknown> };
+    expect(described.variables).toEqual({ id: P1, descriptionHtml: '<p>Neu &amp; gut</p>' });
   });
 
   it('sends an empty field as null, and never one seo field without the other', () => {
@@ -98,7 +113,7 @@ describe('shopifyProductWriteBody', () => {
   });
 
   it('builds nothing for a field outside the form, a value that is not a string or null, or no field', () => {
-    for (const after of [{ status: 'ACTIVE' }, { title: 1 }, { title: true }, {}, { descriptionHtml: '<p>x</p>' }, { title: 'x', descriptionHtml: '<p>x</p>' }]) expect(shopifyProductWriteBody(P1, after), JSON.stringify(after)).toBeNull();
+    for (const after of [{ status: 'ACTIVE' }, { title: 1 }, { title: true }, {}, { descriptionHtml: 1 }, { title: 'x', descriptionHtml: ['<p>x</p>'] }, { bodyHtml: '<p>x</p>' }]) expect(shopifyProductWriteBody(P1, after), JSON.stringify(after)).toBeNull();
     expect(shopifyProductWriteBody('gid://shopify/Product/0', { title: 'x' })).toBeNull();
   });
 });
@@ -116,8 +131,11 @@ describe('the write documents', () => {
     }
   });
 
-  it('do not name descriptionHtml: Shopify stores what it is sent unfiltered (M6), so the engine cannot send it yet', () => {
-    for (const doc of Object.values(SHOPIFY_WRITE_DOCUMENTS)) expect(doc).not.toMatch(/descriptionHtml/i);
-    expect(SHOPIFY_WRITABLE_FIELDS).toEqual(['title', 'seo_title', 'seo_description']);
+  // The product form writes the description (PRD shopify-preset §21) and nothing else of the
+  // product's own: no handle, status, vendor, type, tags, price or variant.
+  it('the product form writes title, description and the two SEO fields, and the image form only alt', () => {
+    expect(SHOPIFY_WRITABLE_FIELDS).toEqual(['title', 'descriptionHtml', 'seo_title', 'seo_description']);
+    expect(SHOPIFY_WRITE_DOCUMENTS.shopify_product).toContain('productUpdate(product: {id: $id, title: $title, descriptionHtml: $descriptionHtml, seo: {title: $seoTitle, description: $seoDescription}})');
+    expect(SHOPIFY_WRITE_DOCUMENTS.shopify_media_alt).not.toMatch(/descriptionHtml/i);
   });
 });

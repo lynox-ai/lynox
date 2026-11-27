@@ -3,8 +3,9 @@ import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '..
 import { chatThreadOf } from './private-thread.js';
 import { stripHidden } from '../../core/hidden-text.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR } from '../../orchestrator/run-source.js';
-import { WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_STOPPED_ERROR } from '../../orchestrator/workflow-stop.js';
+import { WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_STOPPED_ERROR, WORKFLOW_CALLER_ENDED_ERROR } from '../../orchestrator/workflow-stop.js';
 import { GateExpiredError, GateRejectedError } from '../../types/orchestration.js';
+import { shownRunStepId, storedSteps } from '../../orchestrator/step-id.js';
 import { setUpByOther, shownMandate, type ShownMandate } from '../../core/request-principal.js';
 
 interface DiagnoseInput {
@@ -74,6 +75,7 @@ export const DIAGNOSE_ERRORS_QUOTED = 'Quoted errors are text as recorded: a ste
 /** The run errors only the runner writes, word for word: lynox's own account, shown as it is. */
 export const OWN_RUN_ERRORS: ReadonlySet<string> = new Set([
   WORKFLOW_STOPPED_ERROR,
+  WORKFLOW_CALLER_ENDED_ERROR,
   WORKFLOW_QUESTION_UNANSWERED_ERROR,
   WORKFLOW_QUESTION_NOT_ASKED_ERROR,
   WORKFLOW_QUESTION_THREAD_DELETED_ERROR,
@@ -105,16 +107,24 @@ const RECORDED_BY_STEP = 'as the step recorded it, not checked';
 const RUN_RECORDED_BY_STEP = 'as a step recorded it, not checked';
 const RUN_RECORDED = 'as recorded, not checked';
 
-function shownError(error: string, at: { run: boolean; stepIds: readonly string[]; stepErrors: ReadonlyMap<string, readonly string[]> }): ShownError {
+function shownError(error: string, at: { run: boolean; stepIds: readonly string[]; stepErrors: ReadonlyMap<string, readonly string[]>; shownId: (id: string) => string }): ShownError {
   const recordedBy = at.stepErrors.get(error) ?? [];
   if (at.run && OWN_RUN_ERRORS.has(error) && recordedBy.length === 0) return { text: error, quoted: false };
+  // The step as a gate text names it: quoted is only what `update_workflow_steps` takes as `step_id`
+  // (the id, or the position `#2`); the note on an id outside the shape stands after it (U-316).
+  const step = (id: string): string => {
+    const shown = at.shownId(id);
+    if (shown === id) return `"${id}"`;
+    const m = /^(#\d+) (.+)$/.exec(shown);
+    return m ? `"${m[1]!}" ${m[2]!}` : shown;
+  };
   for (const id of at.stepIds) {
     if (at.run && recordedBy.some(by => by !== id)) continue;
-    if (error === new GateExpiredError(id).message) return { text: `Gate timed out for step "${flat(id)}"`, quoted: false };
+    if (error === new GateExpiredError(id).message) return { text: `Gate timed out for step ${step(id)}`, quoted: false };
     const rejected = new GateRejectedError(id).message;
-    if (error === rejected) return { text: `Gate rejected step "${flat(id)}"`, quoted: false };
+    if (error === rejected) return { text: `Gate rejected step ${step(id)}`, quoted: false };
     if (error.startsWith(`${rejected}: `)) {
-      return { text: `Gate rejected step "${flat(id)}", reason: ${quoted(error.slice(rejected.length + 2))}`, quoted: true };
+      return { text: `Gate rejected step ${step(id)}, reason: ${quoted(error.slice(rejected.length + 2))}`, quoted: true };
     }
   }
   return { text: quoted(error), quoted: true, recordedLabel: !at.run ? RECORDED_BY_STEP : recordedBy.length > 0 ? RUN_RECORDED_BY_STEP : RUN_RECORDED };
@@ -162,12 +172,18 @@ export const diagnoseWorkflowTool: ToolEntry<DiagnoseInput> = {
     }
 
     const steps = runHistory.getPipelineStepResults(run.id);
+    // A step id stored before ids had a shape (`step-id.ts`) is shown by its position in the workflow
+    // (`#2`, as update_workflow_steps takes it), or by the note alone when the workflow is gone.
+    const planned = run.workflow_id ? runHistory.getPlannedPipeline(run.workflow_id) : undefined;
+    // A run names such a step by its run name (`step-2`): it is shown with its position and the bridge.
+    const stored = storedSteps(planned);
+    const shownId = (id: string): string => shownRunStepId(id, stored);
     const failed = steps.filter(s => s.status === 'failed' || s.error);
 
     const stepErrors = new Map<string, string[]>();
     for (const s of steps) if (s.error) stepErrors.set(s.error, [...(stepErrors.get(s.error) ?? []), s.step_id]);
-    const runError = run.error ? shownError(run.error, { run: true, stepIds: steps.map(s => s.step_id), stepErrors }) : undefined;
-    const stepError = new Map(steps.flatMap(s => (s.error ? [[s, shownError(s.error, { run: false, stepIds: [s.step_id], stepErrors })] as const] : [])));
+    const runError = run.error ? shownError(run.error, { run: true, stepIds: steps.map(s => s.step_id), stepErrors, shownId }) : undefined;
+    const stepError = new Map(steps.flatMap(s => (s.error ? [[s, shownError(s.error, { run: false, stepIds: [s.step_id], stepErrors, shownId })] as const] : [])));
 
     // The plan's maker: a name a mandate wrote is that person's words (U-204), and so is one whose
     // record read failed. A plan with no record, or a run of no saved plan, names its plan as
@@ -195,14 +211,14 @@ export const diagnoseWorkflowTool: ToolEntry<DiagnoseInput> = {
       for (const s of steps) {
         const cost = `$${s.cost_usd.toFixed(4)}`;
         const err = stepError.get(s);
-        lines.push(`  [${s.status}] ${flat(s.step_id)} (${cost})${err ? ` · error${err.recordedLabel ? ` ${err.recordedLabel}` : ''}: ${err.text}` : ''}`);
+        lines.push(`  [${s.status}] ${shownId(s.step_id)} (${cost})${err ? ` · error${err.recordedLabel ? ` ${err.recordedLabel}` : ''}: ${err.text}` : ''}`);
       }
     }
     lines.push('');
     // Only steer the user to edit the workflow if it still EXISTS — a run can
     // outlive a deleted workflow, and naming a gone id would send the agent into
     // a "workflow not found" dead end.
-    const wfExists = !!run.workflow_id && runHistory.getPlannedPipeline(run.workflow_id) !== undefined;
+    const wfExists = planned !== undefined;
     if (failed.length > 0) {
       lines.push(
         wfExists

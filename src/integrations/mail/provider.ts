@@ -50,10 +50,19 @@ export interface MailEnvelope {
   messageId: string | undefined;
   /** Folder this envelope was fetched from (e.g. 'INBOX'). */
   folder: string;
-  /** Thread grouping key — In-Reply-To/References-derived, may equal messageId. */
+  /**
+   * Thread grouping key: the provider's own thread id (Gmail thread, Graph conversation, an IMAP
+   * server's thread id). Without one it equals messageId (or is unset), and the inbox finds the
+   * thread through inReplyTo and references instead.
+   */
   threadKey: string | undefined;
   /** In-Reply-To header — the immediate parent message-id, if this is a reply. */
   inReplyTo: string | undefined;
+  /**
+   * Message-IDs from the References header, oldest first, as far as the provider reads them
+   * (IMAP only; at most the newest few, see the provider). Sender-supplied, like inReplyTo.
+   */
+  references?: readonly string[] | undefined;
   from: MailAddress[];
   to: MailAddress[];
   cc: MailAddress[];
@@ -71,18 +80,47 @@ export interface MailEnvelope {
   /** Total RFC822 size in bytes, if reported. */
   sizeBytes: number | undefined;
   /**
-   * True if Auto-Submitted header indicates this is an auto-generated or
-   * auto-replied message. The agent must NEVER auto-reply to such messages
+   * True if the headers mark a machine-sent message: Auto-Submitted other than `no`,
+   * X-Autoreply, X-Autorespond, `Precedence: auto_reply`, or a delivery status report
+   * (`automaticMail` in automatic-mail.ts). The agent must NEVER auto-reply to such messages
    * to prevent reply loops with autoresponders.
    */
   isAutoReply: boolean;
   /**
-   * True when Auto-Submitted is `auto-replied` (RFC 3834: a reply to a message, such as an
-   * out-of-office note), as opposed to `auto-generated` mail (a dunning letter, a shop notice).
-   * False when the header is absent — on Microsoft 365's watch envelope, which carries no headers,
-   * always.
+   * True for an automatic reply to a message (RFC 3834 `auto-replied`, or one of the
+   * autoresponder headers above), such as an out-of-office note, as opposed to `auto-generated`
+   * mail (a dunning letter, a shop notice) or a bounce. False when the headers are absent — on
+   * Microsoft 365's watch envelope, which carries no headers, always.
    */
   isAutoReplied?: boolean | undefined;
+  /**
+   * The list identifier of the `List-Id` header (RFC 2919), the part between
+   * `<` and `>`, when the provider read the header. A mailing list sets it;
+   * `List-Unsubscribe` alone is no mark of one, invoices carry it too. Graph
+   * carries no headers in a collection, so a Graph envelope from list or watch
+   * has none.
+   */
+  listId?: string | undefined;
+}
+
+/** RFC 2919 caps a list-id at 255 octets. */
+const LIST_ID_MAX_OCTETS = 255;
+/** A header value longer than this is not parsed at all: the sender sets its length. */
+const LIST_ID_HEADER_MAX_CHARS = 2048;
+
+/**
+ * The list identifier of a `List-Id` header value: the part between the last
+ * `<` and `>` (the phrase before it may itself hold brackets), or the whole
+ * value when it has none. The value is written by the sender, so one that is
+ * empty, longer than 255 octets, or carries a space, a control or an invisible
+ * format character is not a list-id and gives `undefined`.
+ */
+export function listIdFromHeader(value: string | undefined): string | undefined {
+  if (value === undefined || value.length > LIST_ID_HEADER_MAX_CHARS) return undefined;
+  const bracketed = [...value.matchAll(/<([^<>]*)>/g)].at(-1);
+  const id = (bracketed ? bracketed[1] ?? '' : value).trim();
+  if (id === '' || Buffer.byteLength(id, 'utf8') > LIST_ID_MAX_OCTETS || /[\s\p{Cc}\p{Cf}]/u.test(id)) return undefined;
+  return id;
 }
 
 // ── Attachment metadata ────────────────────────────────────────────────────

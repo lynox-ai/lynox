@@ -1,4 +1,4 @@
-import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import type { BetaMessageParam, BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import type { FollowUpSuggestion } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 
@@ -101,6 +101,24 @@ export function buildFollowUpExcerpt(question: string, answer: string): string {
   const q = question.slice(0, FOLLOW_UP_EXCERPT_CHARS);
   const a = answer.slice(0, FOLLOW_UP_EXCERPT_CHARS);
   return wrapUntrustedData(`QUESTION:\n${q}\n\nANSWER:\n${a}`, 'conversation excerpt');
+}
+
+/**
+ * The system, message and tool of the follow-up recovery call, built from the turn's last
+ * user text and the answer. One builder for the agent and for the model-fitness replay
+ * (`scripts/model-fitness/replay.ts`), so the replay measures the request the agent sends.
+ * The caller adds the model, `max_tokens` and the forced `tool_choice`.
+ */
+export function buildFollowUpRequest(question: string, answer: string, tool: BetaTool): {
+  system: string;
+  messages: Array<{ role: 'user'; content: string }>;
+  tools: BetaTool[];
+} {
+  return {
+    system: FOLLOW_UP_FALLBACK_SYSTEM,
+    messages: [{ role: 'user', content: buildFollowUpExcerpt(question, answer) }],
+    tools: [tool],
+  };
 }
 
 /**

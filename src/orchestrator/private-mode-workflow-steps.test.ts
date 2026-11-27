@@ -177,6 +177,7 @@ function makeParent(opts: { threadId: string; privateMode: boolean; memory: IMem
     toolContext: ctx,
     principal: OWNER_PRINCIPAL,
     getAvailableTools: () => ctx.tools,
+    hasRunCostCeiling: () => false,
     memory: opts.memory,
     currentThreadId: opts.threadId,
     skipMemoryExtraction: opts.privateMode,

@@ -47,6 +47,8 @@ let posts: { url: string; body: unknown }[];
 let gets: string[];
 let refuseDeselect: string | null;
 let refuseResume: string | null;
+// The title a refused start names, as the engine sends it.
+let refuseTitle: string | undefined;
 // A run's own answer, by id, and an answer held back until the test lets it through.
 let runsById: Record<string, BulkRunDetailData>;
 let holds: Record<string, Promise<void>>;
@@ -64,6 +66,7 @@ beforeEach(() => {
 	gets = [];
 	refuseDeselect = null;
 	refuseResume = null;
+	refuseTitle = undefined;
 	runsById = {};
 	holds = {};
 	failIds = {};
@@ -83,7 +86,7 @@ beforeEach(() => {
 				const code = refuseResume;
 				// The engine names the run a judged start would end once; the start that names it passes.
 				if (code === 'supersede_required') refuseResume = null;
-				return reply({ error: 'engine English', code, ...(code === 'supersede_required' ? { supersedable: { id: 'r0', costUsd: 0.5 } } : {}) }, 409);
+				return reply({ error: 'engine English', code, ...(refuseTitle !== undefined ? { title: refuseTitle } : {}), ...(code === 'supersede_required' ? { supersedable: { id: 'r0', costUsd: 0.5 } } : {}) }, 409);
 			}
 			if (m) {
 				const seq = Number(m[1]);
@@ -91,16 +94,24 @@ beforeEach(() => {
 				run = { ...run, checksum: 'c2', deselected: run.deselected + 1, changes: { ...run.changes, update: run.changes.update - 1 } };
 				return reply({ checksum: 'c2' });
 			}
+			const back = /\/targets\/(\d+)\/reselect$/.exec(u);
+			if (back) {
+				const seq = Number(back[1]);
+				targets = targets.map((x) => (x.seq === seq ? { ...x, deselected: false } : x));
+				run = { ...run, checksum: 'c3', deselected: run.deselected - 1, changes: { ...run.changes, update: run.changes.update + 1 } };
+				return reply({ checksum: 'c3' });
+			}
 			return reply({});
 		}
 		gets.push(u);
 		// The owner's session: the page offers its acts only once the server says so.
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: viewerOf });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+		// `changed=1`: the page asks for the targets the plan changes first (U-437).
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
 		const pageOf = /\/bulk\/runs\/([^/?]+)\/targets\?/.exec(u)?.[1];
 		if (page && pageOf !== undefined && holds[`${pageOf}/targets`] !== undefined) await holds[`${pageOf}/targets`];
 		if (page && pageOf !== undefined && failIds[`${pageOf}/targets`] === 'throw') throw new Error('network');
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged') : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		const id = /\/bulk\/runs\/([^/?]+)$/.exec(u)?.[1];
 		// A held run answers once, for the first load that asks; a later load of it goes through.
 		if (id !== undefined && holds[id] !== undefined) { const h = holds[id]; delete holds[id]; await h; }
@@ -266,13 +277,15 @@ describe('approving a preview', () => {
 			targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'new_link_domain', linkDomain: c.domain ?? 'video.example' } : x));
 			await render();
 			const where = t('bulk.invalid.where_shopify');
+			const domain = c.domain ?? 'video.example';
 			const text = target.textContent ?? '';
+			// The domain is named in either sentence (U-311).
 			if (c.judged) {
-				expect(text).toContain(t('bulk.invalid.new_link_domain_judged').replace('{where}', where));
-				expect(text).not.toContain(t('bulk.invalid.new_link_domain').replace('{where}', where));
+				expect(text).toContain(tf('bulk.invalid.new_link_domain_judged_named', { domain, where }));
+				expect(text).not.toContain(tf('bulk.invalid.new_link_domain_named', { domain, where }));
 			} else {
-				expect(text).toContain(t('bulk.invalid.new_link_domain').replace('{where}', where));
-				expect(text).not.toContain(t('bulk.invalid.new_link_domain_judged').split('{where}')[0]!.slice(0, 120));
+				expect(text).toContain(tf('bulk.invalid.new_link_domain_named', { domain, where }));
+				expect(text).not.toContain(tf('bulk.invalid.new_link_domain_judged_named', { domain, where }).slice(0, 200));
 			}
 			resetSettingsViewer();
 		});
@@ -294,9 +307,12 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain(t('bulk.approve.only_one'));
 		expect(target.textContent).not.toContain(t('bulk.approve.one_first'));
 		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
+		const asked = gets.length;
 		buttonByText(t('bulk.deselect.off'))!.click();
 		await settle();
 		expect(posts).toEqual([{ url: expect.stringMatching(/\/bulk\/runs\/r1\/targets\/1\/deselect$/) as unknown as string, body: { checksum: 'c1' } }]);
+		// The run is asked for again (its counts and checksum moved); no page of its targets is.
+		expect(gets.slice(asked)).toEqual([expect.stringMatching(/\/bulk\/runs\/r1$/) as unknown as string]);
 		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
 		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
 		// Nothing left to write: the sentence and a way back, no button that cannot act and no note on a write.
@@ -313,18 +329,18 @@ describe('approving a preview', () => {
 		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
 		expect(block.querySelector('#bulk-approve-nothing')).not.toBeNull();
 		expect(block.querySelectorAll('input')).toHaveLength(0);
-		for (const key of ['bulk.approve.unmeasured_note', 'bulk.approve.unmeasured_note_one', 'bulk.approve.unmeasured_confirm']) expect(block.textContent).not.toContain(t(key));
+		for (const key of ['bulk.approve.unmeasured_note', 'bulk.approve.unmeasured_confirm']) expect(block.textContent).not.toContain(t(key));
 		expect(block.textContent).not.toContain('Tee');
 	});
 
-	it('cuts the unchecked note to its first two sentences at one target to write, and keeps it whole at two', async () => {
+	it('shows one note at one target and at two, and says what is written first only in the line below it', async () => {
 		const unchecked = (update: number): BulkRunDetailData => makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', changes: { update, create: 0, delete: 0, unchanged: 0, invalid: 3 - update } });
 		run = unchecked(1);
 		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
 		await render();
-		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note_one'));
-		expect(target.textContent).not.toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
 		expect(target.textContent).toContain(t('bulk.approve.only_one'));
+		expect(target.textContent).not.toContain('Deshalb schreibt lynox zuerst nur ein Ziel');
 		unmount(component!);
 		component = undefined;
 		run = unchecked(2);
@@ -332,6 +348,8 @@ describe('approving a preview', () => {
 		await render();
 		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
 		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+		// The first target is said once, in the line below the note, not in the note as well.
+		expect(target.textContent).not.toContain('Deshalb schreibt lynox zuerst nur ein Ziel');
 		// Every kind of write counts, as the write counts it: one update and one create are two.
 		unmount(component!);
 		component = undefined;
@@ -412,6 +430,18 @@ describe('approving a preview', () => {
 		buttonByText(t('bulk.deselect.off'))!.click();
 		await settle();
 		expect(target.textContent).toContain('engine English');
+	});
+
+	it('tells an image-alt run on a store that its new values are live at once, and names no title or SEO text', async () => {
+		const alt = (seq: number): BulkTarget => ({ seq, key: `gid://shopify/MediaImage/${String(seq)}`, change: 'update', diff: { kind: 'fields', fields: [{ field: 'alt', before: null, after: `Bild ${String(seq)}` }] } as BulkTarget['diff'], error: null, deselected: false });
+		run = makeRun({ total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [alt(1), alt(2)];
+		await render();
+		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
+		// The sentence as the page renders it for this run: about what the run writes, no field named.
+		const live = [...block.querySelectorAll('p')].find((p) => p.textContent === t('bulk.approve.shopify_visible'));
+		expect(live?.textContent).toBe('Bei veröffentlichten Produkten ist alles, was dieser Lauf schreibt, sofort live in deinem Shop.');
+		expect(block.textContent).not.toMatch(/Titel|SEO/);
 	});
 });
 
@@ -702,7 +732,7 @@ describe('the sentence and the way on for a halt', () => {
 		run = judged({ targetSystem: 'data_store', judgeRule: { ...rule, context: ['note'] } });
 		await render();
 		const rows = target.querySelector('[data-testid="bulk-start-context"]');
-		expect(rows!.querySelector('code')?.textContent).toBe('note');
+		expect(rows!.querySelector('[data-testid="bulk-field-own-name"]')?.textContent).toBe('note');
 		unmount(component!);
 		component = undefined;
 
@@ -799,19 +829,109 @@ describe('the markup a target changes (1010)', () => {
 		expect(target.querySelector('[data-testid="bulk-markup"]')!.textContent).toContain(`<p class="x"> ${t('bulk.markup.in_template')}`);
 	});
 
-	it('lists on an undo what it writes back, and says where that lies outside the allowlist', async () => {
+	it('lists on an undo what it writes back in the target\'s own row, says where that lies outside the allowlist, and keeps no list apart', async () => {
 		run = makeRun({ kind: 'undo', sourceRunId: 'r0', total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false,
 			markupChanges: [{ field: 'descriptionHtml', added: [script], removed: [], addsOutsideAllowlist: true }] }];
 		await render();
-		const undo = target.querySelectorAll('[data-testid="bulk-undo-markup"]');
-		expect(undo).toHaveLength(1);
+		// The markup stands in the target's row of the table, once; the list under the approval is gone (U-466).
+		expect(target.querySelectorAll('[data-testid="bulk-undo-markup"]')).toHaveLength(0);
+		expect(target.querySelectorAll('[data-testid="bulk-markup"]')).toHaveLength(1);
+		const rows = target.querySelectorAll('[data-testid="bulk-target-row"]');
+		expect(rows).toHaveLength(1);
+		const row = rows[0]!;
+		expect(row.querySelector('[data-testid="bulk-markup"]')).not.toBeNull();
 		// The product is named by its admin link; the markup it writes back is listed as text.
-		expect(undo[0]!.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
-		expect(codes(undo[0]!)).toEqual(['<script>steal()</script>']);
-		expect(undo[0]!.textContent).toContain(t('bulk.markup.restores'));
-		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note'));
+		expect(row.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
+		expect(codes(row)).toEqual(['<script>steal()</script>']);
+		expect(row.textContent).toContain(t('bulk.markup.restores'));
+		expect(row.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note_active'));
+		expect(row.querySelector('[data-testid="bulk-markup-restores-note"]')?.className).toBe('text-warning');
 		expect(target.querySelectorAll('script')).toHaveLength(0);
+	});
+
+	it('says of an undo that restores the owner\'s own table only that it was there before', async () => {
+		const table = { kind: 'element' as const, namespace: 'html', element: 'table', attributes: [['width', '100%']] as [string, string][], text: null, inTemplate: false };
+		run = makeRun({ kind: 'undo', sourceRunId: 'r0', total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false,
+			markupChanges: [{ field: 'descriptionHtml', added: [table], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: true }] }];
+		await render();
+		const note = target.querySelector('[data-testid="bulk-target-row"] [data-testid="bulk-markup-restores-note"]');
+		expect(note?.textContent).toBe(t('bulk.markup.restores_note'));
+		// Neutral, as the head and the footnote: not a warning about the owner's own table.
+		expect(note?.className).toBe('text-text-subtle');
+	});
+});
+
+describe('the reason under a value lynox leaves out, as the run\'s page words it', () => {
+	const invalid = (error: string, o: Partial<BulkTarget> = {}): BulkTarget[] => [
+		TARGETS[0]!, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error, deselected: false, ...o },
+	];
+
+	it('names the refused domain as text, never as a link (U-311)', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = invalid('new_link_domain', { linkDomain: '<a href="https://evil.example">evil.example</a>' } as Partial<BulkTarget>);
+		await render();
+		expect(target.textContent).toContain('„<a href="https://evil.example">evil.example</a>“');
+		expect(target.querySelector('a[href="https://evil.example"]')).toBeNull();
+	});
+
+	it('words a cut-off answer of a judge that decides an HTML field as a description to keep by hand', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 }, judge: {} as BulkRunDetailData['judge'], judgesHtml: true } as Partial<BulkRunDetailData>);
+		targets = invalid('cut_off');
+		await render();
+		expect(target.textContent).toContain(tf('bulk.invalid.cut_off_html', { where: t('bulk.invalid.where_shopify') }));
+	});
+
+	it('control: the same cut-off answer of a judge that decides no HTML field keeps the plain sentence', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 }, judge: {} as BulkRunDetailData['judge'], judgesHtml: false } as Partial<BulkRunDetailData>);
+		targets = invalid('cut_off');
+		await render();
+		expect(target.textContent).toContain(t('bulk.invalid.cut_off'));
+		expect(target.textContent).not.toContain(tf('bulk.invalid.cut_off_html', { where: t('bulk.invalid.where_shopify') }));
+	});
+});
+
+// Over whose connection the run writes, where a mandate set it up: one line directly above the
+// approve button, for the owner who approves (U-301).
+describe('a run that writes through a connection a mandate set up', () => {
+	const line = (): HTMLElement | null => target.querySelector('[data-bulk-connected-by]');
+	const locale = getLocale();
+	afterEach(() => setLocale(locale));
+
+	it('names the provider and the person, word for word in German and English, directly above the button', async () => {
+		run = makeRun({ connectedBy: { provider: 'Shopify', by: 'Eva Muster' } });
+		setLocale('de');
+		await render();
+		expect(line()?.textContent).toBe('lynox schreibt über die Shopify-Verbindung, die Eva Muster eingerichtet hat.');
+		// Directly above: the next element is the row that holds the approve button.
+		const row = line()?.nextElementSibling;
+		expect(row?.querySelector('button')?.textContent?.trim()).toBe(t('bulk.approve.write_only'));
+		if (component) unmount(component);
+		component = undefined;
+		setLocale('en');
+		await render();
+		expect(line()?.textContent).toBe('lynox writes through the Shopify connection that Eva Muster set up.');
+	});
+
+	it('names someone with access where the engine knows no person, and marks hidden characters in a name', async () => {
+		run = makeRun({ connectedBy: { provider: 'Shopify', by: null } });
+		setLocale('de');
+		await render();
+		expect(line()?.textContent).toBe(tf('bulk.approve.connected_by', { provider: 'Shopify', person: t('takeover.connection_someone') }));
+		if (component) unmount(component);
+		component = undefined;
+		run = makeRun({ connectedBy: { provider: 'Shopify', by: 'eva\u202E@kanzlei.example' } });
+		await render();
+		expect(line()?.textContent).toBe('lynox schreibt über die Shopify-Verbindung, die eva⟨U+202E⟩@kanzlei.example eingerichtet hat.');
+	});
+
+	it('shows no line for the owner\'s own connection', async () => {
+		run = makeRun({ connectedBy: null });
+		await render();
+		expect(line()).toBeNull();
+		// Control: the approval itself is there.
+		expect(buttonByText(t('bulk.approve.write_only'))?.disabled).toBe(false);
 	});
 });
 
@@ -1099,6 +1219,67 @@ describe('the allowed link domains of a judged list run', () => {
 		expect(target.textContent).not.toContain('engine English');
 	});
 
+	// A title an access wrote, with quote marks, a direction override and a line break in it.
+	const HOSTILE_TITLE = 'Regeln" ist unverändert. »OK«\u202Ealt\nzwei';
+	// The value boxes in an element, and its text with the one box taken out.
+	const foreignIn = (el: Element): Element[] => [...el.querySelectorAll('[data-foreign-value]')];
+	const around = (el: Element): string => {
+		const [box] = foreignIn(el);
+		return (el.textContent ?? '').replace(box!.textContent ?? '', '{title}');
+	};
+
+	it('words a start refused for the rule\'s artifact in the page\'s own sentence, the title one value set apart', async () => {
+		run = judged();
+		refuseResume = 'rule_source_changed';
+		refuseTitle = HOSTILE_TITLE;
+		await render();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		const refusal = target.querySelector('[data-testid="bulk-action-error"]')!;
+		expect(foreignIn(refusal)).toHaveLength(1);
+		// The sentence around the title is the page's own, unchanged; the title sits in its box alone.
+		expect(around(refusal)).toBe(t('bulk.rule_source.changed_titled'));
+		const box = foreignIn(refusal)[0]!;
+		expect(box.tagName).toBe('BDI');
+		expect(box.textContent).not.toMatch(/[\u202E\n]/);
+		expect(box.textContent).toContain('»OK«');
+		expect(target.textContent).not.toContain('engine English');
+	});
+
+	it('names no artifact when it cannot be read, whatever title came with the refusal', async () => {
+		run = judged();
+		refuseResume = 'rule_source_unreadable';
+		refuseTitle = HOSTILE_TITLE;
+		await render();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		const refusal = target.querySelector('[data-testid="bulk-action-error"]')!;
+		expect(refusal.textContent).toBe(t('bulk.rule_source.unreadable'));
+		expect(foreignIn(refusal)).toHaveLength(0);
+	});
+
+	it('says a rule taken from an artifact came from it, by its planned title set apart, not that lynox wrote it', async () => {
+		run = judged({ ruleFromArtifact: { title: HOSTILE_TITLE } });
+		await render();
+		const origin = target.querySelector('[data-testid="bulk-rule-from-artifact"]')!;
+		expect(foreignIn(origin)).toHaveLength(1);
+		expect(around(origin)).toBe(t('bulk.start.rule_from_artifact'));
+		expect(target.querySelector('[data-testid="bulk-rule-drafted"]')).toBeNull();
+	});
+
+	it('says so without a name for an artifact that had no title', async () => {
+		run = judged({ ruleFromArtifact: {} });
+		await render();
+		const origin = target.querySelector('[data-testid="bulk-rule-from-artifact"]')!;
+		expect(origin.textContent).toBe(t('bulk.start.rule_from_artifact_untitled'));
+		expect(foreignIn(origin)).toHaveLength(0);
+		expect(target.querySelector('[data-testid="bulk-rule-drafted"]')).toBeNull();
+	});
+
 	it('words the engine\'s start_domains_invalid in the page\'s own sentence', async () => {
 		run = judged();
 		refuseResume = 'start_domains_invalid';
@@ -1125,6 +1306,21 @@ describe('the allowed link domains of a judged list run', () => {
 		return () => { delete holds[id]; release(); };
 	};
 	const resumeUrls = (): string[] => posts.filter((p) => p.url.endsWith('/resume')).map((p) => p.url);
+
+	it('opens another run with its unchanged targets folded, though they were shown on the run before', async () => {
+		targets = Array.from({ length: 8 }, (_, i) => ({ ...TARGETS[i === 0 ? 0 : 1]!, seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}` }));
+		const done = (id: string): BulkRunDetailData => makeRun({ id, phase: 'done', total: 8, changes: { update: 1, create: 0, delete: 0, unchanged: 7, invalid: 0 } });
+		run = done('r1');
+		const open = await renderSwitchable();
+		// The next run is a preview, loaded whole: a fold left open would show its unchanged targets.
+		runsById['r2'] = { ...done('r2'), phase: 'previewed' };
+		const unfold = (): HTMLButtonElement | undefined => buttonByText(tf('bulk.preview.show_unchanged', { n: '7' }));
+		unfold()!.click();
+		await settle();
+		expect(unfold()).toBeUndefined();
+		await open('r2');
+		expect(unfold()).toBeDefined();
+	});
 
 	it('sends no domains typed for another run with the start of this one', async () => {
 		run = judged();
@@ -1269,6 +1465,20 @@ describe('the allowed link domains of a judged list run', () => {
 		await settle();
 		expect(posts.map((p) => p.url)).toEqual([expect.stringContaining('/bulk/runs/r1/targets/1/deselect')]);
 		expect(target.textContent).not.toContain(t('bulk.deselect.refused.not_writing'));
+	});
+
+	it('sends no take-out while another run loads, though the page still shows the one before', async () => {
+		run = makeRun();
+		const open = await renderSwitchable();
+		runsById['r2'] = makeRun({ id: 'r2' });
+		const release = held('r2');
+		await open('r2', false);
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(posts).toEqual([]);
+		release();
+		await settle();
+		expect(posts).toEqual([]);
 	});
 
 	it('leaves a refusal shown on one run behind when another opens', async () => {
@@ -1429,5 +1639,962 @@ describe('the allowed link domains of a judged list run', () => {
 		run = makeRun({ judge: { tier: 'standard', unjudged: 0 }, list: null });
 		await render();
 		expect(target.querySelector('[data-testid="bulk-start-domains"]')).toBeNull();
+	});
+});
+
+// The halt for an outdated connection consent names the next step once: on the owner's page the box
+// below says to plan again, so the halt ends at the reconnect; a mandate's page has no such box, so
+// its halt says it.
+describe('the next step of a halt for an outdated connection consent', () => {
+	// Nothing written yet, or some of the run already written: the two halt sentences.
+	const halted = (applied: number): BulkRunDetailData => makeRun({
+		targetSystem: 'http:demo.myshopify.com', phase: 'approved', applied, sentUnknown: 0,
+		haltReason: 'engine English', haltKey: 'consentOutdated', consentFields: ['descriptionHtml'],
+	});
+	// Pinned, not read from the keys under test: a halt that drops the step must fail here.
+	const planAgain = (): RegExp => (getLocale() === 'de' ? /neu (zu )?planen/ : /plan the run again/);
+	// The halt line of the head, not the page: target rows say to plan again for their own reasons.
+	const haltLine = (): string => [...target.querySelectorAll('dt')].find((d) => d.textContent === t('bulk.head.halted'))!.nextElementSibling!.textContent!;
+	const cases = (['de', 'en'] as const).flatMap((lang) => [0, 1].map((applied) => [lang, applied] as const));
+	const inLocale = (lang: 'de' | 'en'): void => {
+		const before = getLocale();
+		setLocale(lang);
+		onTestFinished(() => setLocale(before));
+	};
+
+	it.each(cases)('says to plan again in the box below on the owner\'s page, and not in the halt (%s, %i written)', async (lang, applied) => {
+		inLocale(lang);
+		run = halted(applied);
+		await render();
+		expect(t('bulk.resume.none')).toMatch(planAgain());
+		expect(target.textContent).toContain(t('bulk.resume.none'));
+		expect(haltLine()).toContain(t('bulk.consent.field.descriptionHtml'));
+		expect(haltLine()).not.toMatch(planAgain());
+	});
+
+	// The box is looked for by its words; the owner's case above shows those words are the box's.
+	it.each(cases)('says to plan again in the halt on a mandate\'s page, which has no box (%s, %i written)', async (lang, applied) => {
+		inLocale(lang);
+		viewerOf = 'mandate';
+		run = halted(applied);
+		await render();
+		expect(target.textContent).not.toContain(t('bulk.resume.none'));
+		expect(haltLine()).toContain(t('bulk.consent.field.descriptionHtml'));
+		expect(haltLine()).toMatch(planAgain());
+	});
+});
+
+describe('discarding a run before approving it (U-324)', () => {
+	it('offers the owner "Discard" on a preview, asks first, and discards only on the confirmation', async () => {
+		await render();
+		const open = target.querySelector<HTMLButtonElement>('[data-testid="bulk-discard-open"]');
+		expect(open?.textContent?.trim()).toBe(t('bulk.discard.button'));
+		// Secondary, never red: lynox writes nothing by it.
+		expect(open?.className ?? '').not.toMatch(/danger/);
+		expect(target.querySelector('[data-testid="bulk-discard-confirm"]')).toBeNull();
+		open!.click();
+		await settle();
+		const box = target.querySelector('[data-testid="bulk-discard"]')!;
+		expect(box.textContent).toContain(t('bulk.discard.confirm_title'));
+		expect(box.textContent).toContain(t('bulk.discard.confirm_text'));
+		expect(posts).toEqual([]);
+		// Cancel closes it and sends nothing.
+		buttonByText(t('bulk.discard.cancel'))!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-discard-confirm"]')).toBeNull();
+		expect(posts).toEqual([]);
+		target.querySelector<HTMLButtonElement>('[data-testid="bulk-discard-open"]')!.click();
+		await settle();
+		target.querySelector<HTMLButtonElement>('[data-testid="bulk-discard-confirm"]')!.click();
+		await settle();
+		expect(posts).toHaveLength(1);
+		expect(posts[0]!.url.endsWith('/bulk/runs/r1/discard')).toBe(true);
+	});
+
+	it('offers a mandate no discard, and offers none on a run past its approval', async () => {
+		viewerOf = 'mandate';
+		resetSettingsViewer();
+		await render();
+		expect(target.querySelector('[data-testid="bulk-discard"]')).toBeNull();
+		if (component) unmount(component);
+		component = undefined;
+		viewerOf = 'owner';
+		resetSettingsViewer();
+		run = makeRun({ phase: 'approved', maxTargets: 1 });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-discard"]')).toBeNull();
+	});
+
+	it('names a discarded run as discarded, the owner as "you" and anyone else the owner', async () => {
+		for (const [viewer, key] of [['owner', 'bulk.halt.discarded'], ['mandate', 'bulk.halt.discarded_mandate']] as const) {
+			viewerOf = viewer;
+			resetSettingsViewer();
+			run = makeRun({ phase: 'aborted', haltReason: 'the owner discarded this run before approving it', haltKey: 'discarded' });
+			await render();
+			const text = target.textContent ?? '';
+			expect([viewer, text.includes(t(key))]).toEqual([viewer, true]);
+			// The last step's chip says discarded, not done.
+			expect(target.querySelector('[aria-current="step"]')?.textContent).toBe(t('bulk.phase.discarded'));
+			expect(target.querySelector('[data-testid="bulk-discard"]')).toBeNull();
+			if (component) unmount(component);
+			component = undefined;
+		}
+		resetSettingsViewer();
+	});
+});
+
+// The start of a judged run (U-333): the fields the judge sets in words, not as the schema, and
+// a line under the disabled start button that says what is missing.
+describe('the start of a judged run, in words', () => {
+	const judged = (o: Partial<BulkRunDetailData> = {}): BulkRunDetailData => makeRun({
+		phase: 'planned', haltKey: 'listed', haltReason: 'engine English', checksum: null,
+		judge: { tier: 'standard', unjudged: 3 }, judgeRuleHash: 'h1',
+		judgeServedBy: { provider: 'anthropic', label: 'Modell' },
+		judgeRule: { rule: 'Schreib die Beschreibung neu.', schema: { properties: { body_html: { type: 'string', maxLength: 5000 } } }, tier: 'standard' },
+		list: { state: 'done' }, startDomains: null,
+		...o,
+	});
+	const fieldLines = (): string[] => [...target.querySelectorAll('[data-testid="bulk-start-field"]')].map((li) => li.textContent?.trim() ?? '');
+	const type = (el: HTMLInputElement | HTMLTextAreaElement, value: string): void => {
+		el.value = value;
+		el.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+	};
+	const capField = (): HTMLInputElement => target.querySelector('input[inputmode="decimal"]')!;
+	const domainField = (): HTMLTextAreaElement => target.querySelector('[data-testid="bulk-start-domains"] textarea')!;
+	const startButton = (): HTMLButtonElement => buttonByText(t(bulkStartButtonKey(run, 'judge', false) ?? 'bulk.start.judge'))!;
+	const hint = (): string | null => target.querySelector('[data-testid="bulk-start-hint"]')?.textContent ?? null;
+
+	it('names each field the judge sets with its shape in words, and shows no schema', async () => {
+		run = judged({ judgeRule: { rule: 'r', tier: 'standard', schema: { properties: {
+			seo_title: { type: 'string', maxLength: 70 },
+			seo_description: { type: 'string', minLength: 10, maxLength: 160 },
+			tone: { type: 'string', enum: ['kurz', 'lang'] },
+			price: { type: 'number', minimum: 0, maximum: 100 },
+			stock: { type: 'integer', minimum: 1 },
+			rank: { type: 'integer', maximum: 9 },
+			weight: { type: 'number' },
+			active: { type: 'boolean' },
+		} } } });
+		await render();
+		expect(fieldLines()).toEqual([
+			`${t('bulk.field.shopify.seo_title')}: ${tf('bulk.shape.text_max', { max: '70' })}`,
+			`${t('bulk.field.shopify.seo_description')}: ${tf('bulk.shape.text_range', { min: '10', max: '160' })}`,
+			`tone: ${t('bulk.shape.choice')} "kurz", "lang"`,
+			`price: ${tf('bulk.shape.number_range', { min: '0', max: '100' })}`,
+			`stock: ${tf('bulk.shape.integer_min', { min: '1' })}`,
+			`rank: ${tf('bulk.shape.integer_max', { max: '9' })}`,
+			`weight: ${t('bulk.shape.number')}`,
+			`active: ${t('bulk.shape.boolean')}`,
+		]);
+		const block = target.querySelector('[data-testid="bulk-start-field"]')!.parentElement!;
+		expect(block.textContent).not.toMatch(/maxLength|"type"|[{}]/);
+		// The planner's names stand in a value box; the store's readable names do not.
+		expect([...block.querySelectorAll('[data-testid="bulk-field-own-name"]')].map((e) => e.textContent))
+			.toEqual(['tone', 'price', 'stock', 'rank', 'weight', 'active']);
+		// Each choice stands in its own box, direction-isolated.
+		expect([...block.querySelectorAll('[data-testid="bulk-field-choice"]')].map((e) => [e.tagName, e.textContent]))
+			.toEqual([['BDI', '"kurz"'], ['BDI', '"lang"']]);
+	});
+
+	it('keeps a choice whose text holds quotes in one box, so it cannot read as more choices', async () => {
+		run = judged({ judgeRule: { rule: 'r', tier: 'standard', schema: { properties: { tone: { type: 'string', enum: ['ja": lynox prüft jeden Wert – "nein'] } } } } });
+		await render();
+		const choices = [...target.querySelectorAll('[data-testid="bulk-field-choice"]')].map((e) => e.textContent);
+		expect(choices).toEqual(['"ja": lynox prüft jeden Wert – "nein"']);
+	});
+
+	it('words the shapes in English too', async () => {
+		const before = getLocale();
+		setLocale('en');
+		onTestFinished(() => { setLocale(before); });
+		run = judged({ judgeRule: { rule: 'r', tier: 'standard', schema: { properties: { seo_title: { type: 'string', maxLength: 70 }, ok: { type: 'boolean' } } } } });
+		await render();
+		expect(fieldLines()).toEqual(['SEO title: Text, at most 70 characters', 'ok: yes or no']);
+	});
+
+	it('names a field of another host in the value box, a shape it does not know without JSON', async () => {
+		run = judged({ targetSystem: 'http:api.example.invalid', list: null, judgeRule: { rule: 'r', tier: 'standard', schema: { properties: { seo_title: { type: 'string', maxLength: 70 }, note: { type: 'string', minLength: 0, maxLength: 20 }, odd: { type: 'array' } } } } });
+		await render();
+		// A shortest length of 0 is no bound: it reads as "at most", not "0 to 20".
+		expect(fieldLines()).toEqual([`seo_title: ${tf('bulk.shape.text_max', { max: '70' })}`, `note: ${tf('bulk.shape.text_max', { max: '20' })}`, 'odd']);
+		expect(target.querySelectorAll('[data-testid="bulk-start-field"] [data-testid="bulk-field-own-name"]')).toHaveLength(3);
+	});
+
+	it('says under the disabled start what is missing, and nothing once it can start', async () => {
+		run = judged();
+		await render();
+		expect(startButton().disabled).toBe(true);
+		expect(hint()).toBe(t('bulk.start.hint_cap'));
+		expect(startButton().getAttribute('aria-describedby')).toBe('bulk-start-hint');
+		expect(target.querySelector('#bulk-start-hint')?.textContent).toBe(t('bulk.start.hint_cap'));
+
+		type(domainField(), 'https://mein-shop.ch/pfad');
+		expect(hint()).toBe(t('bulk.start.hint_both'));
+
+		type(capField(), '5');
+		expect(startButton().disabled).toBe(true);
+		expect(hint()).toBe(t('bulk.start.hint_domains'));
+
+		type(domainField(), 'mein-shop.ch');
+		expect(startButton().disabled).toBe(false);
+		expect(hint()).toBeNull();
+		expect(startButton().hasAttribute('aria-describedby')).toBe(false);
+	});
+
+	it('names the domain list, not a marked line, when it holds too many domains', async () => {
+		run = judged();
+		await render();
+		type(capField(), '5');
+		type(domainField(), Array.from({ length: 21 }, (_, i) => `d${String(i)}.example`).join('\n'));
+		expect(startButton().disabled).toBe(true);
+		expect(hint()).toBe(t('bulk.start.hint_domains'));
+		expect(hint()).not.toMatch(/markiert|marked/);
+	});
+
+	it('says nothing under the start while it is under way, though it empties the cost field', async () => {
+		run = judged();
+		let release!: () => void;
+		await render();
+		holds['r1'] = new Promise<void>((r) => { release = r; });
+		type(capField(), '5');
+		startButton().click();
+		for (let i = 0; i < 20 && capField().value !== ''; i++) { await tick(); await Promise.resolve(); }
+		flushSync();
+		expect(capField().value).toBe('');
+		expect(startButton().disabled).toBe(true);
+		expect(hint()).toBeNull();
+		release();
+		await settle();
+	});
+
+	it('leaves the cost limit out of the hint while its own line says the amount is wrong', async () => {
+		run = judged();
+		await render();
+		type(capField(), '0');
+		expect(startButton().disabled).toBe(true);
+		expect(target.textContent).toContain(t('bulk.start.cap_invalid'));
+		expect(hint()).toBeNull();
+
+		type(domainField(), 'https://mein-shop.ch/pfad');
+		expect(hint()).toBe(t('bulk.start.hint_domains'));
+	});
+
+	it('shows the hint on the start that ends another run, too', async () => {
+		run = judged();
+		refuseResume = 'supersede_required';
+		await render();
+		type(capField(), '5');
+		startButton().click();
+		await settle();
+		const supersede = buttonByText(t(bulkStartButtonKey(run, 'judge', true) ?? 'bulk.start.supersede_yes'))!;
+		expect(hint()).toBeNull();
+		type(capField(), '');
+		expect(supersede.disabled).toBe(true);
+		expect(hint()).toBe(t('bulk.start.hint_cap'));
+		expect(supersede.getAttribute('aria-describedby')).toBe('bulk-start-hint');
+	});
+});
+
+describe('a toggle on the run\'s page', () => {
+	it('puts a target back against the checksum the take-out answered, and loads no page of targets for either', async () => {
+		await render();
+		const asked = gets.length;
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		buttonByText(t('bulk.deselect.on'))!.click();
+		await settle();
+		expect(posts.map((p) => p.body)).toEqual([{ checksum: 'c1' }, { checksum: 'c2' }]);
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(false);
+		expect(target.textContent).not.toContain(t('bulk.deselect.taken_out'));
+		expect(buttonByText(t('bulk.deselect.off'))).toBeDefined();
+	});
+
+	for (const [what, change] of [
+		['another view took a second target out meanwhile', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, deselected: r.deselected + 1 })],
+		['the run lists another number of targets', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, total: r.total + 1 })],
+		// Another view put one target back and took another out: the counts are as this toggle left
+		// them, only the checksum tells the run moved.
+		['another view moved a pair of targets that cancels out', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, checksum: 'c9' })],
+	] as const) {
+		it(`loads the run whole where ${what}`, async () => {
+			await render();
+			const asked = gets.length;
+			const realFetch = globalThis.fetch;
+			vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+				if (init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url)) && gets.length === asked) run = change(run);
+				return realFetch(url, init);
+			}));
+			buttonByText(t('bulk.deselect.off'))!.click();
+			await settle();
+			expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		});
+	}
+
+	it('loads the run whole where the ask for it fails', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		let failed = false;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (!failed && init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) {
+				failed = true;
+				gets.push(String(url));
+				return new Response('{}', { status: 502, headers: { 'Content-Type': 'application/json' } });
+			}
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
+	});
+
+	it('loads the run whole where the ask for it throws, and shows the toggle', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		let failed = false;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (!failed && init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) {
+				failed = true;
+				gets.push(String(url));
+				throw new Error('network');
+			}
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
+	});
+
+	it('loads the run whole where it is no longer the preview it showed', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			// The engine moved the run on between the toggle and the ask: it is approved now.
+			if (init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) run = { ...run, phase: 'approved' };
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+	});
+});
+
+// U-387: a judged run's verdicts that differ from the rest of it come first, each with its reasons as
+// text that does not look clickable, under a line that says this is a reading order, not a check.
+describe('verdicts that differ from the rest of the run', () => {
+	const outlierCount = (): string | null | undefined => target.querySelector('[data-testid="bulk-outlier-count"]')?.textContent;
+	const spread = (): string[] => [...target.querySelectorAll('[data-testid="bulk-outlier-spread"]')].map((e) => e.textContent ?? '');
+	const rowNames = (): string[] => [...target.querySelectorAll('tbody tr')].map((r) => r.querySelector('td')?.textContent ?? '');
+	const pills = (row: number): string[] => [...target.querySelectorAll('tbody tr')[row]!.querySelectorAll('[data-testid="bulk-outlier"]')].map((e) => e.textContent ?? '');
+	const many = (n: number): BulkTarget[] => Array.from({ length: n }, (_, i) => ({
+		seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update' as const, diff: fieldsDiff(`Alt ${String(i + 1)}`, `Neu ${String(i + 1)}`), error: null, deselected: false,
+	}));
+	const changes = (n: number) => ({ update: n, create: 0, delete: 0, unchanged: 0, invalid: 0 });
+
+	it('lists the flagged verdicts first in their own order, with every reason, and says one that does not stand out can still be wrong', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, spread: [],
+			flagged: [{ seq: 7, reasons: ['new_link', 'length_jump'] }, { seq: 19, reasons: ['rare_value'] }] } });
+		targets = many(25);
+		await render();
+		expect(outlierCount()).toBe(tf('bulk.outliers.count', { n: '2' }));
+		expect(rowNames().slice(0, 3).map((r) => /(\d+)/.exec(r)?.[1])).toEqual(['7', '19', '1']);
+		expect(pills(0)).toEqual([t('bulk.outlier.new_link'), t('bulk.outlier.length_jump')]);
+		expect(pills(1)).toEqual([t('bulk.outlier.rare_value')]);
+		expect(pills(2)).toEqual([]);
+		// Text, never a link.
+		expect(target.querySelector('[data-testid="bulk-outlier"] a, [data-testid="bulk-outlier-count"] a')).toBeNull();
+	});
+
+	it('says in the singular that one verdict differs', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, spread: [], flagged: [{ seq: 3, reasons: ['changed_fields'] }] } });
+		targets = many(25);
+		await render();
+		expect(outlierCount()).toBe(t('bulk.outliers.count_one'));
+	});
+
+	it('says that no verdict differs, and that this is no check, when none is flagged among 20 or more', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, spread: [], flagged: [] } });
+		targets = many(25);
+		await render();
+		expect(outlierCount()).toBe(t('bulk.outliers.none'));
+		expect(target.querySelector('[data-testid="bulk-outlier"]')).toBeNull();
+	});
+
+	it('tells the owner to read every verdict of a run under 20', async () => {
+		run = makeRun({ total: 5, changes: changes(5), judgeOutliers: { decided: 5, measured: false, spread: [], flagged: [] } });
+		targets = many(5);
+		await render();
+		expect(outlierCount()).toBe(t('bulk.outliers.small'));
+	});
+
+	it('lists the first 50 of more flagged verdicts first and names how many differ', async () => {
+		const flagged = Array.from({ length: 60 }, (_, i) => ({ seq: 100 - i, reasons: ['new_phone' as const] })).sort((a, b) => a.seq - b.seq);
+		run = makeRun({ total: 100, changes: changes(100), judgeOutliers: { decided: 100, measured: true, spread: [], flagged } });
+		targets = many(100);
+		await render();
+		expect(outlierCount()).toBe(tf('bulk.outliers.over', { n: '60', first: '50' }));
+		// The first 50 flagged (seq 41–90) on top in their own order, then the rest in plan order: 1–40,
+		// then 91–100, flagged but not lifted.
+		const seqs = rowNames().map((r) => Number(/(\d+)/.exec(r)?.[1]));
+		expect(seqs.slice(0, 50)).toEqual(Array.from({ length: 50 }, (_, i) => 41 + i));
+		expect(seqs.slice(50, 52)).toEqual([1, 2]);
+		expect(seqs.slice(-10)).toEqual(Array.from({ length: 10 }, (_, i) => 91 + i));
+		expect(pills(99)).toEqual([t('bulk.outlier.new_phone')]);
+	});
+
+	it('names a link many verdicts add on a line of its own, with up to five hosts as text and how many more', async () => {
+		const hosts = ['a.example', 'b.example', 'c.example', 'd.example', 'e.example', 'f.example', 'g.example'];
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 25, hosts }, { kind: 'phone', count: 1, hosts: [] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toEqual([
+			tf('bulk.outliers.spread.link', { n: '25', hosts: tf('bulk.outliers.spread.link_hosts_more', { hosts: hosts.slice(0, 5).join(', '), k: '2' }) }),
+			tf('bulk.outliers.spread.phone_one', { n: '1', hosts: '' }),
+		]);
+		expect(target.querySelector('[data-testid="bulk-outlier-spread"] a')).toBeNull();
+	});
+
+	it('names seven hosts that mark a row, all of them first, and of the others five and how many more, for links and for addresses', async () => {
+		const marking = ['m1.example', 'm2.example', 'm3.example', 'm4.example', 'm5.example', 'm6.example', 'm7.example'];
+		const others = ['o1.example', 'o2.example', 'o3.example', 'o4.example', 'o5.example', 'o6.example', 'o7.example'];
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 20, hosts: [...marking, ...others], marked: 7 }, { kind: 'email', count: 20, hosts: [...marking, ...others], marked: 7 }] } });
+		targets = many(25);
+		await render();
+		for (const [i, kind] of (['link', 'email'] as const).entries()) {
+			expect(spread()[i], kind).toBe(tf(`bulk.outliers.spread.${kind}`, { n: '20', hosts: tf(`bulk.outliers.spread.${kind}_hosts_more`, { hosts: [...marking, ...others.slice(0, 5)].join(', '), k: '2' }) }));
+		}
+	});
+
+	it('names twenty hosts that mark a row and counts the rest in a sentence of its own, apart from the others it leaves out', async () => {
+		const marking = Array.from({ length: 25 }, (_, i) => `m${String(i + 1)}.example`);
+		const others = ['o1.example', 'o2.example', 'o3.example', 'o4.example', 'o5.example', 'o6.example', 'o7.example'];
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 20, hosts: [...marking, ...others], marked: 25 }, { kind: 'email', count: 20, hosts: [...marking.slice(0, 21), ...others], marked: 21 }] } });
+		targets = many(25);
+		await render();
+		const listed = (n: number) => [...marking.slice(0, n), ...others.slice(0, 5)].join(', ');
+		expect(spread()).toEqual([
+			tf('bulk.outliers.spread.link', { n: '20', hosts: tf('bulk.outliers.spread.link_hosts_more', { hosts: listed(20), k: '2' }) + tf('bulk.outliers.spread.link_marked_more', { m: '5' }) }),
+			tf('bulk.outliers.spread.email', { n: '20', hosts: tf('bulk.outliers.spread.email_hosts_more', { hosts: listed(20), k: '2' }) + t('bulk.outliers.spread.email_marked_more_one') }),
+		]);
+	});
+
+	it('counts one marking host past twenty in the singular, also when no other host is on the line', async () => {
+		const marking = Array.from({ length: 21 }, (_, i) => `m${String(i + 1)}.example`);
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 21, hosts: marking, marked: 21 }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toEqual([tf('bulk.outliers.spread.link', { n: '21', hosts: tf('bulk.outliers.spread.link_hosts', { hosts: marking.slice(0, 20).join(', ') }) + t('bulk.outliers.spread.link_marked_more_one') })]);
+	});
+
+	it('names the one host that marks a row before seven that do not, and counts only those it leaves out', async () => {
+		const others = ['o1.example', 'o2.example', 'o3.example', 'o4.example', 'o5.example', 'o6.example', 'o7.example'];
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [{ seq: 5, reasons: ['new_link'] }],
+			spread: [{ kind: 'link', count: 15, hosts: ['selten.example', ...others], marked: 1 }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toEqual([tf('bulk.outliers.spread.link', { n: '15', hosts: tf('bulk.outliers.spread.link_hosts_more', { hosts: ['selten.example', ...others.slice(0, 5)].join(', '), k: '2' }) })]);
+	});
+
+	it('shows a hidden character in a host of that line instead of hiding it', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 25, hosts: ['shop\u200b.example', 'sh\u200cop.example'] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toHaveLength(1);
+		// A zero-width space, and a joiner that running text may carry between letters: in a host neither is.
+		expect(spread()[0]).not.toMatch(/[\u200b\u200c]/u);
+		expect(spread()[0]).toContain('⟨U+200B⟩');
+		expect(spread()[0]).toContain('⟨U+200C⟩');
+	});
+
+	it('states the way out once below two run lines, in the same box as the lines', async () => {
+		const closing = (): string[] => [...target.querySelectorAll('[data-testid="bulk-outlier-spread-closing"]')].map((e) => e.textContent ?? '');
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 20, hosts: ['a.example'] }, { kind: 'email', count: 20, hosts: ['b.example'] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toHaveLength(2);
+		for (const line of spread()) expect(line).not.toContain(t('bulk.outliers.spread.closing'));
+		expect(closing()).toEqual([t('bulk.outliers.spread.closing')]);
+		const box = target.querySelector('[data-testid="bulk-outlier-spread-box"]')!;
+		expect(box.querySelectorAll('[data-testid="bulk-outlier-spread"]')).toHaveLength(2);
+		expect(box.querySelector('[data-testid="bulk-outlier-spread-closing"]')).not.toBeNull();
+	});
+
+	it('states the way out once below a single run line too', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'phone', count: 20, hosts: [] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toEqual([tf('bulk.outliers.spread.phone', { n: '20', hosts: '' })]);
+		expect([...target.querySelectorAll('[data-testid="bulk-outlier-spread-closing"]')].map((e) => e.textContent)).toEqual([t('bulk.outliers.spread.closing')]);
+	});
+
+	it('shows the table on the verdicts of one line alone, says so over the table, and shows all again from the line or from over the table', async () => {
+		const filtered = (): string | null | undefined => target.querySelector('[data-testid="bulk-outlier-filtered"]')?.textContent;
+		const shows = (): string[] => [...target.querySelectorAll('[data-testid="bulk-outlier-spread-show"]')].map((e) => e.textContent ?? '');
+		const seqsShown = (): number[] => rowNames().map((r) => Number(/(\d+)/.exec(r)?.[1]));
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }, { kind: 'email', count: 1, hosts: ['b.example'], seqs: [2] }] } });
+		targets = many(25);
+		await render();
+		expect(shows()).toEqual([tf('bulk.outliers.spread.show', { n: '3' }), t('bulk.outliers.spread.show_one')]);
+		expect(filtered()).toBeUndefined();
+		expect(seqsShown()).toHaveLength(25);
+
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(seqsShown()).toEqual([3, 5, 7]);
+		expect(filtered()).toBe(`${tf('bulk.outliers.filtered.link', { n: '3' })} ${t('bulk.outliers.spread.show_all')}`);
+		expect(shows()).toEqual([t('bulk.outliers.spread.show_all'), t('bulk.outliers.spread.show_one')]);
+		// Over the table, not below it.
+		const line = target.querySelector('[data-testid="bulk-outlier-filtered"]')!;
+		expect(line.compareDocumentPosition(target.querySelector('table')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+		// Another line's button changes the kind shown.
+		buttonByText(t('bulk.outliers.spread.show_one'))!.click();
+		await settle();
+		expect(seqsShown()).toEqual([2]);
+		expect(filtered()).toBe(`${t('bulk.outliers.filtered.email_one')} ${t('bulk.outliers.spread.show_all')}`);
+
+		// From over the table: all again, and the focus on the button of that kind in the box.
+		(target.querySelector('[data-testid="bulk-outlier-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(seqsShown()).toHaveLength(25);
+		expect(filtered()).toBeUndefined();
+		expect(document.activeElement).toBe(target.querySelectorAll('[data-testid="bulk-outlier-spread-show"]')[1]);
+
+		// From the line itself: the same button shows all again.
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(seqsShown()).toEqual([3, 5, 7]);
+		(target.querySelectorAll('[data-testid="bulk-outlier-spread-show"]')[0] as HTMLButtonElement).click();
+		await settle();
+		expect(seqsShown()).toHaveLength(25);
+		expect(filtered()).toBeUndefined();
+	});
+
+	it('says at the approval, while the table is filtered, that the approval covers every verdict, and shows all from there', async () => {
+		const note = (): string | null | undefined => target.querySelector('[data-testid="bulk-approve-filtered"]')?.textContent;
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25);
+		await render();
+		expect(note()).toBeUndefined();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(note()).toBe(`${tf('bulk.approve.filtered', { n: '3', m: '25' })} ${t('bulk.outliers.spread.show_all')}`);
+		const approveButton = buttonByText(t('bulk.approve.write_one')) ?? buttonByText(t('bulk.approve.approve'));
+		(target.querySelector('[data-testid="bulk-approve-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(note()).toBeUndefined();
+		expect(rowNames()).toHaveLength(25);
+		expect(document.activeElement).toBe(approveButton);
+	});
+
+	it('keeps the line on whose connection the run writes directly above the button while the table is filtered, below the note', async () => {
+		run = makeRun({ total: 25, changes: changes(25), connectedBy: { provider: 'Shopify', by: 'Eva Muster' }, judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25);
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		const note = target.querySelector('[data-testid="bulk-approve-filtered"]');
+		const line = target.querySelector('[data-bulk-connected-by]');
+		expect(note).not.toBeNull();
+		expect(line).not.toBeNull();
+		// The note first, then the line, then the row that holds the approve button.
+		expect(note!.nextElementSibling).toBe(line);
+		const row = line!.nextElementSibling;
+		expect([t('bulk.approve.write_one'), t('bulk.approve.approve')]).toContain(row?.querySelector('button')?.textContent?.trim());
+	});
+
+	it('counts the rows the filtered table shows, leaves out the unchanged rows and their button, and offers that button again after', async () => {
+		const unchangedButton = (): HTMLButtonElement | undefined => [...target.querySelectorAll('button')]
+			.find((b) => [tf('bulk.preview.show_unchanged_one', { n: '1' }), tf('bulk.preview.show_unchanged_targets_one', { n: '1' })].includes(b.textContent?.trim() ?? ''));
+		run = makeRun({ total: 25, changes: { update: 24, create: 0, delete: 0, unchanged: 1, invalid: 0 }, judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25).map((x) => (x.seq === 7 ? { ...x, change: 'unchanged' as const, diff: { kind: 'none' } as BulkTarget['diff'] } : x));
+		await render();
+		expect(unchangedButton()).toBeDefined();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(rowNames()).toHaveLength(2);
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')?.textContent).toBe(`${tf('bulk.outliers.filtered.link', { n: '2' })} ${t('bulk.outliers.spread.show_all')}`);
+		expect(unchangedButton()).toBeUndefined();
+		(target.querySelector('[data-testid="bulk-outlier-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(unchangedButton()).toBeDefined();
+	});
+
+	it('drops the filter once the run is no longer one to approve', async () => {
+		const judgedRun = (id: string, phase: BulkRunDetailData['phase']) => makeRun({ id, phase, total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		run = judgedRun('r1', 'previewed');
+		runsById['r2'] = judgedRun('r2', 'previewed');
+		targets = many(25);
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).not.toBeNull();
+		props.runId = 'r2';
+		await settle();
+		runsById['r1'] = judgedRun('r1', 'approved');
+		props.runId = 'r1';
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).toBeNull();
+	});
+
+	it('counts every verdict of the run at the approval, whether or not the unchanged rows are shown', async () => {
+		const note = (): string | null | undefined => target.querySelector('[data-testid="bulk-approve-filtered"]')?.textContent;
+		run = makeRun({ total: 25, changes: { update: 24, create: 0, delete: 0, unchanged: 1, invalid: 0 }, judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25).map((x) => (x.seq === 9 ? { ...x, change: 'unchanged' as const, diff: { kind: 'none' } as BulkTarget['diff'] } : x));
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(note()).toBe(`${tf('bulk.approve.filtered', { n: '3', m: '25' })} ${t('bulk.outliers.spread.show_all')}`);
+		(target.querySelector('[data-testid="bulk-approve-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		[...target.querySelectorAll('button')].find((x) => [t('bulk.preview.show_unchanged_one'), t('bulk.preview.show_unchanged_targets_one')].includes(x.textContent?.trim() ?? ''))!.click();
+		await settle();
+		expect(rowNames()).toHaveLength(25);
+		await settle();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(note()).toBe(`${tf('bulk.approve.filtered', { n: '3', m: '25' })} ${t('bulk.outliers.spread.show_all')}`);
+	});
+
+	it('says nothing at the approval when the filtered table shows every verdict', async () => {
+		run = makeRun({ total: 3, changes: changes(3), writeForm: 'unmeasured', judgeOutliers: { decided: 3, measured: false, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [1, 2, 3] }] } });
+		targets = many(3);
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-approve-filtered"]')).toBeNull();
+	});
+
+	it('puts the focus on the button of the line when the approve button cannot be pressed', async () => {
+		run = makeRun({ total: 25, changes: changes(25), writeForm: 'unmeasured', judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25);
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		(target.querySelector('[data-testid="bulk-approve-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(document.activeElement).toBe(target.querySelector('[data-testid="bulk-outlier-spread-show"]'));
+	});
+
+	it('offers no button on a line whose verdicts the server does not name, or names none of', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 20, hosts: ['a.example'] }, { kind: 'email', count: 20, hosts: ['b.example'], seqs: [] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toHaveLength(2);
+		expect(target.querySelector('[data-testid="bulk-outlier-spread-show"]')).toBeNull();
+	});
+
+	it('shows the table of another run whole, without the line over it, after filtering this one', async () => {
+		const judgedRun = (id: string) => makeRun({ id, total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		run = judgedRun('r1');
+		runsById['r2'] = judgedRun('r2');
+		targets = many(25);
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(rowNames()).toHaveLength(3);
+		props.runId = 'r2';
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).toBeNull();
+		expect(rowNames()).toHaveLength(25);
+		expect(buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))).toBeDefined();
+	});
+
+	it('shows no line and no mark where the run is not one to approve', async () => {
+		run = makeRun({ phase: 'approved', total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, spread: [], flagged: [{ seq: 7, reasons: ['new_link'] }] } });
+		targets = many(25);
+		await render();
+		expect(outlierCount()).toBeUndefined();
+		expect(target.querySelector('[data-testid="bulk-outlier"]')).toBeNull();
+	});
+});
+
+// An undo the owner approves lists its targets as a write does (U-466): each product by its title
+// with its admin link, its field as a word, and the value it has now beside the one the undo writes
+// back. The entries it deletes stay in their own box under the approval.
+describe('approving an undo, per target (U-466)', () => {
+	const seoDiff = (now: string, back: string): BulkTarget['diff'] =>
+		({ kind: 'fields', fields: [{ field: 'seo_title', before: now, after: back }] }) as BulkTarget['diff'];
+	const undoTargets = (): BulkTarget[] => [
+		{ seq: 0, key: 'gid://shopify/Product/1', change: 'update', diff: seoDiff('Neu 1', 'Alt 1'), error: null, deselected: false, title: 'Snowboard Blau' },
+		{ seq: 1, key: 'gid://shopify/Product/2', change: 'update', diff: seoDiff('Neu 2', 'Alt 2'), error: null, deselected: false, title: 'Snowboard Rot', undoOpen: true },
+		{ seq: 2, key: 'gid://shopify/Product/3', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false },
+	];
+	const undoRun = (o: Partial<BulkRunDetailData> = {}): BulkRunDetailData =>
+		makeRun({ kind: 'undo', sourceRunId: 'r0', probeConfirmed: true, total: 3, changes: { update: 2, create: 0, delete: 1, unchanged: 0, invalid: 0 }, ...o });
+	const created = (seq: number): BulkTarget =>
+		({ seq, key: `gid://shopify/Product/${seq + 1}`, change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false });
+	const rows = (): Element[] => [...target.querySelectorAll('[data-testid="bulk-target-row"]')];
+	const takeOut = (): HTMLButtonElement[] => [...target.querySelectorAll('button')].filter((b) => b.textContent?.trim() === t('bulk.deselect.off'));
+	const explain = (): string | null | undefined => target.querySelector('[data-testid="bulk-undo-approve-explain"]')?.textContent;
+	const approveButton = (): HTMLButtonElement | undefined => buttonByText(t('bulk.undo.approve'));
+	const german = (): void => { const was = getLocale(); setLocale('de'); onTestFinished(() => setLocale(was)); };
+	const english = (): void => { const was = getLocale(); setLocale('en'); onTestFinished(() => setLocale(was)); };
+
+	it('lists each target it gives a value back by title, admin link, field as a word and the value now and back, and leaves the entry it deletes to the box', async () => {
+		run = undoRun();
+		targets = undoTargets();
+		await render();
+		expect(rows()).toHaveLength(2);
+		const first = rows()[0]!;
+		expect(first.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
+		expect(first.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
+		// The field as the owner reads it, never its raw name.
+		expect(first.querySelector('[data-testid="bulk-field-name"]')?.textContent).toBe(`${t('bulk.field.shopify.seo_title')}:`);
+		expect(first.textContent).not.toContain('seo_title');
+		expect(first.querySelector('del')?.textContent).toBe('Neu 1');
+		expect(first.querySelector('ins')?.textContent).toBe('Alt 1');
+		const heads = [...target.querySelectorAll('th')].map((h) => h.textContent);
+		expect(heads).toContain(t('bulk.undo.now_back'));
+		expect(heads).not.toContain(t('bulk.preview.before_after'));
+		// The count over the table leaves the deleted entry out, as the table does.
+		expect(target.textContent).toContain(tf('bulk.preview.title', { k: '2', n: '2' }));
+		// The entry it deletes is not a row; it stands in the box under the approval, as before.
+		const rowLinks = rows().map((r) => r.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href'));
+		expect(rowLinks).not.toContain('https://demo.myshopify.com/admin/products/3');
+		const box = target.querySelector('[data-testid="bulk-undo-creates"]')?.parentElement;
+		expect(box?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/3');
+	});
+
+	it('stacks an undo\'s row under its name on a narrow screen and keeps its roles, and leaves the write\'s table as it was', async () => {
+		run = undoRun();
+		targets = undoTargets();
+		await render();
+		const row = rows()[0]!;
+		expect(row.getAttribute('role')).toBe('row');
+		expect(row.className).toContain('block sm:table-row');
+		expect([...row.children].map((c) => c.getAttribute('role'))).toEqual(['cell', 'cell']);
+		expect([...row.children].map((c) => c.className)).toEqual(['block sm:table-cell pt-1.5 sm:pb-1.5 pr-3', 'block sm:table-cell pb-1.5 pt-1 sm:pt-1.5']);
+		// The column head moves into the row where the table head is hidden.
+		expect(target.querySelector('thead')?.className).toBe('hidden sm:table-header-group');
+		expect(row.children[1]!.querySelector('.sm\\:hidden')?.textContent).toBe(t('bulk.undo.now_back'));
+		unmount(component!);
+		component = undefined;
+		run = makeRun();
+		targets = TARGETS.map((x) => ({ ...x }));
+		await render();
+		const writeRow = rows()[0]!;
+		expect(writeRow.className).not.toContain('block');
+		expect([...writeRow.children].map((c) => c.className)).toEqual(['py-1.5 pr-3', 'py-1.5']);
+		expect(target.querySelector('thead')?.className ?? '').toBe('');
+		expect(target.querySelector('.sm\\:hidden')).toBeNull();
+		expect([...target.querySelectorAll('th')].map((h) => h.textContent)).toContain(t('bulk.preview.before_after'));
+	});
+
+	it('takes a target out of the undo of a run that is not atomic through the same route, and the sentence counts only the targets left', async () => {
+		german();
+		run = undoRun({ total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change !== 'delete').map((x) => ({ ...x, undoOpen: undefined }));
+		await render();
+		expect(explain()).toBe(tf('bulk.undo.approve_explain', { n: '2' }));
+		expect(takeOut()).toHaveLength(2);
+		expect(target.querySelector('[data-testid="bulk-undo-atomic"]')).toBeNull();
+		takeOut()[1]!.click();
+		await settle();
+		expect(posts.filter((p) => p.url.endsWith('/bulk/runs/r1/targets/1/deselect'))).toHaveLength(1);
+		expect(explain()).toBe(t('bulk.undo.approve_explain_one'));
+		expect(rows()[1]!.textContent).toContain(t('bulk.deselect.taken_out'));
+		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
+		expect(approveButton()?.disabled).toBe(false);
+	});
+
+	it('offers no target out of the undo of an atomic run, and says why once over the table', async () => {
+		run = undoRun({ atomic: true });
+		targets = undoTargets();
+		await render();
+		expect(rows()).toHaveLength(2);
+		expect(takeOut()).toHaveLength(0);
+		const atomic = target.querySelectorAll('[data-testid="bulk-undo-atomic"]');
+		expect(atomic).toHaveLength(1);
+		expect(atomic[0]!.textContent).toBe(t('bulk.deselect.refused.atomic_undo'));
+		// Over the table, not under it.
+		expect(atomic[0]!.compareDocumentPosition(target.querySelector('table')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(target.textContent!.split(t('bulk.deselect.refused.atomic_undo'))).toHaveLength(2);
+	});
+
+	it('locks the approval once every target is taken out and nothing is left to delete, says why in German, and points the button at it', async () => {
+		german();
+		run = undoRun({ total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change !== 'delete');
+		await render();
+		takeOut()[0]!.click();
+		await settle();
+		// One target left: the approval still writes it back.
+		expect(approveButton()?.disabled).toBe(false);
+		takeOut()[0]!.click();
+		await settle();
+		expect(explain()).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(approveButton()?.disabled).toBe(true);
+		expect(approveButton()?.getAttribute('aria-describedby')).toBe('bulk-undo-approve-explain');
+	});
+
+	it('says in English that an undo with every target taken out writes nothing, and keeps it locked', async () => {
+		english();
+		run = undoRun({ total: 2, deselected: 2, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change !== 'delete').map((x) => ({ ...x, deselected: true }));
+		await render();
+		expect(explain()).toBe('You took out every target that would get a value back, so this undo writes nothing. Put one back, or leave it with “Not now”.');
+		expect(approveButton()?.disabled).toBe(true);
+	});
+
+	for (const [lang, sentence] of [
+		['de', 'Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; die Rücknahme löscht nur noch den Eintrag unten.'],
+		['en', 'You took out every target that would get a value back; the undo now only deletes the entry below.'],
+	] as const) {
+		it(`says the undo only deletes the entry left once the owner took out every target that gets a value back, and keeps the approval (${lang})`, async () => {
+			if (lang === 'de') german(); else english();
+			run = undoRun({ deselected: 2, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 } });
+			targets = undoTargets().map((x) => (x.change === 'delete' ? x : { ...x, deselected: true }));
+			await render();
+			expect(explain()).toBe(sentence);
+			// The entry is still deleted: the approval stays.
+			expect(approveButton()?.disabled).toBe(false);
+		});
+	}
+
+	it('names several entries left to delete by their number', async () => {
+		german();
+		run = undoRun({ total: 4, deselected: 2, changes: { update: 0, create: 0, delete: 2, unchanged: 0, invalid: 0 } });
+		targets = [...undoTargets().map((x) => (x.change === 'delete' ? x : { ...x, deselected: true })), created(3)];
+		await render();
+		expect(explain()).toBe(tf('bulk.undo.only_deletes', { n: '2' }));
+		expect(approveButton()?.disabled).toBe(false);
+	});
+
+	for (const [lang, sentence] of [
+		['de', 'Diese Rücknahme schreibt keine Werte zurück; sie löscht nur den Eintrag unten.'],
+		['en', 'This undo writes no value back; it only deletes the entry below.'],
+	] as const) {
+		it(`says of the undo of a run that only created an entry that it writes no value back, not that a target was taken out, and shows no table (${lang})`, async () => {
+			if (lang === 'de') german(); else english();
+			run = undoRun({ total: 1, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 } });
+			targets = [created(2)];
+			await render();
+			expect(explain()).toBe(sentence);
+			expect(explain()).not.toBe(t('bulk.undo.only_deletes_one'));
+			expect(rows()).toHaveLength(0);
+			expect(approveButton()?.disabled).toBe(false);
+		});
+	}
+
+	it('names several entries of a run that only created them by their number', async () => {
+		german();
+		run = undoRun({ total: 2, changes: { update: 0, create: 0, delete: 2, unchanged: 0, invalid: 0 } });
+		targets = [created(2), created(3)];
+		await render();
+		expect(explain()).toBe(tf('bulk.undo.deletes_only', { n: '2' }));
+	});
+
+	// The plan refuses a target whose value back the shop kept with markup of its own
+	// (`shop_added_markup`): with every target so, none gets a value back, though none is taken out.
+	const refused = (): BulkTarget[] => undoTargets().filter((x) => x.change !== 'delete')
+		.map((x) => ({ ...x, change: 'invalid' as const, diff: { kind: 'none' } as BulkTarget['diff'], error: 'shop_added_markup', undoOpen: undefined }));
+
+	it('says in German that an undo whose every target is refused writes nothing and why, not that the owner took one out, locks the approval, points the button at it and lists the targets', async () => {
+		german();
+		run = undoRun({ total: 2, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 2 } });
+		targets = refused();
+		await render();
+		expect(explain()).toBe('Diese Rücknahme schreibt nichts: Kein Ziel bekommt seinen Wert von vorher zurück. Der Grund steht bei jedem Ziel. Verwirf sie, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(explain()).not.toContain('Du hast');
+		expect(approveButton()?.disabled).toBe(true);
+		expect(approveButton()?.getAttribute('aria-describedby')).toBe('bulk-undo-approve-explain');
+		expect(rows()).toHaveLength(2);
+		expect(rows().map((r) => r.textContent)).toEqual([expect.stringContaining('Snowboard Blau'), expect.stringContaining('Snowboard Rot')]);
+	});
+
+	it('heads only a row that shows values with the column on a narrow screen, not a row that only gives its reason', async () => {
+		german();
+		run = undoRun({ total: 4, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 2 } });
+		// A row of fields and a row of text lines both show values; the two refused rows only their reason.
+		targets = [...refused(), { ...undoTargets()[0]!, seq: 2 }, { ...undoTargets()[0]!, seq: 3, diff: { kind: 'text', from: 0, removed: ['alt'], added: ['neu'] } }];
+		await render();
+		const labels = rows().map((r) => r.querySelector('[data-testid="bulk-values-label"]')?.textContent ?? null);
+		expect(labels).toEqual([null, null, 'Jetzt → zurück auf', 'Jetzt → zurück auf']);
+	});
+
+	it('says of an undo whose every target is refused that it only deletes the entry left, not that it writes no value back for a source that only created, and keeps the approval', async () => {
+		german();
+		run = undoRun({ total: 3, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 2 } });
+		targets = [...refused(), created(2)];
+		await render();
+		expect(explain()).toBe('Kein Ziel bekommt seinen Wert von vorher zurück; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(explain()).not.toBe(t('bulk.undo.deletes_only_one'));
+		expect(rows()).toHaveLength(2);
+		// Deleting the entry is a write: the approval stays.
+		expect(approveButton()?.disabled).toBe(false);
+		expect(approveButton()?.getAttribute('aria-describedby')).toBeNull();
+	});
+
+	for (const [lang, hint] of [
+		['de', 'Offen, ob die Änderung beim Anbieter angekommen ist. Die Rücknahme sieht hier zuerst nach.'],
+		['en', 'Unclear whether the change reached the provider. Taking back checks here first.'],
+	] as const) {
+		it(`says under the name of a target whose write was never confirmed that the undo checks it first, not under a written one (${lang})`, async () => {
+			if (lang === 'de') german(); else english();
+			run = undoRun({ undoOpen: 1 });
+			targets = undoTargets();
+			await render();
+			const [written, open] = rows();
+			expect(open!.querySelector('[data-testid="bulk-undo-row-open"]')?.textContent).toBe(hint);
+			// Under the name, in the target's cell.
+			expect(open!.children[0]!.querySelector('[data-testid="bulk-undo-row-open"]')).not.toBeNull();
+			expect(written!.querySelector('[data-testid="bulk-undo-row-open"]')).toBeNull();
+		});
+	}
+
+	it('drops the hint from a target whose write was never confirmed once the owner takes it out', async () => {
+		run = undoRun({ undoOpen: 1 });
+		targets = undoTargets();
+		await render();
+		expect(rows()[1]!.querySelector('[data-testid="bulk-undo-row-open"]')).not.toBeNull();
+		takeOut()[1]!.click();
+		await settle();
+		expect(rows()[1]!.textContent).toContain(t('bulk.deselect.taken_out'));
+		expect(rows()[1]!.querySelector('[data-testid="bulk-undo-row-open"]')).toBeNull();
+	});
+
+	it('control: a write\'s row shows no such hint, and its approval keeps its own head', async () => {
+		run = makeRun();
+		targets = TARGETS.map((x) => (x.seq === 1 ? { ...x, undoOpen: true } : { ...x }));
+		await render();
+		expect(target.querySelector('[data-testid="bulk-undo-row-open"]')).toBeNull();
+		expect(buttonByText(t('bulk.undo.approve'))).toBeUndefined();
+		expect(target.textContent).toContain(tf('bulk.preview.title', { k: '3', n: '3' }));
+	});
+
+	it('heads the column "Jetzt → zurück auf" in German and "Now → back to" in English', () => {
+		german();
+		expect(t('bulk.undo.now_back')).toBe('Jetzt → zurück auf');
+		setLocale('en');
+		expect(t('bulk.undo.now_back')).toBe('Now → back to');
 	});
 });

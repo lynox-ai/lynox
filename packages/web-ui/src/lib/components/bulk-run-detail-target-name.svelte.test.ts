@@ -52,8 +52,9 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });
@@ -179,5 +180,117 @@ describe('a Shopify run\'s page', () => {
 		expect(target.querySelector('[data-testid="bulk-target-admin"]')).toBeNull();
 		expect(target.textContent).toContain('gid://shopify/Product/1');
 		expect(target.querySelector('[data-testid="bulk-field-name"]')?.textContent?.trim()).toBe('seo_title:');
+		// The name the planner set stands in a value box, so it does not read as a word of lynox's (U-333).
+		const box = target.querySelector('[data-testid="bulk-field-name"] [data-testid="bulk-field-own-name"]');
+		expect(box?.textContent).toBe('seo_title');
+		// A name to check is not paler than the row it stands in: the box sets its own text colour.
+		expect(box?.classList.contains('text-text')).toBe(true);
+	});
+
+	it('a Shopify field\'s readable name stands as lynox\'s own word, without the value box (U-333)', async () => {
+		run = makeRun({ phase: 'done', undone: 0, undoneBy: null });
+		targets = [written(1, false)];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-field-name"]')?.textContent?.trim()).toBe(`${t('bulk.field.shopify.seo_title')}:`);
+		expect(target.querySelector('[data-testid="bulk-field-own-name"]')).toBeNull();
+	});
+});
+
+// A field name the planner set stands in its value box also where the page names it inside a
+// sentence (U-333): the head of the markup list, the sent-unchanged line, the probe sentence and the
+// sentence of a target refused for a credential in a field it reads. A Shopify field keeps its
+// readable name, without a box. The words around the name stay lynox's, in their order.
+describe('a field name inside a sentence (U-333)', () => {
+	const boxes = (el: Element | null): (string | null)[] => [...(el?.querySelectorAll('[data-testid="bulk-field-own-name"]') ?? [])].map((b) => b.textContent);
+	const link = { kind: 'element' as const, namespace: 'html', element: 'a', attributes: [['href', 'https://x.example/']] as [string, string][], text: null, inTemplate: false };
+	const withMarkup = (field: string): BulkTarget =>
+		({ ...written(1, false), markupChanges: [{ field, added: [link], removed: [], addsOutsideAllowlist: true }] }) as unknown as BulkTarget;
+
+	it('boxes a planner-set name in the head of the markup list, and not a Shopify label', async () => {
+		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: 'workspace', total: 1 });
+		targets = [withMarkup('body_html')];
+		await render();
+		const head = target.querySelector('[data-testid="bulk-markup-head"]');
+		expect(boxes(head)).toEqual(['body_html']);
+		expect(head?.textContent).toBe(tf('bulk.markup.head', { field: 'body_html' }));
+		unmount(component!); component = undefined; target.replaceChildren();
+		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1 });
+		targets = [withMarkup('descriptionHtml')];
+		await render();
+		const shopHead = target.querySelector('[data-testid="bulk-markup-head"]');
+		expect(boxes(shopHead)).toEqual([]);
+		expect(shopHead?.textContent).toBe(tf('bulk.markup.head', { field: t('bulk.field.shopify.descriptionHtml') }));
+	});
+
+	it('boxes each planner-set name in the sent-unchanged line, a Shopify label stays a word', async () => {
+		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1 });
+		targets = [{ ...written(1, false), sentUnchanged: ['seo_description', 'custom_note'] } as BulkTarget];
+		await render();
+		const line = target.querySelector('[data-testid="bulk-sent-unchanged"]');
+		expect(boxes(line)).toEqual(['custom_note']);
+		expect(line?.textContent).toBe(tf('bulk.preview.sent_unchanged', { fields: `${t('bulk.field.shopify.seo_description')}, custom_note` }));
+	});
+
+	it('boxes a planner-set name in the probe sentence, isolated, next to a Shopify label without one', async () => {
+		run = makeRun({ phase: 'writing', undone: 0, undoneBy: null, targetSystem: SHOP, total: 17, applied: 1,
+			haltKey: 'probeRequired', haltReason: 'probeRequired', probe: { key: 'gid://shopify/Product/77', fields: ['seo_title', 'custom_note'] } });
+		targets = [seoTarget(1)];
+		await render();
+		const sentence = target.querySelector('[data-testid="bulk-probe-explain"]');
+		expect(boxes(sentence)).toEqual(['custom_note']);
+		// The whole sentence, so the target and the provider around the name are filled in too.
+		expect(sentence?.textContent).toBe(tf('bulk.probe.explain', { target: tf('bulk.target.product', { n: '77' }), provider: 'demo.myshopify.com', field: `${t('bulk.field.shopify.seo_title')}, custom_note` }));
+		// The box isolates its text, so a name written right to left cannot move the quotes around it.
+		expect(sentence?.querySelector('[data-testid="bulk-field-own-name"]')?.tagName).toBe('BDI');
+	});
+
+	it('boxes the field that held a credential at each place the refusal names it', async () => {
+		run = makeRun({ phase: 'previewed', undone: 0, undoneBy: null, targetSystem: 'workspace', total: 1, applied: 0,
+			changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'k1', change: 'invalid', diff: { kind: 'none' }, error: 'secret_in_context', contextField: 'api_notes', deselected: false } as unknown as BulkTarget];
+		await render();
+		const text = target.querySelector('[data-testid="bulk-invalid-text"]');
+		expect(boxes(text)).toEqual(['api_notes', 'api_notes']);
+		expect(text?.textContent).toBe(tf('bulk.invalid.secret_in_context_field', { field: 'api_notes' }));
+	});
+
+	it('names the field and the limit an answer broke on the run page, word for word in German and English', async () => {
+		const refused = (key: string, field: string): BulkTarget =>
+			({ seq: 1, key, change: 'invalid', diff: { kind: 'none' }, error: 'verdict_invalid', refusalDetail: { field, kind: 'maxLength', limit: 60 }, deselected: false }) as unknown as BulkTarget;
+		const invalidOne = { phase: 'previewed' as const, undone: 0, undoneBy: null, total: 1, applied: 0, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } };
+		const before = getLocale();
+		try {
+			setLocale('de');
+			run = makeRun({ ...invalidOne, targetSystem: SHOP });
+			targets = [refused('gid://shopify/Product/1', 'seo_title')];
+			await render();
+			const shop = target.querySelector('[data-testid="bulk-invalid-text"]');
+			expect(boxes(shop)).toEqual([]);
+			expect(shop?.textContent).toBe('Das Modell hat für dieses Produkt keine verwertbare Antwort gegeben. Feld SEO-Titel: Der Text ist länger als 60 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.');
+			unmount(component!); component = undefined; target.replaceChildren();
+			setLocale('en');
+			await render();
+			expect(target.querySelector('[data-testid="bulk-invalid-text"]')?.textContent).toBe('The model gave no usable answer for this product. Field SEO title: the text is longer than 60 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.');
+			unmount(component!); component = undefined; target.replaceChildren();
+			// Any other list: the rule's own name for the field, set apart in its box.
+			run = makeRun({ ...invalidOne, targetSystem: 'workspace' });
+			targets = [refused('k1', 'summary')];
+			await render();
+			const own = target.querySelector('[data-testid="bulk-invalid-text"]');
+			expect(boxes(own)).toEqual(['summary']);
+			expect(own?.textContent).toBe('The model gave no usable answer for this target. Field summary: the text is longer than 60 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.');
+		} finally {
+			setLocale(before);
+		}
+	});
+
+	it('names a Shopify field that held a credential by its label, without a box', async () => {
+		run = makeRun({ phase: 'previewed', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1, applied: 0,
+			changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'invalid', diff: { kind: 'none' }, error: 'secret_in_context', contextField: 'vendor', deselected: false } as unknown as BulkTarget];
+		await render();
+		const text = target.querySelector('[data-testid="bulk-invalid-text"]');
+		expect(boxes(text)).toEqual([]);
+		expect(text?.textContent).toBe(tf('bulk.invalid.secret_in_context', { field: t('bulk.field.shopify.vendor') }));
 	});
 });
