@@ -3445,10 +3445,7 @@ export class WorkerLoop {
       const pushedText = resultReduced
         ? (capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`)
         : capStop === null ? truncatedResult : truncate(`${capStop}\n\n${withRefusals}`);
-      const bodyOf = (lines: readonly string[]): string => {
-        const pushed = withMemberNotes(pushedText, 'other', lines).result;
-        return endedByOwner ? `${notices.stopped}\n\n${pushed}` : pushed;
-      };
+      const pushed = withMemberNotes(pushedText, 'other', memberSaid).result;
       const message: NotificationMessage = {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
@@ -3463,7 +3460,7 @@ export class WorkerLoop {
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
         title: `${endedByOwner ? '\u23f9' : (budgetCut !== null ? '\u2717' : memberTold.status === 'halted' ? RUN_END_LOOK.halted.mark : '\u2713')} ${task.title}`,
-        body: bodyOf(memberSaid),
+        body: endedByOwner ? `${notices.stopped}\n\n${pushed}` : pushed,
         taskId: task.id,
         priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
