@@ -40,7 +40,7 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     expect(done(ro)).toBe(before);
   });
 
-  it('lists the rejected and superseded entries it still holds, masked, with status and successor, and no active or pending one', () => {
+  it('lists the rejected and superseded entries it still holds, masked, with status and the successor where one is recorded, and no active or pending one', () => {
     const { ks, engine } = make();
     const a = ks.write({ text: 'Ships from Basel', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
     expect(ks.listRejectedOrSupersededMasked(), 'an active entry is not listed').toEqual([]);
@@ -57,9 +57,8 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     const listed = ks.listRejectedOrSupersededMasked();
     expect(listed.map(e => [e.id, e.status, e.supersededBy, e.text]), 'newest change first; the pending one is not listed').toEqual([
       [c.id, 'superseded', a.id, 'Orders above 500 need a second signature'],
-      [b.id, 'rejected', null, listed[1]?.text],
+      [b.id, 'rejected', null, `The invoice address is in Bern, token ***${key.slice(-4)}`],
     ]);
-    expect(listed[1]?.text, 'masked').toMatch(/^The invoice address is in Bern, token (?!ghp_)/);
     expect(ks.listRejectedOrSupersededMasked(1).map(e => e.id), 'the limit holds').toEqual([c.id]);
   });
 
