@@ -161,12 +161,15 @@ describe('KnowledgeLayer → engine.db subject-graph mirror (S1b)', () => {
     expect(await off.layer.listEntitiesAfter(null, 2), 'subject graph off').toBeNull();
 
     const before = on.layer.readFallbackCount;
-    vi.spyOn(SubjectStore.prototype, 'listSubjectsAfter').mockImplementation(() => { throw new Error('broken read'); });
-    expect(await on.layer.listEntitiesAfter(null, 2), 'a failed read').toBeNull();
-    expect(on.layer.readFallbackCount, 'counted as a read fallback').toBe(before + 1);
-    vi.restoreAllMocks();
-    on.engine?.close();
-    off.engine?.close();
+    const broken = vi.spyOn(SubjectStore.prototype, 'listSubjectsAfter').mockImplementation(() => { throw new Error('broken read'); });
+    try {
+      expect(await on.layer.listEntitiesAfter(null, 2), 'a failed read').toBeNull();
+      expect(on.layer.readFallbackCount, 'counted as a read fallback').toBe(before + 1);
+    } finally {
+      broken.mockRestore();
+      on.engine?.close();
+      off.engine?.close();
+    }
   });
 
   it('flag OFF: engine.db untouched, legacy still written (additive proof)', async () => {

@@ -174,13 +174,30 @@ describe('listSubjectEntitiesOn reads one page from the store per call', () => {
     }
   });
 
-  it('reads a key page as a range on the primary key, without sorting', () => {
-    seed(5);
-    const { sql } = sqlDuring(() => store.listSubjectsAfter({ kinds: ['person', 'organization'], after: 'x', limit: 2 }));
+  /** The query plan of the key page the store prepares for `after`. */
+  function keyPagePlan(after: string | null): string {
+    const { sql } = sqlDuring(() => store.listSubjectsAfter({ kinds: ['person', 'organization'], after, limit: 2 }));
     const read = sql.find(t => /FROM subjects/.test(t))!;
-    const plan = (engineDb.getDb().prepare(`EXPLAIN QUERY PLAN ${read}`).all('person', 'organization', 'x', 2) as Array<{ detail: string }>).map(r => r.detail);
-    expect(plan.join(' | '), 'the primary key, by range').toMatch(/USING INDEX sqlite_autoindex_subjects_1 \(id>\?\)/);
-    expect(plan.join(' | '), 'no sort per page').not.toMatch(/TEMP B-TREE/);
+    const args: unknown[] = ['person', 'organization', ...(after === null ? [] : [after]), 2];
+    return (engineDb.getDb().prepare(`EXPLAIN QUERY PLAN ${read}`).all(...args) as Array<{ detail: string }>).map(r => r.detail).join(' | ');
+  }
+
+  it('reads a later key page as a range on the primary key, and the first one in its order, without sorting', () => {
+    seed(5);
+    const later = keyPagePlan('x');
+    expect(later, 'the primary key, by range').toMatch(/USING INDEX sqlite_autoindex_subjects_1 \(id>\?\)/);
+    expect(later, 'no sort per page').not.toMatch(/TEMP B-TREE/);
+    const first = keyPagePlan(null);
+    expect(first, 'the first page walks the primary key').toMatch(/USING INDEX sqlite_autoindex_subjects_1/);
+    expect(first, 'no sort on the first page').not.toMatch(/TEMP B-TREE/);
+  });
+
+  it('bounds the key page like the web page: a huge, fractional or NaN limit reads a whole number of rows', () => {
+    seed(5);
+    const all = [...expectedOrder()].sort();
+    expect(store.listSubjectsAfter({ kinds: ['person', 'organization'], after: null, limit: 1e20 }).map(r => r.id), 'huge limit').toEqual(all);
+    expect(store.listSubjectsAfter({ kinds: ['person', 'organization'], after: null, limit: 2.7 }).map(r => r.id), 'fraction cut down').toEqual(all.slice(0, 2));
+    expect(store.listSubjectsAfter({ kinds: ['person', 'organization'], after: null, limit: Number.NaN }), 'NaN reads nothing').toEqual([]);
   });
 
   it('lets the export walk every listed subject by key', async () => {
