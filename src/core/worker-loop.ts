@@ -534,6 +534,9 @@ export interface ActiveTask {
    * tells its real end once the answer re-arms it. However this process's part then ends,
    * on the normal end path or in the catch, it pushes nothing (U-420). On the entry, not in the
    * run's closure, because the catch in `#runFramed` reads it too.
+   * What this leaves: a question that is never answered ends in the expiry sweep, which records
+   * the run failed and pushes nothing, as for any expired question; the owner reads it in the
+   * run history.
    */
   questionKept?: boolean | undefined;
   /**
@@ -3462,15 +3465,17 @@ export class WorkerLoop {
 
     // A refused member connection is told as `#recordRun` recorded it: its lines under the
     // result and, for a run that finished, the note's title instead of ✓, and not again for a run
-    // that halted on the same lines. A run whose question went unanswered did not finish, so it
-    // does not read as finished with a note.
+    // that finished on the same lines as the run before. A run whose question went unanswered,
+    // that hit its ceiling or that its owner stopped did not finish: it does not read as finished
+    // with a note, and it is told even where the run before noted the same lines.
     // Compared as recorded (English); pushed in the owner's language (`said`).
     const memberNotes = currentMemberNotes();
     const memberSaid = currentMemberNotesIn(noticeLanguage(this.engine.config?.language));
+    const finishedWithNote = memberSaid.length > 0 && !endedByOwner && budgetCut === null && !questionWentUnanswered;
     // A run whose question was kept for the next process is not over: no push, not ✗ (nothing
     // went wrong, a deploy is internal) and not ⏸ (a second notice of a question already asked).
     // The catch in `#runFramed` holds back its push on the same mark (`ActiveTask.questionKept`).
-    if (active?.questionKept !== true && this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
+    if (active?.questionKept !== true && this.notificationRouter.hasChannels() && !(finishedWithNote && memberNotesRepeat(task, memberNotes))) {
       // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
       // its error does (above); the recorded run keeps the full text. Only the run's text is
       // replaced: the ceiling's reason and the member-connection lines are lynox's own and say
@@ -3496,7 +3501,7 @@ export class WorkerLoop {
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
         title: endedByOwner ? `\u23f9 ${task.title}` : budgetCut !== null || questionWentUnanswered ? `\u2717 ${task.title}`
-          : memberSaid.length > 0 ? `${RUN_END_LOOK.noted.mark} ${notices.titleWithNote(task.title)}` : `\u2713 ${task.title}`,
+          : finishedWithNote ? `${RUN_END_LOOK.noted.mark} ${notices.titleWithNote(task.title)}` : `\u2713 ${task.title}`,
         body: endedByOwner ? `${notices.stopped}\n\n${pushed}` : pushed,
         taskId: task.id,
         priority: endedByOwner || (budgetCut === null && !questionWentUnanswered) ? 'normal' : 'high',
@@ -4040,7 +4045,9 @@ export class WorkerLoop {
     // push per order would be noise, and its success is in the run history, where the
     // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
-    if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
+    // Not again for a halt on the same lines as the run before (also one that finished with them);
+    // an end that failed or was interrupted is told even then.
+    if (this.notificationRouter.hasChannels() && !(told.status === 'halted' && memberNotesRepeat(task, notes))) {
       const shownEnd: BulkPushEnd = finishedWithNote ? 'noted'
         : told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;

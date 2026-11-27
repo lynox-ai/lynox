@@ -2766,6 +2766,115 @@ describe('WorkerLoop', () => {
     expect(router.notify).toHaveBeenCalledTimes(2);
   });
 
+  // The repeat check holds back a second note on the same lines; an end that did not finish is
+  // told even after a run that noted them, and the next note after it is told again.
+  it('after a run that finished with a note, the next run whose question went unanswered on the same lines is still pushed as failed', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'halted', last_run_result: 'All done.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => {
+      noteMemberConnection(LINE);
+      await session.promptUser!('Approve this?', ['Yes', 'No']);
+      return 'All done.';
+    });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.any(String), 'failed', { memberNotes: [LINE] });
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title, m.priority])).toEqual([
+      ['owner', `\u2717 ${task.title}`, 'high'],
+      ['all_mandates', `\u2717 ${task.title}`, 'high'],
+    ]);
+    loop.stop();
+  });
+
+  it('after a run that finished with a note, the next run cut off at its ceiling on the same lines is still pushed as failed', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'halted', last_run_result: 'All done.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const session = {
+      sessionId: 'thread-worker-test',
+      run: vi.fn<(task: string) => Promise<string>>().mockImplementation(async () => { noteMemberConnection(LINE); return 'Partial findings so far.'; }),
+      _recreateAgent: vi.fn(),
+      getAgent: () => null,
+      getLastRunStop: () => ({ cause: 'budget_cap', pendingToolCount: 2, pendingTools: ['web_research'], text: 'Partial findings so far.' }),
+    } as unknown as Session;
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.any(String), 'failed', { memberNotes: [LINE] });
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title, m.priority])).toEqual([
+      ['owner', `\u2717 ${task.title}`, 'high'],
+      ['all_mandates', `\u2717 ${task.title}`, 'high'],
+    ]);
+    loop.stop();
+  });
+
+  it('after a failed end with the lines, the next run that finishes with the same lines is told its note again', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'failed', last_run_result: 'x', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection(LINE); return 'All done.'; });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, 'All done.', 'halted', { memberNotes: [LINE] });
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title])).toEqual([
+      ['owner', `\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`],
+      ['all_mandates', `\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`],
+    ]);
+    loop.stop();
+  });
+
+  it.each([
+    ['failed', false, '\u2717'],
+    ['interrupted', 'interrupted', '\u26A0'],
+    ['stopped', 'stopped', '\u23F9'],
+  ] as const)('a workflow end that %s after a run that noted the same lines is still told', async (status, end, mark) => {
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'halted', last_run_result: 'Pipeline completed.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm }), router, 60_000);
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection(LINE);
+      (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: boolean | 'interrupted' | 'stopped', s?: string, o?: { noRetry: true }) => void })
+        .recordAndNotify(task, 'Pipeline failed.', end, undefined, { noRetry: true });
+    }).done;
+    expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, expect.any(String), status, { memberNotes: [LINE], noRetry: true });
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title.startsWith(mark)])).toEqual([['owner', true], ['all_mandates', true]]);
+  });
+
+  it('a workflow halt on the same lines as the halt before is not pushed again', async () => {
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'halted', last_run_result: 'Pipeline halted.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm }), router, 60_000);
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection(LINE);
+      (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: 'halted') => void }).recordAndNotify(task, 'Pipeline halted.', 'halted');
+    }).done;
+    expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, 'Pipeline halted.', 'halted', { memberNotes: [LINE] });
+    expect(router.notify).not.toHaveBeenCalled();
+  });
+
   // A workflow's end with a member line: the owner's devices read it with the line, every live
   // grant reads it without, whoever started or planned the run.
   it.each([

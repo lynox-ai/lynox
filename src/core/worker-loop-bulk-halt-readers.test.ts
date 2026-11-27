@@ -18,13 +18,14 @@ const CLOSING = 'Lösen kann das nur der Inhaber.';
 function harness(opts: { reason: string | null; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant' }) {
   const recorded: string[] = [];
   const recordedNotes: (readonly string[] | undefined)[] = [];
+  const recordedStatus: string[] = [];
   const sent: NotificationMessage[] = [];
   const planner = opts.plannedBy === 'mandate' ? { kind: 'mandate', mandateId: 'grant-1' }
     // A run a mandate planned before the ledger kept its grant: the planner names no grant.
     : opts.plannedBy === 'mandate-without-grant' ? { kind: 'mandate', email: 'member@example.invalid' } : null;
   const engine = {
     config: { language: 'de' },
-    getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn((_id: string, result: string, _status: string, o?: { memberNotes?: readonly string[] }) => { recorded.push(result); recordedNotes.push(o?.memberNotes); return true; }) })),
+    getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn((_id: string, result: string, status: string, o?: { memberNotes?: readonly string[] }) => { recorded.push(result); recordedNotes.push(o?.memberNotes); recordedStatus.push(status); return true; }) })),
     getBulkLedger: vi.fn(() => ({
       getRunForApply: vi.fn(() => ({ phase: 'approved', haltReason: opts.reason, targetSystem: 'api:acme.myshopify.com', delegatedPlanner: planner })),
     })),
@@ -38,7 +39,7 @@ function harness(opts: { reason: string | null; plannedBy: 'owner' | 'mandate' |
   const end = (summary: string, said?: string, done: boolean | 'halted' | 'interrupted' = false): void => {
     (loop as unknown as { recordAndNotify: (t: TriggerRecord, s: string, e: boolean | 'halted' | 'interrupted', said?: string) => void }).recordAndNotify(task, summary, done, said);
   };
-  return { recorded, recordedNotes, sent, end };
+  return { recorded, recordedNotes, recordedStatus, sent, end };
 }
 
 const COUNTS = ' 2 von 5 Zielen geschrieben.';
@@ -91,6 +92,7 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(title).toBe('\u26A0 Massenlauf fertig, mit Hinweis');
     expect(h.sent.map((m) => [m.audience, m.title, m.priority])).toEqual([['owner', title, 'normal'], ['all_mandates', title, 'normal']]);
     // Still recorded as halted: the repeat check reads it.
+    expect(h.recordedStatus).toEqual(['halted']);
     expect(h.recordedNotes).toEqual([['Connection not used: a note.']]);
   });
 
