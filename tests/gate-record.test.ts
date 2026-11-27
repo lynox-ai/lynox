@@ -3745,10 +3745,14 @@ describe('agent-awareness: through evaluate, warning only', () => {
     expect(v.warnings ?? []).toEqual([]);
   });
 
-  it('a public record keeps the warning next to its own warnings', () => {
-    const v = evaluate({ body: body(), head: HEAD, files, visibility: 'public', ux, agentAwareness: owed });
+  it('a public record keeps the warning NEXT TO an open-work warning of its own', () => {
+    // The body also says work is put off, so the public path has a warning of its own to merge:
+    // with only one source, dropping the record's warnings there went unseen.
+    const PUT_OFF = 'Marking it revoked comes with the admin route of the next change.';
+    const v = evaluate({ body: `${body()}\n${PUT_OFF}\n`, head: HEAD, files, visibility: 'public', ux, agentAwareness: owed });
     expect(v.ok, JSON.stringify(v)).toBe(true);
     expect(v.warnings?.join('\n')).toContain('agent-awareness:');
+    expect(v.warnings?.join('\n')).toContain('may say that work is left open');
   });
 });
 
