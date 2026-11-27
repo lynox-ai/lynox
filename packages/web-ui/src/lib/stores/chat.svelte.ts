@@ -1692,7 +1692,7 @@ function dropEmptyAnswerAfter(list: ChatMessage[], i: number): void {
  * in), which a waiting message keeps over the server's transcript when the thread opens. A copy
  * from before the message gets it added, as {@link markFailedInSavedThread} does. A message still
  * in its thread's queue waits already. A message with files cannot wait in the saved copy (its
- * queue keeps text only) and is marked failed there, for a tap to send again.
+ * queue keeps text only) and is held there: not sent yet, a tap sends it.
  */
 function requeueHeldInThread(sid: string, turn: TurnStart, task: string, files: FileAttachment[] | undefined): void {
 	const msg = turn.userMsg;
@@ -1732,7 +1732,9 @@ function requeueHeldInThread(sid: string, turn: TurnStart, task: string, files: 
 	const waitsAlready = saved.queued === true && saved.queueId !== undefined && savedQueue.some((q) => q.id === saved.queueId);
 	if (!waitsAlready && withFiles) {
 		saved.queued = false;
-		saved.failed = true;
+		saved.failed = false;
+		saved.held = true;
+		if (task !== saved.content) saved.heldTask = task;
 	} else if (!waitsAlready) {
 		const id = newQueueId();
 		saved.queueId = id;
@@ -3741,13 +3743,13 @@ async function loadChangeset(): Promise<boolean> {
 		// No time limit of its own: a slow answer that carries a review must still show it, and a
 		// queued turn waits for it. A fetch the network ends lands in the catch and frees the queue.
 		const res = await fetch(`${getApiBase()}/sessions/${sid}/changeset`);
-		// The same thread opened again: its review is read again, for that opening.
+		const data = res.ok ? (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] } : null;
+		// Checked once the whole answer is in. The same thread opened again: its review is read
+		// again, for that opening.
 		if (stale()) return sessionId === sid ? await loadChangeset() : false;
 		// No session on the server (restarted, or dropped): it holds no review, which is an answer.
 		if (res.status === 404) return true;
-		if (!res.ok) return false;
-		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
-		if (stale()) return sessionId === sid ? await loadChangeset() : false;
+		if (!data) return false;
 		if (data.hasChanges && data.files.length > 0) {
 			pendingChangeset = data.files;
 			pendingChangesetRunId = data.runId ?? null;
@@ -4532,7 +4534,7 @@ function failWaitingTurns(): void {
 		} else {
 			// The opening showed the server's transcript, without the waiting bubble: it comes
 			// back, failed, so the turn is not dropped unseen.
-			messages.push({ role: 'user', content: q.task, failed: true });
+			messages.push({ role: 'user', content: q.task, failed: true, ...(q.runOptions?.typed === true ? { typed: true } : {}) });
 		}
 	}
 	persistChatNow();

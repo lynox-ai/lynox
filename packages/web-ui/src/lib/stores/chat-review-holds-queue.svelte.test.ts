@@ -448,6 +448,26 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		expect(store.getPendingChangeset(), 'the card shows in the opening').not.toBeNull();
 	});
 
+	it('a message with a file the open review holds, refused after another thread opened, is back as not sent yet, for a tap', async () => {
+		let refuse!: () => void;
+		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
+		void store.sendMessage('held with a file', [{ name: 'a.txt', type: 'text/plain', data: 'YQ==' }]);
+		await settle();
+		expect(store.getMessages().find((m) => m.content.includes('held with a file')), 'positive control: the message is on screen').toBeDefined();
+		await store.resumeThread('t9');
+		await settle();
+		refuse();
+		await settle();
+		changedIn.set('t1', notes);
+		await store.resumeThread('t1');
+		await settle();
+		const back = store.getMessages().filter((m) => m.content.includes('held with a file'));
+		expect(back, 'one bubble').toHaveLength(1);
+		expect(back[0]?.held, 'not sent yet, a tap sends it').toBe(true);
+		expect(back[0]?.failed, 'not a failure').toBeFalsy();
+		expect(runTasks, 'nothing sent past the review').toEqual([]);
+	});
+
 	it('a message the open review holds, refused after its thread was opened again, waits there, not sent', async () => {
 		let refuse!: () => void;
 		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
@@ -728,7 +748,10 @@ describe('a turn queued before a reload waits for the review the server holds', 
 			expect(store.getQueueLength(), 'positive control: the turn waits').toBe(1);
 			await vi.advanceTimersByTimeAsync(6 * 60_000 + 10_000);
 			await settle();
-			const turn = store.getMessages().find((m) => m.content === 'then this');
+			expect(activeGets, 'positive control: the registry was asked up to the cap').toBeGreaterThanOrEqual(180);
+			const bubbles = store.getMessages().filter((m) => m.content === 'then this');
+			expect(bubbles, 'one bubble for the turn').toHaveLength(1);
+			const turn = bubbles[0];
 			expect(turn?.failed, 'failed, for a tap to send again').toBe(true);
 			expect(turn?.queued, 'no longer shown waiting').toBeFalsy();
 			expect(store.getQueueLength(), 'nothing left in the queue').toBe(0);
