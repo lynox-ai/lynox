@@ -292,7 +292,9 @@ describe('a request to the store under a thread', () => {
 describe('a refused request contains nothing', () => {
   it('a refusal before the funnel\'s end (a credential header the model wrote)', async () => {
     const out = await request(agent({ current: 'thread-1' }), { 'X-Shopify-Access-Token': 'mine' });
-    expect(out).toMatch(/credential header of its own/);
+    // The refusal names the header to remove, as the fixed set spells it.
+    expect(out).toContain('may not carry a credential header of its own (x-shopify-access-token). Remove it;');
+    expect(out).not.toContain('<unprintable>');
     expect(containedRows()).toEqual([]);
     expect(skipSet).toEqual([]);
     expect(atReceipt).toEqual([]);
