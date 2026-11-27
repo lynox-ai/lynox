@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { setLocale, getLocale } from '../i18n.svelte.js';
+import { setLocale, getLocale, t } from '../i18n.svelte.js';
 import { startPausedPlansNav } from '../stores/paused-plans.svelte.js';
 import { noteSettingsViewer, resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
@@ -323,18 +323,24 @@ describe('Delete and the switch at a paused plan, which the route refuses to a h
 		rows = [{ ...PAUSED, status: 'completed', enabled: 0 }];
 		await remount();
 		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
-		// CONTROL: the same plan completed without a pause keeps its switch.
+		// Nor at a plan completed without a pause: it never runs again either (U-275 N6).
 		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await remount();
+		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
+		// CONTROL: the same plan open, without a pause, keeps its switch.
+		rows = [{ ...PAUSED, status: 'open', paused: false, paused_who: undefined, paused_ended: undefined }];
 		await remount();
 		expect(toggle()?.textContent?.trim()).toBe('Pausieren');
 	});
-	it('keeps the switch at a plan the owner paused, which no ended access paused', async () => {
+	it('keeps the switch at an open plan the owner paused, which no ended access paused, and not at a completed one', async () => {
 		// `enabled: 0` is the owner's own pause; `paused` is the one an ended access set.
-		for (const status of ['open', 'completed']) {
-			rows = [{ ...PAUSED, status, enabled: 0, paused: false, paused_who: undefined, paused_ended: undefined }];
-			if (component) await remount(); else await render();
-			expect(toggle()?.textContent?.trim()).toBe('Fortsetzen');
-		}
+		rows = [{ ...PAUSED, status: 'open', enabled: 0, paused: false, paused_who: undefined, paused_ended: undefined }];
+		await render();
+		expect(toggle()?.textContent?.trim()).toBe('Fortsetzen');
+		rows = [{ ...PAUSED, status: 'completed', enabled: 0, paused: false, paused_who: undefined, paused_ended: undefined }];
+		await remount();
+		expect(target.textContent).toContain('Wochenreport');
+		expect(toggle()).toBeNull();
 	});
 	it('keeps Delete for the owner the list does not name, once the session says owner', async () => {
 		viewer = 'none';
@@ -722,5 +728,100 @@ describe('the spacing class patterns of these tests', () => {
 			expect(MARGIN_CLASS.test(c), c).toBe(false);
 			expect(PADDING_CLASS.test(c), c).toBe(false);
 		}
+	});
+});
+
+describe('a completed plan says so, and a completed paused one its workflow case (U-275 N6)', () => {
+	const remount = async (): Promise<void> => {
+		if (component) unmount(component);
+		component = undefined;
+		await render();
+	};
+	const has = (sel: string): boolean => target.querySelector(sel) !== null;
+	const NOT_PAUSED = { paused: false, paused_who: undefined, paused_ended: undefined };
+	const hint = (): HTMLElement | null => target.querySelector<HTMLElement>('[data-trigger-paused-done-hint]');
+	const text = (): string => (hint()?.textContent ?? '').replace(/\s+/g, ' ').trim();
+	const DONE_WF = { ...PAUSED, status: 'completed', effect: 'run_workflow', pipeline_id: 'wf-1' };
+
+	it('marks a completed plan "Completed", and a completed paused one with its own mark only', async () => {
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'completed' }];
+		await render();
+		expect(target.querySelector('[data-trigger-completed]')?.textContent?.trim()).toBe('Abgeschlossen');
+		expect([has('[data-trigger-paused-done]'), has('[data-trigger-switched-off]')]).toEqual([false, false]);
+		// CONTROL: an open plan has no such mark.
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'open' }];
+		await remount();
+		expect(target.textContent).toContain('Wochenreport');
+		expect(has('[data-trigger-completed]')).toBe(false);
+		// Completed and paused, also switched off by the owner: one mark, "Completed · paused".
+		rows = [{ ...PAUSED, status: 'completed', enabled: 0 }];
+		await remount();
+		expect(target.querySelector('[data-trigger-paused-done]')?.textContent?.trim()).toBe('Abgeschlossen · pausiert');
+		expect([has('[data-trigger-switched-off]'), has('[data-trigger-completed]')]).toEqual([false, false]);
+		// Completed and switched off by the owner, without a pause: "Completed" alone, no "Paused".
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'completed', enabled: 0 }];
+		await remount();
+		expect(target.querySelector('[data-trigger-completed]')?.textContent?.trim()).toBe('Abgeschlossen');
+		expect(has('[data-trigger-switched-off]')).toBe(false);
+		// CONTROL: an open plan the owner switched off keeps "Paused".
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'open', enabled: 0 }];
+		await remount();
+		expect(target.querySelector('[data-trigger-switched-off]')?.textContent?.trim()).toBe('Pausiert');
+		setLocale('en');
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'completed' }];
+		await remount();
+		expect(target.querySelector('[data-trigger-completed]')?.textContent?.trim()).toBe('Completed');
+	});
+
+	it('tells the owner which workflow to take over first, by name, or that a new plan is all, or the condition when unknown', async () => {
+		const tab = t('hub.automation.workflows');
+		const btn = t('workflow_library.takeover.button');
+		rows = [{ ...DONE_WF, paused_done_workflow: { name: 'FX-monat' } }];
+		await render();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('workflow');
+		expect(text()).toBe(`Ein Zugang endete. Soll der Plan wieder laufen, übernimm zuerst den Workflow FX-monat unter „${tab}“ mit „${btn}“ und leg dann einen neuen Plan an.`);
+		// The name is someone else's value: set apart, and nowhere else in the line.
+		expect(foreignPlaces(hint()!)).toEqual([['FX-monat', true]]);
+		rows = [{ ...DONE_WF, paused_done_workflow: { name: null } }];
+		await remount();
+		expect(text()).toBe(`Ein Zugang endete. Soll der Plan wieder laufen, übernimm zuerst seinen Workflow unter „${tab}“ mit „${btn}“ und leg dann einen neuen Plan an.`);
+		rows = [{ ...DONE_WF, paused_done_workflow: null }];
+		await remount();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('none');
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.');
+		// An engine that could not read the case, or an older one: the condition, as before.
+		rows = [{ ...DONE_WF }];
+		await remount();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('unknown');
+		expect(text()).toContain('Läuft er auf einem Workflow, den die Person mit dem beendeten Zugang angelegt oder zuletzt geändert hat');
+		setLocale('en');
+		rows = [{ ...DONE_WF, paused_done_workflow: { name: 'FX-monat' } }];
+		await remount();
+		expect(text()).toBe(`An access ended. If the plan should run again, first take over the workflow FX-monat under “${t('hub.automation.workflows')}” with “${t('workflow_library.takeover.button')}”, then create a new plan.`);
+		rows = [{ ...DONE_WF, paused_done_workflow: null }];
+		await remount();
+		expect(text()).toBe('An access ended. If the plan should run again, create a new one.');
+	});
+
+	it('tells a person with access that the owner takes the workflow over first, and what they can do then', async () => {
+		viewer = 'mandate';
+		const HELPER = { ...DONE_WF, paused_who: undefined, paused_ended: undefined };
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat' } }];
+		await render();
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, muss der Inhaber zuerst den Workflow FX-monat übernehmen; bitte ihn darum. Danach kannst du einen neuen Plan anlegen.');
+		expect(foreignPlaces(hint()!)).toEqual([['FX-monat', true]]);
+		rows = [{ ...HELPER, paused_done_workflow: { name: null } }];
+		await remount();
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, muss der Inhaber zuerst seinen Workflow übernehmen; bitte ihn darum. Danach kannst du einen neuen Plan anlegen.');
+		rows = [{ ...HELPER, paused_done_workflow: null }];
+		await remount();
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.');
+		rows = [{ ...HELPER }];
+		await remount();
+		expect(text()).toContain('muss der Inhaber vorher den Workflow übernehmen');
+		setLocale('en');
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat' } }];
+		await remount();
+		expect(text()).toBe('An access ended. If the plan should run again, the owner must first take over the workflow FX-monat; ask them to. After that, you can create a new plan.');
 	});
 });

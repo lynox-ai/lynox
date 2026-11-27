@@ -4,6 +4,8 @@ import { dirname, join } from 'node:path';
 import { answerFrameReady } from '../utils/artifact-frame-host.js';
 import { setThemeMode } from '../stores/theme.svelte.js';
 import { buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
+import { artifactFenceHeader } from '../utils/artifact-inline.js';
+import { t } from '../i18n.svelte.js';
 
 // The chat view's artifact frames across re-renders: a frame whose document did not change keeps
 // its element (matched by document, not by position), a rebuilt one starts at the last measured
@@ -229,5 +231,90 @@ describe('the artifact frames of a message', () => {
 		expect(target.querySelector('.artifact-placeholder')).toBeNull();
 		expect(frames()).toEqual([built]);
 		expect(target.textContent).toContain('const x = 1;');
+	});
+});
+
+describe('an artifact card the chat marks as lost', () => {
+	const PLACEHOLDER = '[evicted after successful save]';
+	const body = '<p>' + PLACEHOLDER + '</p>';
+	// The fence as the chat writes it for a save: the two cards differ only in the store's flag.
+	const card = (lost: boolean, title = 'Report', type = 'html', content = body): string =>
+		'```artifact\n' + artifactFenceHeader({ title, type, id: '', typed: true, lost }) + content + '\n```';
+	const intact = card(false, 'Preisliste', 'html', '<p>Schneeräumung ab CHF 80</p>');
+	const BADGE = /^(Content missing|Inhalt fehlt)$/;
+	const notices = (): Element[] => Array.from(target.querySelectorAll('[data-testid="artifact-inline-lost-notice"]'));
+	const badges = (): Element[] => Array.from(target.querySelectorAll('[data-testid="artifact-inline-lost-badge"]'));
+
+	it('shows the gallery\'s notice for a lost document in place of the placeholder, and builds no frame', async () => {
+		await render({ content: card(true) });
+		expect(badges(), 'positive control: the card carries the badge').toHaveLength(1);
+		expect(notices(), 'one notice').toHaveLength(1);
+		const container = target.querySelector('.artifact-container')!;
+		expect(container.querySelector('.artifact-frame-slot'), 'no slot').toBeNull();
+		expect(frames(), 'no frame').toHaveLength(0);
+		expect(container.textContent, 'the placeholder is not shown').not.toContain(PLACEHOLDER);
+	});
+
+	it('holds only the fixed notice text, nothing from the fence, not its title or type', async () => {
+		const title = 'Q3 <b>bold</b> " onmouseover="x';
+		await render({ content: card(true, title) });
+		expect(badges(), 'one badge').toHaveLength(1);
+		const badge = badges()[0]!;
+		expect(badge.textContent, 'its text is the fixed label').toMatch(BADGE);
+		expect(badge.getAttribute('title'), 'and so is its title').toMatch(BADGE);
+		expect(badge.children, 'no markup inside it').toHaveLength(0);
+		expect(Array.from(badge.attributes).map((a) => a.name).sort(), 'no attribute but its own').toEqual(['class', 'data-testid', 'title']);
+		const notice = notices()[0]!;
+		const parts = Array.from(notice.children);
+		expect(parts.map((p) => p.tagName), 'two paragraphs, nothing else').toEqual(['P', 'P']);
+		expect(parts.map((p) => p.textContent), 'the gallery\'s two sentences').toEqual([t('artifacts.lost_title'), t('artifacts.lost_body')]);
+		expect(parts.every((p) => p.children.length === 0), 'as text').toBe(true);
+		expect(notice.textContent, 'nothing of the title').not.toContain('bold');
+		expect(notice.textContent, 'nothing of the type').not.toMatch(/html/i);
+		expect(Array.from(notice.attributes).map((a) => a.name).sort(), 'no attribute but its own').toEqual(['class', 'data-testid', 'role']);
+	});
+
+	it('shows the notice in place of the body of a lost markdown or data card too', async () => {
+		await render({ content: card(true, 'Notiz', 'markdown', PLACEHOLDER) + '\n\n' + card(true, 'Liste', 'csv', PLACEHOLDER) });
+		expect(Array.from(target.querySelectorAll('.artifact-container')).map((c) => c.getAttribute('data-artifact-type')), 'positive control: a markdown and a data card').toEqual(['markdown', 'csv']);
+		expect(notices(), 'a notice on each').toHaveLength(2);
+		expect(target.querySelector('.artifact-md-body'), 'no markdown body').toBeNull();
+		expect(target.querySelector('.artifact-data-body'), 'no data preview').toBeNull();
+		expect(target.textContent, 'the placeholder is not shown').not.toContain(PLACEHOLDER);
+	});
+
+	for (const [order, content] of [['before', () => card(true) + '\n\n' + intact], ['after', () => intact + '\n\n' + card(true)]] as const) {
+		it(`leaves the intact card in the same message its frame and document, with the lost card ${order} it`, async () => {
+			await render({ content: content() });
+			expect(target.querySelectorAll('.artifact-container'), 'positive control: two cards').toHaveLength(2);
+			expect(notices(), 'one notice').toHaveLength(1);
+			expect(frames(), 'one frame, the intact card\'s').toHaveLength(1);
+			const frameCard = frames()[0]!.closest('.artifact-container')!;
+			expect(frameCard.querySelector('[data-testid="artifact-inline-lost-badge"]'), 'in the card without the badge').toBeNull();
+			expect(documentOf(frames()[0]!), 'showing its own document').toContain('Schneeräumung ab CHF 80');
+		});
+	}
+
+	it('keeps the content of a short fence the model wrote: the rule on its text gives the badge only', async () => {
+		// The same kind of fence as below, under the store's bound: the rule on its text marks it,
+		// but no save stands behind it, so it keeps its frame and its document.
+		const short = '<!' + '-- type: html -->\n<h1>Debug</h1><p>The note ' + PLACEHOLDER + ' replaced a body.</p>';
+		await render({ content: '```artifact\n' + short + '\n```' });
+		expect(badges(), 'positive control: the rule on the text marks it').toHaveLength(1);
+		expect(notices(), 'no notice').toHaveLength(0);
+		expect(frames(), 'its frame').toHaveLength(1);
+		expect(documentOf(frames()[0]!), 'with its document').toContain('Debug');
+	});
+
+	it('is not raised by an intact document that only quotes the placeholder', async () => {
+		// A fence the model wrote (no title comment first), longer than the store's bound, with a
+		// placeholder opening inside: a document quoting it, still readable.
+		const quoting = '<!' + '-- type: html -->\n<h1>Changelog</h1><p>The note ' + PLACEHOLDER + ' replaced a body.</p>' + '<p>' + 'x'.repeat(2100) + '</p>';
+		await render({ content: '```artifact\n' + quoting + '\n```' });
+		expect(target.querySelectorAll('.artifact-container'), 'positive control: the card').toHaveLength(1);
+		expect(badges(), 'no badge').toHaveLength(0);
+		expect(notices(), 'no notice').toHaveLength(0);
+		expect(frames(), 'its frame').toHaveLength(1);
+		expect(documentOf(frames()[0]!), 'with its document').toContain('Changelog');
 	});
 });
