@@ -148,6 +148,27 @@ describe('KnowledgeLayer → engine.db subject-graph mirror (S1b)', () => {
     await layer.close();
   });
 
+  it('walks the subject graph by key for the export, and answers null with it off or when the read fails', async () => {
+    const on = makeLayer({ flag: true });
+    const subjects = new SubjectStore(on.engine!);
+    const ids = ['Ada', 'Bob', 'Cy'].map(name => subjects.createSubject({ kind: 'person', name })).sort();
+    const first = await on.layer.listEntitiesAfter(null, 2);
+    expect(first?.map(e => e.id), 'first page by id').toEqual(ids.slice(0, 2));
+    const second = await on.layer.listEntitiesAfter(first![1]!.id, 2);
+    expect(second?.map(e => e.id), 'the page after the last id').toEqual(ids.slice(2));
+
+    const off = makeLayer({ flag: false });
+    expect(await off.layer.listEntitiesAfter(null, 2), 'subject graph off').toBeNull();
+
+    const before = on.layer.readFallbackCount;
+    vi.spyOn(SubjectStore.prototype, 'listSubjectsAfter').mockImplementation(() => { throw new Error('broken read'); });
+    expect(await on.layer.listEntitiesAfter(null, 2), 'a failed read').toBeNull();
+    expect(on.layer.readFallbackCount, 'counted as a read fallback').toBe(before + 1);
+    vi.restoreAllMocks();
+    on.engine?.close();
+    off.engine?.close();
+  });
+
   it('flag OFF: engine.db untouched, legacy still written (additive proof)', async () => {
     mock.extraction = { entities: [{ name: 'Acme GmbH', type: 'organization', confidence: 0.9 }], relations: [] };
     const { layer, engine } = makeLayer({ flag: false });

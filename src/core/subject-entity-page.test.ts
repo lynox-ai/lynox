@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
-import { listSubjectEntitiesOn } from './knowledge-layer.js';
+import { listSubjectEntitiesAfterOn, listSubjectEntitiesOn } from './knowledge-layer.js';
+import type { EntityRecord } from '../types/memory.js';
 import { collectGraphForExport } from './graph-export.js';
 
 describe('listSubjectEntitiesOn reads one page from the store per call', () => {
@@ -114,13 +115,103 @@ describe('listSubjectEntitiesOn reads one page from the store per call', () => {
     expect(row, 'no embedding column').not.toHaveProperty('embedding');
   });
 
-  it('lets the export collect every listed subject past the first page', async () => {
+  /** The SQL each `prepare` on the store's connection was given, while `run` executes. */
+  function sqlDuring<T>(run: () => T): { result: T; sql: string[] } {
+    const raw = engineDb.getDb();
+    const prepare = raw.prepare.bind(raw);
+    const sql: string[] = [];
+    const spy = vi.spyOn(raw, 'prepare').mockImplementation(((text: string) => { sql.push(text); return prepare(text); }) as typeof raw.prepare);
+    try {
+      return { result: run(), sql };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it('cuts the web page in the query, with LIMIT and OFFSET', () => {
+    seed(30);
+    const { result, sql } = sqlDuring(() => store.listSubjectPage({ kinds: ['person', 'organization'], limit: 10, offset: 10 }));
+    expect(result.map(r => r.id)).toEqual(expectedOrder().slice(10, 20));
+    const reads = sql.filter(t => /FROM subjects/.test(t));
+    expect(reads, 'one read').toHaveLength(1);
+    expect(reads[0], 'cut in the query').toMatch(/LIMIT \? OFFSET \?/);
+  });
+
+  it('answers an offset or limit no SQLite integer can hold with an empty or bounded page, not an error', () => {
+    seed(5);
+    expect(listSubjectEntitiesOn(store, { limit: 10, offset: 1e20 }), 'offset past every row').toEqual([]);
+    expect(listSubjectEntitiesOn(store, { limit: 10, offset: Number.NaN }).map(e => e.id), 'NaN offset reads from the start').toEqual(expectedOrder());
+    expect(listSubjectEntitiesOn(store, { limit: 1e20, offset: 0 }).map(e => e.id), 'huge limit reads every row').toEqual(expectedOrder());
+  });
+
+  it('walks every listed subject by key, one page per read, each read past the last id', () => {
     seed(450);
+    const hidden = store.createSubject({ kind: 'other', name: 'Misc' });
+    const archived = store.createSubject({ kind: 'organization', name: 'Gone' });
+    store.archiveSubject(archived);
+    const { result: pages, sql } = sqlDuring(() => {
+      const out: string[][] = [];
+      let after: string | null = null;
+      for (;;) {
+        const batch: EntityRecord[] = listSubjectEntitiesAfterOn(store, after, 200);
+        out.push(batch.map(e => e.id));
+        if (batch.length < 200) break;
+        after = batch[batch.length - 1]!.id;
+      }
+      return out;
+    });
+    const byId = [...expectedOrder()].sort();
+    expect(pages.map(p => p.length), 'three pages').toEqual([200, 200, 50]);
+    expect(pages.flat(), 'every listed subject once, by id').toEqual(byId);
+    expect(pages.flat(), 'kind other is not listed').not.toContain(hidden);
+    expect(pages.flat(), 'an archived subject is not listed').not.toContain(archived);
+    const reads = sql.filter(t => /FROM subjects/.test(t));
+    expect(reads, 'one read per page').toHaveLength(3);
+    expect(reads[0], 'the first page starts at the first id').not.toMatch(/id > \?/);
+    for (const r of reads.slice(1)) {
+      expect(r, 'a later page reads past the last id').toMatch(/AND id > \?/);
+      expect(r, 'no offset').not.toMatch(/OFFSET/);
+    }
+  });
+
+  it('reads a key page as a range on the primary key, without sorting', () => {
+    seed(5);
+    const { sql } = sqlDuring(() => store.listSubjectsAfter({ kinds: ['person', 'organization'], after: 'x', limit: 2 }));
+    const read = sql.find(t => /FROM subjects/.test(t))!;
+    const plan = (engineDb.getDb().prepare(`EXPLAIN QUERY PLAN ${read}`).all('person', 'organization', 'x', 2) as Array<{ detail: string }>).map(r => r.detail);
+    expect(plan.join(' | '), 'the primary key, by range').toMatch(/USING INDEX sqlite_autoindex_subjects_1 \(id>\?\)/);
+    expect(plan.join(' | '), 'no sort per page').not.toMatch(/TEMP B-TREE/);
+  });
+
+  it('lets the export walk every listed subject by key', async () => {
+    seed(450);
+    const byOffset = vi.fn((o: { limit: number; offset: number }) => listSubjectEntitiesOn(store, o));
     const { entities, truncated } = await collectGraphForExport({
-      listEntities: (o) => listSubjectEntitiesOn(store, o),
+      listEntities: byOffset,
+      listEntitiesAfter: (after, limit) => listSubjectEntitiesAfterOn(store, after, limit),
       getEntityRelationsForExport: () => [],
     });
     expect(truncated).toBe(false);
-    expect(entities.map(e => e.id)).toEqual(expectedOrder());
+    expect(entities.map(e => e.id)).toEqual([...expectedOrder()].sort());
+    expect(byOffset, 'no offset page').not.toHaveBeenCalled();
+  });
+
+  it('pages the export by offset from the start when the key walk is not offered or stops part way', async () => {
+    seed(450);
+    const plain = await collectGraphForExport({
+      listEntities: (o) => listSubjectEntitiesOn(store, o),
+      getEntityRelationsForExport: () => [],
+    });
+    expect(plain.entities.map(e => e.id), 'no key walk: offset pages').toEqual(expectedOrder());
+
+    let calls = 0;
+    const stopped = await collectGraphForExport({
+      listEntities: (o) => listSubjectEntitiesOn(store, o),
+      listEntitiesAfter: (after, limit) => (++calls === 2 ? null : listSubjectEntitiesAfterOn(store, after, limit)),
+      getEntityRelationsForExport: () => [],
+    });
+    expect(calls, 'fixture: the walk stopped at its second page').toBe(2);
+    expect(stopped.entities.map(e => e.id), 'from the start, each entity once').toEqual(expectedOrder());
+    expect(stopped.truncated).toBe(false);
   });
 });

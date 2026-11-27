@@ -269,6 +269,12 @@ export type SubjectListRow = Omit<SubjectRow, 'embedding'>;
 
 const SUBJECT_LIST_COLUMNS = 'id, kind, name, aliases, is_self, parent_id, status, owner_user_id, archived_at, merged_into, created_at, updated_at';
 
+/** A row count or position as SQLite takes it: a whole number from 0 to the largest exact integer. */
+function boundedCount(n: number): number {
+  if (!Number.isFinite(n)) return n > 0 ? Number.MAX_SAFE_INTEGER : 0;
+  return Math.min(Math.max(Math.trunc(n), 0), Number.MAX_SAFE_INTEGER);
+}
+
 export interface PersonDetail {
   email?: string | undefined;
   phone?: string | undefined;
@@ -1149,12 +1155,33 @@ export class SubjectStore {
    * `id` breaks ties in `updated_at`, so pages do not overlap or skip rows that share a timestamp.
    */
   listSubjectPage(opts: { kinds: readonly string[]; limit: number; offset: number }): SubjectListRow[] {
-    if (opts.kinds.length === 0 || opts.limit <= 0) return [];
+    const limit = boundedCount(opts.limit);
+    if (opts.kinds.length === 0 || limit === 0) return [];
     const kinds = opts.kinds.map(() => '?').join(', ');
     return this.db.prepare(
       `SELECT ${SUBJECT_LIST_COLUMNS} FROM subjects WHERE kind IN (${kinds}) AND archived_at IS NULL `
       + 'ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?',
-    ).all(...opts.kinds, opts.limit, Math.max(opts.offset, 0)) as SubjectListRow[];
+    ).all(...opts.kinds, limit, boundedCount(opts.offset)) as SubjectListRow[];
+  }
+
+  /**
+   * The next `limit` active subjects of the given kinds after the subject `after` (by id, ascending;
+   * `null` starts at the first), without the embedding. A caller walking every subject passes the
+   * last id it got, so each call reads one page through the primary-key index and the whole walk is
+   * linear in the number of subjects, where an OFFSET re-reads and re-sorts every row before it.
+   */
+  listSubjectsAfter(opts: { kinds: readonly string[]; after: string | null; limit: number }): SubjectListRow[] {
+    const limit = boundedCount(opts.limit);
+    if (opts.kinds.length === 0 || limit === 0) return [];
+    const kinds = opts.kinds.map(() => '?').join(', ');
+    // The unary `+` keeps SQLite off the kind and archived indexes: walking the primary key in
+    // order is what makes each page a range read; with either index it sorts every row per page.
+    const where = `+kind IN (${kinds}) AND +archived_at IS NULL${opts.after === null ? '' : ' AND id > ?'}`;
+    const args: unknown[] = [...opts.kinds];
+    if (opts.after !== null) args.push(opts.after);
+    return this.db.prepare(
+      `SELECT ${SUBJECT_LIST_COLUMNS} FROM subjects WHERE ${where} ORDER BY id ASC LIMIT ?`,
+    ).all(...args, limit) as SubjectListRow[];
   }
 
   /** Count subjects, optionally restricted to a set of kinds. Active only unless `includeArchived`. */

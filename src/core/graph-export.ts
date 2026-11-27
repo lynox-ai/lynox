@@ -7,7 +7,7 @@ import {
   entityRelationsForExportOn, listEntitiesOn, relationCountOn,
 } from './agent-memory-db.js';
 import { toEntityRecord } from './entity-resolver.js';
-import { EXPORT_RELATIONS_PER_ENTITY, legacyRelationForExport, listSubjectEntitiesOn, relRowToRelationRecord } from './knowledge-layer.js';
+import { EXPORT_RELATIONS_PER_ENTITY, legacyRelationForExport, listSubjectEntitiesAfterOn, listSubjectEntitiesOn, relRowToRelationRecord } from './knowledge-layer.js';
 import { sourceDeletedSql } from './relation-source.js';
 import { RelationshipStore } from './relationship-store.js';
 import { ENTITY_MAPPABLE_SUBJECT_KINDS, SubjectStore } from './subject-store.js';
@@ -24,6 +24,12 @@ export type ExportRelation = RelationRecord & { sourceDeleted: boolean };
 /** What the export needs from a graph store: the entities page by page, and each one's relations. */
 export interface GraphExportSource {
   listEntities(opts: { limit: number; offset: number }): Promise<EntityRecord[]> | EntityRecord[];
+  /**
+   * The next page after the entity `after` (by key; `null` starts at the first). A source that
+   * offers it is walked by key, which is linear; `null` means it cannot read that way, and the
+   * walk pages with `listEntities` instead.
+   */
+  listEntitiesAfter?(after: string | null, limit: number): Promise<EntityRecord[] | null> | EntityRecord[] | null;
   getEntityRelationsForExport(entityId: string): Promise<ExportRelation[]> | ExportRelation[];
 }
 
@@ -45,12 +51,17 @@ const MAX_PAGES = 1000;
 export async function collectGraphForExport(source: GraphExportSource): Promise<{
   entities: EntityRecord[]; relationships: ExportRelation[]; truncated: boolean; relationCapHit: boolean;
 }> {
-  const entities: EntityRecord[] = [];
-  let truncated = true;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const batch = await source.listEntities({ limit: PAGE, offset: page * PAGE });
-    entities.push(...batch);
-    if (batch.length < PAGE) { truncated = false; break; }
+  let entities: EntityRecord[] | null = source.listEntitiesAfter ? await walkByKey(source.listEntitiesAfter.bind(source)) : null;
+  let truncated = entities === null ? true : entities.length >= MAX_PAGES * PAGE;
+  if (entities === null) {
+    // No key walk, or it failed part way: page from the start, so no entity is counted twice.
+    entities = [];
+    truncated = true;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const batch = await source.listEntities({ limit: PAGE, offset: page * PAGE });
+      entities.push(...batch);
+      if (batch.length < PAGE) { truncated = false; break; }
+    }
   }
   if (truncated) {
     // Surfaced, not silent: hitting the cap means the export may be incomplete.
@@ -69,6 +80,22 @@ export async function collectGraphForExport(source: GraphExportSource): Promise<
     }
   }
   return { entities, relationships: [...relationSet.values()], truncated, relationCapHit };
+}
+
+/** Walks every entity by key, page by page; `null` when the source cannot, or stops part way. */
+async function walkByKey(
+  next: (after: string | null, limit: number) => Promise<EntityRecord[] | null> | EntityRecord[] | null,
+): Promise<EntityRecord[] | null> {
+  const entities: EntityRecord[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const batch = await next(after, PAGE);
+    if (batch === null) return null;
+    entities.push(...batch);
+    if (batch.length < PAGE) return entities;
+    after = batch[batch.length - 1]!.id;
+  }
+  return entities;
 }
 
 export interface HeldGraph {
@@ -137,6 +164,7 @@ export async function readHeldGraph(opts: {
       const relationships = new RelationshipStore(opts.engineDb);
       source = {
         listEntities: (o) => listSubjectEntitiesOn(subjects, o),
+        listEntitiesAfter: (after, limit) => listSubjectEntitiesAfterOn(subjects, after, limit),
         getEntityRelationsForExport: (id) => relationships.getRelationshipsForSubjectForExport(id, EXPORT_RELATIONS_PER_ENTITY)
           .map(r => ({ ...relRowToRelationRecord(r), sourceDeleted: r.source_deleted === 1 })),
       };
