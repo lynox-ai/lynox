@@ -1,12 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { PROMPT_EMITTED_TAGS } from '../utils/prompt-markdown.js';
-
-const PROMPT_MARKDOWN = readFileSync(fileURLToPath(new URL('../utils/prompt-markdown.ts', import.meta.url)), 'utf-8');
+import { PROMPT_EMITTED_TAGS, renderPromptSegments } from '../utils/prompt-markdown.js';
 
 /** A class that keeps a line from wrapping, scrolls sideways, or sets a width the box cannot hold. */
-const HOLDS_SIDEWAYS = /overflow-x-(auto|scroll)|overflow-(auto|scroll)$|whitespace-(nowrap|pre)$|text-nowrap|\[white-space:(pre|nowrap)\]|truncate|break-(keep|normal)|overflow-wrap:normal|_table\]:block|table-auto|(^|:)(min-)?w-(max|\[)/;
+const HOLDS_SIDEWAYS = /overflow-x-(auto|scroll|hidden)|overflow-(auto|scroll|hidden)!?$|\[overflow(-x)?:|whitespace-(nowrap|pre)!?$|text-nowrap|\[white-space:(pre|nowrap)\]|truncate|break-(keep|normal)|wrap-(normal|break-word)|overflow-wrap:normal|\[word-break:|_table\]:block|table-auto|\[table-layout:auto\]|(^|:)!?(min-)?w-(max|screen|[1-9]|\[)/;
+
+/** Classes the check must refuse, so a regex that never matches cannot pass the tests below. */
+const REFUSED = ['[&_pre]:overflow-x-auto', 'overflow-x-hidden', '[&_pre]:whitespace-pre', 'whitespace-nowrap!', 'text-nowrap', '[&_pre]:[white-space:nowrap]', 'truncate', '[&_td]:break-keep', '[&_td]:wrap-normal', '[&_td]:wrap-break-word', '[word-break:keep-all]', '[&_table]:block', '[&_table]:table-auto', '[table-layout:auto]', 'w-96', 'w-screen', 'min-w-max', 'w-[600px]', '[overflow-x:auto]'];
+
+/** Classes it must let through: the box's own, and widths that cannot push it sideways. */
+const ALLOWED = ['min-w-0', 'max-w-full', '[&_pre]:max-w-full', 'w-full', 'overflow-y-auto', '[overflow-wrap:anywhere]', '[&_pre]:[white-space:break-spaces]'];
 
 /**
  * A question without a consent kind renders as markup in a box that scrolls downwards, and the
@@ -18,9 +22,9 @@ const HOLDS_SIDEWAYS = /overflow-x-(auto|scroll)|overflow-(auto|scroll)$|whitesp
  * The box now wraps instead: a code block keeps its line breaks and wraps long lines, a table
  * takes the box's width and wraps inside its cells, and every word may break. So everything the
  * question holds lies below, where the count sees it. A code block wraps with `break-spaces`, not
- * `pre-wrap`: under `pre-wrap` a long run of spaces hangs invisibly at the line's end, so a value
- * made of a word, many spaces and `Time: 09:00` would start a line of its own with no line break
- * in it; under `break-spaces` the spaces take room and wrap like any other character.
+ * `pre-wrap`: under `pre-wrap` a long run of spaces hangs invisibly at the line's end; under
+ * `break-spaces` the spaces take room and wrap like any other character, so what a run of them
+ * does to the lines can be seen.
  *
  * There is no layout engine in this package's tests, so the measurement lives in the shots (390
  * and 1372 wide, a long code line and a wide table). This pins the rules in the template, the
@@ -64,8 +68,13 @@ describe('a question in the question card hides nothing sideways', () => {
 	});
 
 	it('a cell keeps the box\'s word breaking, so a long word cannot widen its column', () => {
-		const cells = boxClasses().filter((c) => /^\[&_(th|td|tr|table)\]:/.test(c));
-		expect(cells.filter((c) => c.includes('overflow-wrap') || c.includes('word-break') || c.includes('break-'))).toEqual([]);
+		const cells = boxClasses().filter((c) => /^\[&_(th|td|tr|thead|tbody|table)\]:/.test(c));
+		expect(cells.filter((c) => /overflow-wrap|word-break|break-|wrap-/.test(c))).toEqual([]);
+	});
+
+	it('the check below refuses every class that holds a line sideways and lets the box\'s own through', () => {
+		expect(REFUSED.filter((c) => !HOLDS_SIDEWAYS.test(c))).toEqual([]);
+		expect(ALLOWED.filter((c) => HOLDS_SIDEWAYS.test(c))).toEqual([]);
 	});
 
 	it('nothing in the box scrolls sideways or keeps a line from wrapping', () => {
@@ -74,10 +83,12 @@ describe('a question in the question card hides nothing sideways', () => {
 	});
 
 	it('the box a value of outside text is shown in wraps like the text around it', () => {
-		const open = /const VALUE_BOX_OPEN = '<bdi\b[^>]*\bclass="([^"]*)"/.exec(PROMPT_MARKDOWN);
-		expect(open, 'VALUE_BOX_OPEN is a <bdi> with a class').not.toBeNull();
-		const cls = open![1]!.split(/\s+/).filter(Boolean);
-		expect(cls.filter((c) => HOLDS_SIDEWAYS.test(c) || /^(block|inline-block|flex|grid)$/.test(c))).toEqual([]);
+		const html = renderPromptSegments([{ kind: 'frame', text: 'Send to ' }, { kind: 'value', text: 'a long value' }, { kind: 'frame', text: '?' }], { box: true });
+		const boxes = [...html.matchAll(/<bdi\b[^>]*\bdata-foreign-value\b[^>]*>/g)].map((m) => m[0]);
+		expect(boxes, 'the value is rendered in its box').toHaveLength(1);
+		const cls = (/\bclass="([^"]*)"/.exec(boxes[0]!)?.[1] ?? '').split(/\s+/).filter(Boolean);
+		expect(cls.length, 'the box has classes').toBeGreaterThan(0);
+		expect(cls.filter((c) => HOLDS_SIDEWAYS.test(c) || /^(block|inline-block|flex|inline-flex|grid|inline-grid|table|inline-table|contents)$/.test(c))).toEqual([]);
 	});
 
 	it('every tag the question can carry either wraps unaided or has its rule in the box', () => {
