@@ -12,7 +12,7 @@
  * the person wrote.
  */
 
-import type { ConsentAction, ConsentKey } from '../contract/prompt.js';
+import type { ConsentAction, ConsentKey, ConsentKind } from '../contract/prompt.js';
 import type { NoticeLanguage } from '../core/notice-language.js';
 import type { SendRoleKind, SendSlot } from '../core/profile-secret-view.js';
 import { pv, singleLine } from '../core/prompt-value.js';
@@ -763,9 +763,20 @@ export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChan
  * equal. The keys themselves are the wire (`src/contract/prompt.ts`).
  */
 export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentKey, string>>>> = {
-  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow Deep', balanced: 'Run on Balanced', cancel: 'Cancel', send: 'Send', confirm: 'Confirm', merge: 'Merge', apply: 'Apply', retire: 'Retire', proceed: 'Run', adjust: 'Adjust' },
-  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Stufe Tief erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen', send: 'Senden', confirm: 'Bestätigen', merge: 'Zusammenführen', apply: 'Übernehmen', retire: 'Zurückziehen', proceed: 'Ausführen', adjust: 'Anpassen' },
+  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow Deep', balanced: 'Run on Balanced', cancel: 'Cancel', send: 'Send', confirm: 'Confirm', merge: 'Merge', apply: 'Apply', retire: 'Retire', proceed: 'Run', adjust: 'Adjust', 'as-text': 'Write as text', 'as-formulas': 'Write as formulas' },
+  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Stufe Tief erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen', send: 'Senden', confirm: 'Bestätigen', merge: 'Zusammenführen', apply: 'Übernehmen', retire: 'Zurückziehen', proceed: 'Ausführen', adjust: 'Anpassen', 'as-text': 'Als Text schreiben', 'as-formulas': 'Als Formeln schreiben' },
 };
+
+/**
+ * How `cancel` reads on the Sheets formula question: it says that nothing is written, as the
+ * way out of a bulk run does. The web UI's `chat.consent.dont_write`; a test holds the two equal.
+ */
+export const DONT_WRITE_LABEL: Readonly<Record<DialogLanguage, string>> = { en: "Don't write", de: 'Nicht schreiben' };
+
+/** How `key` reads on a question of `kind`, where the engine itself names it. */
+export function consentLabel(kind: ConsentKind, key: ConsentKey, language: DialogLanguage): string {
+  return key === 'cancel' && (kind === 'formula' || kind === 'formula-text') ? DONT_WRITE_LABEL[language] : CONSENT_LABELS[language][key];
+}
 
 /** The confirming key of a consent that names its action (a Google write), in the owner's words. */
 export const CONSENT_ACTION_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentAction, string>>>> = {
@@ -972,10 +983,11 @@ export interface SheetsNoteDialog {
   readonly formulaFetches: PromptText;
   readonly formulaMore: (n: number) => PromptText;
   /**
-   * Why the option that writes formulas is not offered, naming it as `button`, the option's own
-   * label, so the sentence follows the label. The number is written out, as the question's own words.
+   * Why the button that writes formulas is not offered. Where it names the button, it says the
+   * button's label in that language (`CONSENT_LABELS`, web-ui `chat.consent.write_formulas`) as the
+   * question's own words, not as a value; a test holds the two equal. The number is written out too.
    */
-  readonly formulaOnlyShown: (button: string) => PromptText;
+  readonly formulaOnlyShown: PromptText;
   /** A cell named by its place in the values given, when the range names no first cell. */
   readonly cellPlace: (row: number, value: number, appended: boolean) => string;
   /** Why a format call asks, with `n` the requests shown. */
@@ -993,7 +1005,7 @@ export const SHEETS_NOTE_DIALOG: Readonly<Record<DialogLanguage, SheetsNoteDialo
       : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these cells start like a formula, and Google runs a formula when it is written.`,
     formulaFetches: pv`A formula can make Google fetch an address and send data from the sheet with it. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE and IMAGE are examples; other functions can do it too. The address need not be written out: a formula can build it from other cells.`,
     formulaMore: (n) => pv`and ${n} more`,
-    formulaOnlyShown: () => pv`Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.`,
+    formulaOnlyShown: pv`Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.`,
     cellPlace: (row, value, appended) => `${ordinal(row)} ${appended ? 'new row' : 'row'}, ${ordinal(value)} value`,
     formatHead: (n) => n === 1
       ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, or change what a reader sees in a cell or sheet, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, which Google runs on its side.`
@@ -1008,7 +1020,7 @@ export const SHEETS_NOTE_DIALOG: Readonly<Record<DialogLanguage, SheetsNoteDialo
       : pv`Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. ${n} dieser Zellen beginnen wie eine Formel, und Google führt eine Formel beim Schreiben aus.`,
     formulaFetches: pv`Eine Formel kann Google eine Adresse abrufen lassen und dabei Daten aus der Tabelle mitschicken. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE und IMAGE sind Beispiele; andere Funktionen können das auch. Die Adresse muss nicht ausgeschrieben sein: Eine Formel kann sie aus anderen Zellen zusammensetzen.`,
     formulaMore: (n) => pv`und ${n} weitere`,
-    formulaOnlyShown: (button) => pv`„${button}“ steht nur zur Wahl, wenn hier jede Formel gezeigt wird. Willst du sie als Formeln schreiben, bitte im Chat darum, höchstens 5 auf einmal zu schreiben.`,
+    formulaOnlyShown: pv`„Als Formeln schreiben“ steht nur zur Wahl, wenn hier jede Formel gezeigt wird. Willst du sie als Formeln schreiben, bitte im Chat darum, höchstens 5 auf einmal zu schreiben.`,
     cellPlace: (row, value, appended) => `${row}. ${appended ? 'neue Zeile' : 'Zeile'}, ${value}. Wert`,
     formatHead: (n) => n === 1
       ? pv`Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. 1 dieser Anfragen kann Zellinhalt oder eine Regel schreiben oder ändern, was jemand in einer Zelle oder einem Blatt sieht, etwa ein Zahlenformat, einen Link, die Schreibrichtung oder ausgeblendete Zeilen. Inhalt und Regeln können eine Formel enthalten, die Google bei sich ausführt.`

@@ -3893,6 +3893,15 @@ describe('LynoxHTTPApi', () => {
           expect(again.idempotent, answer).toBe(true);
           expect(again.refused, answer).toBe(refused ? 'unrecognised_answer' : undefined);
         }
+        // The Sheets formula question is read against the kind stored with it: the one that showed
+        // only some formulas has no key that writes them, so that key is no answer to it.
+        for (const [kind, answer, refused] of [['formula-text', 'as-formulas', true], ['formula', 'as-formulas', false], ['formula-text', 'as-text', false], ['formula', '2', true], ['formula', 'Write as formulas', true]] as const) {
+          const sid = `s-${kind}-${answer.replace(/\W/g, '_')}`;
+          const id = store.insertAskUser(sid, 'Formulas?', [...(kind === 'formula' ? ['as-text', 'as-formulas', 'cancel'] : ['as-text', 'cancel'])], false, undefined, undefined, undefined, undefined, kind);
+          const res = await jsonFetch(`/api/sessions/${sid}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer }) });
+          expect(res.status, `${kind} ${answer}`).toBe(200);
+          expect((await res.json() as { refused?: string }).refused, `${kind} ${answer}`).toBe(refused ? 'unrecognised_answer' : undefined);
+        }
         // An older client answers without a promptId: nothing is answered, and the gate stays open.
         const legacyId = guard('s-consent-legacy');
         const legacy = await jsonFetch('/api/sessions/s-consent-legacy/reply', { method: 'POST', body: JSON.stringify({ answer: 'y' }) });

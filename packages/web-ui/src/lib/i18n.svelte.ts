@@ -1883,6 +1883,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.consent.merge': { de: 'Zusammenführen', en: 'Merge' },
 	'chat.consent.apply': { de: 'Übernehmen', en: 'Apply' },
 	'chat.consent.retire': { de: 'Zurückziehen', en: 'Retire' },
+	// The Sheets formula question; the German 'Als Formeln schreiben' is also named in the question's text (engine dialog-text formulaOnlyShown).
+	'chat.consent.write_text': { de: 'Als Text schreiben', en: 'Write as text' },
+	'chat.consent.write_formulas': { de: 'Als Formeln schreiben', en: 'Write as formulas' },
+	'chat.consent.dont_write': { de: 'Nicht schreiben', en: "Don't write" },
 	'chat.consent.proceed': { de: 'Ausführen', en: 'Run' },
 	'chat.consent.adjust': { de: 'Anpassen', en: 'Adjust' },
 	'chat.consent.plan_hint': { de: 'Oder schreib, was du ändern willst.', en: 'Or write what to change.' },
@@ -3378,6 +3382,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'history.load_details_failed': { de: 'Details konnten nicht geladen werden.', en: 'Failed to load details.' },
 	'history.show_more': { de: 'Mehr anzeigen', en: 'Show more' },
 	'history.show_less': { de: 'Weniger anzeigen', en: 'Show less' },
+	'workflow_library.status.show_more': { de: 'Mehr anzeigen', en: 'Show more' },
+	'workflow_library.status.show_less': { de: 'Weniger anzeigen', en: 'Show less' },
 	'history.avg_duration': { de: 'Avg', en: 'Avg' },
 
 	// Error page

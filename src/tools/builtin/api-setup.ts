@@ -47,9 +47,9 @@ import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
-import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
+import { noteMemberRefusal, refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, sendSlots, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle, settingsVersion, bindingOf } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, sendSlots, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle, settingsVersion, bindingOf } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -2571,7 +2571,7 @@ ${draftJson}
       const storedForSave = agent.toolContext?.apiStore?.storedProfile(profile.id);
       if (storedForSave && isOwnerPrincipal(agent.principal) && isMandateConnection(storedForSave)
         && !connectionWaits(storedForSave, agent.toolContext?.mandateEnds ?? null)) {
-        const theirs = memberConnectionRefusal(storedForSave, agent.principal, agent.toolContext?.mandateEnds ?? null);
+        const theirs = noteMemberRefusal(storedForSave, agent.principal, agent.toolContext?.mandateEnds ?? null);
         return `Error: API profile "${profile.id}" was not saved. ${theirs ?? 'Its connection was made in a mandate\'s session that is still active.'}`;
       }
       delete profile.created_by;

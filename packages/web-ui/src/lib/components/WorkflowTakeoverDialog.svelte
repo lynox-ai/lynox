@@ -4,8 +4,10 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import StampPreviewBody from './StampPreviewBody.svelte';
 	import MarkedLine from './MarkedLine.svelte';
+	import DialogStatusLine from './DialogStatusLine.svelte';
 	import { FoldGroup } from '../utils/fold-group.svelte.js';
 	import { shownValue } from '../utils/plan-takeover.js';
+	import { DIALOG_FOOT_CLASS, bringIntoReview, holdScrollPadding } from '../utils/dialog-sticky.js';
 	import { stampChanges, type StampChanges } from '../utils/workflow-stamp.js';
 	import {
 		markLine, parseWorkflowTakeoverPreview, refusalNamesSupport, stepConnectionNote, takeoverOutcome, takeoverRefusalText, workflowTakeoverLines,
@@ -35,6 +37,12 @@
 	let changes = $state<StampChanges | null>(null);
 	let generation = 0;
 	let dialog = $state<HTMLElement | null>(null);
+	// The scrolling frame: what scrolls into view in it stays clear of the parts that stay in sight.
+	let frame = $state<HTMLElement | null>(null);
+	$effect(() => {
+		if (frame === null) return;
+		return holdScrollPadding(frame);
+	});
 	let heading = $state<HTMLElement | null>(null);
 	let errorLine = $state<HTMLElement | null>(null);
 	let changedEl = $state<HTMLElement | null>(null);
@@ -44,7 +52,8 @@
 	$effect(() => {
 		heading?.focus();
 	});
-	// The buttons sit at the foot, these lines at the head: on a phone they would be out of sight.
+	// The buttons sit at the foot, these lines at the head: where the frame is too low to keep them
+	// in sight, they would be out of sight.
 	$effect(() => {
 		errorLine?.scrollIntoView?.({ block: 'nearest' });
 	});
@@ -164,13 +173,13 @@
 			// The confirm was turned off, or the content it sat in was replaced: focus goes back to the
 			// head of the dialog rather than to the page behind it, unless something outside the
 			// dialog took it meanwhile, such as an overlay above it. After a change it goes to the
-			// first changed part, brought into sight: that is what the owner has to read again. The
-			// line above, which says why, may scroll out of sight then (it carries role=status).
+			// first changed part, brought into sight below the line that says why, which stays in
+			// sight while it is short and the frame is high enough (DialogStatusLine).
 			await tick();
 			if (dialog?.isConnected === true && keyIsOurs()) {
 				const mark = toMark ? dialog.querySelector<HTMLElement>('[data-stamp-changed]') : null;
-				(mark ?? heading)?.focus();
-				mark?.scrollIntoView?.({ block: 'nearest' });
+				(mark ?? heading)?.focus({ preventScroll: mark !== null });
+				if (mark && frame) bringIntoReview(frame, mark);
 			}
 		}
 	}
@@ -187,10 +196,10 @@
 	tabindex="-1"
 	data-testid="takeover-dialog"
 >
-	<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
+	<div bind:this={frame} class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words"><MarkedLine text={tf('workflow_library.takeover.title', { name: shownValue(preview?.workflow.name ?? workflow.name) })} mono={false} /></h2>
 		{#if changedLine}
-			<p bind:this={changedEl} role="status" data-testid="takeover-changed" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{changedLine}</p>
+			<DialogStatusLine text={changedLine} testid="takeover-changed" bind:el={changedEl} />
 		{/if}
 		{#if error}
 			<p bind:this={errorLine} role="alert" data-testid="takeover-error" class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
@@ -216,7 +225,7 @@
 			</div>
 		{/if}
 
-		<div class="flex items-center justify-end gap-2 mt-5">
+		<div data-dialog-foot class={DIALOG_FOOT_CLASS}>
 			<button
 				onclick={onclose}
 				class="min-h-11 md:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg-muted px-3 py-1 text-xs text-text-muted hover:bg-bg transition-colors"
