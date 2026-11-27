@@ -350,8 +350,10 @@ export interface HttpDialog {
   readonly exfil: (word: PromptText, warning: string) => PromptText;
   readonly outbound: (word: PromptText, method: string, host: string, path: string, fields: string, tail: PromptText) => PromptText;
   readonly queryTooLarge: (bytes: number) => PromptText;
+  readonly queryUnreadable: PromptText;
   readonly querySecret: PromptText;
   readonly headers: (names: string, block: PromptText) => PromptText;
+  readonly bodyUnreadable: PromptText;
   readonly bodySecret: PromptText;
   readonly bodyTooLarge: (bytes: number) => PromptText;
   readonly noteOnce: PromptText;
@@ -368,8 +370,10 @@ export const HTTP_DIALOG: Readonly<Record<DialogLanguage, HttpDialog>> = {
     exfil: (word, warning) => pv`⚠ ${word}: ${warning} — Allow?`,
     outbound: (word, method, host, path, fields, tail) => pv`⚠ ${word}: ${method} to ${host} ${path} (${fields}) — Allow outbound data?${tail}`,
     queryTooLarge: (bytes) => pv` The query (${bytes} bytes) is too large to show; the path above names its keys, cut short where it is long.`,
+    queryUnreadable: pv` The query has too many percent-encoded characters to check for a stored secret, so it is not shown here; the path above names its keys.`,
     querySecret: pv` A stored secret is sent in this query; it is shown masked (***).`,
     headers: (names, block) => pv` It sets the headers ${names}.${block}`,
+    bodyUnreadable: pv` The body has too many percent-encoded characters to check for a stored secret, so it is not shown here. If you do not know what this write sends, decline it.`,
     bodySecret: pv` The body holds a stored secret and is not shown.`,
     bodyTooLarge: (bytes) => pv` The body (${bytes} bytes) is too large to show; its field names are listed.`,
     noteOnce: pv` Allowing sends this request once, now; it will ask again next time.`,
@@ -384,8 +388,10 @@ export const HTTP_DIALOG: Readonly<Record<DialogLanguage, HttpDialog>> = {
     exfil: (word, warning) => pv`⚠ ${word}: ${warning} — Erlauben?`,
     outbound: (word, method, host, path, fields, tail) => pv`⚠ ${word}: ${method} an ${host} ${path} (${fields}) — Daten nach aussen senden?${tail}`,
     queryTooLarge: (bytes) => pv` Die Query (${bytes} Bytes) ist zu gross zum Anzeigen; der Pfad oben nennt ihre Schlüssel, lange gekürzt.`,
+    queryUnreadable: pv` Die Query hat zu viele prozentkodierte Zeichen, um sie auf ein gespeichertes Geheimnis zu prüfen, darum wird sie hier nicht angezeigt; der Pfad oben nennt ihre Schlüssel.`,
     querySecret: pv` In dieser Query steht ein gespeichertes Geheimnis; es ist maskiert (***).`,
     headers: (names, block) => pv` Sie setzt die Header ${names}.${block}`,
+    bodyUnreadable: pv` Der Body hat zu viele prozentkodierte Zeichen, um ihn auf ein gespeichertes Geheimnis zu prüfen, darum wird er hier nicht angezeigt. Wenn du nicht weisst, was diese Anfrage sendet, lehne sie ab.`,
     bodySecret: pv` Der Body enthält ein gespeichertes Geheimnis und wird nicht angezeigt.`,
     bodyTooLarge: (bytes) => pv` Der Body (${bytes} Bytes) ist zu gross zum Anzeigen; seine Feldnamen sind aufgeführt.`,
     noteOnce: pv` Erlauben sendet diese Anfrage einmal, jetzt; beim nächsten Mal fragt lynox wieder.`,
