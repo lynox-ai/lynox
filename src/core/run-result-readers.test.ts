@@ -80,7 +80,7 @@ describe("a run's end with member lines, by reader", () => {
     expect(stored('a')).toEqual({ last_run_result: 'All done.', last_run_member_notes: null });
   });
 
-  it('the migration splits a result recorded with its lines: the owner reads it as before, a mandate the sentence', () => {
+  it('the migration splits only a halted result with its lines: the owner reads it as before, a mandate the sentence', () => {
     // A database from before: the column and its version taken back out, a result with its lines under it.
     const path = join(dir, 'old.db');
     new EngineDb(path, '').close();
@@ -97,20 +97,30 @@ describe("a run's end with member lines, by reader", () => {
     insert.run('headless', 'Headless', 'cron', 'run_agent', `\n• ${LINE}`, 'halted');
     insert.run('none', 'None', 'cron', 'run_agent', null, null);
     insert.run('unstated', 'Unstated', 'cron', 'run_agent', `${REPLY}\n• ${LINE}`, null);
+    // A failed workflow puts its grant and write notes under its result in the same form; a bulk
+    // run's halt sentence can list items so. Neither is split.
+    const grantNote = 'Pipeline failed\n• This run had no write grant: the plan was not stamped.';
+    insert.run('workflow', 'Workflow', 'cron', 'run_workflow', grantNote, 'failed');
+    const bulkHalt = 'The run halted.\n• 2 of 5 targets written.';
+    insert.run('bulk-r1', 'Bulk', 'bulk', 'bulk_apply', bulkHalt, 'halted');
     raw.close();
     const migrated = new EngineDb(path, '');
     const rows = migrated.getDb().prepare('SELECT id, last_run_result, last_run_member_notes FROM triggers ORDER BY id').all();
     migrated.close();
     expect(rows).toEqual([
-      { id: 'failed', last_run_result: 'Found:', last_run_member_notes: JSON.stringify([`one\n• ${LINE}`]) },
-      { id: 'headless', last_run_result: '', last_run_member_notes: JSON.stringify([LINE]) },
+      // A bulk run's trigger keeps its result as it is.
+      { id: 'bulk-r1', last_run_result: bulkHalt, last_run_member_notes: null },
+      // Only a halted result is split: a failed one keeps its list, member lines too, as before.
+      { id: 'failed', last_run_result: failedWithList, last_run_member_notes: null },
+      { id: 'headless', last_run_result: '', last_run_member_notes: JSON.stringify({ migrated: LINE }) },
       // A success never carries lines: its own list stays where it is.
       { id: 'listed', last_run_result: listed, last_run_member_notes: null },
       { id: 'none', last_run_result: null, last_run_member_notes: null },
-      { id: 'old', last_run_result: REPLY, last_run_member_notes: JSON.stringify([`${LINE}\n• Another line.`]) },
+      { id: 'old', last_run_result: REPLY, last_run_member_notes: JSON.stringify({ migrated: `${LINE}\n• Another line.` }) },
       { id: 'plain', last_run_result: 'All done.', last_run_member_notes: null },
-      // No status says success: split, the side that hides.
-      { id: 'unstated', last_run_result: REPLY, last_run_member_notes: JSON.stringify([LINE]) },
+      // No status says halted: left as it is.
+      { id: 'unstated', last_run_result: `${REPLY}\n• ${LINE}`, last_run_member_notes: null },
+      { id: 'workflow', last_run_result: grantNote, last_run_member_notes: null },
     ]);
     // Read back as the routes read it: the owner the text as it was stored, a mandate the sentence.
     const reopened = new EngineDb(path, '');
@@ -131,9 +141,11 @@ describe("a run's end with member lines, by reader", () => {
       expect(read('failed')['last_run_result']).toBe(failedWithList);
       expect(read('headless')['last_run_result']).toBe(`\n• ${LINE}`);
       expect(read('listed')['last_run_result']).toBe(listed);
-      for (const id of ['old', 'failed', 'headless']) expect(readAsMandate(id)['last_run_result']).toBe(forMandatesHere());
+      for (const id of ['old', 'headless']) expect(readAsMandate(id)['last_run_result']).toBe(forMandatesHere());
       expect(readAsMandate('listed')['last_run_result']).toBe(listed);
-      expect(readAsMandate('unstated')['last_run_result']).toBe(forMandatesHere());
+      // A failed workflow's grant note reaches the mandate as it did before the upgrade.
+      expect(readAsMandate('workflow')['last_run_result']).toBe(grantNote);
+      expect(readAsMandate('bulk-r1')['last_run_result']).toBe(bulkHalt);
     } finally { reopened.close(); }
   });
 
@@ -143,6 +155,17 @@ describe("a run's end with member lines, by reader", () => {
     const row = history.getTrigger('a')!;
     expect(memberNotesRepeat(row, [LINE])).toBe(true);
     expect(memberNotesRepeat(row, ['another line'])).toBe(false);
+  });
+
+  it('a line a run end stores is read back whole, also one that holds the separator, so its repeat is one', () => {
+    seed('a');
+    // A plan or profile label the owner chose can hold what the lines are joined with.
+    const labelled = 'Connection not used: CRM (profile "a\n• b") was connected by eva@kanzlei.example.';
+    tm.recordTaskRun('a', REPLY, 'halted', { memberNotes: [labelled] });
+    expect(stored('a')).toEqual({ last_run_result: REPLY, last_run_member_notes: JSON.stringify([labelled]) });
+    const row = history.getTrigger('a')!;
+    expect(row.last_run_member_notes).toEqual([labelled]);
+    expect(memberNotesRepeat(row, [labelled])).toBe(true);
   });
 
   it('lastRunResultFor: the owner reads result and lines, anyone else the sentence; without lines both read the result', () => {

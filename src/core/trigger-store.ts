@@ -284,15 +284,19 @@ const TRIGGER_READ_COLS =
  * `string | undefined`; both mean "absent" and every consumer treats them so).
  */
 /**
- * The stored lines of a last run; a malformed or empty value is none, never a throw. An entry the
- * v79 migration split off a result holds every line after the first, joined as recorded: it is
- * read as those lines, so a repeat compares line by line, and read back joined it is the same text.
+ * The stored lines of a last run; a malformed or empty value is none, never a throw. A run end
+ * stores its lines as an array, each read as it was recorded, so a line that holds `\n• ` itself
+ * stays one line. The entry the v79 migration split off a result (`{"migrated": …}`) holds every
+ * line after the first, joined as recorded: it alone is read as those lines, so a repeat compares
+ * line by line, and read back joined it is the same text.
  */
 function memberNotesOf(raw: string | null): { last_run_member_notes?: string[] } {
   if (raw === null) return {};
   try {
     const parsed: unknown = JSON.parse(raw);
-    const lines = Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string').flatMap((l) => l.split('\n• ')) : [];
+    const migrated = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as { migrated?: unknown }).migrated : undefined;
+    const lines = typeof migrated === 'string' ? migrated.split('\n• ')
+      : Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string') : [];
     return lines.length > 0 ? { last_run_member_notes: lines } : {};
   } catch { return {}; }
 }

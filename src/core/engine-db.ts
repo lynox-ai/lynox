@@ -1704,17 +1704,23 @@ const MIGRATIONS: string[] = [
   // of the lines as recorded; NULL: none). The owner reads them under the result; anyone else
   // reads a fixed sentence in place of a result that has them (`lastRunResultFor`).
   // A result recorded before carries its lines under it (`result\n• line…`), and a trigger that
-  // does not run again would keep them in reach of every reader. So each such result is split at
-  // its first `\n• `: what follows goes into the column as one entry. The owner reads the same
-  // text as before (`lastRunResultFor` puts it back with the same separator); anyone else reads
-  // the sentence. Not a success: a run that noted lines never ends as one (`withMemberNotes`
-  // halts it), so a successful reply with a list of its own stays as it is.
+  // does not run again would keep them in reach of every reader. So such a result is split at its
+  // first `\n• `: what follows goes into the column as one entry, marked as split here
+  // (`{"migrated": …}`), so that only this entry is read back as several lines. The owner reads the
+  // same text as before (`lastRunResultFor` puts it back with the same separator); anyone else
+  // reads the sentence.
+  // Only a halted run's result: a run that noted lines halts (`withMemberNotes` turns its success
+  // into a halt), and other ends put lines of their own under the result in the same form (a
+  // failed workflow's grant and write notes, a model's list), which stay as they are. A bulk run's
+  // trigger is left alone too: its halt sentence can list items the same way. What this leaves as
+  // before: a failed run, or a bulk halt, whose result carries member lines keeps them in the result
+  // until the trigger's next run end writes the column.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (79);
    ALTER TABLE triggers ADD COLUMN last_run_member_notes TEXT;
    UPDATE triggers SET
-     last_run_member_notes = json_array(substr(last_run_result, instr(last_run_result, char(10) || '• ') + 3)),
+     last_run_member_notes = json_object('migrated', substr(last_run_result, instr(last_run_result, char(10) || '• ') + 3)),
      last_run_result = substr(last_run_result, 1, instr(last_run_result, char(10) || '• ') - 1)
-   WHERE instr(last_run_result, char(10) || '• ') > 0 AND last_run_status IS NOT 'success';`,
+   WHERE instr(last_run_result, char(10) || '• ') > 0 AND last_run_status = 'halted' AND substr(effect, 1, 5) <> 'bulk_';`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */
