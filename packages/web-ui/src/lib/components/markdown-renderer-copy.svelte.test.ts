@@ -137,7 +137,7 @@ describe('the copy button on an artifact card', () => {
 		await render(dataCard(rows.join('\n')));
 		expect(copyButton()?.textContent).toMatch(new RegExp(`^(Alle 61${NBSP}Zeilen kopieren|Copy all 61${NBSP}lines)$`));
 		expect(copyButton()?.getAttribute('aria-label')).toMatch(new RegExp(`^(Alle 61${NBSP}Zeilen kopieren: Liste|Copy all 61${NBSP}lines: Liste)$`));
-		expect(target.querySelector('.artifact-data-more')?.textContent).toMatch(new RegExp(`^(60 von 61${NBSP}Zeilen angezeigt|60 of 61${NBSP}lines shown)$`));
+		expect(target.querySelector('.artifact-data-more')?.textContent).toMatch(new RegExp(`^(Vorschau: die ersten 60 von 61${NBSP}Zeilen|Preview: first 60 of 61${NBSP}lines)$`));
 		await clickCopy();
 		expect(written).toEqual([rows.join('\n')]);
 		expect(toasts.map((x) => x.text)).toEqual([expect.stringMatching(new RegExp(`^(Kopiert: 61${NBSP}Zeilen\\.|Copied: 61${NBSP}lines\\.)$`))]);

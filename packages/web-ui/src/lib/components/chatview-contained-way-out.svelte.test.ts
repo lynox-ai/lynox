@@ -183,7 +183,7 @@ describe('ChatView in a chat that only reads', () => {
 		contained = true;
 		await turnThenRender('Verbessere die Beschreibungen', []);
 		const note = target.querySelector('[data-contained-bar] [data-plan-new-chat-note]');
-		expect(note?.textContent).toMatch(/Mit geht nur, was du geschrieben hast|Only what you wrote comes along/);
+		expect(note?.textContent).toMatch(/^(In den neuen Chat kommt nur mit, was du geschrieben hast\. Brauchst du einen Text von lynox, kopiere ihn vorher\.|Only what you wrote goes to the new chat\. If you need a text from lynox, copy it first\.)$/);
 		// Once, in the bar; not again under the button in the history.
 		expect(target.querySelectorAll('[data-plan-new-chat-note]')).toHaveLength(1);
 	});
