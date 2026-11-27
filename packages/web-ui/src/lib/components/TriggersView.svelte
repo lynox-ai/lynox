@@ -664,8 +664,9 @@
 								     stage and host instead (`shownTitle`); it offers no takeover. -->
 								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if (pausedOpen(trigger) || (ownerActs && writtenByMember(trigger))) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{#if shownHost(trigger) !== null}{HOST_SEP}<BulkHost value={shownHost(trigger) ?? ''} testid="trigger-bulk-host" />{/if}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
-								<!-- Not beside "Completed · paused": one mark says the plan does not run. -->
-								{#if trigger.enabled === 0 && !pausedDone(trigger)}
+								<!-- Not at a completed plan: its own mark says it does not run, and it has no switch
+								     that "Paused" would offer to resume (U-275 N6). -->
+								{#if trigger.enabled === 0 && trigger.status !== 'completed'}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-switched-off>{t('triggers.paused')}</span>
 								{/if}
 								{#if held(trigger)}

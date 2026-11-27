@@ -758,6 +758,11 @@ describe('a completed plan says so, and a completed paused one its workflow case
 		await remount();
 		expect(target.querySelector('[data-trigger-paused-done]')?.textContent?.trim()).toBe('Abgeschlossen · pausiert');
 		expect([has('[data-trigger-switched-off]'), has('[data-trigger-completed]')]).toEqual([false, false]);
+		// Completed and switched off by the owner, without a pause: "Completed" alone, no "Paused".
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'completed', enabled: 0 }];
+		await remount();
+		expect(target.querySelector('[data-trigger-completed]')?.textContent?.trim()).toBe('Abgeschlossen');
+		expect(has('[data-trigger-switched-off]')).toBe(false);
 		// CONTROL: an open plan the owner switched off keeps "Paused".
 		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'open', enabled: 0 }];
 		await remount();

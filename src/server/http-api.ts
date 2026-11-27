@@ -159,7 +159,7 @@ import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './webhook-receiver.js';
 import { requestLogUrl } from './request-log-url.js';
-import { isPaused, pausedDoneWorkflow, pausedDoneWorkflowText, pausedForOf, planPauseOn, type PausedDoneWorkflowReader } from '../core/plan-pause.js';
+import { isPaused, pausedDoneReaderOf, pausedDoneWorkflow, pausedDoneWorkflowText, pausedForOf, planPauseOn, type PausedDoneWorkflowReader } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
@@ -3496,7 +3496,7 @@ export class LynoxHTTPApi {
     if (trigger === undefined || !isPaused(trigger)) return false;
     const ownerMay = action === 'enable' || action === 'complete' || action === 'delete';
     if (isOwnerPrincipal(this._principalOf(req)) && ownerMay) return false;
-    errorResponse(res, 409, pausedRefusal(trigger, this.engine?.getRunHistory()), 'paused');
+    errorResponse(res, 409, pausedRefusal(trigger, pausedDoneReaderOf(this.engine?.getRunHistory(), this.engine?.getMandateEnds())), 'paused');
     return true;
   }
 
@@ -9927,6 +9927,7 @@ export class LynoxHTTPApi {
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
       const history = engine.getRunHistory();
+      const doneReader = pausedDoneReaderOf(history, engine.getMandateEnds());
       // `paused` is no status value: it reads `paused_at` (`plan-pause.ts`).
       const pausedFilter = (status as string | undefined) === 'paused';
       const rows = pausedFilter
@@ -9998,7 +9999,7 @@ export class LynoxHTTPApi {
             // A completed plan that keeps its pause: whether a new plan on its workflow needs that
             // workflow's takeover first, and which workflow that is (U-275 N6). Not sent when it
             // could not be read: the view then gives the condition, as before.
-            ...pausedDoneWorkflowField(trigger, history),
+            ...pausedDoneWorkflowField(trigger, doneReader),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -10262,7 +10263,7 @@ export class LynoxHTTPApi {
         // would always miss, dropping the response to the {id, enabled} stub.
         const updated = engine.getRunHistory()?.getTrigger(params['id']!);
         // Switching a paused plan on starts nothing until it is taken over, and the answer says so.
-        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: pausedRefusal(updated, engine.getRunHistory()) } : {};
+        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: pausedRefusal(updated, pausedDoneReaderOf(engine.getRunHistory(), engine.getMandateEnds())) } : {};
         jsonResponse(res, 200, { ...(updated !== undefined ? triggerForRoute(updated, this._principalOf(_req)) : { id: params['id'], enabled: b['enabled'] ? 1 : 0 }), ...pausedNote });
         return;
       }
@@ -10685,7 +10686,7 @@ export class LynoxHTTPApi {
           return;
         }
         if (outcome.reason === 'paused') {
-          errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!), engine.getRunHistory()), 'paused');
+          errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!), pausedDoneReaderOf(engine.getRunHistory(), engine.getMandateEnds())), 'paused');
           return;
         }
         errorResponse(res, 404, 'Trigger not found'); return;

@@ -6,7 +6,7 @@ import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidde
 import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
-import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, isPaused, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, isPaused, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type BeforeTriggerWrite } from '../../core/task-manager.js';
@@ -235,6 +235,11 @@ reader?: PausedDoneWorkflowReader | null): string {
   else if (t.effect === 'run_workflow') parts.push('NO WORKFLOW LINKED — it dispatches to one and has none');
   if (t.pipeline_params) parts.push(`params ${cut(clean(t.pipeline_params), PARAMS_CHARS)}`);
   return parts.length === 0 ? '' : `\n    ↳ ${parts.join(FIELD_SEPARATOR)}`;
+}
+
+/** What a completed paused plan's line reads its workflow's case with (`pausedDoneWorkflow`). */
+function doneReader(agent: IAgent): PausedDoneWorkflowReader | null {
+  return pausedDoneReaderOf(agent.toolContext.runHistory, agent.toolContext.mandateEnds);
 }
 
 // Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger
@@ -752,7 +757,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       if (pausedTarget !== undefined && isPaused(pausedTarget)
         && !(isOwnerPrincipal(agent.principal) && input.status === 'completed')) {
         return pausedTarget.status === 'completed'
-          ? pausedDoneUpdateRefusal(pausedDoneWorkflow(pausedTarget, agent.toolContext.runHistory))
+          ? pausedDoneUpdateRefusal(pausedDoneWorkflow(pausedTarget, doneReader(agent)))
           : `Error: this plan is ${pausedModelText(pausedTarget)}. It cannot be changed until then.`;
       }
       return withInstanceWrite(agent, {
@@ -775,7 +780,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (input.status === 'completed') {
           const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal, mark), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
-          return `Task completed: ${formatTaskLine(task, '', agent.toolContext.runHistory)}`;
+          return `Task completed: ${formatTaskLine(task, '', doneReader(agent))}`;
         }
 
         const task = w.run('apply', () => managerRef.update(input.task_id, {
@@ -854,19 +859,19 @@ export const taskListTool: ToolEntry<TaskListInput> = {
         // Use the history directly for overdue
         const overdue = managerRef.getWeekSummary(scopes).overdue;
         if (overdue.length === 0) return 'No overdue tasks.';
-        return overdue.map(t => formatTaskLine(t, '', agent.toolContext.runHistory)).join('\n');
+        return overdue.map(t => formatTaskLine(t, '', doneReader(agent))).join('\n');
       }
       if (input.due === 'today') {
         const summary = managerRef.getWeekSummary(scopes);
         const tasks = [...summary.overdue, ...summary.dueToday];
         if (tasks.length === 0) return 'No tasks due today (and none overdue).';
-        return tasks.map(t => formatTaskLine(t, '', agent.toolContext.runHistory)).join('\n');
+        return tasks.map(t => formatTaskLine(t, '', doneReader(agent))).join('\n');
       }
       if (input.due === 'week') {
         const summary = managerRef.getWeekSummary(scopes);
         const tasks = [...summary.overdue, ...summary.dueToday, ...summary.dueThisWeek];
         if (tasks.length === 0) return 'No tasks due this week.';
-        return tasks.map(t => formatTaskLine(t, '', agent.toolContext.runHistory)).join('\n');
+        return tasks.map(t => formatTaskLine(t, '', doneReader(agent))).join('\n');
       }
     }
 
@@ -910,7 +915,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     const limited = tasks.slice(0, input.limit ?? 20);
     if (limited.length === 0) return 'No tasks found.';
 
-    const lines = limited.map(t => formatTaskLine(t, '', agent.toolContext.runHistory));
+    const lines = limited.map(t => formatTaskLine(t, '', doneReader(agent)));
     if (tasks.length > limited.length) {
       lines.push(`... and ${tasks.length - limited.length} more`);
     }

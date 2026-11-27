@@ -9,7 +9,7 @@ import { MandateEnds } from './mandate-ends.js';
 import { TriggerStore } from './trigger-store.js';
 import { ADVANCE_WARNING_S, PAUSE_NOTICE_BODY_MAX, PAUSE_NOTICE_TITLE_MAX, advanceWarning, claimAdvanceWarnings, deliveredWarning, markWarningsDelivered, pauseNotice, pausePlanNow, type PausedFor } from './plan-pause.js';
 import {
-  claimPauseNotices, pauseEndedPlans, pausedDoneWorkflow, pausedForOf, planEndedMembers, rowPlanMembers, setPlanPauseForTests,
+  claimPauseNotices, pauseEndedPlans, pausedDoneReaderOf, pausedDoneWorkflow, pausedForOf, planEndedMembers, rowPlanMembers, setPlanPauseForTests,
   writePause, PLAN_PAUSE_DEFAULT, type PausePlanRow,
 } from './plan-pause.js';
 
@@ -1124,55 +1124,92 @@ describe('whether a completed, paused plan needs its workflow taken over first (
     b.db.prepare('UPDATE workflows SET definition_json = ? WHERE id = ?').run(JSON.stringify({ id, name, steps: [] }), id);
     return id;
   };
-  const H_ENDED: PausedFor = { mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: NOW - H, roles: ['workflow-created'], closedPrompt: false };
-  // A completed workflow plan whose pause names the ended member `h`.
-  const donePlan = (b: Box, id: string, wf: string, ended: readonly PausedFor[] = [H_ENDED]): ReturnType<RunHistory['getTrigger']> => {
+  const NOW_S = Math.floor(Date.now() / 1000);
+  const ended = (b: Box, email: string): void => login(b, email, NOW_S - H, NOW_S - 2 * H);
+  const live = (b: Box, email: string): void => login(b, email, NOW_S + H, NOW_S - H);
+  const entry = (email: string): PausedFor => ({ mandateId: `g-${email}`, email, reason: 'expired', endsAt: NOW_S - H, roles: ['created'], closedPrompt: false });
+  // A completed workflow plan whose pause names `pausedBy`.
+  const donePlan = (b: Box, id: string, wf: string, pausedBy = 'h@x.ch'): ReturnType<RunHistory['getTrigger']> => {
     plan(b, id, { effect: 'run_workflow', workflow: wf });
-    writePause(b.db, id, [...ended]);
+    writePause(b.db, id, [entry(pausedBy)]);
     b.db.prepare("UPDATE triggers SET status = 'completed' WHERE id = ?").run(id);
     return b.history.getTrigger(id);
   };
+  const reader = (b: Box): ReturnType<typeof pausedDoneReaderOf> => pausedDoneReaderOf(b.history, b.ends);
 
-  it('names the workflow when its mark is a member whose end paused the plan, by the mark a run reads', () => {
+  it('names the workflow when the mark a run reads has ended now, creator or editor, with or without a grant id', () => {
     const b = box();
+    ended(b, 'h@x.ch');
     named(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
-    expect(pausedDoneWorkflow(donePlan(b, 'p', 'wf')!, b.history)).toEqual({ kind: 'workflow', workflowId: 'wf', name: 'Monatsbericht' });
+    expect(pausedDoneWorkflow(donePlan(b, 'p', 'wf')!, reader(b))).toEqual({ kind: 'workflow', workflowId: 'wf', name: 'Monatsbericht' });
+    // The editor's mark is the one a run reads: created by a live member, last changed by h.
+    live(b, 'o@x.ch');
+    named(b, 'wf-ed', { email: 'o@x.ch', grant: 'g-o@x.ch' });
+    b.db.prepare("UPDATE workflows SET mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now') WHERE id = 'wf-ed'").run(tag('h@x.ch'), 'g-h@x.ch');
+    expect(pausedDoneWorkflow(donePlan(b, 'p-ed', 'wf-ed')!, reader(b)).kind).toBe('workflow');
+    // A mark without a grant id counts as ended, as at the run.
+    named(b, 'wf-nogrant', { email: 'n@x.ch', grant: null });
+    expect(pausedDoneWorkflow(donePlan(b, 'p-ng', 'wf-nogrant')!, reader(b)).kind).toBe('workflow');
     // A definition that cannot be read still needs the takeover; it is named by no name.
     workflow(b, 'wf-unread', { email: 'h@x.ch', grant: 'g-h@x.ch' });
     b.db.prepare("UPDATE workflows SET definition_json = 'not json' WHERE id = 'wf-unread'").run();
-    expect(pausedDoneWorkflow(donePlan(b, 'p-unread', 'wf-unread')!, b.history)).toEqual({ kind: 'workflow', workflowId: 'wf-unread', name: null });
-    // The editor's mark is the one a run reads: created by someone else, last changed by h.
-    named(b, 'wf-ed', { email: 'o@x.ch', grant: 'g-o@x.ch' });
-    b.db.prepare("UPDATE workflows SET mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now') WHERE id = 'wf-ed'").run(tag('h@x.ch'), 'g-h@x.ch');
-    expect(pausedDoneWorkflow(donePlan(b, 'p-ed', 'wf-ed')!, b.history).kind).toBe('workflow');
-    // A mark without a grant id counts as ended, as at the run.
-    named(b, 'wf-nogrant', { email: 'n@x.ch', grant: null });
-    expect(pausedDoneWorkflow(donePlan(b, 'p-ng', 'wf-nogrant')!, b.history).kind).toBe('workflow');
+    expect(pausedDoneWorkflow(donePlan(b, 'p-unread', 'wf-unread')!, reader(b))).toEqual({ kind: 'workflow', workflowId: 'wf-unread', name: null });
   });
 
-  it('says none once the owner took the workflow over, when someone else shapes it, for the owner\'s workflow, a gone one and an agent plan', () => {
+  it('reads the mark now, not the frozen pause: a member who ended after it counts, one renewed since does not', () => {
     const b = box();
+    // Paused for a, its workflow by w, whose access ended only later.
+    ended(b, 'a@x.ch');
+    ended(b, 'w@x.ch');
+    named(b, 'wf-w', { email: 'w@x.ch', grant: 'g-w@x.ch' });
+    expect(pausedDoneWorkflow(donePlan(b, 'later', 'wf-w', 'a@x.ch')!, reader(b)).kind).toBe('workflow');
+    // Paused for r, who logged in again with a later end since: the workflow takeover would answer
+    // that r is live, and a new plan would run.
+    ended(b, 'r@x.ch');
+    named(b, 'wf-r', { email: 'r@x.ch', grant: 'g-r@x.ch' });
+    const renewed = donePlan(b, 'renewed', 'wf-r', 'r@x.ch')!;
+    expect(pausedDoneWorkflow(renewed, reader(b)).kind, 'control: ended, it names the workflow').toBe('workflow');
+    live(b, 'r@x.ch');
+    expect(pausedDoneWorkflow(renewed, reader(b))).toEqual({ kind: 'none' });
+  });
+
+  it('says none once the owner took the workflow over, for a live member\'s workflow, the owner\'s, and an agent plan', () => {
+    const b = box();
+    ended(b, 'h@x.ch');
     named(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
+    const taken = donePlan(b, 'taken', 'wf')!;
+    expect(pausedDoneWorkflow(taken, reader(b)).kind, 'control: before the takeover').toBe('workflow');
     b.db.prepare('UPDATE workflows SET covered_created_by = created_by, covered_created_id = created_mandate_id, covered_created_at = created_at WHERE id = ?').run('wf');
-    expect(pausedDoneWorkflow(donePlan(b, 'taken', 'wf')!, b.history)).toEqual({ kind: 'none' });
-    // The workflow's member is live and not among the ended: a new plan would run.
+    expect(pausedDoneWorkflow(taken, reader(b))).toEqual({ kind: 'none' });
+    // Its member is live: a new plan on it would run.
+    live(b, 'o@x.ch');
     named(b, 'wf-o', { email: 'o@x.ch', grant: 'g-o@x.ch' });
-    expect(pausedDoneWorkflow(donePlan(b, 'other', 'wf-o')!, b.history)).toEqual({ kind: 'none' });
+    expect(b.ends.isLive('g-o@x.ch'), 'the member is live').toBe(true);
+    expect(pausedDoneWorkflow(donePlan(b, 'other', 'wf-o')!, reader(b))).toEqual({ kind: 'none' });
     named(b, 'wf-own');
-    expect(pausedDoneWorkflow(donePlan(b, 'own', 'wf-own')!, b.history)).toEqual({ kind: 'none' });
-    expect(pausedDoneWorkflow(donePlan(b, 'gone', 'wf-gone')!, b.history)).toEqual({ kind: 'none' });
-    expect(pausedDoneWorkflow({ effect: 'run_agent', paused_for: JSON.stringify([H_ENDED]) }, b.history)).toEqual({ kind: 'none' });
+    expect(pausedDoneWorkflow(donePlan(b, 'own', 'wf-own')!, reader(b))).toEqual({ kind: 'none' });
+    expect(pausedDoneWorkflow({ effect: 'run_agent' }, reader(b))).toEqual({ kind: 'none' });
   });
 
-  it('says unknown when the workflow or its marks cannot be read, or there is nothing to read them with', () => {
+  it('says unknown when its marks or the access ends cannot be read, or there is nothing to read them with; none once its workflow is deleted', () => {
     const b = box();
+    ended(b, 'h@x.ch');
     named(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
     const t = donePlan(b, 'p', 'wf')!;
+    // A deleted workflow takes the plan's link with it (ON DELETE SET NULL): no workflow to take over.
+    named(b, 'wf-del', { email: 'h@x.ch', grant: 'g-h@x.ch' });
+    donePlan(b, 'gone', 'wf-del');
+    b.db.prepare("DELETE FROM workflows WHERE id = 'wf-del'").run();
+    expect(pausedDoneWorkflow(b.history.getTrigger('gone')!, reader(b))).toEqual({ kind: 'none' });
+    // Marks that are not there while the link stands (a read between the two) are not known.
     expect(pausedDoneWorkflow(t, null)).toEqual({ kind: 'unknown' });
-    expect(pausedDoneWorkflow(t, { getWorkflowExact: () => { throw new Error('locked'); }, getWorkflowAuthorship: (id) => b.history.getWorkflowAuthorship(id) })).toEqual({ kind: 'unknown' });
-    expect(pausedDoneWorkflow(t, { getWorkflowExact: () => ({ name: 'W' }), getWorkflowAuthorship: () => { throw new Error('locked'); } })).toEqual({ kind: 'unknown' });
-    // A workflow that is there but whose marks are not: not known, never "none".
-    expect(pausedDoneWorkflow(t, { getWorkflowExact: () => ({ name: 'W' }), getWorkflowAuthorship: () => undefined })).toEqual({ kind: 'unknown' });
+    expect(pausedDoneReaderOf(b.history, null), 'no store of access ends: no reader').toBeNull();
+    expect(pausedDoneReaderOf(null, b.ends)).toBeNull();
+    const base = reader(b)!;
+    expect(pausedDoneWorkflow(t, { ...base, getWorkflowAuthorship: () => { throw new Error('locked'); } })).toEqual({ kind: 'unknown' });
+    expect(pausedDoneWorkflow(t, { ...base, getWorkflowAuthorship: () => undefined })).toEqual({ kind: 'unknown' });
+    expect(pausedDoneWorkflow(t, { ...base, isLive: () => { throw new Error('locked'); } })).toEqual({ kind: 'unknown' });
+    // The name is read after the decision: a definition read that fails keeps the case.
+    expect(pausedDoneWorkflow(t, { ...base, getWorkflowExact: () => { throw new Error('locked'); } })).toEqual({ kind: 'workflow', workflowId: 'wf', name: null });
   });
 });
-

@@ -245,7 +245,7 @@ describe('the pause is held to its takeover (real engine)', () => {
       return id;
     };
     const BASE = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.';
-    const ITS = ' Its workflow was created or last changed by the person whose access ended: the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+    const ITS = ' Its workflow was created or last changed by someone whose access has ended: the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
     const row = async (id: string, cookie = ownerCookie): Promise<Record<string, unknown> | undefined> =>
       ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((r) => r['id'] === id);
     wf('wf-done-a', who);
