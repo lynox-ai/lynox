@@ -72,8 +72,8 @@ describe('the Session writes a call its tool reports as not done as a failed row
   async function runSave(paramName: string): Promise<{ rows: ToolCallRecord[]; captures: number }> {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-soft-failure-row-'));
     dirs.push(dir);
-    // Nothing from the caller's shell reaches the engine: no vault key, no instance id, no other
-    // provider, no error sink.
+    // These five names from the caller's shell do not reach the engine: a vault key, an instance id,
+    // another provider and its key, an error sink.
     for (const k of ['LYNOX_VAULT_KEY', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_BUGSINK_DSN', 'LYNOX_LLM_PROVIDER', 'MISTRAL_API_KEY']) vi.stubEnv(k, undefined);
     vi.stubEnv('LYNOX_DATA_DIR', dir);
     vi.stubEnv('ANTHROPIC_API_KEY', 'test-key-not-real');
