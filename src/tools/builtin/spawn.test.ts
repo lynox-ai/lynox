@@ -6965,8 +6965,9 @@ describe('spawn_agent holds a batch against the daily and monthly caps', () => {
     configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 10, monthlyCapUSD: 500 });
     expect(reservePersistentBudget(8.5).allowed, 'another run holds $8.50').toBe(true);
     await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
-      'Not delegated: the daily budget of $10.00 has $0.50 left right now, because $8.50 of it is held for work that is still running. '
-      + 'That is less than one of these sub-agents may spend. Try again when that work has finished.',
+      'Not delegated: the daily budget of $10.00 has $0.50 left right now: $1.00 is already spent and $8.50 is held for work that is still running. '
+      + 'That is less than one of these sub-agents may spend. Tell the user that work still running holds the budget, '
+      + 'and that this can be delegated again once it has finished.',
     );
     expect(mockSend).not.toHaveBeenCalled();
   });

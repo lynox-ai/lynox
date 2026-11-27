@@ -164,10 +164,15 @@ function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | und
   // Room that other work still running holds comes back when it ends. Only the amount is named,
   // never which work: a run here need not be one that may see what else this instance runs.
   if (r.headroomUSD < smallestUSD && (r.recordedHeadroomUSD ?? 0) >= smallestUSD) {
-    const heldUSD = (r.recordedHeadroomUSD ?? 0) - r.headroomUSD;
-    return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left right now, `
-      + `because ${usd(heldUSD)} of it is held for work that is still running. That is less than one of these `
-      + 'sub-agents may spend. Try again when that work has finished.';
+    // All three from the one refusal: recorded headroom is unfloored here (it is at least a
+    // child's hold), so cap − it is what is spent, and it − headroom what is held.
+    const recorded = r.recordedHeadroomUSD ?? 0;
+    const spentUSD = r.capUSD - recorded;
+    const heldUSD = recorded - r.headroomUSD;
+    return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left right now: `
+      + `${usd(spentUSD)} is already spent and ${usd(heldUSD)} is held for work that is still running. `
+      + 'That is less than one of these sub-agents may spend. Tell the user that work still running holds '
+      + 'the budget, and that this can be delegated again once it has finished.';
   }
   if (r.headroomUSD < smallestUSD) {
     return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left, `
