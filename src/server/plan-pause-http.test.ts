@@ -205,7 +205,8 @@ describe('the pause is held to its takeover (real engine)', () => {
   });
 
   it('a completed plan that keeps its pause is refused with its own sentence, without the takeover; an open one keeps it (U-275)', async () => {
-    const DONE = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again. If it runs a workflow that the person whose access ended created or last changed, the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+    // A notify plan runs no workflow: no workflow sentence (U-275 N6).
+    const DONE = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.';
     const OPEN = 'paused because an access ended; it needs to be taken over';
     const donePlan = (): string => {
       const id = pausedPlan();
@@ -222,6 +223,55 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect([sw.status, sw.json['paused'], sw.json['note']]).toEqual([200, true, DONE]);
     const open = await ask('POST', `/api/triggers/${pausedPlan()}/run`, ownerCookie);
     expect([open.status, open.json['error']], 'control: an open paused plan still names the takeover').toEqual([409, OPEN]);
+  });
+
+  it('a completed paused workflow plan says whether its workflow is taken over first, in the refusal and the list, and names it to the view only (U-275 N6)', async () => {
+    const who = { kind: 'mandate' as const, email: 'uma@example.invalid', mandateId: 'TEST-MANDATE-DONE-WF' };
+    const history = engine.getRunHistory()!;
+    const nowS = Math.floor(Date.now() / 1000);
+    const ENDED = [{ mandateId: who.mandateId, email: who.email, reason: 'expired' as const, endsAt: nowS - 3600, roles: ['workflow-created' as const], closedPrompt: false }];
+    const wf = (id: string, by: typeof who | null): void => {
+      history.insertPlannedPipeline({
+        id, name: `FX-${id}`, goal: 'g', steps: [{ id: 's1', task: 't' }], reasoning: '', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', template: true,
+      }, by);
+    };
+    const done = (id: string, workflow: string): string => {
+      history.insertTrigger({
+        id, title: 'Runs it', source: 'cron', effect: 'run_workflow', pipelineId: workflow, scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+        confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner',
+      });
+      writePause(db(), id, ENDED);
+      db().prepare("UPDATE triggers SET status = 'completed' WHERE id = ?").run(id);
+      return id;
+    };
+    const BASE = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.';
+    const ITS = ' Its workflow was created or last changed by someone whose access has ended: the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+    const row = async (id: string, cookie = ownerCookie): Promise<Record<string, unknown> | undefined> =>
+      ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((r) => r['id'] === id);
+    wf('wf-done-a', who);
+    wf('wf-done-own', null);
+    try {
+      const a = done('done-wf-a', 'wf-done-a');
+      const run = await ask('POST', `/api/triggers/${a}/run`, ownerCookie);
+      expect([run.status, run.json['code'], run.json['error']]).toEqual([409, 'paused', BASE + ITS]);
+      // The model and the API never carry the workflow's name; the list gives it to the view.
+      expect(String(run.json['error'])).not.toContain('FX-');
+      expect((await row(a))?.['paused_done_workflow']).toEqual({ name: 'FX-wf-done-a' });
+      expect((await row(a, mandateCookie))?.['paused_done_workflow']).toEqual({ name: 'FX-wf-done-a' });
+      // The owner's own workflow: nothing to take over first.
+      const own = done('done-wf-own', 'wf-done-own');
+      expect((await ask('POST', `/api/triggers/${own}/run`, ownerCookie)).json['error']).toBe(BASE);
+      expect((await row(own))?.['paused_done_workflow']).toBeNull();
+      // After the owner took the workflow over, neither says it any more.
+      db().prepare("UPDATE workflows SET covered_created_by = created_by, covered_created_id = created_mandate_id, covered_created_at = created_at WHERE id = 'wf-done-a'").run();
+      expect((await ask('POST', `/api/triggers/${a}/run`, ownerCookie)).json['error']).toBe(BASE);
+      expect((await row(a))?.['paused_done_workflow']).toBeNull();
+      // CONTROL: an open paused plan and a completed plan without a pause carry no such field.
+      const open = pausedPlan();
+      expect(await row(open)).not.toHaveProperty('paused_done_workflow');
+    } finally {
+      db().prepare("DELETE FROM triggers WHERE id LIKE 'done-wf-%'").run();
+    }
   });
 
   it("a mandate's change, completion and delete are refused before anything marks the plan", async () => {

@@ -488,3 +488,107 @@ describe('google_sheets format after content from outside the chat', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 });
+
+describe('google_sheets after content from outside the chat, asked in German', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  /** As `agent`, on an instance whose questions are German. */
+  function agentDe(answer: string): IAgent {
+    return { ...agent('sawUntrustedData', answer), dialogLanguage: 'de' } as IAgent;
+  }
+
+  const HEAD_DE = (n: string): string => `Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. ${n}, und Google führt eine Formel beim Schreiben aus.`;
+  const FETCHES_DE = 'Eine Formel kann Google eine Adresse abrufen lassen und dabei Daten aus der Tabelle mitschicken. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE und IMAGE sind Beispiele; andere Funktionen können das auch. Die Adresse muss nicht ausgeschrieben sein: Eine Formel kann sie aus anderen Zellen zusammensetzen.';
+  const HIDDEN_DE = '„Write as formulas“ steht nur zur Wahl, wenn hier jede Formel gezeigt wird. Willst du sie als Formeln schreiben, bitte im Chat darum, höchstens 5 auf einmal zu schreiben.';
+
+  it('asks about formulas in German, the formulas and their cells as they are', async () => {
+    const a = agentDe('Don’t write');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING], ['=B2', 'Bob']] }, a);
+    expect(flattenPrompt(asked(a).prompt)).toBe([
+      'Bereich „Sheet1!B2:C3“ in Tabelle sid überschreiben? Die Daten dort werden ersetzt.',
+      '',
+      `${HEAD_DE('2 dieser Zellen beginnen wie eine Formel')} ${FETCHES_DE}`,
+      `C2: ${FETCHING}`,
+      'B3: =B2',
+    ].join('\n'));
+  });
+
+  it('says "1 dieser Zellen beginnt" for one cell', async () => {
+    const a = agentDe('Don’t write');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'A1', values: [['=B2']] }, a);
+    expect(flattenPrompt(asked(a).prompt).split('\n')[2]).toBe(`${HEAD_DE('1 dieser Zellen beginnt wie eine Formel')} ${FETCHES_DE}`);
+  });
+
+  it('counts the rest in German and names the option it leaves out by that option\'s own label', async () => {
+    const a = agentDe('Don’t write');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=6', '=7']] }, a);
+    expect(flattenPrompt(asked(a).prompt).split('\n').slice(-2)).toEqual(['und 2 weitere', HIDDEN_DE]);
+    // The options stay the words the answer is read against, in every language.
+    expect(asked(a).options).toEqual(['Write as text', 'Don’t write']);
+    expect(HIDDEN_DE).toContain(`höchstens ${FORMULAS_SHOWN} auf einmal`);
+  });
+
+  it('names a cell by its place in German when the range names no first cell', async () => {
+    const a = agentDe('Don’t write');
+    await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1', values: [['x', '=B2']] }, a);
+    expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe('1. neue Zeile, 2. Wert: =B2');
+    const b = agentDe('Don’t write');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1', values: [['=B2']] }, b);
+    expect(flattenPrompt(asked(b).prompt).split('\n').at(-1)).toBe('1. Zeile, 1. Wert: =B2');
+  });
+
+  it('writes as text on the same answer as in English', async () => {
+    mockFetch.mockResolvedValueOnce(WRITTEN);
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING]] }, agentDe('Write as text'));
+    expect(sentValues()).toEqual([['Name', `'${FETCHING}`]]);
+  });
+
+  it('writes the formulas as they are on "Write as formulas", as in English', async () => {
+    mockFetch.mockResolvedValueOnce(WRITTEN);
+    const a = agentDe('Write as formulas');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING]] }, a);
+    // Asked, with the option offered: the formula went out because of the answer.
+    expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
+    expect(sentValues()).toEqual([['Name', FETCHING]]);
+  });
+
+  it('refuses a format batch too large to show in English, the same words as for an English question', async () => {
+    const range = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
+    const cells = { updateCells: { range, rows: [{ values: [{ userEnteredValue: { formulaValue: FETCHING } }] }], fields: 'userEnteredValue' } };
+    const batch = { action: 'format' as const, spreadsheet_id: 'sid', format_requests: Array.from({ length: FORMAT_REQUESTS_SHOWN + 1 }, () => cells) };
+    const de = await createSheetsTool(auth).handler(batch, agentDe('confirm'));
+    const en = await createSheetsTool(auth).handler(batch, agent('sawUntrustedData', 'confirm'));
+    expect(de).toBe(en);
+    expect(de).toMatch(/^Error: this chat has read content from outside lynox, so a "format" call must show the owner/);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('asks about a format batch in German, the requests as they are', async () => {
+    const a = agentDe('cancel');
+    const range = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
+    const borders = { updateBorders: { range, top: { style: 'SOLID' } } };
+    const cells = { updateCells: { range, rows: [{ values: [{ userEnteredValue: { formulaValue: FETCHING } }] }], fields: 'userEnteredValue' } };
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [borders, cells, 'odd'] }, a);
+    expect(flattenPrompt(asked(a).prompt)).toBe([
+      'Tabelle sid formatieren? Formatierungen können Zellen und Blätter löschen oder überschreiben.',
+      '',
+      `Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. 2 dieser Anfragen können Zellinhalt oder eine Regel schreiben oder ändern, was jemand in einer Zelle oder einem Blatt sieht, etwa ein Zahlenformat, einen Link, die Schreibrichtung oder ausgeblendete Zeilen. Inhalt und Regeln können eine Formel enthalten, die Google bei sich ausführt. ${FETCHES_DE} Diese 2 Anfragen stehen hier vollständig:`,
+      `updateCells: ${JSON.stringify(cells.updateCells)}`,
+      'Anfrage: "odd"',
+      'und 1 Formatierungsanfrage, die keinen Zellinhalt schreibt',
+    ].join('\n'));
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('says the one-request forms in German', async () => {
+    const a = agentDe('cancel');
+    const range = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
+    const b1 = { updateBorders: { range, top: { style: 'SOLID' } } };
+    const b2 = { mergeCells: { range, mergeType: 'MERGE_ALL' } };
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [b1, b2, 'odd'] }, a);
+    const text = flattenPrompt(asked(a).prompt);
+    expect(text).toContain('1 dieser Anfragen kann Zellinhalt oder eine Regel schreiben');
+    expect(text).toContain('Die Anfrage steht hier vollständig:');
+    expect(text.split('\n').at(-1)).toBe('und 2 Formatierungsanfragen, die keinen Zellinhalt schreiben');
+  });
+});

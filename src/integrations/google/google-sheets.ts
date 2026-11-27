@@ -11,7 +11,7 @@ import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 import { formulaCells, formulasAsText, type FormulaCell } from './sheets-formula.js';
 import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
 import type { ConsentAction } from '../../contract/prompt.js';
-import { GOOGLE_DIALOG } from '../../tools/dialog-text.js';
+import { GOOGLE_DIALOG, SHEETS_NOTE_DIALOG, type DialogLanguage, type SheetsNoteDialog } from '../../tools/dialog-text.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
@@ -141,9 +141,9 @@ const FORMULA_OPTIONS_SOME_HIDDEN = [WRITE_AS_TEXT, DONT_WRITE];
 export const FORMULAS_SHOWN = 5;
 
 /** The cells of a write or an append that may be read as a formula, in call order. */
-function formulasToShow(input: SheetsInput): FormulaCell[] {
-  if (input.action === 'write') return formulaCells(input.values, input.range, 'write');
-  if (input.action === 'append') return formulaCells(input.values, input.range, 'append');
+function formulasToShow(input: SheetsInput, language: DialogLanguage): FormulaCell[] {
+  if (input.action === 'write') return formulaCells(input.values, input.range, 'write', language);
+  if (input.action === 'append') return formulaCells(input.values, input.range, 'append', language);
   return [];
 }
 
@@ -156,30 +156,19 @@ function chosenOption(answer: string, options: readonly string[]): string | unde
 }
 
 /**
- * What a formula can do, said the same wherever a question shows one. The functions are examples,
- * never a list to check against: others fetch too, and the address may be built from other cells,
- * so a formula with no address written in it is not a formula that fetches nothing.
- */
-const FORMULA_FETCHES = pv`A formula can make Google fetch an address and send data from the sheet with it. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE and IMAGE are examples; other functions can do it too. The address need not be written out: a formula can build it from other cells.`;
-
-/**
  * What the question adds: why it asks, then each cell and its whole formula as a value. A
  * formula is never shortened, since the address in it is what the owner decides on; a line
  * break in it is not kept, so it cannot draw another cell's line.
  */
-function formulaNote(formulas: readonly FormulaCell[]): PromptText {
+function formulaNote(formulas: readonly FormulaCell[], said: SheetsNoteDialog): PromptText {
   const n = formulas.length;
-  const head = joinPrompts([n === 1
-    ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these cells starts like a formula, and Google runs a formula when it is written.`
-    : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these cells start like a formula, and Google runs a formula when it is written.`, FORMULA_FETCHES], ' ');
+  const head = joinPrompts([said.formulaHead(n), said.formulaFetches], ' ');
   const lines = formulas.slice(0, FORMULAS_SHOWN).map(({ cell, formula }) => pv`${cell}: ${singleLine(formula)}`);
   // With some only counted, the question offers no "Write as formulas" and says why, and how
   // to get it: each call is asked about on its own, so a call with at most FORMULAS_SHOWN shows
   // every formula. The sentence writes that number out, so it stays the question's own words;
   // tests hold the sentence to a copy of it and the copy's number to the constant.
-  const more = n > FORMULAS_SHOWN
-    ? [pv`and ${n - FORMULAS_SHOWN} more`, pv`Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.`]
-    : [];
+  const more = n > FORMULAS_SHOWN ? [said.formulaMore(n - FORMULAS_SHOWN), said.formulaOnlyShown(WRITE_AS_FORMULAS)] : [];
   return joinPrompts([head, ...lines, ...more], '\n');
 }
 
@@ -349,7 +338,7 @@ function requestLine(request: unknown): { type: string | null; body: string; len
  * that fetches; when more requests, or a longer one, than a question can show come in one call,
  * the call is refused instead, and the refusal says how to split it.
  */
-function formatRequestsNote(requests: readonly unknown[]): { note: PromptText } | { refusal: string } | null {
+function formatRequestsNote(requests: readonly unknown[], said: SheetsNoteDialog): { note: PromptText } | { refusal: string } | null {
   const shown = requests.filter((r) => !isPureFormatRequest(r));
   if (shown.length === 0) return null;
   const n = shown.length;
@@ -357,16 +346,10 @@ function formatRequestsNote(requests: readonly unknown[]): { note: PromptText } 
   if (n > FORMAT_REQUESTS_SHOWN || lines.some((l) => l.length > FORMAT_LINE_MAX)) {
     return { refusal: `Error: this chat has read content from outside lynox, so a "format" call must show the owner, in full, every request that can write cell content or a rule. This call has ${n} such request(s); one question shows at most ${FORMAT_REQUESTS_SHOWN}, each at most ${FORMAT_LINE_MAX} characters. Split it: send pure formatting (borders, merges, sizes, bands, colours, bold) in one call, and at most ${FORMAT_REQUESTS_SHOWN} of the other requests per call, each small enough to show in full (fewer cells or rows per request). A repeatCell is pure formatting when its mask names only those parts or the whole format, and its cell sets only colours, borders, padding, alignment, wrapping, rotation and text style (bold, italic, underline, strikethrough, font, size, text colour); number formats, links and text direction count as the other requests. Nothing was sent.` };
   }
-  const head = joinPrompts([
-    n === 1
-      ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, or change what a reader sees in a cell or sheet, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, which Google runs on its side.`
-      : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these requests can write cell content or a rule, or change what a reader sees in a cell or sheet, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, which Google runs on its side.`,
-    FORMULA_FETCHES,
-    n === 1 ? pv`The request is shown in full:` : pv`These ${n} requests are shown in full:`,
-  ], ' ');
-  const shownLines = lines.map((l) => (l.type === null ? pv`request: ${l.body}` : pv`${l.type}: ${l.body}`));
+  const head = joinPrompts([said.formatHead(n), said.formulaFetches, said.formatShown(n)], ' ');
+  const shownLines = lines.map((l) => (l.type === null ? said.formatUntyped(l.body) : pv`${l.type}: ${l.body}`));
   const rest = requests.length - n;
-  const more = rest === 0 ? [] : [rest === 1 ? pv`and 1 formatting request that writes no cell content` : pv`and ${rest} formatting requests that write no cell content`];
+  const more = rest === 0 ? [] : [said.formatMore(rest)];
   return { note: joinPrompts([head, ...shownLines, ...more], '\n') };
 }
 
@@ -470,7 +453,8 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           // the range in text nodes — see core/prompt-value.ts. They are no
           // longer collapsed on the way in, which means the prompt now shows
           // the value that is actually about to be used.
-          const said = GOOGLE_DIALOG[agent.dialogLanguage ?? 'en'];
+          const language = agent.dialogLanguage ?? 'en';
+          const said = GOOGLE_DIALOG[language];
           const sheet = input.spreadsheet_id ?? said.unknown;
           const range = input.range ?? said.unspecified;
           // An append inserts its rows (`insertDataOption=INSERT_ROWS`), so it overwrites nothing
@@ -483,10 +467,10 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           // the question: Google runs it on its side, where no check on the engine's requests
           // sees the address it may fetch. Before that, the question is the plain one above.
           const tainted = deriveTurnUntrusted(agent);
-          const formulas = tainted ? formulasToShow(input) : [];
+          const formulas = tainted ? formulasToShow(input, language) : [];
           // A format call is asked about as one batch: a request that can write cell content or a
           // rule is shown in full beside the question, and the answer covers every request in it.
-          const requests = tainted && input.action === 'format' ? formatRequestsNote(input.format_requests ?? []) : null;
+          const requests = tainted && input.action === 'format' ? formatRequestsNote(input.format_requests ?? [], SHEETS_NOTE_DIALOG[language]) : null;
           if (requests !== null && 'refusal' in requests) return requests.refusal;
           if (formulas.length === 0) {
             // Only the `confirm` key goes ahead; its button names `action`, which decides nothing.
@@ -494,7 +478,7 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
             if (consent !== 'confirm') return consentRefusal(consent, 'Action cancelled by user.');
           } else {
             const options = formulas.length > FORMULAS_SHOWN ? FORMULA_OPTIONS_SOME_HIDDEN : FORMULA_OPTIONS;
-            const chosen = chosenOption(await agent.promptUser(joinPrompts([confirmMsg, formulaNote(formulas)], '\n\n'), options), options);
+            const chosen = chosenOption(await agent.promptUser(joinPrompts([confirmMsg, formulaNote(formulas, SHEETS_NOTE_DIALOG[language])], '\n\n'), options), options);
             if (chosen === WRITE_AS_TEXT) {
               call = { ...input, values: formulasAsText(input.values ?? []) };
             } else if (chosen !== WRITE_AS_FORMULAS) {
