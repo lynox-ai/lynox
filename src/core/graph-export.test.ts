@@ -8,6 +8,7 @@ import { AgentMemoryDb, AGENT_MEMORY_SCHEMA_VERSION } from './agent-memory-db.js
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
+import { EXPORT_TABLES } from './export-tables.js';
 import { MEMORY_TEXTS_RELATIONSHIPS_NOTE, MEMORY_TEXT_EXPORT_CAP, UNREADABLE_MEMORY_TEXT, graphHoldsRowsNotExported, readHeldGraph, readMemoryTextsForExport } from './graph-export.js';
 import { EXPORT_RELATIONS_PER_ENTITY } from './knowledge-layer.js';
 
@@ -286,6 +287,14 @@ describe('readMemoryTextsForExport', () => {
     db.close();
     return { oldId, newId, entity };
   }
+
+  it('carries every agent-memory.db table the archive carries, and the archive every one this export carries', () => {
+    new AgentMemoryDb(file).close();
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    // The graph block carries entities and relations; this block carries the rest.
+    const carried = ['entities', 'relations', ...Object.keys(texts['agent-memory.db'])].sort();
+    expect(carried).toEqual(Object.keys(EXPORT_TABLES['agent-memory.db'].include).sort());
+  });
 
   it('carries the link and history tables of both stores, row by row, the reason a text was replaced masked', () => {
     const { oldId, newId, entity } = seedLegacy();
@@ -607,6 +616,7 @@ describe('graphHoldsRowsNotExported', () => {
     try {
       raw.exec('CREATE TABLE episodes (id TEXT PRIMARY KEY, task TEXT NOT NULL)');
       expect(held(false), 'an empty leftover table holds nothing').toBe(false);
+      expect(held(true), 'nor with the subject graph on').toBe(false);
       raw.prepare("INSERT INTO episodes (id, task) VALUES ('e1', 'call Alice')").run();
       expect(held(false), 'a row in it is in no block').toBe(true);
       expect(held(true), 'on either setting').toBe(true);

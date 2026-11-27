@@ -168,7 +168,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       memories: { about: 'remembered facts in the knowledge graph' },
       cooccurrences: { about: 'which ones appear together' },
       supersedes: { about: 'which fact replaced an older one' },
-      metrics: { about: 'counters kept per remembered fact, such as how often reading people and companies from it was refused' },
+      metrics: { about: 'counters the software kept, for example how often reading people and companies from a remembered fact was refused' },
     },
     name: {
       schema_version: MARKER,

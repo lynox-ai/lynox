@@ -7,6 +7,7 @@ import {
   entityRelationsForExportOn, listEntitiesOn, relationCountOn,
 } from './agent-memory-db.js';
 import { toEntityRecord } from './entity-resolver.js';
+import { EXPORT_TABLES } from './export-tables.js';
 import { EXPORT_RELATIONS_PER_ENTITY, legacyRelationForExport, listSubjectEntitiesAfterOn, listSubjectEntitiesOn, relRowToRelationRecord } from './knowledge-layer.js';
 import { sourceDeletedSql } from './relation-source.js';
 import { RelationshipStore } from './relationship-store.js';
@@ -343,9 +344,6 @@ export function readMemoryTextsForExport(opts: {
   return { 'agent-memory.db': legacyHalf, 'engine.db': engineHalf, mayBeIncomplete: incomplete };
 }
 
-/** The agent-memory.db tables the export carries, in the graph block or in `knowledge_graph.memories`. */
-const AGENT_MEMORY_EXPORTED_TABLES = ['entities', 'relations', 'mentions', 'memories', 'cooccurrences', 'supersedes', 'metrics'] as const;
-
 /**
  * Whether the stores hold graph rows that no block of the export carries, counted, never read:
  *  - engine.db subjects the graph block does not list: with the subject graph on, archived ones
@@ -380,7 +378,10 @@ export function graphHoldsRowsNotExported(opts: {
     if (agentMemoryVersionOn(legacy) > AGENT_MEMORY_SCHEMA_VERSION) return true;
     // A file this build can read may still hold a table it no longer knows (an older schema keeps
     // what a later one dropped, as v1's `episodes`): any row in one is in no block.
-    const known = [...AGENT_MEMORY_EXPORTED_TABLES, 'schema_version'];
+    // The tables the archive's list names for this store: what it carries and what it names as
+    // holding no content. The two exports read the same list, so they cannot drift apart.
+    const listed = EXPORT_TABLES['agent-memory.db'];
+    const known = [...Object.keys(listed.include), ...Object.keys(listed.name)];
     const other = legacy.prepare(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN (${known.map(() => '?').join(', ')})`,
     ).all(...known) as Array<{ name: string }>;
