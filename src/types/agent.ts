@@ -360,6 +360,12 @@ export interface IAgent {
    */
   hasRunCostCeiling(): boolean;
   /**
+   * Whether this run's whole budget is already held against the instance's daily and monthly
+   * caps (a background run the admission reserved for). Work carved out of the run's budget
+   * then needs no hold of its own there. An agent that cannot answer counts as not held.
+   */
+  budgetHeldAgainstCaps?(): boolean;
+  /**
    * Hold `usd` against this run's ceiling for work about to start. `false` means it did
    * not fit and nothing was held, so a refused caller has nothing to give back.
    */

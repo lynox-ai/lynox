@@ -147,6 +147,28 @@ function childRowCostUSD(agent: Agent | undefined): number {
  * argument exists for. It was reverted rather than shipped, because an argument that works
  * in half the cases reads as a guarantee and is not one.
  */
+/**
+ * The refusal when a batch does not fit under the daily or monthly cap. The figures are the ones
+ * the reservation refused with, not a second reading. A smaller batch is offered only when one
+ * child could still fit (`smallestUSD`, the least any child of this batch is held at); otherwise
+ * the cap stops the work.
+ */
+function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | undefined; cap?: 'daily' | 'monthly' | undefined; capUSD?: number | undefined }, batchUSD: number, smallestUSD: number): string {
+  if (r.headroomUSD === undefined || r.cap === undefined || r.capUSD === undefined) {
+    return `Not delegated: ${r.reason ?? 'the spending cap cannot be checked.'}`;
+  }
+  const usd = (n: number): string => `$${n.toFixed(2)}`;
+  const resets = r.cap === 'daily' ? 'tomorrow' : 'next month';
+  if (r.headroomUSD < smallestUSD) {
+    return `Not delegated: the ${r.cap} spending cap (${usd(r.capUSD)}) leaves ${usd(r.headroomUSD)}, `
+      + `less than one of these sub-agents needs. No sub-agent can run before the cap resets ${resets}. `
+      + 'Tell the user that the spending cap stops this work.';
+  }
+  return `Not delegated: these sub-agents could together spend up to ${usd(batchUSD)}, and the ${r.cap} `
+    + `spending cap (${usd(r.capUSD)}) leaves ${usd(r.headroomUSD)}. Delegate fewer sub-agents or give them `
+    + `a lower max_budget_usd, so that together they stay within ${usd(r.headroomUSD)}.`;
+}
+
 function minChildBudgetUSD(model: string, maxOutputTokens: number | undefined): number {
   if (!hasKnownPricing(model)) return 0;
   return estimateFirstTurnUSD(model, maxOutputTokens);
@@ -2512,21 +2534,30 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // No `await` lies between the run's reservation and this line.
     //
     // ⛔ The instance's daily and monthly caps, for the whole batch and before the first child.
-    // The session checks them once per turn, and the background loop's admission covers the
-    // delegating run's own turns only, so without this a turn that passed the cap just below it
-    // could fan out batch after batch on top. Held is each child's hard cap (its share, or what
-    // it asked for), not the turn-based estimate: that is the most a child can spend. Before
-    // `checkSessionBudget`, which reserves on the session counter and gives nothing back.
-    capHolds = specs.map((_, i) => shares?.[i] ?? requested[i]!);
-    const capReservation = reservePersistentBudget(capHolds.reduce((sum, usd) => sum + usd, 0));
-    if (!capReservation.allowed) {
-      throw new Error(
-        `Not delegated: ${capReservation.reason ?? 'the spending cap would be exceeded.'} `
-        + 'The sub-agents of this batch could together spend more than the cap leaves. '
-        + 'Tell the user that the spending cap stops this work.',
-      );
+    // The session checks them once per turn, so without this a turn that passed the cap just
+    // below it could fan out batch after batch on top. Before `checkSessionBudget`, which
+    // reserves on the session counter and gives nothing back.
+    //
+    // Held is each child's hard cap (its share, or what it asked for), not the turn-based
+    // estimate: that is the most a child can spend, up to one turn over, as any limit here (a
+    // turn is recorded before it is compared). Never under the cost of one turn on the child's
+    // model: a child given nothing still runs that one turn.
+    //
+    // ⚠ NOT on a background run whose whole budget the admission already holds against the
+    // caps (`budgetHeldAgainstCaps`): the shares are carved out of that budget, so holding them
+    // again would count the same dollars twice and refuse the batch for room the run itself is
+    // holding. Only shares qualify; without a run budget there is nothing they are inside of.
+    const coveredByRun = shares !== null && agent.budgetHeldAgainstCaps?.() === true;
+    if (!coveredByRun) {
+      capHolds = specs.map((_, i) => Math.max(
+        shares?.[i] ?? requested[i]!,
+        minChildBudgetUSD(childModels[i]!, childCaps[i]),
+      ));
+      const batchUSD = capHolds.reduce((sum, usd) => sum + usd, 0);
+      const capReservation = reservePersistentBudget(batchUSD);
+      if (!capReservation.allowed) throw new Error(capRefusal(capReservation, batchUSD, Math.min(...capHolds)));
+      capHeld = capReservation.reservedUSD;
     }
-    capHeld = capReservation.reservedUSD;
     checkSessionBudget(agent.sessionCounters, totalEstimate);
 
     channels.spawnStart.publish({ agents: names, parent: agent.name, parentRunId, depth: childDepth });
@@ -2957,6 +2988,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       // mint budget.
       if (heldForBatch > 0) agent.releaseExternalCost?.(heldForBatch);
       if (capHeld > 0) releasePersistentBudget(capHeld);
+      capHeld = 0;
     }
   },
   // Spawning writes nothing outside; each call the child makes is classified on its own.

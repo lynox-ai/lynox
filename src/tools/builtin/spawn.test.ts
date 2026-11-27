@@ -6931,10 +6931,25 @@ describe('spawn_agent holds a batch against the daily and monthly caps', () => {
     resetPersistentBudget();
   });
 
+  /** A parent whose run budget is a REAL guard, so shares and the run's hold are the product's. */
+  function parentOn(guard: CostGuard): IAgent {
+    return makeAgent({
+      hasRunCostCeiling: () => true,
+      getRemainingRunBudgetUSD: () => guard.remainingBudgetUSD(),
+      reserveExternalCost: (usd: number) => guard.reserveExternalCost(usd),
+      releaseExternalCost: (usd: number) => { guard.releaseExternalCost(usd); },
+      chargeExternalCost: (usd: number) => { guard.recordExternalCost(usd); },
+      budgetHeldAgainstCaps: () => guard.budgetHeldAgainstCaps(),
+    });
+  }
+
   it('refuses a batch on a reached daily cap before the first child, and runs the same batch under it', async () => {
     const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
     configurePersistentBudget({ costProvider: spentToday(10), dailyCapUSD: 10, monthlyCapUSD: 500 });
-    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(/^Not delegated: Daily spending cap \(\$10\) would be exceeded/);
+    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
+      'Not delegated: the daily spending cap ($10.00) leaves $0.00, less than one of these sub-agents needs. '
+      + 'No sub-agent can run before the cap resets tomorrow. Tell the user that the spending cap stops this work.',
+    );
     expect(mockSend).not.toHaveBeenCalled();
     expect(testCounters.costUSD, 'the session counter is not charged for a refused batch').toBe(0);
     expect(getReservedInFlight()).toBe(0);
@@ -6947,9 +6962,14 @@ describe('spawn_agent holds a batch against the daily and monthly caps', () => {
   it('refuses a batch whose children fit one by one but not together, and on a reached monthly cap', async () => {
     const { configurePersistentBudget } = await import('../../core/session-budget.js');
     configurePersistentBudget({ costProvider: spentToday(8), dailyCapUSD: 10, monthlyCapUSD: 500 });
-    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(/Daily spending cap/);
+    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
+      'Not delegated: these sub-agents could together spend up to $3.00, and the daily spending cap ($10.00) leaves $2.00. '
+      + 'Delegate fewer sub-agents or give them a lower max_budget_usd, so that together they stay within $2.00.',
+    );
     configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 100, monthlyCapUSD: 3.5 });
-    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(/Monthly spending cap \(\$3\.5\)/);
+    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
+      'the monthly spending cap ($3.50) leaves $2.50. Delegate fewer sub-agents',
+    );
     expect(mockSend).not.toHaveBeenCalled();
   });
 
@@ -6964,6 +6984,83 @@ describe('spawn_agent holds a batch against the daily and monthly caps', () => {
     for (const held of during) expect(held).toBeGreaterThanOrEqual(1);
     expect(Math.max(...during)).toBe(3);
     expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('gives each child\'s hold back when that child settles, while its sibling still runs', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    mockSend.mockImplementationOnce(async () => 'a done').mockImplementationOnce(async () => { await gate; return 'b done'; });
+    const run = spawnAgentTool.handler(batch, makeAgent());
+    // a ($1) settled, b ($2) still runs: only b's cap is held.
+    await vi.waitFor(() => { expect(getReservedInFlight()).toBe(2); });
+    release();
+    await run;
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('holds a child of a run with a budget at its share, not at what it asked for', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    const guard = new CostGuard({ maxBudgetUSD: 1.5 }, 'claude-sonnet-4-6');
+    const during: number[] = [];
+    mockSend.mockImplementation(async () => { during.push(getReservedInFlight()); return 'ok'; });
+    await spawnAgentTool.handler(batch, parentOn(guard));
+    // Asked $1 + $2, the run has $1.50: shares $0.50 + $1.00.
+    expect(Math.max(...during)).toBeCloseTo(1.5, 10);
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('holds a child given no budget at the cost of the one turn it still runs', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    const during: number[] = [];
+    mockSend.mockImplementation(async () => { during.push(getReservedInFlight()); return 'ok'; });
+    await spawnAgentTool.handler({ agents: [{ name: 'z', task: 'Z', max_budget_usd: 0 }] }, makeAgent());
+    expect(during).toHaveLength(1);
+    expect(during[0]).toBeGreaterThan(0);
+  });
+
+  describe('a background run whose budget the admission already holds', () => {
+    /** The admission's reservation of `usd`, and a run guard bounded by `maxUSD` that may carry it. */
+    async function runOn(capUSD: number, spent: number, maxUSD: number, carry: 'hold' | 'none' | 'lookalike' | 'released'): Promise<IAgent> {
+      const { configurePersistentBudget, reservePersistentBudget, releaseReservation } = await import('../../core/session-budget.js');
+      configurePersistentBudget({ costProvider: spentToday(spent), dailyCapUSD: capUSD, monthlyCapUSD: 500 });
+      const hold = reservePersistentBudget(maxUSD);
+      expect(hold.allowed, 'positive control: the admission held the run').toBe(true);
+      // Given back, and the room taken by another run: the object it still carries holds nothing.
+      if (carry === 'released') { releaseReservation(hold); expect(reservePersistentBudget(maxUSD).allowed).toBe(true); }
+      const heldAgainstCaps = carry === 'hold' || carry === 'released' ? hold
+        : carry === 'lookalike' ? { allowed: true, reservedUSD: maxUSD } : undefined;
+      return parentOn(new CostGuard({ maxBudgetUSD: maxUSD, heldAgainstCaps }, 'claude-sonnet-4-6'));
+    }
+
+    it('fans out with the whole headroom held for the run, without holding the batch twice', async () => {
+      // $10 cap, nothing spent, the run holds all $10: a second hold of the shares cannot fit.
+      const agent = await runOn(10, 0, 10, 'hold');
+      await spawnAgentTool.handler(batch, agent);
+      expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+
+    it('still holds the batch for a run without that reservation, a look-alike of it, or one given back', async () => {
+      for (const carry of ['none', 'lookalike', 'released'] as const) {
+        mockSend.mockClear();
+        const { resetPersistentBudget } = await import('../../core/session-budget.js');
+        resetPersistentBudget();
+        const agent = await runOn(10, 0, 10, carry);
+        await expect(spawnAgentTool.handler(batch, agent), carry).rejects.toThrow(/^Not delegated: /);
+        expect(mockSend, carry).not.toHaveBeenCalled();
+      }
+    });
+
+    it('does not count a reservation smaller than the run\'s budget as holding it', async () => {
+      const { configurePersistentBudget, reservePersistentBudget } = await import('../../core/session-budget.js');
+      configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+      const hold = reservePersistentBudget(1);
+      expect(new CostGuard({ maxBudgetUSD: 5, heldAgainstCaps: hold }, 'claude-sonnet-4-6').budgetHeldAgainstCaps()).toBe(false);
+      expect(new CostGuard({ maxBudgetUSD: 1, heldAgainstCaps: hold }, 'claude-sonnet-4-6').budgetHeldAgainstCaps()).toBe(true);
+    });
   });
 
   it('gives the hold back when a child throws, when it is stopped, and when dispatch throws', async () => {
