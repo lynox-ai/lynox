@@ -89,9 +89,10 @@ describe('singleLine keeps at most four marks on one base character', () => {
     expect(singleLine(`e${'\u0301\u3164'.repeat(10)}`)).toBe(`e${'\u0301'.repeat(4)}`);
   });
 
-  it('a C1 control between two runs does not start a new run of four', () => {
+  it('a C1 control or DEL between two runs does not start a new run of four', () => {
     const run = '\u0301'.repeat(4);
     expect(singleLine(`a${`${run}\u0086`.repeat(5)}b`)).toBe(`a${run}b`);
+    expect(singleLine(`a${`${run}\u007f`.repeat(5)}b`)).toBe(`a${run}b`);
     expect(singleLine(`a${run}\u0080${run}\u009fb`)).toBe(`a${run}b`);
     expect(dialogValue(`/etc/shadowa${`${run}\u0084`.repeat(5)}`)).toBe(`/etc/shadowa${run}`);
     // NEL is a line end and stays a space, so the words around it stay apart.

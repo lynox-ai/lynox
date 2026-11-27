@@ -67,10 +67,12 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  *
  * Two things about the character class, both measured rather than assumed:
  *
- * 1. It is NOT the reason a leftover character is harmless. C1 controls (U+0085
- *    NEL, U+0084, U+009B) survive `\s` — and are inert anyway, because neither
- *    JS's LineTerminator set nor CSS's segment-break set contains them, so
- *    `marked` can never see one as a line end and no renderer breaks on one.
+ * 1. `\s` is NOT the reason a control character is harmless. DEL and the C1
+ *    controls (U+0085 NEL, U+0084, U+009B) pass `\s`, and as line ends they are
+ *    inert anyway, because neither JS's LineTerminator set nor CSS's
+ *    segment-break set contains them, so `marked` can never see one as a line
+ *    end and no renderer breaks on one. They are named below for another reason
+ *    (point 4).
  *    That is a property of the ENVIRONMENT, not of this class. Anyone extending
  *    this to a consumer that does treat C1 as a break (a terminal, a CSV or
  *    header export) has to re-derive the class, not trust this one.
@@ -98,20 +100,20 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  *    over the text around a value. Vietnamese needs two, Indic scripts one or
  *    two; Tibetan stacks, Hebrew with cantillation and Quranic Arabic can carry
  *    more than four and are cut too, accepted. Spacing marks
- *    (`\p{Mc}`) are visible and stay uncapped. The C1 controls other than NEL
- *    are removed before the cap: inert as line ends (point 1), they still sit
- *    between two mark runs as a base of no width, so runs of four on each would
- *    stack on one place.
+ *    (`\p{Mc}`) are visible and stay uncapped. DEL and the C1 controls other
+ *    than NEL are removed before the cap: inert as line ends (point 1), they
+ *    still sit between two mark runs as a base of no width, so runs of four on
+ *    each would stack on one place. NEL is collapsed like a space instead.
  * All of this runs before any cut a caller makes, so characters past a cut
  * cannot shorten what the cut keeps.
  */
 export function singleLine(value: string): string {
-  // Format, default-ignorable and C1 control characters (NEL aside) removed
-  // outright, long mark runs cut, every break-ish or blank character collapsed
-  // to one space. `\s` misses most of C0 and all of C1, so both are named, as
-  // are the two blanks above.
+  // Format, default-ignorable, DEL and C1 control characters (NEL aside)
+  // removed outright, long mark runs cut, every break-ish or blank character
+  // collapsed to one space. `\s` misses most of C0 and all of C1, so both are
+  // named, as are the two blanks above.
   return value
-    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u0080-\u0084\u0086-\u009f]/gu, '')
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u007f-\u0084\u0086-\u009f]/gu, '')
     .replace(/([\p{Mn}\p{Me}]{4})[\p{Mn}\p{Me}]+/gu, '$1')
     .replace(/[\s\u0000-\u001f\u0085\u2800\u{1D159}]+/gu, ' ');
 }
