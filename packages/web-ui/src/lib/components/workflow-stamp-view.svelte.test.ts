@@ -923,3 +923,168 @@ describe('the stamp says who else may answer its questions when it runs on a sch
 		}
 	});
 });
+
+describe('the review keeps its reason and its buttons in sight', () => {
+	// jsdom lays nothing out: what stays in sight is read the way the view reads it, from the
+	// computed position and the box, set here as a browser reports them.
+	function layOut(statusHeight: number, footHeight: number, sticky: boolean): () => void {
+		const realStyle = window.getComputedStyle;
+		const realRect = Element.prototype.getBoundingClientRect;
+		const held = (el: Element): number | null =>
+			el.hasAttribute('data-dialog-status') ? statusHeight : el.hasAttribute('data-dialog-foot') ? footHeight : null;
+		window.getComputedStyle = ((el: Element) => {
+			const style = realStyle(el);
+			return held(el) === null || !sticky ? style : ({ ...style, position: 'sticky' } as CSSStyleDeclaration);
+		}) as typeof window.getComputedStyle;
+		Element.prototype.getBoundingClientRect = function (this: Element) {
+			const h = held(this);
+			return h === null ? realRect.call(this) : ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: h, width: 0, height: h, toJSON: () => ({}) } as DOMRect);
+		};
+		return () => { window.getComputedStyle = realStyle; Element.prototype.getBoundingClientRect = realRect; };
+	}
+	const frame = (): HTMLElement => q('stamp-dialog')!.firstElementChild as HTMLElement;
+	const changedTwice = (task = 'Send it somewhere else'): Record<string, Answer[]> => ({
+		'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }, { status: 200, body: preview('d2', task) }],
+		'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+	});
+
+	it('opening the view puts the focus on its heading, which names the dialog, and Escape closes it and gives the focus back', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
+		q('stamp-review')!.focus();
+		await click(q('stamp-review'));
+		const heading = target.querySelector<HTMLElement>('[data-stamp-review-title]');
+		expect(document.activeElement).toBe(heading);
+		expect(q('stamp-dialog')?.getAttribute('aria-labelledby')).toBe(heading?.id);
+		heading!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+		await settle();
+		expect(q('stamp-dialog')).toBeNull();
+		expect(document.activeElement).toBe(q('stamp-review'));
+	});
+
+	it('Cancel with no opener to go back to gives the focus to this workflow\'s review button, not to the page', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
+		await click(q('stamp-review'));
+		// Opened with the focus on the page: there is no opener to go back to.
+		expect(q('stamp-dialog')).not.toBeNull();
+		await click(byText('Abbrechen'));
+		expect(q('stamp-dialog')).toBeNull();
+		expect(document.activeElement).toBe(q('stamp-review'));
+	});
+
+	it('Cancel after the opener is gone (the schedule dialog it came from) gives the focus to this workflow\'s review button', async () => {
+		await open('owner', WF, {
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+		});
+		await click(byText('Planen'));
+		const scheduleConfirm = byText('Bestätigen & planen');
+		scheduleConfirm!.focus();
+		expect(document.activeElement).toBe(scheduleConfirm);
+		await click(scheduleConfirm);
+		expect(q('stamp-dialog')).not.toBeNull();
+		expect(scheduleConfirm!.isConnected).toBe(false);
+		await click(byText('Abbrechen'));
+		expect(q('stamp-dialog')).toBeNull();
+		expect(document.activeElement).toBe(q('stamp-review'));
+	});
+
+	it('Cancel closes the view and gives the focus back to what opened it', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
+		q('stamp-review')!.focus();
+		await click(q('stamp-review'));
+		await click(byText('Abbrechen'));
+		expect(q('stamp-dialog')).toBeNull();
+		expect(document.activeElement).toBe(q('stamp-review'));
+	});
+
+	it('Escape still closes the view once the focus fell to the page', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 400, body: { code: 'expect_required' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		(document.activeElement as HTMLElement | null)?.blur();
+		expect(document.activeElement).toBe(document.body);
+		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+		await settle();
+		expect(q('stamp-dialog')).toBeNull();
+	});
+
+	it('the buttons sit in a foot that stays in sight on an opaque ground with a line above, and Tab keeps clear of it from the start', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
+		const restore = layOut(0, 52, true);
+		try {
+			await click(q('stamp-review'));
+		} finally {
+			restore();
+		}
+		// Held as soon as the view opens, before anything is marked: the browser keeps a focused
+		// control clear of the foot.
+		expect(frame().style.scrollPaddingBottom).toBe('60px');
+		expect(frame().style.scrollPaddingTop).toBe('');
+		const foot = q('stamp-dialog')!.querySelector<HTMLElement>('[data-dialog-foot]');
+		expect(foot?.contains(q('stamp-confirm'))).toBe(true);
+		const cls = foot!.className.split(/\s+/);
+		expect(cls).toEqual(expect.arrayContaining(['[@media(min-height:30rem)]:sticky', '[@media(min-height:30rem)]:-bottom-5', 'bg-bg', '[@media(min-height:30rem)]:border-t']));
+	});
+
+	it('after steps changed, the line stays in sight and the changed step is focused and brought into view clear of the line and the foot', async () => {
+		await open('owner', WF, changedTwice());
+		await click(q('stamp-review'));
+		const restore = layOut(64, 52, true);
+		try {
+			await click(q('stamp-confirm'));
+		} finally {
+			restore();
+		}
+		const status = q('stamp-dialog')!.querySelector<HTMLElement>('[data-dialog-status]');
+		expect(status?.contains(q('stamp-line'))).toBe(true);
+		expect(status!.className.split(/\s+/)).toContain('[@media(min-height:30rem)]:sticky');
+		const mark = q('stamp-dialog')!.querySelector<HTMLElement>('[data-stamp-changed]');
+		expect(mark).not.toBeNull();
+		expect(document.activeElement).toBe(mark);
+		// The frame's scroll padding is what the browser keeps clear, for this and for every Tab.
+		expect(frame().style.scrollPaddingTop).toBe('72px');
+		expect(frame().style.scrollPaddingBottom).toBe('60px');
+		expect(scrolled).toContain(mark);
+	});
+
+	it('parts that scroll with the frame keep nothing clear, however high they are', async () => {
+		await open('owner', WF, changedTwice());
+		await click(q('stamp-review'));
+		const restore = layOut(64, 52, false);
+		try {
+			await click(q('stamp-confirm'));
+		} finally {
+			restore();
+		}
+		const mark = q('stamp-dialog')!.querySelector<HTMLElement>('[data-stamp-changed]');
+		expect(frame().style.scrollPaddingTop).toBe('');
+		expect(frame().style.scrollPaddingBottom).toBe('');
+		expect(scrolled).toContain(mark);
+	});
+
+	it('a reload that marks nothing puts the focus on the heading, not on the confirm', async () => {
+		await open('owner', WF, changedTwice('Send the report'));
+		await click(q('stamp-review'));
+		q('stamp-confirm')!.focus();
+		expect(document.activeElement).toBe(q('stamp-confirm'));
+		await click(q('stamp-confirm'));
+		expect(q('stamp-line')).not.toBeNull();
+		expect(q('stamp-dialog')!.querySelector('[data-stamp-changed]')).toBeNull();
+		expect(document.activeElement).toBe(target.querySelector('[data-stamp-review-title]'));
+	});
+
+	it('an error in the view carries no role: the error state is the library\'s, and may be another run\'s', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 400, body: { code: 'expect_required' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		const err = [...q('stamp-dialog')!.querySelectorAll<HTMLElement>('p')].find((p) => p.className.includes('text-danger'));
+		expect(err).toBeDefined();
+		expect(err!.hasAttribute('role')).toBe(false);
+	});
+});

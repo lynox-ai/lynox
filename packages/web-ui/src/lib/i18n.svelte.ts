@@ -3382,6 +3382,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'history.load_details_failed': { de: 'Details konnten nicht geladen werden.', en: 'Failed to load details.' },
 	'history.show_more': { de: 'Mehr anzeigen', en: 'Show more' },
 	'history.show_less': { de: 'Weniger anzeigen', en: 'Show less' },
+	'workflow_library.status.show_more': { de: 'Mehr anzeigen', en: 'Show more' },
+	'workflow_library.status.show_less': { de: 'Weniger anzeigen', en: 'Show less' },
 	'history.avg_duration': { de: 'Avg', en: 'Avg' },
 
 	// Error page
