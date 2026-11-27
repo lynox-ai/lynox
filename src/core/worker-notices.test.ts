@@ -697,7 +697,8 @@ describe('a halt only the owner can resolve, as each reader gets it (bulkHaltFor
       en: goesOn('lynox could not record that this run reads the store; nothing was sent.', 'The owner can continue the run later.'),
     },
   };
-  // Whose sentence holds for any reader: no way, a way lynox or the shop takes, or the run page's.
+  // Whose sentence has no way to split off: no way, a way lynox or the shop takes, or the run
+  // page's. Two of them speak to the owner as "you" (awaitingStart, discarded); that stays as it is.
   const NEUTRAL: ReadonlySet<string> = new Set([
     'awaitingStart', 'failureRate', 'consecutiveFailures', 'timeBudget', 'expired', 'checksum', 'maxTargets', 'probeRequired',
     'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete',
