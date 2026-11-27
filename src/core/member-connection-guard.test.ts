@@ -69,7 +69,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'core/store-token-refresh.ts|const refresh = secretStore.resolve(refreshSlot);': 'view; the refresh body, sent only to the bound store under its pass',
   'core/store-token-refresh.ts|const clientId = secretStore.resolve(client.id);': 'view; the refresh body, sent only to the bound store under its pass',
   'core/store-token-refresh.ts|const clientSecret = secretStore.resolve(client.secret);': 'view; the refresh body, sent only to the bound store under its pass',
-  'core/store-token-refresh.ts|const access = ctx.secretStore.resolve(accessTokenKey(profile.id));': 'view; the window\'s binding check after a 401, over the token the request sent, not sent again',
+  'core/store-token-refresh.ts|const access = ctx.secretStore.resolve(accessTokenKey(profile.id));': 'view; the window\'s binding check after a 401, over the access token the vault holds now, not sent',
   'core/store-token-refresh.ts|const there = (name: string): boolean => (store.holds !== undefined ? store.holds(name) : Boolean(store.resolve(name)));': 'view; whether the refresh token and the client are there, read only where the store has no holds, not sent',
   'core/store-token-refresh.ts|if (ctx.secretStore.resolve(accessKey) !== plan.presented.access': 'view; compare-and-swap before a refresh is stored, not sent',
   'core/store-token-refresh.ts||| ctx.secretStore.resolve(refreshKey) !== plan.presented.refresh': 'view; compare-and-swap before a refresh is stored, not sent',

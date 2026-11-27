@@ -101,6 +101,7 @@ interface Harness {
   escalations: () => number;
   escalationBodies: string[];
   deliveries: string[];
+  startChats: unknown[];
   parks: unknown[];
   leaseReleases: () => number;
   notified: NotificationMessage[];
@@ -140,6 +141,7 @@ function makeHarness(o?: {
   } as unknown as TriggerRecord;
   const records: Array<[string, string, string]> = [];
   const deliveries: string[] = [];
+  const startChats: unknown[] = [];
   let leaseReleases = 0;
   let dispatched = false;
   const manager = {
@@ -152,7 +154,7 @@ function makeHarness(o?: {
     getTrigger: (id: string) => (id === task.id ? task : undefined),
     recordTaskRun: (id: string, result: string, status: string) => { records.push([id, result, status]); return false; },
     setEnabled: () => true,
-    startEscalation: () => true,
+    startEscalation: (_id: string, _at: string, _retry: boolean, chat?: unknown) => { startChats.push(chat); return true; },
     recordEscalationOutcome: (_id: string, delivery: string) => { deliveries.push(delivery); },
   } as unknown as TaskManager;
   const parks: unknown[] = [];
@@ -187,7 +189,7 @@ function makeHarness(o?: {
   } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000, o?.taskTimeoutMs);
   loops.push(loop);
-  return { loop, prompts, threads, records, escalations: () => escalations, escalationBodies, deliveries, parks, leaseReleases: () => leaseReleases, notified };
+  return { loop, prompts, threads, records, escalations: () => escalations, escalationBodies, deliveries, startChats, parks, leaseReleases: () => leaseReleases, notified };
 }
 
 const APPROVAL_STORE = { tag: 'approval-store' };
@@ -305,6 +307,8 @@ describe('a scheduled workflow that asks its owner', () => {
     expect(h.notified[0]).toMatchObject({ taskId: 'trg-asks', data: { threadId: handed.runId, promptId: q.id } });
     await waitUntil('the delivery to be recorded on the schedule', () => h.deliveries.length > 0);
     expect(h.deliveries).toEqual(['delivered']);
+    // The schedule links the run's chat, where the question stands.
+    expect(h.startChats).toEqual([{ threadId: handed.runId, kind: 'question' }]);
 
     h.prompts.answerUser(q.id, 'B', OWNER_PRINCIPAL);
     await waitUntil('the run to end', () => h.records.length > 0);

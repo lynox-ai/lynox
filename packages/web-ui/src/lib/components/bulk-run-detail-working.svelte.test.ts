@@ -371,6 +371,70 @@ describe('a run the engine works on', () => {
 	});
 });
 
+describe('a run whose list is not read yet', () => {
+	const LIST = { state: 'pending' };
+	it('says so in its title while it waits for its start, with no status line, in DE and EN', async () => {
+		run = makeRun({ total: 0, list: LIST, haltKey: 'awaitingStart', haltReason: 'awaitingStart' });
+		await render();
+		expect(title()).toBe(`Liste noch nicht gelesen · ${HOST}`);
+		expect(counts()).toBeNull();
+		expect(line()).toBeNull();
+		unmount(component!);
+		component = undefined;
+		const before = getLocale();
+		setLocale('en');
+		onTestFinished(() => setLocale(before));
+		await render();
+		expect(title()).toBe(`List not read yet · ${HOST}`);
+		expect(counts()).toBeNull();
+	});
+
+	it('says so in its title when the read halted before it found a target, and keeps the halt\'s own sentence', async () => {
+		run = makeRun({ total: 0, list: LIST, haltKey: 'unavailable', haltReason: 'engine English' });
+		await render();
+		expect(title()).toBe(`Liste noch nicht gelesen · ${HOST}`);
+		expect(counts()).toBeNull();
+		// The halt says why where it always does, in its own sentence.
+		expect(shown()).toContain('Angehalten');
+		expect(shown()).toContain('Der Lauf kam nicht weiter.');
+	});
+
+	it('says the list was not read, without „yet“, when the run halted on a cause it has to be planned again for, in DE and EN', async () => {
+		run = makeRun({ total: 0, list: LIST, haltKey: 'listTooLarge', haltReason: 'engine English' });
+		await render();
+		expect(title()).toBe(`Liste nicht gelesen · ${HOST}`);
+		expect(counts()).toBeNull();
+		expect(shown()).toContain('Angehalten');
+		unmount(component!);
+		component = undefined;
+		const before = getLocale();
+		setLocale('en');
+		onTestFinished(() => setLocale(before));
+		await render();
+		expect(title()).toBe(`List not read · ${HOST}`);
+		expect(counts()).toBeNull();
+	});
+
+	it('counts the targets of a read that halted part-way, shows the dash while the list is read, and counts a run that ended before it read its list', async () => {
+		run = makeRun({ total: 40, changes: UPDATES(40), list: LIST, haltKey: 'unavailable', haltReason: 'engine English' });
+		await render();
+		expect(title()).toBe(`40 Ziele · ${HOST}`);
+		expect(counts()).toBe('40 Ziele');
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ total: 0, list: LIST, listFirstPage: `https://${HOST}/admin/api/2026-10/graphql.json` });
+		await render();
+		expect(title()).toBe(`– Ziele · ${HOST}`);
+		expect(counts()).toBe('–');
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ phase: 'aborted', total: 0, list: LIST, haltKey: 'mandateEnded', haltReason: 'mandateEnded' });
+		await render();
+		expect(title()).toBe(`0 Ziele · ${HOST}`);
+		expect(counts()).not.toBeNull();
+	});
+});
+
 describe('the head names every target once', () => {
 	const NONE: BulkHeads = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 };
 	const i18n = { t, tf };

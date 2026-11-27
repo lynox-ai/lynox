@@ -473,16 +473,22 @@ export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'chang
  * pause on, `paused`, and for the owner only `paused_who`, the emails of the members whose end
  * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
  * the push had to shorten the name.
+ *
+ * `chatExists` decides whether the escalation's chat still stands; without it, or once the chat
+ * is deleted, the trigger links to no chat.
  */
-export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal, chatExists?: (threadId: string) => boolean): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat'> & { last_escalation_kind?: 'question' | 'alert' | undefined; paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
   // The stored run cause leaves only as `blocked_reason`, parsed (`storedRunCause`), never as stored.
-  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_run_cause: _cause, ...stored } = trigger;
-  // Whether a wakeup reached the owner, and the step to take when it did not (their push
-  // subscription), are the owner's: a mandate reading them would be told about the owner's
-  // devices as if they were its own, and could act on neither. An absent value leaves the JSON.
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_escalation_case: escalationCase, last_escalation_chat: escalationChat, last_run_cause: _cause, ...stored } = trigger;
+  // Whether a wakeup reached the owner, why it did not, the step to take then (their push
+  // subscription) and the chat it points to are the owner's: a mandate reading them would be
+  // told about the owner's devices as if they were its own, and could act on neither. An absent
+  // value leaves the JSON.
+  const chat = escalationChat !== undefined && chatExists?.(escalationChat.threadId) === true ? escalationChat : undefined;
   const rest = isOwnerPrincipal(principal)
-    ? { ...stored, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome }
-    : { ...stored, last_escalation_at: undefined, last_escalation_outcome: undefined };
+    // Whether it was a question or an alert stays with the notice when its chat is gone.
+    ? { ...stored, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_escalation_case: escalationCase, last_escalation_chat: chat, last_escalation_kind: escalationChat?.kind }
+    : { ...stored, last_escalation_at: undefined, last_escalation_outcome: undefined, last_escalation_case: undefined, last_escalation_chat: undefined, last_escalation_kind: undefined };
   if (!planPauseOn()) return rest;
   const paused = isPaused(trigger);
   if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
@@ -9870,6 +9876,10 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
+      // A trigger links to its escalation's chat only while that chat stands (a deleted one is gone).
+      // Only the owner is shown the chat, so only the owner's list looks it up.
+      const threadsForList = isOwnerPrincipal(principal) ? engine.getThreadStore() : null;
+      const chatExists = (threadId: string): boolean => threadsForList?.getThread(threadId) !== undefined;
       // Who set each trigger up or changed it last, when that was a mandate: lines as on an
       // approval card, named by the same rule (in these lines a mandate sees another address's
       // grant as another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
@@ -9905,7 +9915,7 @@ export class LynoxHTTPApi {
             try { bulkSystem = bulkLedgerForList?.getRunForApply(trigger.bulk_run_id)?.targetSystem; } catch { bulkSystem = undefined; }
           }
           return {
-            ...triggerForRoute(trigger, principal),
+            ...triggerForRoute(trigger, principal, chatExists),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
             workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',
@@ -15016,12 +15026,41 @@ export class LynoxHTTPApi {
         exportData['memory_scopes_may_be_incomplete'] = all.mayBeIncomplete;
       }
 
-      // Knowledge graph (entities + relations). `knowledge_graph_may_be_incomplete` says the block
-      // is not the whole of what the graph holds: a read threw, fell back or reached a cap, or
-      // remembered texts or mentions are stored, which the block does not carry yet. `enabled` is
-      // the setting, as on the durable knowledge block: whether the graph is switched on in the
-      // config.
+      // Knowledge graph (entities, relations, and under `memories` the remembered texts with what
+      // links them to the graph). `knowledge_graph_may_be_incomplete` says the block is not the
+      // whole of what the graph holds: a read threw, fell back or reached a cap, or a remembered
+      // text could not be decrypted. `enabled` is the setting, as on the durable knowledge block:
+      // whether the graph is switched on in the config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
+      // The remembered texts both stores hold, read the same way on either path and masked as the
+      // durable knowledge block is; read before the graph, so a graph read that fails does not
+      // take them with it.
+      // Graph rows no block carries (subjects the graph block does not list; with the subject
+      // graph on, the older store's entities and relations) are counted, and any marks the
+      // block too: the export says "complete" only when nothing stored is left out.
+      let memoryTexts: { block: Record<string, unknown>; mayBeIncomplete: boolean };
+      try {
+        const { graphHoldsRowsNotExported, readMemoryTextsForExport } = await import('../core/graph-export.js');
+        const exportSecrets = engine.getSecretStore();
+        const agentMemoryFile = join(getLynoxDir(), 'agent-memory.db');
+        const read = readMemoryTextsForExport({
+          agentMemoryFile,
+          engineDb: engine.getEngineDb(),
+          mask: (t: string) => maskSecretPatterns(exportSecrets ? exportSecrets.maskSecrets(t) : t),
+        });
+        // With a layer, the setting it started with: a config reload does not rebuild it, and the
+        // count must agree with what the layer lists.
+        const layer = engine.getKnowledgeLayer();
+        const notExported = graphHoldsRowsNotExported({
+          agentMemoryFile,
+          engineDb: engine.getEngineDb(),
+          subjectGraph: layer ? layer.readsSubjectGraph === true : engine.getUserConfig().subject_graph_enabled === true,
+        });
+        memoryTexts = { block: { 'agent-memory.db': read['agent-memory.db'], 'engine.db': read['engine.db'] }, mayBeIncomplete: read.mayBeIncomplete || notExported };
+      } catch {
+        memoryTexts = { block: {}, mayBeIncomplete: true };
+        process.stderr.write('⚠ /api/export: remembered texts could not be read — knowledge graph marked incomplete\n');
+      }
       const kg = engine.getKnowledgeLayer();
       if (kg) {
         const fallbacksBefore = kg.readFallbackCount;
@@ -15034,28 +15073,16 @@ export class LynoxHTTPApi {
             relationships,
             relationships_note: EXPORT_RELATIONSHIPS_NOTE,
             stats,
+            memories: memoryTexts.block,
             enabled: graphEnabled,
           };
           // A subject-graph read that fell back to the legacy store answered from another
           // store; what it returned may be partial.
           // The same holds when the subject graph is on but its store never opened.
           const fellBack = kg.readFallbackCount !== fallbacksBefore || kg.subjectGraphUnavailable;
-          // Remembered texts and their mentions (both stores) are held but not in this block, so
-          // while any is stored the block is not the whole of the graph. A count that cannot be
-          // taken, or a missing engine.db, cannot show there are none.
-          let textsHeld = true;
-          try {
-            const engineDb = engine.getEngineDb();
-            if (engineDb) {
-              const { countEngineMemoryRows } = await import('../core/memory-graph-store.js');
-              textsHeld = kg.countHeldMemoryTexts() > 0 || countEngineMemoryRows(engineDb) > 0;
-            }
-          } catch {
-            process.stderr.write('⚠ /api/export: remembered texts could not be counted — knowledge graph marked incomplete\n');
-          }
-          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack || textsHeld;
+          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack || memoryTexts.mayBeIncomplete;
         } catch {
-          exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
+          exportData['knowledge_graph'] = { entities: [], relationships: [], memories: memoryTexts.block, enabled: graphEnabled };
           exportData['knowledge_graph_may_be_incomplete'] = true;
           process.stderr.write('⚠ /api/export: knowledge graph read failed — exported empty and marked incomplete\n');
         }
@@ -15077,11 +15104,12 @@ export class LynoxHTTPApi {
             relationships: held.relationships,
             relationships_note: EXPORT_RELATIONSHIPS_NOTE,
             stats: held.stats,
+            memories: memoryTexts.block,
             enabled: graphEnabled,
           };
-          exportData['knowledge_graph_may_be_incomplete'] = held.mayBeIncomplete;
+          exportData['knowledge_graph_may_be_incomplete'] = held.mayBeIncomplete || memoryTexts.mayBeIncomplete;
         } catch {
-          exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
+          exportData['knowledge_graph'] = { entities: [], relationships: [], memories: memoryTexts.block, enabled: graphEnabled };
           exportData['knowledge_graph_may_be_incomplete'] = true;
           process.stderr.write('⚠ /api/export: held knowledge graph read failed — exported empty and marked incomplete\n');
         }
@@ -15330,8 +15358,8 @@ export class LynoxHTTPApi {
           setAside = new Set(['history.db', 'engine.db', 'datastore.db', 'agent-memory.db']);
         }
         if (setAside.has('history.db')) exportData['threads_may_be_incomplete'] = true;
-        // A set-aside engine.db is marked whatever the subject graph: it still holds remembered
-        // texts, and while those are stored the block is not the whole of the graph.
+        // A set-aside store is marked whatever the subject graph: the remembered texts it still
+        // holds are not read from it, so the block is not the whole of the graph.
         if (setAside.has('agent-memory.db') || setAside.has('engine.db')) {
           exportData['knowledge_graph_may_be_incomplete'] = true;
         }

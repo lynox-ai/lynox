@@ -50,7 +50,7 @@ describe('a paused plan in the Triggers view', () => {
   });
 
   it('the list carries `paused`, and the view labels it and shows no next run', () => {
-    expect(ROUTE).toMatch(/\.\.\.triggerForRoute\(trigger, principal\)/);
+    expect(ROUTE).toMatch(/\.\.\.triggerForRoute\(trigger, principal, chatExists\)/);
     // `pausedOpen`: paused and not completed (641c-2; a completed plan keeps its pause, nothing is due).
     expect(VIEW).toMatch(/\{#if pausedOpen\(trigger\)\}[\s\S]{0,300}?triggers\.paused_takeover/);
     expect(VIEW).toContain("return trigger.paused === true && trigger.status !== 'completed';");

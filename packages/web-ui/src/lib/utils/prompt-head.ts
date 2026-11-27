@@ -51,6 +51,57 @@ export function linesBelow(lineBoxes: readonly { top: number; bottom: number }[]
 }
 
 /**
+ * How far the content of a scrolled box reaches below its visible part, in pixels, for a box whose
+ * lines are not elements of their own (rendered markup). Measured where the content ends — the
+ * bottom of its last element, `contentBottom` — so a trailing margin, which scrolls but holds no
+ * text, is not counted; never more than is left to scroll. `contentBottom` is null when the content
+ * does not end in an element (text after the last one): then what is left to scroll is taken.
+ */
+export function contentLeftBelow(box: { scrollHeight: number; clientHeight: number; scrollTop: number; bottom: number }, contentBottom: number | null): number {
+	const toScroll = box.scrollHeight - box.clientHeight - box.scrollTop;
+	return contentBottom === null ? toScroll : Math.min(toScroll, contentBottom - box.bottom);
+}
+
+/** The nodes `contentBottomOf` reads: a box's last child and its siblings before it. */
+export interface TailNode {
+	nodeType: number;
+	textContent: string | null;
+	previousSibling: TailNode | null;
+	getBoundingClientRect?: () => { bottom: number };
+}
+
+/**
+ * Where a box's content ends, for `contentLeftBelow`: the bottom of its last element, passing over
+ * text that is only whitespace (rendered markup ends in a line break). Null when text follows the
+ * last element, or there is none: then what is left to scroll is taken.
+ */
+export function contentBottomOf(lastChild: TailNode | null): number | null {
+	let tail = lastChild;
+	while (tail && tail.nodeType === 3 && (tail.textContent ?? '').trim() === '') tail = tail.previousSibling;
+	return tail && tail.nodeType === 1 && tail.getBoundingClientRect ? tail.getBoundingClientRect().bottom : null;
+}
+
+/**
+ * How many lines `left` pixels of content below a box's edge are, rounded up so a cut line counts.
+ * 0 below one pixel: the sizes are rounded pixels and the scroll position is not, so fractional
+ * zoom leaves up to a pixel at the very end. Any more, and part of a line is hidden.
+ */
+export function linesLeftBelow(left: number, lineHeight: number): number {
+	if (left < 1) return 0;
+	return Math.max(1, Math.ceil(left / Math.max(1, lineHeight) - 0.01));
+}
+
+/**
+ * How far one "read more" scrolls a box of `clientHeight` with a fade of `fadeHeight` at its
+ * bottom: by the whole lines seen above the fade, at least one. The line under the fade, or cut
+ * by the edge, is then on screen after; no line is passed over.
+ */
+export function readOnStep(clientHeight: number, lineHeight: number, fadeHeight: number): number {
+	const line = Math.max(1, lineHeight);
+	return Math.max(1, Math.floor((clientHeight - fadeHeight) / line)) * line;
+}
+
+/**
  * Whether the field has too little room to show about four lines once it shrinks with the window.
  * Then the card keeps its own height and the stack scrolls instead, buttons included: the question
  * wins over the buttons. `over` is how far the stack's content runs past its visible part.

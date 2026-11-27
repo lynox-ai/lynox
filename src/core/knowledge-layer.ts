@@ -1641,11 +1641,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
-   * How many remembered texts and mentions the legacy store holds ({@link AgentMemoryDb.countMemoryTextRows}).
-   * The data export does not carry them, so it marks its graph block incomplete while this is above zero.
+   * Whether this layer reads the subject graph: the setting as it was when the layer started.
+   * A later config reload does not rebuild the layer, so a reader that must agree with what the
+   * layer returns takes the setting from here, not from the current config.
    */
-  countHeldMemoryTexts(): number {
-    return this.db.countMemoryTextRows();
+  get readsSubjectGraph(): boolean {
+    return this.subjectGraphEnabled;
   }
 
   /**

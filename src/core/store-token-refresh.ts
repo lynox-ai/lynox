@@ -414,7 +414,7 @@ function clientStillMisnamed(profileId: string, ctx: StoreRefreshContext): boole
  * them. Kept equal by the test "the window's check and the refresh pass agree on each criterion"
  * (`store-token-refresh.test.ts`). A connect or a slot filled inside the window reads renewable.
  * Asked only for a 401's renewal, never for a token found due: one value is read, the access token
- * the request already sent, for its digest; for the refresh token and the client it only asks
+ * the vault holds now, for its digest; for the refresh token and the client it only asks
  * whether they are there (`holds`, no `secretAccess` event, where the store has it). It writes,
  * logs and sends nothing, mints no pass and asks the control plane nothing. Two differences from
  * the pass. An empty value counts as there for `holds` and as missing for the pass, so such a
@@ -734,12 +734,13 @@ async function endConnection(
    */
   invalidGrantSaid = false,
 ): Promise<StoreRefreshOutcome> {
-  // Whether this ended the connection. A connect that saved meanwhile, or a save that failed,
-  // leaves it as it is: then nothing says to connect again.
-  const ended = (await markEnded(profileId, ctx, plan)) === 'ended';
+  // Whether this ended the connection. A profile changed meanwhile (a connect, a removal, a grant
+  // taken away), or a save that failed, leaves it as it is: then nothing says to connect again.
+  const mark = await markEnded(profileId, ctx, plan);
   const said = invalidGrantSaid ? `${why} (invalid_grant)` : why;
-  if (!ended) {
-    outcomeLine(profileId, outcome, trigger, `${said}; the connection was left as it is (connected again meanwhile, or not saved)`);
+  if (mark !== 'ended') {
+    const left = mark === 'left' ? 'changed meanwhile' : 'it could not be marked ended';
+    outcomeLine(profileId, outcome, trigger, `${said}; the connection was left as it is (${left})`);
     return 'not-run';
   }
   outcomeLine(profileId, outcome, trigger, said);

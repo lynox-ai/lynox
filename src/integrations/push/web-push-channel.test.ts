@@ -103,10 +103,31 @@ describe('WebPushNotificationChannel — outcome', () => {
 		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('delivered');
 	});
 
-	it('reports failed with no subscription: nobody was told', async () => {
+	it('reports no_recipient with no subscription: nobody was told, and nothing was tried', async () => {
 		channel.unsubscribe('https://push.example/abc');
-		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('failed');
+		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('no_recipient');
 		expect(webPush.sendNotification).not.toHaveBeenCalled();
+	});
+
+	it('reports no_recipient when the only subscription is gone (404/410), and drops it', async () => {
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockRejectedValueOnce(Object.assign(new Error('gone'), { statusCode: 410 }));
+		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('no_recipient');
+		expect(webPush.sendNotification).toHaveBeenCalledTimes(1);
+		// It was dropped: the next send tries nothing.
+		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('no_recipient');
+		expect(webPush.sendNotification).toHaveBeenCalledTimes(1);
+	});
+
+	it('reports failed, not no_recipient, when a 404 and a refused send meet: a send was tried and did not get through', async () => {
+		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+		channel.subscribe('https://push.example/second', 'k', 'a', OWNER_PRINCIPAL);
+		const send = webPush.sendNotification as ReturnType<typeof vi.fn>;
+		send.mockImplementation(async (sub: { endpoint: string }) => {
+			throw Object.assign(new Error('x'), { statusCode: sub.endpoint === 'https://push.example/abc' ? 404 : 503 });
+		});
+		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('failed');
+		send.mockImplementation(async () => undefined);
+		stderr.mockRestore();
 	});
 
 	it('reports failed when every subscription refused it', async () => {
@@ -166,9 +187,14 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		send.mockImplementation(async () => undefined);
 		expect(await ch.send({ title: 't', body: 'b', priority: 'high' })).toBe('reached_others');
 		expect(sendCalls()).toEqual(['https://push.example/eva']);
-		// Nobody takes it: failed.
+		// Nobody takes it, and the owner has no subscription left: no_recipient. The mandate's device
+		// that refused is not the owner's, so it does not make the owner's notice a failed send.
 		send.mockImplementation(async () => { throw Object.assign(new Error('boom'), { statusCode: 500 }); });
+		expect(await ch.send({ title: 't', body: 'b', priority: 'high' })).toBe('no_recipient');
+		// With an owner's device again, and it refuses too: failed.
+		expect(ch.subscribe('https://push.example/abc2', 'k', 'a', OWNER_PRINCIPAL)).toBe('ok');
 		expect(await ch.send({ title: 't', body: 'b', priority: 'high' })).toBe('failed');
+		ch.unsubscribe('https://push.example/abc2');
 		send.mockImplementation(async () => undefined);
 		// The mandate's own test send still reaches its device and counts as sent for it.
 		const own = await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal' }, EVA);
@@ -197,6 +223,36 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(await notifier.notifyNewItem(item('i2'))).toBe(false);
 		expect(sendCalls()).toEqual(['https://push.example/eva']);
 		send.mockImplementation(async () => undefined);
+	});
+
+	// The typical case behind it: the owner set up no device, a helper did. The trigger must not
+	// say the owner's settings are not the cause, so it names no case at all.
+	it('through the router: no device of the owner\'s and a helper\'s that took it reads not_delivered with no case', async () => {
+		const { NotificationRouter, summarizeDelivery, deliveryCase } = await import('../../core/notification-router.js');
+		ch.unsubscribe('https://push.example/abc');
+		expect(ch.subscribe('https://push.example/eva', 'k', 'a', EVA)).toBe('ok');
+		const router = new NotificationRouter();
+		router.register(ch);
+		const report = await router.notify({ title: 'Needs you', body: 'b', priority: 'high' });
+		expect(report).toEqual([{ channel: ch.name, outcome: 'reached_others' }]);
+		expect(summarizeDelivery(report)).toBe('not_delivered');
+		expect(deliveryCase(report)).toBeUndefined();
+	});
+
+	it('through the router: with no subscription the inbox notifier is told false, and the throttle counts nothing', async () => {
+		const { NotificationRouter } = await import('../../core/notification-router.js');
+		const { createInboxNotifier } = await import('../inbox/notifier.js');
+		ch.unsubscribe('https://push.example/abc');
+		const router = new NotificationRouter();
+		router.register(ch);
+		let t = 1_000_000;
+		const notifier = createInboxNotifier({ router, now: () => t, perMinute: () => 1, perHour: () => 10 });
+		const item = (id: string) => ({ id, bucket: 'requires_user', accountId: 'acc', subject: 's', reasonDe: 'r', fromAddress: 'a@example.invalid' }) as unknown as Parameters<typeof notifier.notifyNewItem>[0];
+		expect(await notifier.notifyNewItem(item('i1'))).toBe(false);
+		// Nothing was counted: once a device is set up, the next one goes out within the same minute.
+		expect(ch.subscribe('https://push.example/abc', 'p256dh-key', 'auth-key', OWNER_PRINCIPAL)).toBe('ok');
+		t += 1_000;
+		expect(await notifier.notifyNewItem(item('i2'))).toBe(true);
 	});
 
 	it('counts a mandate with no store of ends as ended: nothing is stored for it', async () => {
@@ -294,7 +350,7 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(sendCalls()).toEqual(['https://push.example/eva']);
 		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
 		live.delete('TEST-MANDATE-1');
-		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-1' })).toBe('failed');
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-1' })).toBe('no_recipient');
 		expect(sendCalls()).toEqual([]);
 	});
 
@@ -306,8 +362,8 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-2' })).toBe('delivered');
 		expect(sendCalls()).toEqual(['https://push.example/max']);
 		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
-		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates' })).toBe('failed');
-		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-9' })).toBe('failed');
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates' })).toBe('no_recipient');
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-9' })).toBe('no_recipient');
 		expect(sendCalls()).toEqual([]);
 		// Control: the same message without a side still reaches every device.
 		await ch.send({ title: 't', body: 'b', priority: 'normal' });
@@ -318,7 +374,7 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 	// owner's, and the owner's device never makes it count as told.
 	it('sends an all-mandates message to every live grant\'s devices and none of the owner\'s', async () => {
 		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
-		expect(await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toEqual({ sent: 1, sentToOwner: 0, failed: 0, cleaned: 0 });
+		expect(await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toEqual({ sent: 1, sentToOwner: 0, failed: 0, failedOwner: 0, cleaned: 0 });
 		expect(sendCalls()).toEqual(['https://push.example/eva']);
 		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
 		ch.subscribe('https://push.example/max', 'k', 'a', mandate('max@example.invalid', 'TEST-MANDATE-2'));
@@ -373,7 +429,7 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 	it('does not count an owner message as delivered when only a mandate\'s device exists', async () => {
 		ch.unsubscribe('https://push.example/abc');
 		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
-		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'owner' })).toBe('failed');
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'owner' })).toBe('no_recipient');
 		expect(sendCalls()).toEqual([]);
 		// Without an audience, the mandate's device is reached, but only as someone other than the owner.
 		expect(await ch.send({ title: 't', body: 'b', priority: 'normal' })).toBe('reached_others');

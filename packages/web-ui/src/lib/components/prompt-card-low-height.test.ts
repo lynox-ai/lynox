@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'svelte/compiler';
 
 /**
  * With little height (a phone in landscape with the keyboard open, a small window) a long
@@ -16,6 +18,7 @@ import { fileURLToPath } from 'node:url';
  * template, the instrument `secret-prompt-frame.test.ts` uses on this file for the same reason.
  */
 const CHATVIEW = readFileSync(fileURLToPath(new URL('./ChatView.svelte', import.meta.url)), 'utf-8');
+const SRC = fileURLToPath(new URL('../../', import.meta.url));
 
 /** The classes of the one opening tag that carries `marker`. */
 function classesOf(marker: string): string[] {
@@ -76,5 +79,63 @@ describe('a long permission question at little height', () => {
 		const cls = classesOf('data-chat-transcript');
 		expect(cls).toContain('min-h-12');
 		expect(cls).toContain('flex-1');
+	});
+});
+
+describe('a question without a consent kind that runs past its box', () => {
+	// The model's own question and a tool's confirmation (a sheet's formulas, a mail) are rendered
+	// markup in a box of fixed height. Its end may be what the yes is for, so a count and a fade say
+	// that more follows, as the engine's own confirmation does. The measurement is in the shots.
+	const boxTag = (): string => {
+		const tags = [...CHATVIEW.matchAll(/<div\b[^>]*>/g)].map((m) => m[0]).filter((t) => t.includes('data-prompt-markdown'));
+		expect(tags).toHaveLength(1);
+		return tags[0]!;
+	};
+
+	it('its box is the card\'s one box with that mark, measured again when it scrolls', () => {
+		expect(permissionCard()).toContain(boxTag());
+		expect(boxTag()).toContain('onscroll={measureQuestion}');
+		expect(CHATVIEW).toContain("document.querySelector<HTMLElement>('[data-pending-prompt] [data-prompt-markdown]')");
+		// No other file of the web UI carries the mark, so the lookup cannot land elsewhere.
+		const files = readdirSync(SRC, { recursive: true, encoding: 'utf-8' }).filter((f) => /\.(svelte|ts)$/.test(f) && !/\.test\.ts$/.test(f));
+		expect(files.filter((f) => readFileSync(join(SRC, f), 'utf-8').includes('data-prompt-markdown')).map((f) => f.replace(/\\/g, '/'))).toEqual(['lib/components/ChatView.svelte']);
+	});
+
+	it('the box scrolls and cuts nothing off any other way', () => {
+		const cls = boxTag().match(/\bclass="([^"]*)"/)![1]!.split(/\s+/);
+		expect(cls).toContain('max-h-64');
+		expect(cls).toContain('overflow-y-auto');
+		expect(cls.filter((c) => /(^|:)(overflow-hidden|overflow-y-hidden|overflow-clip|truncate|line-clamp-|hidden$|invisible|h-0$|max-h-0)/.test(c))).toEqual([]);
+	});
+
+	it('the fade sits on the box, in a frame of its own, only while lines lie below', () => {
+		// Read as Svelte parses it: the box's parent is the frame, the fade the frame's only other child.
+		type Node = { type: string; name?: string; attributes?: Array<{ type: string; name: string; value: unknown }>; fragment?: { nodes: Node[] }; consequent?: { nodes: Node[] }; alternate?: { nodes: Node[] } | null; test?: { start: number; end: number } };
+		const ast = parse(CHATVIEW, { modern: true }) as unknown as { fragment: { nodes: Node[] } };
+		const kids = (n: Node): Node[] => [...(n.fragment?.nodes ?? []), ...(n.consequent?.nodes ?? []), ...(n.alternate?.nodes ?? [])];
+		const has = (n: Node, attr: string): boolean => (n.attributes ?? []).some((a) => a.type === 'Attribute' && a.name === attr);
+		const cls = (n: Node): string => { const a = (n.attributes ?? []).find((x) => x.name === 'class'); return Array.isArray(a?.value) ? (a.value as Array<{ data?: string }>).map((v) => v.data ?? '').join('') : ''; };
+		const parents: Node[] = [];
+		const walk = (n: Node): void => { for (const k of kids(n)) { if (k.type === 'RegularElement' && kids(k).some((c) => c.type === 'RegularElement' && has(c, 'data-prompt-markdown'))) parents.push(k); walk(k); } };
+		walk({ type: 'Root', fragment: ast.fragment });
+		expect(parents).toHaveLength(1);
+		const frame = parents[0]!;
+		expect(cls(frame).split(/\s+/)).toContain('relative');
+		const children = kids(frame).filter((c) => c.type !== 'Comment' && !(c.type === 'Text'));
+		expect(children.map((c) => c.type)).toEqual(['RegularElement', 'IfBlock']);
+		expect(has(children[0]!, 'data-prompt-markdown')).toBe(true);
+		const fadeIf = children[1]!;
+		expect(CHATVIEW.slice(fadeIf.test!.start, fadeIf.test!.end)).toBe('questionBelow > 0');
+		const fade = (fadeIf.consequent?.nodes ?? []).filter((c) => c.type === 'RegularElement');
+		expect(fade).toHaveLength(1);
+		expect(has(fade[0]!, 'data-prompt-fade')).toBe(true);
+		expect(cls(fade[0]!).split(/\s+/)).toEqual(expect.arrayContaining(['pointer-events-none', 'absolute', 'inset-x-0', 'bottom-0']));
+	});
+
+	it('the button with the count stands under the box, only while lines lie below', () => {
+		const card = permissionCard();
+		const afterFrame = card.slice(card.indexOf('{/if}', card.indexOf('data-prompt-fade')) + '{/if}'.length);
+		expect(afterFrame).toMatch(/^\s*<\/div>\s*\{#if questionBelow > 0\}\s*<div class="flex shrink-0 justify-end pt-1">\s*<button data-prompt-read-more type="button" onclick=\{readOnQuestion\} [^>]*>\{questionBelowLabel\} <span aria-hidden="true">↓<\/span><\/button>\s*<\/div>\s*\{\/if\}/);
+		expect(CHATVIEW).toContain("questionBelow === 1 ? t('chat.prompt_read_more_one') : tf('chat.prompt_read_more', { n: String(questionBelow) })");
 	});
 });

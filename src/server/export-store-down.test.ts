@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { EXPORT_RELATIONS_PER_ENTITY } from '../core/knowledge-layer.js';
+import { MEMORY_TEXTS_RELATIONSHIPS_NOTE } from '../core/graph-export.js';
 import { SecretStore } from '../core/secret-store.js';
 import { EngineDb } from '../core/engine-db.js';
 import { SubjectStore } from '../core/subject-store.js';
@@ -30,10 +31,21 @@ type ExportBody = {
     entries: Array<{ text: string }>; pending_entries: unknown[]; sources: unknown[];
     blocks: Record<string, string | null>; may_be_incomplete: boolean; enabled: boolean;
   };
-  knowledge_graph: { entities: unknown[]; relationships: unknown[]; enabled: boolean }; knowledge_graph_may_be_incomplete: boolean;
+  knowledge_graph: { entities: unknown[]; relationships: unknown[]; enabled: boolean; memories?: MemoryTexts }; knowledge_graph_may_be_incomplete: boolean;
   secrets: string[]; secrets_may_be_incomplete: boolean; secrets_note: string;
   set_aside_databases?: Array<{ database: string; files: string[] }>;
   set_aside_databases_unknown?: string;
+};
+
+type MemoryTexts = {
+  'agent-memory.db'?: { memories: Array<Record<string, unknown>>; mentions: Array<Record<string, unknown>> };
+  'engine.db'?: { memories: Array<Record<string, unknown>>; memory_subjects: Array<Record<string, unknown>>; relationships: Array<Record<string, unknown>>; relationships_note: string };
+};
+
+/** The remembered-text half of a store that holds none. */
+const NO_MEMORY_TEXTS = {
+  'agent-memory.db': { memories: [], mentions: [] },
+  'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE },
 };
 
 type EngineView = {
@@ -208,7 +220,7 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     };
     try {
       const body = await h.exportBody();
-      expect(body.knowledge_graph).toEqual({ entities: [], relationships: [], enabled: true });
+      expect(body.knowledge_graph, 'the remembered texts are read apart from the graph').toEqual({ entities: [], relationships: [], memories: NO_MEMORY_TEXTS, enabled: true });
       expect(body.knowledge_graph_may_be_incomplete, 'the graph threw, it was not read').toBe(true);
     } finally {
       h.engine().knowledgeLayer = saved;
@@ -224,7 +236,6 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       listEntities: ({ offset }: { offset: number }) => Promise.resolve(offset === 0 ? [{ id: 'a' }] : []),
       stats: () => Promise.resolve({}),
       getEntityRelationsForExport: () => Promise.resolve(Array.from({ length: count }, (_, i) => rel(i))),
-      countHeldMemoryTexts: () => 0,
     });
     try {
       h.engine().knowledgeLayer = stub(EXPORT_RELATIONS_PER_ENTITY - 1);
@@ -241,67 +252,81 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     }
   }, 60_000);
 
-  it('marks the knowledge graph incomplete while remembered texts are stored, in either store, since the block does not carry them', async () => {
-    const saved = h.engine().knowledgeLayer;
-    const stub = (count: () => number) => ({
-      readFallbackCount: 0,
-      subjectGraphUnavailable: false,
-      listEntities: () => Promise.resolve([]),
-      stats: () => Promise.resolve({}),
-      getEntityRelationsForExport: () => Promise.resolve([]),
-      countHeldMemoryTexts: count,
-    });
+  it('carries the remembered texts of both stores, masked, and marks the graph only when they cannot all be read', async () => {
+    expect(h.engine().getKnowledgeLayer(), 'fixture: the knowledge graph opened').not.toBeNull();
     const engineDb = (h.engine().getEngineDb() as EngineDb | null);
     expect(engineDb, 'fixture: engine.db opened').not.toBeNull();
     const raw = engineDb!.getDb();
+    // Built at RUNTIME, as the harness's secret is: a key-shaped literal is what the
+    // commit-time scan looks for, and this repo is public.
+    const key = `sk-ant-api03-${randomBytes(24).toString('hex')}`;
+    // A second connection on the layer's own file, as another writer would be.
+    const legacy = new Database(join(h.dir(), 'agent-memory.db'));
     try {
-      h.engine().knowledgeLayer = stub(() => 0);
-      const none = await h.exportBody();
-      expect(none.knowledge_graph_may_be_incomplete, 'no texts in either store: read in full').toBe(false);
+      legacy.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active, embedding, created_at, updated_at) VALUES ('m-legacy', ?, 'knowledge', 'global', 'global', 0, x'00', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')").run(`Alice's key is ${key}`);
+      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active) VALUES ('m-held', ?, 'knowledge', 'global', 'global', 0)").run(engineDb!.enc(`Bob prefers mornings, key ${key}`));
 
-      h.engine().knowledgeLayer = stub(() => 1);
-      const legacy = await h.exportBody();
-      expect(legacy.knowledge_graph_may_be_incomplete, 'a text or mention in agent-memory.db is not in the block').toBe(true);
-
-      h.engine().knowledgeLayer = stub(() => 0);
-      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active) VALUES ('m-held', 'held text', 'knowledge', 'global', 'global', 0)").run();
-      const engineHeld = await h.exportBody();
-      expect(engineHeld.knowledge_graph_may_be_incomplete, 'a text in engine.db, even one no longer active, is not in the block').toBe(true);
-      raw.prepare("DELETE FROM memories WHERE id = 'm-held'").run();
+      const res = await fetch(`${h.baseUrl()}/api/export`, { headers: { Authorization: `Bearer ${h.secret}` } });
+      const text = await res.text();
+      const body = JSON.parse(text) as ExportBody;
+      const memories = body.knowledge_graph.memories!;
+      const legacyRow = memories['agent-memory.db']!.memories.find(m => m['id'] === 'm-legacy');
+      expect(legacyRow?.['text'], 'a replaced text of agent-memory.db, masked').toMatch(/^Alice's key is (?!sk-ant-)/);
+      expect(text.includes(key), 'the key is not in the export').toBe(false);
+      expect(legacyRow && 'embedding' in legacyRow, 'no embedding').toBe(false);
+      expect(memories['engine.db']!.memories.map(m => m['id']), 'the one text engine.db holds, once').toEqual(['m-held']);
+      const engineRow = memories['engine.db']!.memories[0];
+      expect(engineRow?.['text'], 'engine.db, decrypted and masked').toMatch(/^Bob prefers mornings, key (?!sk-ant-)/);
+      expect(body.knowledge_graph_may_be_incomplete, 'both stores read in full').toBe(false);
 
       const getEngineDb = h.engine().getEngineDb;
       h.engine().getEngineDb = () => null;
       try {
         const noEngineDb = await h.exportBody();
-        expect(noEngineDb.knowledge_graph_may_be_incomplete, 'without engine.db its texts cannot be counted').toBe(true);
+        expect(noEngineDb.knowledge_graph.memories?.['agent-memory.db']?.memories.map(m => m['id']), 'agent-memory.db is still read').toContain('m-legacy');
+        expect(noEngineDb.knowledge_graph_may_be_incomplete, 'without engine.db its texts were not read').toBe(true);
       } finally {
         h.engine().getEngineDb = getEngineDb;
       }
-
-      h.engine().knowledgeLayer = stub(() => { throw new Error('count failed'); });
-      const failed = await h.exportBody();
-      expect(failed.knowledge_graph_may_be_incomplete, 'a count that fails cannot show there are none').toBe(true);
-      expect(failed.knowledge_graph.enabled, 'the block itself was still written').toBe(true);
     } finally {
       raw.prepare("DELETE FROM memories WHERE id = 'm-held'").run();
-      h.engine().knowledgeLayer = saved;
-    }
-  }, 60_000);
-
-  it('counts the texts the real layer holds in agent-memory.db', async () => {
-    expect(h.engine().getKnowledgeLayer(), 'fixture: the knowledge graph opened').not.toBeNull();
-    // A second connection on the layer's own file, as another writer would be.
-    const file = new Database(join(h.dir(), 'agent-memory.db'));
-    try {
-      file.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, embedding, created_at, updated_at) VALUES ('m-legacy', 'held text', 'knowledge', 'global', 'global', x'00', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')").run();
-      const held = await h.exportBody();
-      expect(held.knowledge_graph_may_be_incomplete, 'a text the layer holds is not in the block').toBe(true);
-    } finally {
-      file.prepare("DELETE FROM memories WHERE id = 'm-legacy'").run();
-      file.close();
+      legacy.prepare("DELETE FROM memories WHERE id = 'm-legacy'").run();
+      legacy.close();
     }
     const after = await h.exportBody();
-    expect(after.knowledge_graph_may_be_incomplete, 'with the text gone the block is whole again').toBe(false);
+    expect(after.knowledge_graph.memories, 'with the texts gone nothing is left').toEqual(NO_MEMORY_TEXTS);
+    expect(after.knowledge_graph_may_be_incomplete).toBe(false);
+  }, 60_000);
+
+  it('marks the knowledge graph while engine.db holds a subject no block lists, on the layer path', async () => {
+    expect(h.engine().getKnowledgeLayer(), 'fixture: the knowledge graph opened').not.toBeNull();
+    const engineDb = h.engine().getEngineDb() as EngineDb;
+    const id = new SubjectStore(engineDb).createSubject({ kind: 'service', name: 'Hosting' });
+    try {
+      const held = await h.exportBody();
+      expect(held.knowledge_graph_may_be_incomplete, 'with the subject graph off, a stored subject is in no block').toBe(true);
+    } finally {
+      engineDb.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(id);
+    }
+    const after = await h.exportBody();
+    expect(after.knowledge_graph_may_be_incomplete, 'with it gone nothing is left out').toBe(false);
+  }, 60_000);
+
+  it('counts with the subject-graph setting the layer started with, not one switched on in the config since', async () => {
+    const layer = h.engine().getKnowledgeLayer() as { readsSubjectGraph: boolean } | null;
+    expect(layer?.readsSubjectGraph, 'fixture: the layer started with the subject graph off').toBe(false);
+    const engineDb = h.engine().getEngineDb() as EngineDb;
+    // A person: listed if the layer read the subject graph, in no block since it does not.
+    const id = new SubjectStore(engineDb).createSubject({ kind: 'person', name: 'Bob' });
+    const getUserConfig = h.engine().getUserConfig;
+    h.engine().getUserConfig = () => ({ ...getUserConfig.call(h.engine()), subject_graph_enabled: true });
+    try {
+      const body = await h.exportBody();
+      expect(body.knowledge_graph_may_be_incomplete, 'the layer lists no subject, so Bob is left out').toBe(true);
+    } finally {
+      h.engine().getUserConfig = getUserConfig;
+      engineDb.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(id);
+    }
   }, 60_000);
 
   it('lists a secret written to the vault after boot by name, not by value', async () => {
@@ -367,7 +392,6 @@ describe('export with every store open, durable memory off, then the CRM gone (r
         listEntities: () => Promise.resolve([]),
         stats: () => Promise.resolve({}),
         getEntityRelationsForExport: () => Promise.resolve([]),
-        countHeldMemoryTexts: () => 0,
       };
       const steady = await h.exportBody();
       expect(steady.knowledge_graph_may_be_incomplete, 'fallbacks before the export do not count').toBe(false);
@@ -433,6 +457,9 @@ describe('export with the knowledge graph switched off after it held entities an
     const alice = db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'global' });
     const acme = db.createEntity({ canonicalName: 'ACME', entityType: 'organization', scopeType: 'global', scopeId: 'global' });
     db.createRelation(alice, acme, 'works_at', 'Alice works at ACME', 'm-not-stored');
+    db.setEmbeddingDimensions(3);
+    const memory = db.createMemory({ text: 'Alice prefers mornings', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
+    db.createMention(memory, alice);
     db.close();
   }, false);
 
@@ -445,7 +472,23 @@ describe('export with the knowledge graph switched off after it held entities an
     expect(graph.entities.map(e => e.canonicalName).sort()).toEqual(['ACME', 'Alice']);
     expect(graph.relationships.map(r => r.description)).toEqual(['Alice works at ACME']);
     expect(graph.enabled, 'switched off').toBe(false);
-    expect(body.knowledge_graph_may_be_incomplete, 'read in full, and no remembered text is held').toBe(false);
+    const legacy = body.knowledge_graph.memories?.['agent-memory.db'];
+    expect(legacy?.memories.map(m => m['text']), 'the remembered text it still holds').toEqual(['Alice prefers mornings']);
+    expect(legacy?.mentions, 'and its mention of Alice').toHaveLength(1);
+    expect(body.knowledge_graph_may_be_incomplete, 'read in full, the remembered text included').toBe(false);
+  }, 60_000);
+
+  it('marks the held graph while engine.db holds a subject no block lists', async () => {
+    const engineDb = h.engine().getEngineDb() as EngineDb;
+    const id = new SubjectStore(engineDb).createSubject({ kind: 'person', name: 'Bob' });
+    try {
+      const body = await h.exportBody();
+      expect(body.knowledge_graph_may_be_incomplete, 'with the subject graph off, a stored subject is in no block').toBe(true);
+    } finally {
+      engineDb.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(id);
+    }
+    const after = await h.exportBody();
+    expect(after.knowledge_graph_may_be_incomplete, 'with it gone nothing is left out').toBe(false);
   }, 60_000);
 });
 
@@ -465,7 +508,7 @@ describe('export with the knowledge graph switched off and durable memory on (re
 
     const body = await h.exportBody();
     expect(body.knowledge_graph).toMatchObject({ entities: [], relationships: [], enabled: false });
-    expect(body.knowledge_graph_may_be_incomplete, 'off, and the graph holds nothing: read in full').toBe(false);
+    expect(body.knowledge_graph_may_be_incomplete, 'the entry\'s subject ACME is stored, and with the subject graph off no block lists it').toBe(true);
     expect(body.durable_knowledge.enabled, 'durable memory on').toBe(true);
     expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['Quotes are valid for 30 days']);
     expect(body.durable_knowledge.may_be_incomplete, 'the graph being off does not mark durable knowledge').toBe(false);

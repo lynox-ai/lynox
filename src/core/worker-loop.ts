@@ -50,7 +50,7 @@ import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from '
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
-import { inquiryOptions, summarizeDelivery } from './notification-router.js';
+import { deliveryCase, inquiryOptions, summarizeDelivery, type DeliveryDetail } from './notification-router.js';
 import { stripHidden } from './hidden-text.js';
 import { runTaskPrompt, RUN_TASK_ANSWERED, RUN_TASK_ANSWER_PREAMBLE } from './run-task-turn.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
@@ -3086,7 +3086,7 @@ export class WorkerLoop {
       // Whether the question reached anyone goes onto the trigger and, through the engine as a
       // workflow question's does, to the hooks: on a managed instance a push that reached nobody
       // then mails the owner a fixed text that names neither the question nor the task.
-      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id));
+      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: session.sessionId, kind: 'question' }));
       const notices = this.#notices();
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
@@ -3101,7 +3101,7 @@ export class WorkerLoop {
         inquiry: questionReduced
           ? { question: notices.containedQuestionInquiry }
           : { question: offBoxQuestion, options: meta?.consent !== undefined ? consentInquiryOptions(meta.consent, noticeLanguage(this.engine.config?.language)) : inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
-      }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
+      }).then((report) => { recordDelivery(summarizeDelivery(report), { case: deliveryCase(report) }); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });
       try {
@@ -3890,7 +3890,7 @@ export class WorkerLoop {
       maskOffBox: (text) => this.engine.getSecretStore()?.maskAll(text) ?? text,
       notify: (msg) => this.notificationRouter.notify(msg),
       // Through the engine, as an escalation's is, so the hooks hear of a question that reached nobody.
-      recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id)),
+      recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: runId, kind: 'question' })),
       ownerStop,
       teardown,
       tearingDown: () => active?.tearingDown === true,
@@ -3907,25 +3907,25 @@ export class WorkerLoop {
    * (`unconfirmed`) is on the trigger before the wakeup leaves; the answer is written against
    * that start and cannot overwrite a newer escalation.
    */
-  #recordEscalation(triggerId: string): (delivery: DeliverySummary) => void {
+  #recordEscalation(triggerId: string, chat?: DeliveryDetail['chat']): (delivery: DeliverySummary, detail?: DeliveryDetail) => void {
     const startedAt = this.#nextEscalationStart();
     // A record that cannot be written must not stop the escalation it describes: the owner
     // still gets the thread and the wakeup.
     const start = (retry: boolean): boolean => {
       try {
-        return this.engine.getTaskManager()?.startEscalation(triggerId, startedAt, retry) ?? false;
+        return this.engine.getTaskManager()?.startEscalation(triggerId, startedAt, retry, chat) ?? false;
       } catch (err: unknown) {
         process.stderr.write(`[lynox:worker] recording an escalation start failed: ${processErrorText(err)}\n`);
         return false;
       }
     };
     const started = start(false);
-    return (delivery) => {
+    return (delivery, detail) => {
       // A start that did not land is tried once more, so the answer has a start to match;
       // otherwise the case would keep the previous escalation's outcome as if it were this one.
       // The retry lands only if no later escalation has started meanwhile.
       if (!started && !start(true)) return;
-      this.engine.getTaskManager()?.recordEscalationOutcome(triggerId, delivery, startedAt);
+      this.engine.getTaskManager()?.recordEscalationOutcome(triggerId, delivery, startedAt, detail);
     };
   }
 

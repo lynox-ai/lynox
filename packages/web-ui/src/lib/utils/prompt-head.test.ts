@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { linesBelow, promptFieldTooLow, splitPromptHead } from './prompt-head.js';
+import { contentBottomOf, contentLeftBelow, linesBelow, type TailNode, linesLeftBelow, promptFieldTooLow, readOnStep, splitPromptHead } from './prompt-head.js';
 
 const many = Array.from({ length: 3 }, (_, i) => `rm -rf ./release/build-${i + 1}/artifacts`).join('\n');
 
@@ -63,6 +63,94 @@ describe('linesBelow', () => {
 	});
 	it('adds up a long cut line and the short lines below it', () => {
 		expect(linesBelow([box(0, 138), box(138, 161), box(161, 184), box(184, 207)], 92, 23)).toBe(2 + 3);
+	});
+});
+
+describe('contentLeftBelow', () => {
+	const box = (scrollHeight: number, scrollTop = 0) => ({ scrollHeight, clientHeight: 256, scrollTop, bottom: 400 });
+
+	it('measures from where the content ends, so a trailing margin is not counted', () => {
+		// 4 px of margin under the last paragraph: 30 px left to scroll, 26 px of it text.
+		expect(contentLeftBelow(box(286), 426)).toBe(26);
+		// A list ends without a margin: everything left to scroll is text.
+		expect(contentLeftBelow(box(286), 430)).toBe(30);
+	});
+
+	it('never says more than is left to scroll, and counts down as the box is scrolled', () => {
+		expect(contentLeftBelow(box(286), 440)).toBe(30);
+		expect(contentLeftBelow(box(286, 20), 406)).toBe(6);
+	});
+
+	it('takes what is left to scroll when the content does not end in an element', () => {
+		expect(contentLeftBelow(box(286), null)).toBe(30);
+		expect(contentLeftBelow(box(286, 30), null)).toBe(0);
+	});
+});
+
+describe('contentBottomOf', () => {
+	const el = (bottom: number, previousSibling: TailNode | null = null): TailNode => ({ nodeType: 1, textContent: 'x', previousSibling, getBoundingClientRect: () => ({ bottom }) });
+	const text = (data: string, previousSibling: TailNode | null): TailNode => ({ nodeType: 3, textContent: data, previousSibling });
+
+	it('is the bottom of the last element, past the line breaks after it', () => {
+		const p = el(426, el(300));
+		expect(contentBottomOf(text('\n', text('  ', p)))).toBe(426);
+		expect(contentBottomOf(p)).toBe(426);
+	});
+
+	it('is null when text follows the last element, or there is no element', () => {
+		expect(contentBottomOf(text('the end of it\n', el(426)))).toBeNull();
+		expect(contentBottomOf(text('\n', null))).toBeNull();
+		expect(contentBottomOf(null)).toBeNull();
+	});
+
+	it('is null when any other node, such as a comment, follows the last element', () => {
+		expect(contentBottomOf({ nodeType: 8, textContent: '', previousSibling: el(426) })).toBeNull();
+		// Only an element is where the content ends, whatever else the node can report.
+		expect(contentBottomOf({ nodeType: 8, textContent: '', previousSibling: el(426), getBoundingClientRect: () => ({ bottom: 999 }) })).toBeNull();
+	});
+});
+
+describe('linesLeftBelow', () => {
+	it('counts what is left in lines, a cut line as a whole one', () => {
+		expect(linesLeftBelow(302, 22)).toBe(14);
+		expect(linesLeftBelow(44, 22)).toBe(2);
+		expect(linesLeftBelow(12, 22)).toBe(1);
+	});
+
+	it('counts an exact number of lines as that many, and one pixel more as one more', () => {
+		expect(linesLeftBelow(22, 22)).toBe(1);
+		expect(linesLeftBelow(23, 22)).toBe(2);
+		expect(linesLeftBelow(45, 22)).toBe(3);
+		expect(linesLeftBelow(68.25, 22.75)).toBe(3);
+		// Three line heights of 22.1 px divide to 3.0000000000000004: three lines, not four.
+		expect(linesLeftBelow(3 * 22.1, 22.1)).toBe(3);
+	});
+
+	it('is 0 below one pixel, the rounding left at the very end by fractional zoom', () => {
+		expect(linesLeftBelow(0, 22)).toBe(0);
+		expect(linesLeftBelow(0.8, 22)).toBe(0);
+		expect(linesLeftBelow(-3, 22)).toBe(0);
+	});
+
+	it('counts a line of which only a pixel or a few are hidden', () => {
+		expect(linesLeftBelow(1, 22)).toBe(1);
+		expect(linesLeftBelow(1.5, 22)).toBe(1);
+		expect(linesLeftBelow(11, 22.75)).toBe(1);
+	});
+});
+
+describe('readOnStep', () => {
+	it('scrolls by the whole lines seen above the fade, never more than that', () => {
+		// 224 px seen above the fade: 10 lines of 22 px, 9 of 22.75 px.
+		expect(readOnStep(256, 22, 32)).toBe(220);
+		expect(readOnStep(256, 22.75, 32)).toBe(9 * 22.75);
+		// 219 px seen: 9 whole lines, the tenth is partly under the fade and comes after.
+		expect(readOnStep(251, 22, 32)).toBe(198);
+		expect(readOnStep(252, 22, 32)).toBe(220);
+	});
+
+	it('at least one line, even in a box hardly taller than its fade', () => {
+		expect(readOnStep(40, 22, 32)).toBe(22);
 	});
 });
 

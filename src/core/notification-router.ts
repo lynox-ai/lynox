@@ -78,14 +78,17 @@ export interface NotificationMessage {
  *
  * - `delivered` — the message left for at least one reader.
  * - `skipped` — the message was not for this channel; nothing to do, nothing wrong.
- * - `failed` — the message was for this channel and did not reach anyone, including the
- *   case of a channel with nobody to deliver to.
+ * - `failed` — the message was for this channel and did not reach anyone it tried.
+ * - `no_recipient` — the message was for this channel, but the channel had nobody to deliver
+ *   it to (a web push with no live subscription of the owner's). Nobody was told, exactly as
+ *   with `failed`; it is its own value so the owner can be told that setting up a device would
+ *   help, where after `failed` it would not.
  * - `reached_others` — the message left, but only for readers other than the owner (a web
  *   push that only a mandate's device took). It was sent, so whoever limits how often a
  *   channel sends counts it (`sendTo`); the owner was not told, so it never counts as
  *   delivered (`summarizeDelivery`), and an escalation still falls back to mail.
  */
-export type ChannelOutcome = 'delivered' | 'skipped' | 'failed' | 'reached_others';
+export type ChannelOutcome = 'delivered' | 'skipped' | 'failed' | 'no_recipient' | 'reached_others';
 
 export interface NotificationChannel {
   readonly name: string;
@@ -97,11 +100,59 @@ export type NotifyReport = ReadonlyArray<{ readonly channel: string; readonly ou
 
 /**
  * Whether a `notify()` reached anyone: `delivered` iff at least one channel delivered,
- * `no_channel` when none was registered, `not_delivered` otherwise. A `skipped` or
- * `reached_others` channel never counts — that is the reason `ChannelOutcome` is more than
+ * `no_channel` when none was registered, `not_delivered` otherwise. A `skipped`,
+ * `no_recipient` or `reached_others` channel never counts — that is the reason `ChannelOutcome` is more than
  * a boolean.
  */
 export type DeliverySummary = 'delivered' | 'not_delivered' | 'no_channel';
+
+/**
+ * Why a `not_delivered` notice reached nobody: `no_subscription` when no channel had anyone to
+ * deliver to (`no_recipient`), `send_failed` when a channel tried and did not get through. Only
+ * the owner's own record reads it; the hooks and the control plane hear `DeliverySummary` alone.
+ */
+export type DeliveryCase = 'no_subscription' | 'send_failed';
+
+/**
+ * What a reported delivery adds for the trigger's record: why it reached nobody, and the chat
+ * where the question or the alert stands, if there is one. `kind` says which of the two it is.
+ */
+export interface DeliveryDetail {
+  readonly case?: DeliveryCase | undefined;
+  readonly chat?: { readonly threadId: string; readonly kind: 'question' | 'alert' } | undefined;
+}
+
+/**
+ * Why a `notify()` that reached nobody did so. Undefined unless `summarizeDelivery` says
+ * `not_delivered`; undefined too when every channel skipped the message (none was meant), and
+ * when a channel reached only others (`reached_others` does not say whether the owner had a
+ * device, so neither case is known to be true). A skipping channel does not count either way.
+ * A channel that was tried and failed makes it `send_failed` wherever it stands in the report,
+ * ahead of one that reached only others: the order channels registered in decides nothing.
+ */
+export function deliveryCase(report: NotifyReport): DeliveryCase | undefined {
+  if (summarizeDelivery(report) !== 'not_delivered') return undefined;
+  let sawNoRecipient = false;
+  let sawOthers = false;
+  for (const { outcome } of report) {
+    switch (outcome) {
+      case 'skipped': break;
+      case 'no_recipient': sawNoRecipient = true; break;
+      case 'reached_others': sawOthers = true; break;
+      case 'failed':
+        return 'send_failed';
+      case 'delivered':
+        // Not reachable: summarizeDelivery said not_delivered.
+        return undefined;
+      default: {
+        const unknown: never = outcome;
+        return unknown;
+      }
+    }
+  }
+  if (sawOthers) return undefined;
+  return sawNoRecipient ? 'no_subscription' : undefined;
+}
 
 /**
  * What a channel's `send` resolved to, read strictly. `NotificationChannel` is exported, and a
@@ -113,8 +164,25 @@ export type DeliverySummary = 'delivered' | 'not_delivered' | 'no_channel';
  * as `failed`.
  */
 export function outcomeOf(value: unknown): ChannelOutcome {
-  if (value === 'delivered' || value === 'skipped' || value === 'failed' || value === 'reached_others') return value;
+  if (value === 'delivered' || value === 'skipped' || value === 'failed' || value === 'no_recipient' || value === 'reached_others') return value;
   return value === true ? 'skipped' : 'failed';
+}
+
+/** Whether `sendTo` counts an outcome as handled. Exhaustive, so a new outcome must decide. */
+function handledForSendTo(outcome: ChannelOutcome): boolean {
+  switch (outcome) {
+    case 'delivered':
+    case 'skipped':
+    case 'reached_others':
+      return true;
+    case 'failed':
+    case 'no_recipient':
+      return false;
+    default: {
+      const unknown: never = outcome;
+      return unknown;
+    }
+  }
 }
 
 export function summarizeDelivery(report: NotifyReport): DeliverySummary {
@@ -175,6 +243,7 @@ export class NotificationRouter {
    * returns `true`, as it did when channels answered with a boolean — callers throttle on
    * this value (`integrations/inbox/notifier.ts`), so its meaning stays "handled". So does
    * `reached_others`: a push a mandate's device took was sent, and the throttle counts it.
+   * `no_recipient` is `false`, as a channel with nobody to deliver to always was.
    */
   async sendTo(
     channelName: string,
@@ -185,8 +254,7 @@ export class NotificationRouter {
       return false;
     }
     try {
-      const outcome = outcomeOf(await ch.send(msg));
-      return outcome === 'delivered' || outcome === 'skipped' || outcome === 'reached_others';
+      return handledForSendTo(outcomeOf(await ch.send(msg)));
     } catch (err: unknown) {
       const detail =
         err instanceof Error ? err.message : String(err);
