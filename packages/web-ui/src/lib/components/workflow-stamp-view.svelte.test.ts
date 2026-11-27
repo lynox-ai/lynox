@@ -984,9 +984,18 @@ describe('the review keeps its reason and its buttons in sight', () => {
 		expect(q('stamp-dialog')).toBeNull();
 	});
 
-	it('the buttons sit in a foot that stays in sight on an opaque ground with a line above', async () => {
+	it('the buttons sit in a foot that stays in sight on an opaque ground with a line above, and Tab keeps clear of it from the start', async () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
-		await click(q('stamp-review'));
+		const restore = layOut(0, 52, true);
+		try {
+			await click(q('stamp-review'));
+		} finally {
+			restore();
+		}
+		// Held as soon as the view opens, before anything is marked: the browser keeps a focused
+		// control clear of the foot.
+		expect(frame().style.scrollPaddingBottom).toBe('60px');
+		expect(frame().style.scrollPaddingTop).toBe('');
 		const foot = q('stamp-dialog')!.querySelector<HTMLElement>('[data-dialog-foot]');
 		expect(foot?.contains(q('stamp-confirm'))).toBe(true);
 		const cls = foot!.className.split(/\s+/);
