@@ -320,6 +320,27 @@ describe('the pause is held to its takeover (real engine)', () => {
     }
   });
 
+  it('the list gives the owner why a wakeup reached nobody and its chat while that chat stands, and a helper neither', async () => {
+    const id = pausedPlan();
+    const threadId = `question-chat-${id}`;
+    engine.getThreadStore()!.createThread(threadId, { title: 'Weekly' });
+    db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered', last_escalation_case = 'no_subscription', last_escalation_thread_id = ?, last_escalation_chat_kind = 'question' WHERE id = ?").run(threadId, id);
+    const rowOf = async (cookie: string): Promise<Record<string, unknown> | undefined> =>
+      ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((t) => t['id'] === id);
+    const owner = await rowOf(ownerCookie);
+    expect([owner?.['last_escalation_case'], owner?.['last_escalation_chat'], owner?.['last_escalation_kind']]).toEqual(['no_subscription', { threadId, kind: 'question' }, 'question']);
+    const helper = await rowOf(mandateCookie);
+    expect(helper?.['id']).toBe(id);
+    expect(helper).not.toHaveProperty('last_escalation_case');
+    expect(helper).not.toHaveProperty('last_escalation_chat');
+    expect(helper).not.toHaveProperty('last_escalation_kind');
+    // The chat is deleted: the case and whether it was a question stay, the link goes.
+    engine.getThreadStore()!.deleteThread(threadId);
+    const after = await rowOf(ownerCookie);
+    expect([after?.['last_escalation_case'], after?.['last_escalation_kind']]).toEqual(['no_subscription', 'question']);
+    expect(after).not.toHaveProperty('last_escalation_chat');
+  });
+
   it('a change or completion of a plan that is not paused answers the escalation fields to the owner only', async () => {
     const escalatedPlan = (): string => {
       const id = `escalated-${String(++n)}`;
@@ -327,17 +348,23 @@ describe('the pause is held to its takeover (real engine)', () => {
         id, title: 'Weekly', source: 'cron', effect: 'notify', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
         confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'mandate:ida@example.invalid', createdMandateId: 'TEST-MANDATE-PAUSE',
       });
-      db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered' WHERE id = ?").run(id);
+      db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered', last_escalation_case = 'send_failed', last_escalation_thread_id = 'escalation-x', last_escalation_chat_kind = 'alert' WHERE id = ?").run(id);
       return id;
     };
     const owner = await ask('PATCH', `/api/tasks/${escalatedPlan()}`, ownerCookie, { title: 'Renamed' });
-    expect([owner.status, owner.json['last_escalation_at'], owner.json['last_escalation_outcome']]).toEqual([200, '2026-10-27T08:00:00.000Z', 'not_delivered']);
+    expect([owner.status, owner.json['last_escalation_at'], owner.json['last_escalation_outcome'], owner.json['last_escalation_case'], owner.json['last_escalation_kind']])
+      .toEqual([200, '2026-10-27T08:00:00.000Z', 'not_delivered', 'send_failed', 'alert']);
+    // This answer does not look the chat up, so it names none.
+    expect(owner.json).not.toHaveProperty('last_escalation_chat');
     for (const [method, path, body] of [['PATCH', '', { title: 'Renamed' }], ['POST', '/complete', undefined]] as const) {
       const id = escalatedPlan();
       const helper = await ask(method, `/api/tasks/${id}${path}`, mandateCookie, body);
       expect([method, path, helper.status, helper.json['id']]).toEqual([method, path, 200, id]);
       expect(helper.json).not.toHaveProperty('last_escalation_at');
       expect(helper.json).not.toHaveProperty('last_escalation_outcome');
+      expect(helper.json).not.toHaveProperty('last_escalation_case');
+      expect(helper.json).not.toHaveProperty('last_escalation_chat');
+      expect(helper.json).not.toHaveProperty('last_escalation_kind');
     }
   });
 

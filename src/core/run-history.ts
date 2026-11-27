@@ -11,7 +11,7 @@ import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scru
 import type { CallApiCost, CallContract, CallFiled, GrantLift } from './call-connection.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier, PlannedPipeline } from '../types/index.js';
 import { workflowStampState, type WorkflowStampState } from './workflow-stamp.js';
-import type { DeliverySummary } from './notification-router.js';
+import type { DeliveryDetail, DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
@@ -3806,14 +3806,14 @@ export class RunHistory {
 
   /** Mark that an escalation of a trigger started — see {@link TriggerStore.startEscalation}.
    *  False without a trigger store. */
-  startEscalation(id: string, at: string, onlyIfLater = false): boolean {
-    return this._triggerStore?.startEscalation(id, at, onlyIfLater) ?? false;
+  startEscalation(id: string, at: string, onlyIfLater = false, chat?: DeliveryDetail['chat']): boolean {
+    return this._triggerStore?.startEscalation(id, at, onlyIfLater, chat) ?? false;
   }
 
   /** Record whether the escalation that started at `startedAt` reached anyone — see
    *  {@link TriggerStore.recordEscalationOutcome}. False without a trigger store. */
-  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string): boolean {
-    return this._triggerStore?.recordEscalationOutcome(id, outcome, startedAt) ?? false;
+  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string, detail?: DeliveryDetail): boolean {
+    return this._triggerStore?.recordEscalationOutcome(id, outcome, startedAt, detail) ?? false;
   }
 
   /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The

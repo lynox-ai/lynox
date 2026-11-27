@@ -7,7 +7,7 @@
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
-	import { escalationNotice } from '../utils/trigger-escalation.js';
+	import { escalationNotice, escalationChatLink } from '../utils/trigger-escalation.js';
 	import WatchAddress from './WatchAddress.svelte';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, pausedTitleLine, pausedWhoText, planTitle, refusalText, takeoverLines, writtenByMember, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
@@ -65,6 +65,12 @@
 		// finding) reached anyone — see `escalationNotice`.
 		last_escalation_at?: string;
 		last_escalation_outcome?: string;
+		// Why a `not_delivered` one reached nobody, and the chat its question or alert stands in
+		// (owner only; absent once that chat is deleted) — see `escalationChatLink`.
+		last_escalation_case?: string;
+		last_escalation_chat?: { threadId: string; kind: string };
+		// Whether that escalation was a run's question or an alert, kept when its chat is gone.
+		last_escalation_kind?: string;
 		// Whether a run of this trigger is in flight right now, and whether a stop can end it
 		// (`GET /api/triggers`; a mandate is told only about its own runs). Snapshots from
 		// the last load: the stop route still answers a run that ended since.
@@ -693,9 +699,13 @@
 								{/if}
 								{#if escalationNotice(trigger)}
 									{@const notice = escalationNotice(trigger)!}
-									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
+									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{fmtDate(notice.at)} · {t(notice.key)}</span>
 								{/if}
 							</div>
+							{#if escalationChatLink(trigger)}
+								{@const chatLink = escalationChatLink(trigger)!}
+								<p class="mt-1 mb-1 text-xs" data-escalation-chat={trigger.last_escalation_chat?.kind}><a class="text-accent-text underline" href={chatLink.href}>{t(chatLink.key)}</a></p>
+							{/if}
 							<!-- A completed plan that keeps its pause has no way back at the plan: nothing takes it
 							     over or reopens it. The line names the way there is (U-275). -->
 							{#if pausedDone(trigger)}

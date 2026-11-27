@@ -147,7 +147,7 @@ import { isFeatureEnabled } from './features.js';
 import { bulkRunsOn } from './bulk-switch.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
-import { NotificationRouter, type DeliverySummary } from './notification-router.js';
+import { NotificationRouter, type DeliveryDetail, type DeliverySummary } from './notification-router.js';
 import { escalateToUser as runEscalation, type EscalateOpts } from './escalation.js';
 import { WorkerLoop } from './worker-loop.js';
 import { Session, sessionInitialTier, resolveNamedProfile } from './session.js';
@@ -3296,14 +3296,15 @@ export class Engine {
    * hooks' `onEscalationReported`. `escalateToUser` uses it, and so does a scheduled workflow's
    * question (`WorkflowQuestions`), so the hooks hear of both the same way.
    */
-  escalationReporter(caller?: (delivery: DeliverySummary) => void): (delivery: DeliverySummary) => void {
+  escalationReporter(caller?: (delivery: DeliverySummary, detail?: DeliveryDetail) => void): (delivery: DeliverySummary, detail?: DeliveryDetail) => void {
     // The caller's record and the hooks each run in their own try/catch: a caller whose record
     // throws must not keep the hooks from hearing of an escalation that reached nobody, and a
     // hook that throws must not cost the caller its record. The switch is read when the wakeup
     // has answered, not here, so turning it off takes effect without a restart.
-    return (delivery: DeliverySummary): void => {
+    // `detail` is for the caller's own record only; the hooks hear the summary, as before.
+    return (delivery: DeliverySummary, detail?: DeliveryDetail): void => {
       if (caller) {
-        try { caller(delivery); } catch (err: unknown) {
+        try { caller(delivery, detail); } catch (err: unknown) {
           process.stderr.write(`[escalation] recording the delivery failed: ${processErrorText(err)}\n`);
         }
       }

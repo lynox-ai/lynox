@@ -404,6 +404,17 @@ export interface TriggerRecord {
    *  `not_delivered` (channels were there, none delivered), `no_channel` (none registered),
    *  `unconfirmed` (started, no answer from the channels yet — or none will come). */
   last_escalation_outcome?: 'delivered' | 'not_delivered' | 'no_channel' | 'unconfirmed' | undefined;
+  /** Why a `not_delivered` escalation reached nobody: no live push subscription of the owner's
+   *  (`no_subscription`), or a send that was tried and did not get through (`send_failed`).
+   *  Absent for any other outcome, for a `not_delivered` one whose push reached only someone
+   *  else's device (whether the owner had one is not known), and for an escalation recorded
+   *  before this was kept. */
+  last_escalation_case?: 'no_subscription' | 'send_failed' | undefined;
+  /** The chat where that escalation's question (`question`: the run's own chat) or alert
+   *  (`alert`: the escalation's chat) stands. Absent for an alert that had none (no thread store,
+   *  a mandate's thread) and for an escalation recorded before this was kept. A route names it
+   *  only while that chat exists. */
+  last_escalation_chat?: { threadId: string; kind: 'question' | 'alert' } | undefined;
   /** The bulk run a `bulk_apply` / `bulk_undo` trigger writes (or a `bulk_preview`
    *  trigger reads), from `condition_json.run_id`. Set only by the bulk approval route
    *  and, for a preview, the external bulk plan. */

@@ -1684,6 +1684,14 @@ const MIGRATIONS: string[] = [
   // the rule's schema, never the refused value. Existing rows stay NULL and read as before.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (76);
    ALTER TABLE bulk_targets ADD COLUMN refusal_detail TEXT;`,
+  // v77: about the trigger's last escalation, beside its outcome: why a `not_delivered` one reached
+  // nobody (`no_subscription` | `send_failed`), and the chat where its question or alert stands
+  // (thread id, and whether it is a `question` or an `alert`), so the trigger can link to it.
+  // Ids and fixed values only, no text from the run. Existing rows stay NULL and read as before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (77);
+   ALTER TABLE triggers ADD COLUMN last_escalation_case TEXT;
+   ALTER TABLE triggers ADD COLUMN last_escalation_thread_id TEXT;
+   ALTER TABLE triggers ADD COLUMN last_escalation_chat_kind TEXT;`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */

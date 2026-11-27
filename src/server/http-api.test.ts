@@ -573,6 +573,7 @@ const { pushMock } = vi.hoisted(() => ({
     addedBy: vi.fn((): { created_by: string | null } | undefined => ({ created_by: null })),
     subscriptionCount: vi.fn(() => 1),
     sendDetailed: vi.fn(async () => ({ sent: 1, failed: 0, cleaned: 0 })),
+    send: vi.fn(async (): Promise<'delivered' | 'failed' | 'no_recipient'> => 'delivered'),
   },
 }));
 vi.mock('../integrations/push/web-push-channel.js', () => ({
@@ -583,6 +584,8 @@ vi.mock('../integrations/push/web-push-channel.js', () => ({
     addedBy = pushMock.addedBy;
     subscriptionCount = pushMock.subscriptionCount;
     sendDetailed = pushMock.sendDetailed;
+    send = pushMock.send;
+    name = 'web-push';
     getPublicKey(): string { return 'pub'; }
     eraseSubscriptions(): void { /* nothing stored */ }
     scrubFreedPages(): void { /* nothing stored */ }
@@ -976,6 +979,33 @@ describe('LynoxHTTPApi', () => {
         expect(router!.register).toHaveBeenCalledTimes(1);
         expect(engine.startWorkerLoop).toHaveBeenCalledTimes(1);
         expect(router!.register.mock.invocationCallOrder[0]!).toBeLessThan(engine.startWorkerLoop.mock.invocationCallOrder[0]!);
+      } finally {
+        await own.shutdown();
+      }
+    });
+
+    // The same, through an escalation the loop sends the moment it starts, on a real router.
+    it('an escalation the worker loop sends as it starts reaches the push channel, not no_channel', async () => {
+      const { Engine } = await import('../core/engine.js');
+      const { NotificationRouter, summarizeDelivery } = await import('../core/notification-router.js');
+      const ctor = vi.mocked(Engine);
+      const original = ctor.getMockImplementation()!;
+      const router = new NotificationRouter();
+      let sent: Promise<string> | undefined;
+      ctor.mockImplementationOnce(function (this: Record<string, unknown>, ...args: unknown[]) {
+        const self = original.call(this, ...args) as Record<string, unknown> | undefined ?? this;
+        self['getNotificationRouter'] = vi.fn(() => router);
+        // The first tick's escalation, sent inside the start, before anything awaited in init can run.
+        self['startWorkerLoop'] = vi.fn(() => { sent = router.notify({ title: 'Q', body: 'b', priority: 'high' }).then(summarizeDelivery); });
+        return self;
+      } as never);
+      pushMock.send.mockClear();
+      const own = new LynoxHTTPApi();
+      try {
+        await own.init();
+        expect(sent, 'the loop must have started').toBeDefined();
+        expect(await sent).toBe('delivered');
+        expect(pushMock.send).toHaveBeenCalledTimes(1);
       } finally {
         await own.shutdown();
       }

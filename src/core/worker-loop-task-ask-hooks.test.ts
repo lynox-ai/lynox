@@ -89,16 +89,20 @@ const TASK: TriggerRecord = {
 };
 
 /** Starts the task, whose agent turn asks its owner and parks; resolves once the question is pushed. */
-async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutcome: 'delivered' | 'failed' | 'reached_others' }): Promise<{
+async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutcome: 'delivered' | 'failed' | 'no_recipient' | 'reached_others' }): Promise<{
   outcomes: Array<[string, DeliverySummary]>;
   starts: string[];
   notified: NotificationMessage[];
+  startChats: unknown[];
+  details: unknown[];
 }> {
   const history = new RunHistory(join(tempDir('lynox-task-question-'), 'history.db'));
   closers.push(() => { history.close(); });
   const promptStore = new PromptStore(history.getDb());
   const outcomes: Array<[string, DeliverySummary]> = [];
   const starts: string[] = [];
+  const startChats: unknown[] = [];
+  const details: unknown[] = [];
   const taskManager = {
     getDueTriggers: vi.fn(() => [TASK]),
     getExpiredWaitingTriggers: vi.fn(() => []),
@@ -111,8 +115,8 @@ async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutco
     getTrigger: vi.fn((id: string) => (id === TASK.id ? TASK : undefined)),
     recordTaskRun: vi.fn(),
     setEnabled: vi.fn(() => true),
-    startEscalation: vi.fn((id: string) => { starts.push(id); return true; }),
-    recordEscalationOutcome: vi.fn((id: string, outcome: DeliverySummary) => { outcomes.push([id, outcome]); return true; }),
+    startEscalation: vi.fn((id: string, _at: string, _retry: boolean, chat?: unknown) => { starts.push(id); startChats.push(chat); return true; }),
+    recordEscalationOutcome: vi.fn((id: string, outcome: DeliverySummary, _startedAt: string, detail?: unknown) => { outcomes.push([id, outcome]); details.push(detail); return true; }),
   } as unknown as TaskManager;
   const session = {
     sessionId: SESSION_ID, _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null,
@@ -145,7 +149,7 @@ async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutco
   closers.unshift(() => { loop.stop(); });
   await loop.tick();
   if (!await settles(() => notified.some((m) => m.inquiry !== undefined))) throw new Error('the task never pushed its question');
-  return { outcomes, starts, notified };
+  return { outcomes, starts, notified, startChats, details };
 }
 
 // Each case boots a managed engine: about 1 s alone, but one of six runs on a loaded machine
@@ -157,10 +161,24 @@ describe('a scheduled task question on an instance the control plane runs', { ti
     expect(await settles(() => h.outcomes.length > 0)).toBe(true);
     expect(h.starts).toEqual([TASK.id]);
     expect(h.outcomes).toEqual([[TASK.id, 'not_delivered']]);
+    expect(h.details).toEqual([{ case: 'send_failed' }]);
     expect(await settles(() => escalationPosts(fetchSpy).length > 0)).toBe(true);
     const posts = escalationPosts(fetchSpy);
     expect(posts).toHaveLength(1);
     expect(String(posts[0]![0])).toBe('https://cp.test/internal/usage/inst-tq/escalation');
+  });
+
+  // No device of the owner's set up: the trigger says so, links the question's chat, and the
+  // control plane still hears of it, since that mail is then the owner's only way to learn of it.
+  it('one whose push had nobody to deliver to is written as no_subscription with its chat, and still reported to the control plane', async () => {
+    const { engine, fetchSpy } = await bootManaged();
+    const h = await askingTask({ reporter: engine.escalationReporter.bind(engine), pushOutcome: 'no_recipient' });
+    expect(await settles(() => h.outcomes.length > 0)).toBe(true);
+    expect(h.startChats).toEqual([{ threadId: SESSION_ID, kind: 'question' }]);
+    expect(h.outcomes).toEqual([[TASK.id, 'not_delivered']]);
+    expect(h.details).toEqual([{ case: 'no_subscription' }]);
+    expect(await settles(() => escalationPosts(fetchSpy).length > 0)).toBe(true);
+    expect(escalationPosts(fetchSpy)).toHaveLength(1);
   });
 
   // The trigger view tells the owner that none of their devices received it: true here as well.
@@ -169,6 +187,9 @@ describe('a scheduled task question on an instance the control plane runs', { ti
     const h = await askingTask({ reporter: engine.escalationReporter.bind(engine), pushOutcome: 'reached_others' });
     expect(await settles(() => h.outcomes.length > 0)).toBe(true);
     expect(h.outcomes).toEqual([[TASK.id, 'not_delivered']]);
+    // No case: the channel answers reached_others and does not say whether the owner had a device
+    // of their own, so the trigger keeps the general sentence instead of naming a cause.
+    expect(h.details).toEqual([{ case: undefined }]);
     expect(await settles(() => escalationPosts(fetchSpy).length > 0)).toBe(true);
     expect(escalationPosts(fetchSpy)).toHaveLength(1);
   });
