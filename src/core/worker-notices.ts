@@ -144,6 +144,13 @@ export interface WorkerNotices {
    * "only the owner": a mandate under a later access can connect its own connection again.
    */
   readonly memberEndForMandates: string;
+  /**
+   * The push title of a run that finished and noted member-connection lines, after its ⚠: the run
+   * is over and nothing waits, so the title must not say it is paused (U-420). The note leads: it
+   * alone tells this end from an interrupted one, and a phone cuts a title at its end. The note
+   * itself is in the body. Owner and mandates alike.
+   */
+  readonly titleWithNote: (name: string) => string;
   readonly chipRunAgain: string;
   readonly chipRetry: string;
   readonly chipExplain: string;
@@ -323,6 +330,7 @@ const EN: WorkerNotices = Object.freeze({
   stoppedWith: (message: string) => `Stopped on your instruction: ${message}`,
   stopped: 'Stopped on your instruction.',
   memberEndForMandates: 'The run finished without a connection it may not use, so its result may be incomplete. Contact the owner of this instance.',
+  titleWithNote: (name: string) => `With a note: ${name}`,
   chipRunAgain: 'Run again',
   chipRetry: 'Retry',
   chipExplain: 'Explain',
@@ -463,6 +471,7 @@ const DE: WorkerNotices = Object.freeze({
   stoppedWith: (message: string) => `Auf deine Anweisung gestoppt: ${message}`,
   stopped: 'Auf deine Anweisung gestoppt.',
   memberEndForMandates: 'Der Lauf ist zu Ende, ohne eine Verbindung, die er nicht nutzen darf. Sein Ergebnis kann darum unvollständig sein. Wende dich an den Inhaber dieser Instanz.',
+  titleWithNote: (name: string) => `Mit Hinweis: ${name}`,
   chipRunAgain: 'Erneut ausführen',
   chipRetry: 'Erneut versuchen',
   chipExplain: 'Erklären',

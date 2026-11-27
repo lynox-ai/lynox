@@ -451,15 +451,16 @@ const DE: BulkNotices = Object.freeze({
 export const BULK_NOTICES: Readonly<Record<NoticeLanguage, BulkNotices>> = Object.freeze({ en: EN, de: DE });
 
 /** How a run ended, as its push title says it (`RUN_END_LOOK` in the worker). */
-export type BulkPushEnd = 'success' | 'failed' | 'halted' | 'interrupted' | 'stopped' | 'discarded';
+/** `noted`: finished, with member-connection lines; the note leads, so a cut title keeps it (U-420). */
+export type BulkPushEnd = 'success' | 'noted' | 'failed' | 'halted' | 'interrupted' | 'stopped' | 'discarded';
 
 const PUSH_STAGE: Readonly<Record<NoticeLanguage, Readonly<Record<BulkTriggerEffect, string>>>> = Object.freeze({
   de: Object.freeze({ bulk_preview: 'Vorschau', bulk_judge: 'Beurteilung', bulk_apply: 'Massenlauf', bulk_undo: 'Rücknahme' }),
   en: Object.freeze({ bulk_preview: 'Preview', bulk_judge: 'Judging', bulk_apply: 'Bulk run', bulk_undo: 'Undo' }),
 });
 const PUSH_END: Readonly<Record<NoticeLanguage, Readonly<Record<BulkPushEnd, string>>>> = Object.freeze({
-  de: Object.freeze({ success: 'fertig', failed: 'fehlgeschlagen', halted: 'angehalten', interrupted: 'unterbrochen', stopped: 'gestoppt', discarded: 'verworfen' }),
-  en: Object.freeze({ success: 'done', failed: 'failed', halted: 'halted', interrupted: 'interrupted', stopped: 'stopped', discarded: 'discarded' }),
+  de: Object.freeze({ success: 'fertig', noted: 'fertig, mit Hinweis', failed: 'fehlgeschlagen', halted: 'angehalten', interrupted: 'unterbrochen', stopped: 'gestoppt', discarded: 'verworfen' }),
+  en: Object.freeze({ success: 'done', noted: 'done, with a note', failed: 'failed', halted: 'halted', interrupted: 'interrupted', stopped: 'stopped', discarded: 'discarded' }),
 });
 
 /** Whether a run's stored halt reason is the owner's discard: its push ends "discarded" under

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { WorkerLoop } from './worker-loop.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
-import { BULK_NOTICES } from './bulk-notices.js';
+import { BULK_NOTICES, bulkPushTitle } from './bulk-notices.js';
 import { WORKER_NOTICES } from './worker-notices.js';
 import type { Engine } from './engine.js';
 import type { NotificationMessage, NotificationRouter } from './notification-router.js';
@@ -15,16 +15,17 @@ import { noteMemberConnection, runCollectingMemberNotes } from './member-connect
 const R = BULK_HALT_REASONS;
 const CLOSING = 'Lösen kann das nur der Inhaber.';
 
-function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant' }) {
+function harness(opts: { reason: string | null; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant' }) {
   const recorded: string[] = [];
   const recordedNotes: (readonly string[] | undefined)[] = [];
+  const recordedStatus: string[] = [];
   const sent: NotificationMessage[] = [];
   const planner = opts.plannedBy === 'mandate' ? { kind: 'mandate', mandateId: 'grant-1' }
     // A run a mandate planned before the ledger kept its grant: the planner names no grant.
     : opts.plannedBy === 'mandate-without-grant' ? { kind: 'mandate', email: 'member@example.invalid' } : null;
   const engine = {
     config: { language: 'de' },
-    getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn((_id: string, result: string, _status: string, o?: { memberNotes?: readonly string[] }) => { recorded.push(result); recordedNotes.push(o?.memberNotes); return true; }) })),
+    getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn((_id: string, result: string, status: string, o?: { memberNotes?: readonly string[] }) => { recorded.push(result); recordedNotes.push(o?.memberNotes); recordedStatus.push(status); return true; }) })),
     getBulkLedger: vi.fn(() => ({
       getRunForApply: vi.fn(() => ({ phase: 'approved', haltReason: opts.reason, targetSystem: 'api:acme.myshopify.com', delegatedPlanner: planner })),
     })),
@@ -35,10 +36,10 @@ function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'manda
   } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000);
   const task = { id: 't-1', title: 'Bulk apply run-1', effect: 'bulk_apply', bulk_run_id: 'run-1' } as unknown as TriggerRecord;
-  const end = (summary: string, said?: string): void => {
-    (loop as unknown as { recordAndNotify: (t: TriggerRecord, s: string, e: boolean, said?: string) => void }).recordAndNotify(task, summary, false, said);
+  const end = (summary: string, said?: string, done: boolean | 'halted' | 'interrupted' = false): void => {
+    (loop as unknown as { recordAndNotify: (t: TriggerRecord, s: string, e: boolean | 'halted' | 'interrupted', said?: string) => void }).recordAndNotify(task, summary, done, said);
   };
-  return { recorded, recordedNotes, sent, end };
+  return { recorded, recordedNotes, recordedStatus, sent, end };
 }
 
 const COUNTS = ' 2 von 5 Zielen geschrieben.';
@@ -77,6 +78,37 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.recorded).toEqual([`lynox konnte den Zugang zum Shop nicht erneuern.${COUNTS}`]);
     const storedLines = [NOTE.en];
     expect(h.recordedNotes).toEqual([storedLines]);
+  });
+
+  // A run that finished and noted member-connection lines is recorded as halted, so the same
+  // refusal is not pushed again; but it finished and nothing waits, so no title says it halted.
+  it('titles a bulk run that finished with member-connection lines as done with a note, for the owner and every grant', async () => {
+    const h = harness({ reason: null, plannedBy: 'owner' });
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection('Connection not used: the model\'s line', () => ({ en: 'Connection not used: a note.', de: 'Verbindung nicht genutzt: eine Notiz.' }));
+      h.end('Fertig.', undefined, true);
+    }).done;
+    const title = `\u26A0 ${bulkPushTitle('bulk_apply', 'noted', 'api:acme.myshopify.com', 'de')}`;
+    expect(title).toBe('\u26A0 Massenlauf fertig, mit Hinweis');
+    expect(h.sent.map((m) => [m.audience, m.title, m.priority])).toEqual([['owner', title, 'normal'], ['all_mandates', title, 'normal']]);
+    // Still recorded as halted: the repeat check reads it.
+    expect(h.recordedStatus).toEqual(['halted']);
+    expect(h.recordedNotes).toEqual([['Connection not used: a note.']]);
+  });
+
+  // Only a run that finished reads as done with a note: a real halt and a lost run keep their look.
+  it('keeps a real halt\'s ⏸ and a lost run\'s ⚠ at high priority when they carry member-connection lines', async () => {
+    for (const [end, mark, word, priority] of [['halted', '\u23F8', 'angehalten', 'normal'], ['interrupted', '\u26A0', 'unterbrochen', 'high']] as const) {
+      const h = harness({ reason: null, plannedBy: 'owner' });
+      await runCollectingMemberNotes(async () => {
+        noteMemberConnection('Connection not used: the model\'s line', () => ({ en: 'Connection not used: a note.', de: 'Verbindung nicht genutzt: eine Notiz.' }));
+        h.end('Ende.', undefined, end);
+      }).done;
+      const title = `${mark} ${bulkPushTitle('bulk_apply', end, 'api:acme.myshopify.com', 'de')}`;
+      expect(title, end).toBe(`${mark} Massenlauf ${word}`);
+      expect(h.sent.map((m) => [m.title, m.priority]), end).toEqual([[title, priority], [title, priority]]);
+      expect(h.sent.every((m) => !m.title.includes('Hinweis')), end).toBe(true);
+    }
   });
 
   it('builds every grant\'s push from the sentence in the owner\'s language, as before the lines were left out', async () => {

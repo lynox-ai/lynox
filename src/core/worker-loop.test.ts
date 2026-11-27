@@ -1190,11 +1190,11 @@ describe('WorkerLoop', () => {
       ]);
       expect(sent[1]!.body).not.toContain('jo@kanzlei.example');
       // The owner's push is the one it was, with the audience added: title, priority, thread, chips.
-      expect(sent[0]).toMatchObject({ title: `⏸ ${task.title}`, priority: 'normal', taskId: 'po-1', data: { threadId: 'thread-worker-test' } });
+      expect(sent[0]).toMatchObject({ title: `\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`, priority: 'normal', taskId: 'po-1', data: { threadId: 'thread-worker-test' } });
       expect(sent[0]!.followUps?.map((f) => f.label)).toEqual([WORKER_NOTICES.en.chipDetails, WORKER_NOTICES.en.chipRunAgain]);
       // Both are the same end, one title; the grants' push leads nowhere back to the reply: no
       // deep link into the run's thread, no follow-ups.
-      expect(sent[1]!.title).toBe(`⏸ ${task.title}`);
+      expect(sent[1]!.title).toBe(`\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`);
       expect(sent[1]!.title).toBe(sent[0]!.title);
       expect(sent[1]!.taskId).toBe('po-1');
       expect(sent[1]!.priority).toBe(sent[0]!.priority);
@@ -2654,12 +2654,12 @@ describe('WorkerLoop', () => {
     // One end, told by reader: with the line to the owner's devices, without it to every grant's.
     expect(router.notify).toHaveBeenCalledTimes(2);
     expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({
-      title: `\u23F8 ${task.title}`,
+      title: `\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`,
       body: `All done.\n• ${LINE}`,
       priority: 'normal',
       audience: 'owner',
     }));
-    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: WORKER_NOTICES.en.memberEndForMandates, audience: 'all_mandates' }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`, body: WORKER_NOTICES.en.memberEndForMandates, audience: 'all_mandates' }));
 
     // The next run of the schedule meets the same refusal: recorded again, not pushed again.
     Object.assign(task, { last_run_status: 'halted', last_run_result: `All done.`, last_run_member_notes: [LINE] });
@@ -2706,8 +2706,8 @@ describe('WorkerLoop', () => {
     const recordedLine = 'The plan "Daily Report" did not use api.crm.example (profile "CRM" (id crm-api)). setup@example.org set it up with their own login, so only setup@example.org\'s own session uses it. If the plan should use this service, there are two ways: once setup@example.org\'s access has ended, ask in a chat to take over the connection and confirm with “Allow”; or delete the connection under Settings → API connections and connect the service yourself, which disconnects setup@example.org. Otherwise the plan cannot run this step.';
     expect(modelLine).toMatch(/^Connection not used: setup@example\.org set up this connection .*Say so in your reply, and do not ask for permission\.$/);
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, `All done.`, 'halted', { memberNotes: [recordedLine] });
-    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `All done.\n• ${pushedLine}`, audience: 'owner' }));
-    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: WORKER_NOTICES[language].memberEndForMandates, audience: 'all_mandates' }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u26A0 ${WORKER_NOTICES[language].titleWithNote(task.title)}`, body: `All done.\n• ${pushedLine}`, audience: 'owner' }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u26A0 ${WORKER_NOTICES[language].titleWithNote(task.title)}`, body: WORKER_NOTICES[language].memberEndForMandates, audience: 'all_mandates' }));
 
     // The next run meets the same refusal: compared as recorded, so not pushed again, in either language.
     Object.assign(task, { last_run_status: 'halted', last_run_result: `All done.`, last_run_member_notes: [recordedLine] });
@@ -2718,7 +2718,58 @@ describe('WorkerLoop', () => {
     loop.stop();
   });
 
-  it('a run ended through recordAndNotify (a workflow\'s end) is told with its line and ⏸ to the owner, as a fixed sentence to every grant, once', async () => {
+  // A run whose question went unanswered did not finish: recorded failed, so its push is a ✗ at
+  // high priority, with or without member-connection lines (U-420), not a ✓ nor the note's title.
+  it('a run whose question went unanswered and that met a member\'s connection is pushed as failed, not as finished with a note', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => {
+      noteMemberConnection(LINE);
+      await session.promptUser!('Approve this?', ['Yes', 'No']);
+      return 'All done.';
+    });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.any(String), 'failed', { memberNotes: [LINE] });
+    // Owner and every grant: the same failed title, the owner with the line, every grant the fixed sentence.
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title, m.priority])).toEqual([
+      ['owner', `\u2717 ${task.title}`, 'high'],
+      ['all_mandates', `\u2717 ${task.title}`, 'high'],
+    ]);
+    const [owner, grants] = vi.mocked(router.notify).mock.calls.map(([m]) => m);
+    expect(owner!.body).toContain(LINE);
+    expect(grants).toEqual(expect.objectContaining({ body: WORKER_NOTICES.en.memberEndForMandates }));
+    expect(grants!.data).toBeUndefined();
+    expect(grants!.followUps).toBeUndefined();
+  });
+
+  it('a run whose question went unanswered is pushed as failed at high priority, also without member-connection lines', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => {
+      await session.promptUser!('Approve this?', ['Yes', 'No']);
+      return 'All done.';
+    });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.any(String), 'failed');
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u2717 ${task.title}`, priority: 'high' }));
+  });
+
+  it('a run ended through recordAndNotify (a workflow\'s end) is told with its line, ⚠ and the note in the title to the owner, as a fixed sentence to every grant, once', async () => {
     const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
     const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
     const task = makeTask();
@@ -2733,7 +2784,7 @@ describe('WorkerLoop', () => {
     await end();
     expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, `Pipeline completed.`, 'halted', { memberNotes: [LINE] });
     expect(router.notify).toHaveBeenCalledTimes(2);
-    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `Pipeline completed.\n• ${LINE}`, priority: 'normal' }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`, body: `Pipeline completed.\n• ${LINE}`, priority: 'normal' }));
     // The line names another member's connection: the owner's devices only; every grant reads the end without it.
     expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.body])).toEqual([['owner', `Pipeline completed.\n• ${LINE}`], ['all_mandates', WORKER_NOTICES.en.memberEndForMandates]]);
 
@@ -2741,6 +2792,115 @@ describe('WorkerLoop', () => {
     await end();
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
     expect(router.notify).toHaveBeenCalledTimes(2);
+  });
+
+  // The repeat check holds back a second note on the same lines; an end that did not finish is
+  // told even after a run that noted them, and the next note after it is told again.
+  it('after a run that finished with a note, the next run whose question went unanswered on the same lines is still pushed as failed', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'halted', last_run_result: 'All done.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => {
+      noteMemberConnection(LINE);
+      await session.promptUser!('Approve this?', ['Yes', 'No']);
+      return 'All done.';
+    });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.any(String), 'failed', { memberNotes: [LINE] });
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title, m.priority])).toEqual([
+      ['owner', `\u2717 ${task.title}`, 'high'],
+      ['all_mandates', `\u2717 ${task.title}`, 'high'],
+    ]);
+    loop.stop();
+  });
+
+  it('after a run that finished with a note, the next run cut off at its ceiling on the same lines is still pushed as failed', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'halted', last_run_result: 'All done.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const session = {
+      sessionId: 'thread-worker-test',
+      run: vi.fn<(task: string) => Promise<string>>().mockImplementation(async () => { noteMemberConnection(LINE); return 'Partial findings so far.'; }),
+      _recreateAgent: vi.fn(),
+      getAgent: () => null,
+      getLastRunStop: () => ({ cause: 'budget_cap', pendingToolCount: 2, pendingTools: ['web_research'], text: 'Partial findings so far.' }),
+    } as unknown as Session;
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.any(String), 'failed', { memberNotes: [LINE] });
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title, m.priority])).toEqual([
+      ['owner', `\u2717 ${task.title}`, 'high'],
+      ['all_mandates', `\u2717 ${task.title}`, 'high'],
+    ]);
+    loop.stop();
+  });
+
+  it('after a failed end with the lines, the next run that finishes with the same lines is told its note again', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'failed', last_run_result: 'x', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection(LINE); return 'All done.'; });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, 'All done.', 'halted', { memberNotes: [LINE] });
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title])).toEqual([
+      ['owner', `\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`],
+      ['all_mandates', `\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`],
+    ]);
+    loop.stop();
+  });
+
+  it.each([
+    ['failed', false, '\u2717'],
+    ['interrupted', 'interrupted', '\u26A0'],
+    ['stopped', 'stopped', '\u23F9'],
+  ] as const)('a workflow end that %s after a run that noted the same lines is still told', async (status, end, mark) => {
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'halted', last_run_result: 'Pipeline completed.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm }), router, 60_000);
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection(LINE);
+      (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: boolean | 'interrupted' | 'stopped', s?: string, o?: { noRetry: true }) => void })
+        .recordAndNotify(task, 'Pipeline failed.', end, undefined, { noRetry: true });
+    }).done;
+    expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, expect.any(String), status, { memberNotes: [LINE], noRetry: true });
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title.startsWith(mark)])).toEqual([['owner', true], ['all_mandates', true]]);
+  });
+
+  it('a workflow halt on the same lines as the halt before is not pushed again', async () => {
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'halted', last_run_result: 'Pipeline halted.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm }), router, 60_000);
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection(LINE);
+      (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: 'halted') => void }).recordAndNotify(task, 'Pipeline halted.', 'halted');
+    }).done;
+    expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, 'Pipeline halted.', 'halted', { memberNotes: [LINE] });
+    expect(router.notify).not.toHaveBeenCalled();
   });
 
   // A workflow's end with a member line: the owner's devices read it with the line, every live
@@ -2802,7 +2962,7 @@ describe('WorkerLoop', () => {
       (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: boolean) => void }).recordAndNotify(task, 'Pipeline completed.', true);
     }, task.title).done;
     expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, `Pipeline completed.`, 'halted', { memberNotes: [OWNER.en] });
-    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `Pipeline completed.\n• ${OWNER.de}` }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u26A0 ${WORKER_NOTICES.de.titleWithNote(task.title)}`, body: `Pipeline completed.\n• ${OWNER.de}` }));
   });
 
   // F4: the catch records outside the run's context, from the run's entry.
@@ -2962,7 +3122,7 @@ describe('WorkerLoop', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({
-      title: `\u23F8 ${task.title}`,
+      title: `\u26A0 ${WORKER_NOTICES.en.titleWithNote(task.title)}`,
       body: `${CONTAINED_RESULT_PUSH}\n• ${LINE}`,
     }));
   });
