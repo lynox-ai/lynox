@@ -9,7 +9,7 @@
  */
 
 import { CONSENT_KEYS, type ConsentAction, type ConsentKind } from '../contract/prompt.js';
-import { CONSENT_ACTION_LABELS, CONSENT_LABELS } from '../tools/dialog-text.js';
+import { CONSENT_ACTION_LABELS, consentLabel } from '../tools/dialog-text.js';
 import { join } from 'node:path';
 import { claimStoreReconnectHints } from './store-token-refresh.js';
 import { recipientsConfirmable } from './recipient-confirm.js';
@@ -695,7 +695,7 @@ export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: stri
 
 /** An engine consent's options as a notification lists them: the keys in the owner's words. */
 function consentInquiryOptions(kind: ConsentKind, language: 'de' | 'en', action?: ConsentAction): string[] {
-  return CONSENT_KEYS[kind].map((key) => (key === 'confirm' && action !== undefined ? CONSENT_ACTION_LABELS[language][action] : CONSENT_LABELS[language][key]));
+  return CONSENT_KEYS[kind].map((key) => (key === 'confirm' && action !== undefined ? CONSENT_ACTION_LABELS[language][action] : consentLabel(kind, key, language)));
 }
 
 /** The refusal notice of a run that ended by throwing, carried from the run to where the failure is recorded. */

@@ -1883,6 +1883,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.consent.merge': { de: 'Zusammenführen', en: 'Merge' },
 	'chat.consent.apply': { de: 'Übernehmen', en: 'Apply' },
 	'chat.consent.retire': { de: 'Zurückziehen', en: 'Retire' },
+	// The Sheets formula question; 'Als Formeln schreiben' / 'Write as formulas' is also named in the question's text.
+	'chat.consent.write_text': { de: 'Als Text schreiben', en: 'Write as text' },
+	'chat.consent.write_formulas': { de: 'Als Formeln schreiben', en: 'Write as formulas' },
+	'chat.consent.dont_write': { de: 'Nicht schreiben', en: "Don't write" },
 	'chat.consent.proceed': { de: 'Ausführen', en: 'Run' },
 	'chat.consent.adjust': { de: 'Anpassen', en: 'Adjust' },
 	'chat.consent.plan_hint': { de: 'Oder schreib, was du ändern willst.', en: 'Or write what to change.' },
