@@ -6,7 +6,8 @@
 	import { goto } from '$app/navigation';
 	import { trySaveArtifact, saveFailureText } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
+	import { withoutHidden } from '../stores/contained-way-out.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
@@ -24,9 +25,11 @@
 		content: string;
 		/** When true, defer artifact iframe rendering (show code instead). */
 		streaming?: boolean;
+		/** The chat this renders in only reads: a copied text is on its way to a new chat. */
+		containedChat?: boolean;
 	}
 
-	let { content, streaming = false }: Props = $props();
+	let { content, streaming = false, containedChat = false }: Props = $props();
 
 	let highlightedHtml = $state('');
 
@@ -146,12 +149,14 @@
 		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
 		const encodedMd = btoa(unescape(encodeURIComponent(body)));
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
+		// No copy button: rendered markdown can still hide text that a copy would carry.
+		const actions = artifactActionBtns(displayTitle, null);
 		return `<div class="artifact-container artifact-md artifact-collapsed"${OWN_MARK} data-md="${encodedMd}" data-title="${safeTitle}" data-artifact-type="markdown"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon('markdown')}</span>
 				<span class="artifact-label">Markdown</span>
 				<span class="artifact-title">${safeTitle}</span>
-				${artifactActionBtns()}
+				${actions}
 			</div>
 			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
 		</div>`;
@@ -172,6 +177,9 @@
 		return m ? m[1]!.toLowerCase() : null;
 	}
 
+	/** How many lines of a data card the preview shows. */
+	const DATA_PREVIEW_LINES = 60;
+
 	/** Build a data-file artifact: a code preview plus a download button that
 	 *  produces a real Blob with the right extension and MIME type. The full
 	 *  body is embedded as `data-raw` so the download is the exact file, not
@@ -182,19 +190,28 @@
 		// Anchored: only strip the leading marker we ourselves prepended, never
 		// a literal `<!-- type: … -->` that happens to sit inside the data.
 		const body = clean.replace(/^<!-{2}\s*type:\s*\w+\s*-->\s*/i, '').trim();
-		const safeTitle = escapeHtml(title || 'Data');
+		const displayTitle = title || 'Data';
+		const safeTitle = escapeHtml(displayTitle);
 		const encodedRaw = btoa(unescape(encodeURIComponent(body)));
 		const lines = body.split('\n');
-		const preview = escapeHtml(lines.slice(0, 60).join('\n')) + (lines.length > 60 ? '\n…' : '');
+		const preview = escapeHtml(lines.slice(0, DATA_PREVIEW_LINES).join('\n')) + (lines.length > DATA_PREVIEW_LINES ? '\n…' : '');
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
+		// The button copies the whole file; when the preview shows less, the button says how much.
+		const more = lines.length > DATA_PREVIEW_LINES;
+		// A file of nothing but invisible characters gets no button: there would be nothing to copy.
+		const actions = artifactActionBtns(displayTitle, withoutHidden(body).text.trim() !== '' ? { lines: more ? lines.length : null } : null);
+		const moreLine = more
+			? `<p class="artifact-data-more">${escapeHtml(tf('artifacts.lines_shown', { shown: String(DATA_PREVIEW_LINES), n: String(lines.length) }))}</p>`
+			: '';
 		return `<div class="artifact-container artifact-data artifact-collapsed"${OWN_MARK} data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}" data-artifact-type="${type}"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(type)}</span>
 				<span class="artifact-label">${meta.label}</span>
 				<span class="artifact-title">${safeTitle}</span>
-				${artifactActionBtns()}
+				${actions}
 			</div>
 			<pre class="artifact-data-body"><code>${preview}</code></pre>
+			${moreLine}
 		</div>`;
 	}
 
@@ -236,6 +253,9 @@
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
+		// No copy button: what the frame shows cannot be read from the source (a stylesheet can hide
+		// text, a script can replace it), so a copy could carry text the user never saw.
+		const actions = artifactActionBtns(displayTitle, null);
 		const typeMatch = src.match(/<!-{2}\s*type:\s*([a-z]+)\s*-->/i);
 		const typeKey = typeMatch ? typeMatch[1]!.toLowerCase() : 'html';
 		const typeLabel = typeKey.toUpperCase();
@@ -249,22 +269,37 @@
 				<span class="artifact-type-icon">${artifactTypeIcon(typeKey)}</span>
 				<span class="artifact-label">${typeLabel}</span>
 				<span class="artifact-title">${safeTitle}</span>
-				${artifactActionBtns()}
+				${actions}
 			</div>
 			<div class="artifact-frame-slot"${OWN_MARK}></div>
 		</div>`;
 		return { markup, frame: fullHtml };
 	}
 
+	/** The copy button of a card: `null` for none, `lines` set when it copies more lines than the
+	 *  card shows. */
+	type CopyButton = { readonly lines: number | null } | null;
+
 	/** The shared, minimal artifact-pill actions: expand → the coherent gallery
 	 *  big-view (the ONE full view — renders every type incl. interactive HTML),
 	 *  share/export the source file, and the collapse chevron. Full print +
 	 *  download options live in the gallery view. On mobile the export button
 	 *  uses the iOS share glyph (it opens the native share sheet). Every builder
-	 *  (html/svg, markdown, data) uses this so the pill is identical everywhere. */
-	function artifactActionBtns(): string {
+	 *  (html/svg, markdown, data) uses this; only a data card adds the copy button. */
+	function artifactActionBtns(title: string, copy: CopyButton): string {
 		const shareIcon = isIosSafari() ? ICON_SHARE : ICON_DOWNLOAD;
-		return `<button class="artifact-btn"${OWN_MARK} data-action="expand" title="Expand">${ICON_EXPAND}</button>
+		// The copy button names what it does in words, not only with an icon: it is the way to take
+		// a text from lynox into a new chat, and a chat that only reads says to copy it first. It
+		// shows on the closed card too, so the way out needs no opening.
+		let copyBtn = '';
+		if (copy) {
+			const n = copy.lines === null ? null : String(copy.lines);
+			const label = n === null ? t('artifacts.copy_text') : tf('artifacts.copy_lines', { n });
+			const name = n === null ? tf('artifacts.copy_text_aria', { title }) : tf('artifacts.copy_lines_aria', { n, title });
+			const linesAttr = n === null ? '' : ` data-lines="${n}"`;
+			copyBtn = `<button type="button" class="artifact-btn artifact-copy"${OWN_MARK} data-action="copy"${linesAttr} aria-label="${escapeHtml(name)}">${ICON_COPY}<span class="artifact-copy-label">${escapeHtml(label)}</span></button>`;
+		}
+		return `${copyBtn}<button class="artifact-btn"${OWN_MARK} data-action="expand" title="Expand">${ICON_EXPAND}</button>
 				<button class="artifact-btn"${OWN_MARK} data-action="share" title="Share">${shareIcon}</button>
 				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>`;
 	}
@@ -275,6 +310,7 @@
 	// iOS-style share glyph (arrow rising out of a tray) — used on iOS where the
 	// download buttons route through the native share sheet.
 	const ICON_SHARE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 10V2M8 2L5.5 4.5M8 2l2.5 2.5M3.5 7.5H3a1 1 0 00-1 1V13a1 1 0 001 1h10a1 1 0 001-1V8.5a1 1 0 00-1-1h-.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+	const ICON_COPY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" stroke="currentColor" stroke-width="1.3"/></svg>`;
 	const ICON_EXPAND = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_SAVE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2h8l3 3v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/><path d="M5 2v4h5V2M5 14v-4h6v4" stroke="currentColor" stroke-width="1.2"/></svg>`;
 	// Chevron — the universal expand/collapse affordance on the pill row;
@@ -360,6 +396,9 @@
 			return;
 		}
 
+		// Copying does not open the card: it takes the text and leaves the card as it is.
+		if (hit.action === 'copy') { void handleCopyText(container, e.target as Element); return; }
+
 		// Artifact toolbar actions. Auto-expand if collapsed.
 		if (container.classList.contains('artifact-collapsed')) {
 			container.classList.remove('artifact-collapsed');
@@ -389,6 +428,32 @@
 		// The placeholder refusal is said as such; every other failure keeps the general text.
 		if (!result.artifact) { addToast(saveFailureText(result, 'Open failed'), 'error'); return; }
 		await goto(`/app/artifacts?id=${encodeURIComponent(result.artifact.id)}`);
+	}
+
+	/** The text a card's copy button takes: the file of a data card. Markdown and HTML cards have
+	 *  no copy button. */
+	function copyTextOf(container: HTMLElement): string {
+		return container.dataset['raw'] !== undefined ? decodeB64(container.dataset['raw'] ?? '') : '';
+	}
+
+	async function handleCopyText(container: HTMLElement, target: Element) {
+		// Only the button this view built: message markup can carry a `data-lines` of its own.
+		const lines = target.closest(`[data-action="copy"][${OWN_ATTR}]`)?.getAttribute('data-lines') ?? null;
+		const { text, removed } = withoutHidden(copyTextOf(container));
+		try {
+			if (!text) throw new Error('nothing to copy');
+			await navigator.clipboard.writeText(text);
+		} catch {
+			addToast(t('common.copy_failed'), 'error', 4000);
+			return;
+		}
+		const parts: string[] = [];
+		if (lines !== null) parts.push(tf('artifacts.copied_lines', { n: lines }));
+		else parts.push(removed || containedChat ? t('artifacts.copied') : t('common.copied'));
+		if (removed) parts.push(t('artifacts.copy_removed_hidden'));
+		// In a chat that only reads, the copied text is on its way to a new chat: say where it goes.
+		if (containedChat) parts.push(t('artifacts.copy_paste_hint'));
+		addToast(parts.join(' '), 'success', parts.length > 1 ? 4000 : 1500);
 	}
 
 	/** Quick export: share (mobile) / download (desktop) the artifact's SOURCE
@@ -1242,6 +1307,14 @@
 		line-height: 0;
 		transition: color 0.15s, border-color 0.15s;
 	}
+	div :global(.artifact-copy) {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		line-height: 1;
+		font-size: 0.75rem;
+		padding: 0.25rem 0.5rem;
+	}
 	div :global(.artifact-btn:hover) {
 		color: var(--color-text);
 		border-color: var(--color-border);
@@ -1282,11 +1355,22 @@
 	   icon/type/title/chevron make up the pill. */
 	div :global(.artifact-collapsed .artifact-frame),
 	div :global(.artifact-collapsed .artifact-md-body),
-	div :global(.artifact-collapsed .artifact-data-body) {
+	div :global(.artifact-collapsed .artifact-data-body),
+	div :global(.artifact-collapsed .artifact-data-more) {
 		display: none;
 	}
-	div :global(.artifact-collapsed .artifact-btn) {
+	/* The copy button stays on the closed card: the way out of a chat that only reads must be
+	   found without opening the card. The pill may wrap at 390px for it. */
+	div :global(.artifact-collapsed .artifact-btn:not(.artifact-copy)) {
 		display: none;
+	}
+	div :global(.artifact-collapsed .artifact-toolbar) {
+		flex-wrap: wrap;
+	}
+	div :global(.artifact-data-more) {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+		padding: 0.25rem 0.75rem 0.5rem;
 	}
 
 	div :global(.hidden) {

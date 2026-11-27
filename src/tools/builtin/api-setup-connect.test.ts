@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { apiSetupTool, unnamedValueStep, askableValueStep } from './api-setup.js';
+import { CONSENT_UNRECOGNISED_SENTENCE } from '../../core/consent-ask.js';
 import { askSecretTool, MANDATE_SECRET_REFUSAL } from './ask-secret.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
@@ -255,7 +256,7 @@ describe('a preset profile discloses the host it will authorize at', () => {
     // '[object Object]' and passes for the wrong reason.
     (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async (q: unknown) => {
       asked.push(typeof q === 'string' ? q : JSON.stringify(q));
-      return 'no';
+      return 'deny';
     };
 
     await apiSetupTool.handler({ action: 'create', profile: {
@@ -275,7 +276,7 @@ describe('a preset profile discloses the host it will authorize at', () => {
     const agent = agentWith(store);
     (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async (q: unknown) => {
       asked.push(typeof q === 'string' ? q : JSON.stringify(q));
-      return 'no';
+      return 'deny';
     };
     const base = shopProfile();
     await apiSetupTool.handler({ action: 'create', profile: {
@@ -444,7 +445,7 @@ describe('a save that cannot derive the authorize host says so', () => {
     await saveWith(
       { preset_id: 'example-shop', preset_params: {} },
       { custom_endpoint_ack: undefined },
-      async (q: unknown) => { asked.push(typeof q === 'string' ? q : JSON.stringify(q)); return 'no'; },
+      async (q: unknown) => { asked.push(typeof q === 'string' ? q : JSON.stringify(q)); return 'deny'; },
     );
 
     expect(asked.join(' ')).toContain('No authorization address could be derived');
@@ -477,7 +478,7 @@ describe('the save asks about being sent somewhere, not only about data', () => 
 
   it('asks even when every host is vetted, because vetting answers the other question', async () => {
     const asked: string[] = [];
-    await saveVetted(async (q: unknown) => { asked.push(typeof q === 'string' ? q : JSON.stringify(q)); return 'no'; });
+    await saveVetted(async (q: unknown) => { asked.push(typeof q === 'string' ? q : JSON.stringify(q)); return 'deny'; });
 
     expect(asked).toHaveLength(1);
     const question = asked[0] ?? '';
@@ -554,7 +555,7 @@ describe('the save asks about being sent somewhere, not only about data', () => 
     const agent = agentWith(new ApiStore());
     (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async (q: unknown) => {
       asked.push(typeof q === 'string' ? q : JSON.stringify(q));
-      return 'no';
+      return 'deny';
     };
     const p = shopProfile({ custom_endpoint_ack: undefined });
     await apiSetupTool.handler({ action: 'create', profile: {
@@ -603,9 +604,10 @@ describe('the save asks about being sent somewhere, not only about data', () => 
   });
 
   it('does not save the profile when the user declines being sent there', async () => {
-    const { store, reply } = await saveVetted(async () => 'no');
+    const { store, reply } = await saveVetted(async () => 'deny');
 
     expect(reply).toContain('Blocked');
+    expect(reply).not.toContain(CONSENT_UNRECOGNISED_SENTENCE);
     expect(store.get('shop-api')).toBeUndefined();
   });
 });

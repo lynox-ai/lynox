@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent, ChangesetManagerLike } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
+import { CONSENT_UNRECOGNISED_SENTENCE } from './consent-ask.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, AUDIT_UNAVAILABLE_STORED_MAIL_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
@@ -1764,7 +1765,7 @@ describe('Agent', () => {
     it('isDangerous + promptUser: deny blocks execution', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
-      const promptUser = vi.fn().mockResolvedValue('no');
+      const promptUser = vi.fn().mockResolvedValue('deny');
 
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_bash', name: 'bash', input: {} }]))
@@ -1786,6 +1787,7 @@ describe('Agent', () => {
       const toolResultsMsg = messages[2];
       const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
       expect(results[0]!.content).toContain('Permission denied by user');
+      expect(results[0]!.content).not.toContain(CONSENT_UNRECOGNISED_SENTENCE);
       expect(results[0]!.is_error).toBe(true);
     });
 
@@ -1914,6 +1916,7 @@ describe('Agent', () => {
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
       await agent.send('Do it');
       expect(tool.handler).not.toHaveBeenCalled();
+      expect(JSON.stringify(agent.getMessages())).toContain(CONSENT_UNRECOGNISED_SENTENCE);
     });
 
     it('input validation: rejects unknown top-level key before handler runs', async () => {
@@ -2652,6 +2655,9 @@ describe('Agent', () => {
         expect(options, answer).toEqual(['allow', 'deny']);
         expect(meta?.consent, answer).toBe('guard');
         expect(tool.handler, answer).toHaveBeenCalledTimes(consents ? 1 : 0);
+        const said = JSON.stringify(agent.getMessages());
+        if (answer === 'allow' || answer === 'deny') expect(said, answer).not.toContain(CONSENT_UNRECOGNISED_SENTENCE);
+        else expect(said, answer).toContain(CONSENT_UNRECOGNISED_SENTENCE);
       }
     });
 
