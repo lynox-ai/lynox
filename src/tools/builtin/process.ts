@@ -396,14 +396,26 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // the fail-closed contract validator and throws on a bad contract, so the
     // volatile in-memory store is only populated after the durable write
     // succeeded. Then the ProcessRecord for lineage/audit (D11 — internal,
-    // never agent-facing); stamping the promotion link last keeps the
-    // ProcessRecord consistent with the pipeline that exists.
+    // never agent-facing), written last.
+    // A failure of that last write is not a failed save: the workflow is stored and runs.
+    // Answering "not saved" there sent the model to save the same workflow again, and a second
+    // copy was stored. Only `insertProcess` is caught; an error from any write before it,
+    // `storePipeline` included, still answers "not saved".
     return withInstanceWrite(agent, { site: 'save_workflow#session', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]], main: ['pipeline'] }, (w) => {
       w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, agent.principal), ifReturned);
       w.created('pipeline', pipelineId);
       storePipeline(pipelineId, planned);
       record.promotedToPipelineId = pipelineId;
-      runHistory.insertProcess(record);
+      // This catch takes every error from `insertProcess`, so a check added inside it later
+      // would fail here without stopping the save: only the logs and `lineage=lost` on a mandate's
+      // trail row would show it.
+      try {
+        runHistory.insertProcess(record);
+      } catch (err) {
+        logErrorChain('save_workflow:lineage', err);
+        console.warn(`[lynox:workflow] workflow ${pipelineId} saved without its capture record (${lineageFailureClass(err)})`);
+        w.counts([['lineage', 'lost']]);
+      }
 
       const paramNames = record.parameters.map(p => p.name);
       return JSON.stringify({
@@ -420,6 +432,19 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     logErrorChain('save_workflow:promote', err);
     return `Error: Could not save the workflow (${getErrorMessage(err)}). No workflow was saved.`;
   }
+}
+
+/** The error classes a lineage write is known to throw; any other is named `Error`. */
+const LINEAGE_FAILURE_CLASSES: ReadonlySet<string> = new Set(['SqliteError', 'TypeError', 'RangeError']);
+
+/**
+ * The class of a lineage write's failure, for the warning line: a name from a fixed list, never
+ * the message, and never a class name the list does not hold (a class can be named by any code).
+ */
+export function lineageFailureClass(err: unknown): string {
+  let name = '';
+  try { name = err instanceof Error ? String(err.constructor?.name ?? '') : ''; } catch { /* a getter that throws names nothing */ }
+  return LINEAGE_FAILURE_CLASSES.has(name) ? name : 'Error';
 }
 
 export const saveWorkflowTool: ToolEntry<SaveWorkflowInput> = {

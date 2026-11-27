@@ -1588,6 +1588,11 @@ export class Agent implements IAgent {
     return this.costGuard?.remainingBudgetUSD() ?? null;
   }
 
+  /** Whether this run's whole budget is already held against the daily and monthly caps; see `IAgent`. */
+  budgetHeldAgainstCaps(): boolean {
+    return this.costGuard?.budgetHeldAgainstCaps() ?? false;
+  }
+
   /** Whether this run was admitted with a spending bound of its own; see `IAgent`. */
   hasRunCostCeiling(): boolean {
     return this.costGuard?.hasRunCeiling() ?? false;

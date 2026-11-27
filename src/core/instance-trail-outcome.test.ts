@@ -119,6 +119,17 @@ describe('w.run and the outcome row', () => {
     expect(rows()[1]).toEqual({ phase: 'failed', target: 'data_store wrote=part n=1' });
   });
 
+  it('a block that throws itself after a proven change, outside any step, writes wrote=part on a failed row', () => {
+    const by = writer();
+    const err = new Error('after the write');
+    let caught: unknown;
+    try {
+      inSlot(by, () => withInstanceWrite(by, spec({ main: ['a'] }), (w) => { w.run('a', () => true, ifTrue); throw err; }));
+    } catch (e) { caught = e; }
+    expect(caught).toBe(err);
+    expect(rows()[1]).toEqual({ phase: 'failed', target: 'data_store wrote=part n=1' });
+  });
+
   it('a step that throws inside the block and is caught there still caps the row at part', () => {
     const by = writer();
     inSlot(by, () => withInstanceWrite(by, spec({ main: ['flat'] }), (w) => {

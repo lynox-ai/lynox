@@ -86,7 +86,7 @@ describe("a run's end with member lines, by reader", () => {
     new EngineDb(path, '').close();
     const raw = new Database(path);
     const legacy = `${REPLY}\n• ${LINE}\n• Another line.`;
-    raw.exec('ALTER TABLE triggers DROP COLUMN last_run_member_notes; DELETE FROM schema_version WHERE version >= 79;');
+    raw.exec('ALTER TABLE triggers DROP COLUMN last_run_member_notes; DELETE FROM schema_version WHERE version >= 80;');
     raw.prepare("INSERT INTO triggers (id, title, source, effect, last_run_result, last_run_status) VALUES ('old', 'Old', 'cron', 'run_agent', ?, 'halted')").run(legacy);
     const listed = 'Done:\n• first item\n• second item';
     const failedWithList = `Found:\n• one\n• ${LINE}`;

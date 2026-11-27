@@ -71,8 +71,8 @@ describe('a monthly schedule names its day as the language does', () => {
 		setLocale('en');
 		rows = monthly();
 		await render();
-		expect(scheduleOf('Erster')).toMatch(/^Monthly on the 1st at \d\d:\d\d$/);
-		expect(scheduleOf('Zweiundzwanzigster')).toMatch(/^Monthly on the 22nd at \d\d:\d\d$/);
+		expect(scheduleOf('Erster')).toMatch(/^Monthly on the 1st at \d{1,2}:\d\d [AP]M$/);
+		expect(scheduleOf('Zweiundzwanzigster')).toMatch(/^Monthly on the 22nd at \d{1,2}:\d\d [AP]M$/);
 	});
 
 	it('in German as the number with its period', async () => {
@@ -108,9 +108,9 @@ describe('a schedule near midnight names the local day', () => {
 		setLocale('en');
 		rows = rowsOf();
 		await render();
-		expect(scheduleOf('Wochentag')).toBe('Mondays 15:00');
-		expect(scheduleOf('Erster')).toBe('Monthly on the last day at 18:00');
-		expect(scheduleOf('Einunddreissigster')).toBe('Monthly on the 31st at 15:00');
+		expect(scheduleOf('Wochentag')).toBe('Mondays 3:00 PM');
+		expect(scheduleOf('Erster')).toBe('Monthly on the last day at 6:00 PM');
+		expect(scheduleOf('Einunddreissigster')).toBe('Monthly on the 31st at 3:00 PM');
 	});
 
 	it('a day that moves is said as the local day, with that day\'s English ordinal', async () => {
@@ -128,16 +128,16 @@ describe('a schedule near midnight names the local day', () => {
 		setLocale('en');
 		rows = moved();
 		await render();
-		expect(scheduleOf('Vor')).toBe('Monthly on the 2nd at 00:00');
-		expect(scheduleOf('Vor Zehn')).toBe('Monthly on the 11th at 00:00');
-		expect(scheduleOf('Einunddreissig UTC')).toBe('Monthly on the 31st at 23:00 UTC');
+		expect(scheduleOf('Vor')).toBe('Monthly on the 2nd at 12:00 AM');
+		expect(scheduleOf('Vor Zehn')).toBe('Monthly on the 11th at 12:00 AM');
+		expect(scheduleOf('Einunddreissig UTC')).toBe('Monthly on the 31st at 11:00 PM UTC');
 		unmount(component!);
 		component = undefined;
 		inZone(480);
 		rows = moved();
 		await render();
-		expect(scheduleOf('Zurück')).toBe('Monthly on the 1st at 18:00');
-		expect(scheduleOf('Zurück Dreiundzwanzig')).toBe('Monthly on the 22nd at 18:00');
+		expect(scheduleOf('Zurück')).toBe('Monthly on the 1st at 6:00 PM');
+		expect(scheduleOf('Zurück Dreiundzwanzig')).toBe('Monthly on the 22nd at 6:00 PM');
 	});
 
 	it('across a clock change: a weekday that summer would move stays in UTC', async () => {
@@ -159,5 +159,96 @@ describe('a schedule near midnight names the local day', () => {
 		rows = [{ ...BASE, id: 'r', title: 'Ramadan', schedule_cron: '30 23 * * 1' }];
 		await render();
 		expect(scheduleOf('Ramadan')).toBe('Montags 23:30 UTC');
+	});
+});
+
+describe('a schedule said in words, or as a schedule of its own', () => {
+	beforeEach(() => { vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(-60); });
+
+	const forms = (): Record<string, unknown>[] => [
+		{ ...BASE, id: 'f1', title: 'Minute', schedule_cron: '* * * * *' },
+		{ ...BASE, id: 'f2', title: 'Fünf', schedule_cron: '*/5 * * * *' },
+		{ ...BASE, id: 'f3', title: 'Zwei Stunden', schedule_cron: '15 */2 * * *' },
+		{ ...BASE, id: 'f4', title: 'Stunde', schedule_cron: '20 * * * *' },
+		{ ...BASE, id: 'f5', title: 'Eigen', schedule_cron: '*/7 3-5 * * 1' },
+		{ ...BASE, id: 'f6', title: 'Täglich', schedule_cron: '0 7 * * *' },
+		{ ...BASE, id: 'f7', title: 'Schritt eins', schedule_cron: '*/1 * * * *' },
+		{ ...BASE, id: 'f8', title: 'Kurzform', schedule_cron: '5m' },
+	];
+
+	function titleOf(title: string): string | null {
+		const card = [...target.querySelectorAll('[data-trigger-title]')].find((e) => e.textContent?.trim() === title)?.closest('.group');
+		return card?.querySelector('[data-trigger-schedule]')?.getAttribute('title') ?? null;
+	}
+
+	it('in German', async () => {
+		setLocale('de');
+		rows = forms();
+		await render();
+		expect(['Minute', 'Fünf', 'Zwei Stunden', 'Stunde', 'Eigen', 'Täglich'].map(scheduleOf)).toEqual([
+			'Jede Minute', 'Alle 5 Minuten', 'Alle 2 Stunden (01:15, 03:15, …)', 'Stündlich (00:20, 01:20, …)', 'Eigener Zeitplan', 'Täglich um 08:00',
+		]);
+		// The expression is not the label; it is there on hover, and only for a schedule of its own.
+		expect(titleOf('Eigen')).toBe('*/7 3-5 * * 1');
+		expect(titleOf('Täglich')).toBeNull();
+		expect(['Schritt eins', 'Kurzform'].map(scheduleOf)).toEqual(['Jede Minute', '5m']);
+		expect(titleOf('Kurzform')).toBeNull();
+	});
+
+	it('marks a hidden character in the expression it shows on hover', async () => {
+		setLocale('de');
+		rows = [{ ...BASE, id: 'h1', title: 'Versteckt', schedule_cron: '0 3\u202E21\u202C * * *' }];
+		await render();
+		expect(scheduleOf('Versteckt')).toBe('Eigener Zeitplan');
+		expect(titleOf('Versteckt')).toBe('0 3⟨U+202E⟩21⟨U+202C⟩ * * *');
+	});
+
+	it('in English, on the 12-hour clock', async () => {
+		setLocale('en');
+		rows = forms();
+		await render();
+		expect(['Minute', 'Fünf', 'Zwei Stunden', 'Stunde', 'Eigen', 'Täglich'].map(scheduleOf)).toEqual([
+			'Every minute', 'Every 5 minutes', 'Every 2 hours (1:15 AM, 3:15 AM, …)', 'Every hour (12:20 AM, 1:20 AM, …)', 'Custom schedule', 'Daily at 8:00 AM',
+		]);
+		expect(titleOf('Eigen')).toBe('*/7 3-5 * * 1');
+	});
+});
+
+describe('the dates on a card write their time as the schedule line does', () => {
+	beforeEach(() => { vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(-60); });
+
+	function nextRunOf(title: string): string {
+		const card = [...target.querySelectorAll('[data-trigger-title]')].find((e) => e.textContent?.trim() === title)?.closest('.group');
+		return card?.querySelector('[data-next-run]')?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+	}
+
+	// 07:00 UTC, which is 08:00 in this browser's zone only if the runner sits there too: the
+	// date is drawn in the runner's own zone, so the time is matched by its form, not its value.
+	const next = '2099-03-04T07:00:00.000Z';
+
+	it('in English on the 12-hour clock without a leading zero, like "Daily at 8:00 AM"', async () => {
+		setLocale('en');
+		rows = [{ ...BASE, id: 'd1', title: 'Täglich', schedule_cron: '0 7 * * *', next_run_at: next }];
+		await render();
+		expect(nextRunOf('Täglich')).toMatch(/, (1[0-2]|[1-9]):\d\d [AP]M$/);
+	});
+
+	it('in German on the 24-hour clock with a leading zero', async () => {
+		setLocale('de');
+		rows = [{ ...BASE, id: 'd1', title: 'Täglich', schedule_cron: '0 7 * * *', next_run_at: next }];
+		await render();
+		expect(nextRunOf('Täglich')).toMatch(/\d\d\.\d\d\.2099, \d\d:\d\d$/);
+	});
+});
+
+describe('a date the list cannot read', () => {
+	it('is said as no date, never as a made-up time', async () => {
+		setLocale('en');
+		rows = [{ ...BASE, id: 'x1', title: 'Kaputt', schedule_cron: '0 7 * * *', next_run_at: '2099-03-04T07:00:00.000Z', last_run_at: 'not a date', last_run_status: 'success' }];
+		await render();
+		const card = [...target.querySelectorAll('[data-trigger-title]')].find((e) => e.textContent?.trim() === 'Kaputt')?.closest('.group');
+		const last = card?.querySelector('[data-run-status]')?.textContent ?? '';
+		expect(last).toContain('Invalid Date');
+		expect(last).not.toMatch(/NaN/);
 	});
 });

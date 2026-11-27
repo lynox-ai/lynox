@@ -23,7 +23,7 @@ import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, getActiveRou
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../../core/llm/provider-keys.js';
 import { resolveTools } from '../resolve-tools.js';
 
-import { adjustSessionCost, checkSessionBudget } from '../../core/session-budget.js';
+import { adjustSessionCost, checkSessionBudget, releasePersistentBudget, reservePersistentBudget } from '../../core/session-budget.js';
 import { compose, engineText, escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
 import { childFilingContext } from '../../core/approval-filing.js';
@@ -147,6 +147,31 @@ function childRowCostUSD(agent: Agent | undefined): number {
  * argument exists for. It was reverted rather than shipped, because an argument that works
  * in half the cases reads as a guarantee and is not one.
  */
+/**
+ * The refusal when a batch does not fit under the daily or monthly cap. The figures are the ones
+ * the reservation refused with, not a second reading. A smaller batch is offered only when one
+ * child could still fit (`smallestUSD`, the least any child of this batch is held at); otherwise
+ * the cap stops the work.
+ */
+function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | undefined; cap?: 'daily' | 'monthly' | undefined; capUSD?: number | undefined }, batchUSD: number, smallestUSD: number): string {
+  if (r.headroomUSD === undefined || r.cap === undefined || r.capUSD === undefined) {
+    return `Not delegated: ${r.reason ?? 'the spending cap cannot be checked.'}`;
+  }
+  const usd = (n: number): string => `$${n.toFixed(2)}`;
+  const budget = `${r.cap} budget`;
+  // ⚠ No reset time and no cause: what is left may be short for spend already booked OR for work
+  // still running that holds part of it (which can be the delegating run's own hold), and the
+  // sentence has to be true for both.
+  if (r.headroomUSD < smallestUSD) {
+    return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left, `
+      + 'less than one of these sub-agents may spend. '
+      + `Tell the user that the ${budget} leaves no room for this delegation now, and that you cannot change the budget.`;
+  }
+  return `Not delegated: these sub-agents could together spend up to ${usd(batchUSD)}, and the ${budget} `
+    + `of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left. Delegate to fewer sub-agents or give them `
+    + `a lower max_budget_usd, so that together they stay within ${usd(r.headroomUSD)}.`;
+}
+
 function minChildBudgetUSD(model: string, maxOutputTokens: number | undefined): number {
   if (!hasKnownPricing(model)) return 0;
   return estimateFirstTurnUSD(model, maxOutputTokens);
@@ -2379,6 +2404,10 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
      * `finally` below gives it back.
      */
     let heldForBatch = 0;
+    /** Each child's hard cap, as held against the instance's daily and monthly caps. */
+    let capHolds: number[] = [];
+    /** What of that hold is still taken; given back like `heldForBatch`. */
+    let capHeld = 0;
     if (remainingRunUSD !== null) {
       const asked = requested.reduce((sum, usd) => sum + usd, 0);
       // SCALED proportionally rather than refused outright. Refusing reads as the
@@ -2506,6 +2535,32 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // cost, until the session refused all further work for money it never spent. Inside
     // the `try`, so its own refusal gives the run's hold back through the `finally`.
     // No `await` lies between the run's reservation and this line.
+    //
+    // ⛔ The instance's daily and monthly caps, for the whole batch and before the first child.
+    // The session checks them once per turn, so without this a turn that passed the cap just
+    // below it could fan out batch after batch on top. Before `checkSessionBudget`, which
+    // reserves on the session counter and gives nothing back.
+    //
+    // Held is each child's hard cap (its share, or what it asked for), not the turn-based
+    // estimate: that is the most a child can spend, up to one turn over, as any limit here (a
+    // turn is recorded before it is compared). Never under the cost of one turn on the child's
+    // model: a child given nothing still runs that one turn.
+    //
+    // ⚠ NOT on a background run whose whole budget the admission already holds against the
+    // caps (`budgetHeldAgainstCaps`): the shares are carved out of that budget, so holding them
+    // again would count the same dollars twice and refuse the batch for room the run itself is
+    // holding. Only shares qualify; without a run budget there is nothing they are inside of.
+    const coveredByRun = shares !== null && agent.budgetHeldAgainstCaps?.() === true;
+    if (!coveredByRun) {
+      capHolds = specs.map((_, i) => Math.max(
+        shares?.[i] ?? requested[i]!,
+        minChildBudgetUSD(childModels[i]!, childCaps[i]),
+      ));
+      const batchUSD = capHolds.reduce((sum, usd) => sum + usd, 0);
+      const capReservation = reservePersistentBudget(batchUSD);
+      if (!capReservation.allowed) throw new Error(capRefusal(capReservation, batchUSD, Math.min(...capHolds)));
+      capHeld = capReservation.reservedUSD;
+    }
     checkSessionBudget(agent.sessionCounters, totalEstimate);
 
     channels.spawnStart.publish({ agents: names, parent: agent.name, parentRunId, depth: childDepth });
@@ -2611,6 +2666,13 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           if (shares !== null) {
             agent.releaseExternalCost?.(shares[i]!);
             heldForBatch -= shares[i]!;
+          }
+          // The child's cap hold against the daily and monthly caps, on the same exits. Its
+          // run row, written before this, carries what it really spent.
+          if (capHeld > 0) {
+            const back = Math.min(capHolds[i] ?? 0, capHeld);
+            releasePersistentBudget(back);
+            capHeld -= back;
           }
           // ⛔ The child's ACTUAL cost, onto the delegating run's own ceiling. Without
           // it the run keeps counting only its own turns while the tenant's daily total
@@ -2928,6 +2990,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       // is a no-op; `releaseExternalCost` floors at 0 either way, so a miscount cannot
       // mint budget.
       if (heldForBatch > 0) agent.releaseExternalCost?.(heldForBatch);
+      if (capHeld > 0) releasePersistentBudget(capHeld);
+      capHeld = 0;
     }
   },
   // Spawning writes nothing outside; each call the child makes is classified on its own.

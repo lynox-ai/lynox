@@ -1700,7 +1700,13 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (78);
    ALTER TABLE bulk_runs ADD COLUMN superseded_by TEXT REFERENCES bulk_runs(id) ON DELETE SET NULL;
    CREATE INDEX IF NOT EXISTS idx_bulk_runs_superseded ON bulk_runs(superseded_by);`,
-  // v79: the member-connection lines of a trigger's last run, apart from its result (a JSON array
+  // v79: the phase a run stood in when an undo took it back (`done`, `aborted`, or `writing` with
+  // a halt), so an undo of that undo puts it back exactly there. NULL on every run taken back
+  // before this version: one without a halt reason stood done, one with a reason cannot be told
+  // halted from aborted, and an undo that would put it back is refused (`phase_not_kept`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (79);
+   ALTER TABLE bulk_runs ADD COLUMN phase_before_undo TEXT;`,
+  // v80: the member-connection lines of a trigger's last run, apart from its result (a JSON array
   // of the lines as recorded; NULL: none). The owner reads them under the result; anyone else
   // reads a fixed sentence in place of a result that has them (`lastRunResultFor`).
   // A result recorded before carries its lines under it (`result\n• line…`), and a trigger that
@@ -1716,7 +1722,7 @@ const MIGRATIONS: string[] = [
   // before: any end other than a halt (failed, timed out, stopped, interrupted, no status), and any
   // bulk end, whose result carries member lines keeps them in the result until the trigger's next
   // run end writes the column.
-  `INSERT OR IGNORE INTO schema_version (version) VALUES (79);
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (80);
    ALTER TABLE triggers ADD COLUMN last_run_member_notes TEXT;
    UPDATE triggers SET
      last_run_member_notes = json_object('migrated', substr(last_run_result, instr(last_run_result, char(10) || '• ') + 3)),
