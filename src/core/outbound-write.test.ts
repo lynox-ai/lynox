@@ -1147,6 +1147,29 @@ describe('the headers of a write, read together under one budget', () => {
     const headers = { 'x-a': '%73ecret', ...many(1) };
     expect(headersForQuestion(headers, (t) => t.replaceAll('secret', '***'), () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'x-a' } });
   });
+
+  // JSON text in a header value is read on the budget of its own (2 M), and all headers of one
+  // question share it: one such header fits it alone, many together do not, while the same
+  // number of plain values of the same length stays well inside the reading budget (600 K).
+  describe('with JSON text in their values', () => {
+    const piece = '%2541%u0041%E9%2525%41+';
+    // The escapes are written as JSON escapes: only reading the JSON text in the value finds them.
+    const json = (i: number): string => `["${`t${i}${piece.repeat(2)}`.replace(/%/g, '\\u0025')}"]`;
+    const headers = (n: number, value: (i: number) => string): Record<string, string> =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`x-h-${String(i).padStart(4, '0')}`, value(i)]));
+
+    it('reads one such header, and many of them together past that budget count as holding a secret', () => {
+      const one = headersForQuestion(headers(1, json), (t) => t, () => 'show');
+      expect('lines' in one && one.lines.length).toBe(1);
+      const some = headersForQuestion(headers(400, json), (t) => t, () => 'show');
+      expect('lines' in some && some.lines.length).toBe(400);
+      const many = headersForQuestion(headers(800, json), (t) => t, () => 'show');
+      expect('unshowable' in many && many.unshowable.reason).toBe('escaped-secret');
+      // Control: as many plain values, each as long, are read: the reading budget is not what ran out.
+      const plainValues = headersForQuestion(headers(800, (i) => 'v'.repeat(json(i).length)), (t) => t, () => 'show');
+      expect('lines' in plainValues && plainValues.lines.length).toBe(800);
+    });
+  });
 });
 
 // The gate reads one call's body about ten times; the reading is kept by a digest of body and headers.
