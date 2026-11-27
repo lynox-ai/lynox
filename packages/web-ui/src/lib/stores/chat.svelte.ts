@@ -696,7 +696,9 @@ async function drainQueueNow(due: { sid: string | null; gen: number }): Promise<
 	while (_changesetFetch) await _changesetFetch;
 	if (_drainDue === due) _drainDue = null;
 	// A new chat (newChat) leaves the opening as it is: the thread says it.
-	if (sessionId !== due.sid || _resumeGeneration !== due.gen || pendingChangeset || isStreaming || messageQueue.length === 0) return;
+	if (sessionId !== due.sid || _resumeGeneration !== due.gen || isStreaming || messageQueue.length === 0) return;
+	// The open review holds the turn, checked right before it is sent.
+	if (sendBlockedByReview({ silent: true })) return;
 	const next = messageQueue.shift()!;
 	persistChatNow(); // queue shrank — keep the durable copy in sync
 	await _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
@@ -708,7 +710,7 @@ function refireFailedTurn(msg: ChatMessage): void {
 	// Runs past `sendMessage`, so it checks the open review itself. Silently: it is not the
 	// user's action, and browsers fire `online` in bursts. The turn stays failed, with its
 	// tap-to-retry and its `failedOffline` mark, so the next automatic re-send probes again.
-	if (pendingChangeset) return;
+	if (sendBlockedByReview({ silent: true })) return;
 	msg.failed = false;
 	msg.failedOffline = false;
 	msg.sendUnconfirmed = false;
@@ -957,10 +959,13 @@ export interface RunOptions {
 /**
  * Whether a send must wait for the open changeset review — and if so, says so and points at
  * the review. A caller that holds the user's text asks this BEFORE clearing it: `sendMessage`
- * returns without sending in that case, and text cleared first is lost.
+ * returns without sending in that case, and text cleared first is lost. `silent` is for a send
+ * the user did not take (the queue's drain, a re-send on reconnect): it waits without a word,
+ * as browsers fire `online` in bursts.
  */
-export function sendBlockedByReview(): boolean {
+export function sendBlockedByReview(opts?: { silent?: boolean }): boolean {
 	if (!pendingChangeset) return false;
+	if (opts?.silent === true) return true;
 	addToast(t('changeset.review_pending'), 'info', 4000);
 	// Scroll changeset into view if visible
 	setTimeout(() => {
