@@ -31,6 +31,7 @@ import {
   type MailWatchHandle,
   type MailWatchHandler,
   type MailWatchOptions,
+  listIdFromHeader,
 } from '../provider.js';
 import { currentCallSignal } from '../../../core/call-connection.js';
 import { processErrorText } from '../../../core/error-egress.js';
@@ -738,8 +739,9 @@ export class ImapSmtpProvider implements MailProvider {
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
             // The watcher lists new mail; without these headers no listed mail is ever automatic,
-            // and a reply on a server without thread ids never finds its thread.
-            headers: LIST_FETCH_HEADERS,
+            // a reply on a server without thread ids never finds its thread, and no List-Id
+            // reaches the inbox rules or the prefilter.
+            headers: [...LIST_FETCH_HEADERS, 'list-id'],
           },
           { uid: true },
         )) {
@@ -778,7 +780,7 @@ export class ImapSmtpProvider implements MailProvider {
           internalDate: true,
           size: true,
           bodyStructure: true,
-          headers: ['in-reply-to', 'references', ...AUTOMATIC_MAIL_FETCH_HEADERS],
+          headers: ['in-reply-to', 'references', ...AUTOMATIC_MAIL_FETCH_HEADERS, 'list-id'],
         },
         { uid: true },
       ));
@@ -923,8 +925,9 @@ export class ImapSmtpProvider implements MailProvider {
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
             // The watcher lists new mail; without these headers no listed mail is ever automatic,
-            // and a reply on a server without thread ids never finds its thread.
-            headers: LIST_FETCH_HEADERS,
+            // a reply on a server without thread ids never finds its thread, and no List-Id
+            // reaches the inbox rules or the prefilter.
+            headers: [...LIST_FETCH_HEADERS, 'list-id'],
           },
           { uid: true },
         )) {
@@ -1203,6 +1206,7 @@ export class ImapSmtpProvider implements MailProvider {
       sizeBytes: msg.size,
       isAutoReply,
       isAutoReplied,
+      listId: listIdFromHeader(headers.get('list-id')),
     };
   }
 }
@@ -1263,7 +1267,8 @@ export function parseHeaders(raw: string): Map<string, string> {
     if (idx <= 0) continue;
     const key = line.slice(0, idx).trim().toLowerCase();
     const value = line.slice(idx + 1).trim();
-    if (key && value) out.set(key, value);
+    // The first of a repeated field wins, as Gmail's header lookup does.
+    if (key && value && !out.has(key)) out.set(key, value);
   }
   return out;
 }

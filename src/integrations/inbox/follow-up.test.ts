@@ -314,6 +314,23 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(inbox.getItem(id)!.userAction).toBeUndefined();
   });
 
+  // The copy check asks only whether the address is a connected account, never the domains the
+  // own-group exception reads: a sender under an account's domain is still a customer.
+  it('a sender under the domain of a connected account is not our own mail', async () => {
+    const id = seedReplied();
+    const h = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: {
+        resolve: accounts.resolve,
+        addresses: () => ['support@acme.example', 'colleague@acme.example'],
+        isOwnAddress: (a) => a === 'support@acme.example',
+      },
+    });
+    await h(ACCOUNT.id, envelope({ from: [{ address: 'colleague@acme.example' }], messageId: '<coll@x>' }));
+    expect(stored('<coll@x>').direction).toBe('inbound');
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+  });
+
   it('a message dated exactly at the reply does not open the item', async () => {
     const id = seedReplied();
     await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-03T09:00:00Z') }));
