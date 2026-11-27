@@ -143,7 +143,7 @@ describe('google_drive tool', () => {
         action: 'upload',
         file_name: 'test.txt',
         content: 'Hello',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       expect(result).toContain(SCOPES.DRIVE_FILE);
     });
@@ -163,7 +163,7 @@ describe('google_drive tool', () => {
       const result = await tool.handler({
         action: 'upload', file_name: 'lynox-backups', content: 'x',
         mime_type: 'application/vnd.google-apps.folder',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
       expect(result).toBe('Error: "upload" cannot create folders.');
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -185,7 +185,7 @@ describe('google_drive tool', () => {
         action: 'upload',
         file_name: 'test.txt',
         content: 'Hello World',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       expect(result).toContain('File uploaded');
       expect(result).toContain('uploaded1');
@@ -206,7 +206,7 @@ describe('google_drive tool', () => {
         content: 'JVBE Ri0=', // base64 with a space to prove it gets stripped
         content_encoding: 'base64',
         mime_type: 'application/pdf',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       const body = String(mockFetch.mock.calls.at(-1)?.[1]?.body ?? '');
       expect(body).toContain('Content-Transfer-Encoding: base64');
@@ -230,7 +230,7 @@ describe('google_drive tool', () => {
         content: 'data:image/png;base64,iVBORw0KGgo=', // common model habit
         content_encoding: 'base64',
         mime_type: 'image/png',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       const body = String(mockFetch.mock.calls.at(-1)?.[1]?.body ?? '');
       expect(body).toContain('iVBORw0KGgo=');        // real base64 survives
@@ -250,7 +250,7 @@ describe('google_drive tool', () => {
         action: 'upload',
         file_name: 't.txt',
         content: 'Hello World',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       const body = String(mockFetch.mock.calls.at(-1)?.[1]?.body ?? '');
       expect(body).not.toContain('Content-Transfer-Encoding');
@@ -290,7 +290,7 @@ describe('google_drive tool', () => {
         action: 'share',
         file_id: 'file1',
         email: 'user@example.com',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       // `share` must NOT be admitted by drive.file — see ACTION_SCOPES.
       expect(result).toContain(SCOPES.DRIVE);
@@ -321,7 +321,7 @@ describe('google_drive tool', () => {
       const tool = createDriveTool(() => auth);
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => meta });
 
-      const result = await tool.handler({ action: 'move', file_id: 'f1', target_folder_id: 'dst' }, createMockAgent('Yes'));
+      const result = await tool.handler({ action: 'move', file_id: 'f1', target_folder_id: 'dst' }, createMockAgent('confirm'));
 
       expect(result).toMatch(/did not say which folder this file is in now/);
       expect(result).toMatch(/Nothing was changed/);
@@ -336,7 +336,7 @@ describe('google_drive tool', () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ parents: ['src'] }) });
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'f1', name: 'Plan.pdf', parents: ['dst'] }) });
 
-      const result = await tool.handler({ action: 'move', file_id: 'f1', target_folder_id: 'dst' }, createMockAgent('Yes'));
+      const result = await tool.handler({ action: 'move', file_id: 'f1', target_folder_id: 'dst' }, createMockAgent('confirm'));
 
       expect(result).toBe('File "Plan.pdf" moved to folder dst.');
       const patch = mockFetch.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === 'PATCH');

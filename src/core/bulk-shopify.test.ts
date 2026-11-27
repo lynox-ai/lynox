@@ -10,13 +10,20 @@ vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn().mockResolvedValue([{ address: '23.227.38.65', family: 4 }]) },
 }));
 
+// A preset without its pinned API version, for one test: the run then has no endpoint at all.
+const noApiVersion = vi.hoisted(() => ({ on: false }));
+vi.mock('./shopify-graphql.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./shopify-graphql.js')>();
+  return { ...actual, shopifyGraphqlEndpoint: (host: string) => (noApiVersion.on ? null : actual.shopifyGraphqlEndpoint(host)) };
+});
+
 import dns from 'node:dns/promises';
 import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, BULK_HALT_REASONS, type BulkRunForPreview } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_TARGET_TITLE_MAX, bulkTargetTitleCell, type BulkRunForPreview } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { BulkHostBudget, externalClient, externalWriter, graphqlWriteAnswer, parseBulkContract, type ExternalClient, type ExternalRead } from './bulk-external.js';
 import {
@@ -26,7 +33,7 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
-import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyPairedAfter, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyConnectedBy, shopifyMediaAccess, shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyPairedAfter, shopifyProductWriteAccess, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
 import { SHOPIFY_READ_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { MARKUP_MAX_TAGS, canonicalHtml, htmlEqual, normalizeHtml } from './html-tree.js';
@@ -45,15 +52,17 @@ import { BULK_MAX_TARGETS } from './bulk-plan.js';
 import { BULK_NOTICES } from './bulk-notices.js';
 import { SHOPIFY_CONSENT_VERSION } from './oauth-presets.js';
 
-/** A connection confirmed under the current customer text: every field of a Shopify run is covered. */
-const confirmedGrant = (): unknown => ({ consent_version: SHOPIFY_CONSENT_VERSION });
+/** A connection that asked for and was granted `write_products`, confirmed under the current
+ *  customer text: every field of a Shopify run is covered. */
+const WRITES_PRODUCTS = { asked_scope: ['read_products', 'write_products'], granted_scope: ['read_products', 'write_products'] };
+const confirmedGrant = (): unknown => ({ ...WRITES_PRODUCTS, consent_version: SHOPIFY_CONSENT_VERSION });
 import type { IAgent } from '../types/index.js';
 
 const HOST = 'acme.myshopify.com';
 // The store connection of HOST, granted the scope image alt texts need (`shopifyMediaAccess`), so a
 // plan in the image form gets past the scope check to what this file tests.
 const IMAGE_WRITING_STORE = {
-  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] }, scope: 'read_products write_products write_files' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'], asked_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] }, scope: 'read_products write_products write_files' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'], asked_scope: ['read_products', 'write_products', 'write_files'], store_binding: 'bound' } } : undefined,
 };
 const ENDPOINT = `https://${HOST}/admin/api/2026-10/graphql.json`;
 const gid = (n: number): string => `gid://shopify/Product/${String(n)}`;
@@ -852,9 +861,11 @@ describe('the worker\'s client for a Shopify run', () => {
     const run = { id, targetSystem: `http:${HOST}`, contractJson: ledger.getListRun(id)!.contractJson, delegatedPlanner: null };
     const page0 = { form: 'shopify_products_list', afterId: 0, filters: {} } as const;
     const read10 = { form: 'shopify_product_read', gid: gid(10) } as const;
-    // Past the grant: what stops it is the missing stored credential, nothing is sent.
-    expect(await factory(run, undefined, { phase: 'list', afterId: 0, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'no_credential' });
-    expect(await factory(run, undefined, { phase: 'read', targets: [gid(10)] })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'no_credential' });
+    // Past the grant: what stops it is the store's own refusal, named through the worker's attach
+    // (this process has no control plane, so it is a self-hosted one), and nothing is sent.
+    const selfHosted = { kind: 'store_refused', reason: 'shopifySelfHosted' };
+    expect(await factory(run, undefined, { phase: 'list', afterId: 0, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual(selfHosted);
+    expect(await factory(run, undefined, { phase: 'read', targets: [gid(10)] })!.graphqlRead(ENDPOINT, read10)).toEqual(selfHosted);
     // The stored contract alone grants no read; a grant holds its own body and no other.
     expect(await factory(run)!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
     expect(await factory(run, undefined, { phase: 'list', afterId: 5, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
@@ -884,6 +895,33 @@ describe('the switch', () => {
     s.requests.length = 0;
     expect((await runBulkPreview(id2, deps({ shopifyEnabled: () => false }))).status).toBe('halted');
     expect(ledger.getStatus(id2)!.haltReason).toBe(BULK_HALT_REASONS.shopifyReadOff);
+    expect(minted).toEqual([]);
+    expect(s.requests).toEqual([]);
+  });
+
+  it('halts as a missing setting of lynox\'s, not as an unreachable store, when the preset pins no API version', async () => {
+    fill(3);
+    const id = startedList();
+    noApiVersion.on = true;
+    try {
+      expect((await runBulkPreview(id, deps())).status).toBe('halted');
+    } finally {
+      noApiVersion.on = false;
+    }
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.shopifyNoApiVersion);
+    expect(minted).toEqual([]);
+    expect(s.requests).toEqual([]);
+  });
+
+  it('halts as unreachable, not as a missing setting, when the run\'s host is not a store\'s', async () => {
+    fill(3);
+    const src = source();
+    const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: 'api.example.com', source: src, readContract: listReadContract('api.example.com', src) });
+    if (!out.ok) throw new Error(out.reason);
+    const started = ledger.resumePreview(out.status.id, Date.now(), { listChecksum: ledger.listStartChecksum(out.status.id)! });
+    if (!started.ok) throw new Error(started.reason);
+    expect((await runBulkPreview(out.status.id, deps())).status).toBe('halted');
+    expect(ledger.getStatus(out.status.id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
     expect(minted).toEqual([]);
     expect(s.requests).toEqual([]);
   });
@@ -1084,15 +1122,20 @@ describe('who mints a Shopify read grant', () => {
     visit(sf);
     return found;
   }
+  /** The whole source tree, parsed once for both counts. Parsing every file is the slow part
+   *  (seconds on a quiet machine), so the two tests that count over the tree share one pass. */
+  let tree: Record<string, Found> | null = null;
   function count(key: keyof Found): Record<string, number> {
     const root = join(__dirname, '..');
+    tree ??= Object.fromEntries(sources(root).map((f) => [f.slice(root.length + 1), scan(f, readFileSync(f, 'utf8'))]));
     const out: Record<string, number> = {};
-    for (const f of sources(root)) {
-      const n = scan(f, readFileSync(f, 'utf8'))[key];
-      if (n > 0) out[f.slice(root.length + 1)] = n;
-    }
+    for (const [f, found] of Object.entries(tree)) if (found[key] > 0) out[f] = found[key];
     return out;
   }
+  /** A pass over the whole tree takes about twice as long on a busy shared runner as on a quiet
+   *  one, and the default ten seconds were overrun there. The bound stays: a pass that takes over
+   *  a minute still fails, a slow one does not. */
+  const TREE_SCAN_MS = 60_000;
 
   it('sees a call, an alias, a destructure, a property, a re-export and an escape — and not a comment', () => {
     for (const text of ['x = withShopifyRead(a, b, c)', "import { withShopifyRead as g } from './p.js'", 'const { withShopifyRead: w } = await import(m)', "pg['withShopifyRead'](a)", 'export { withShopifyRead } from "./p.js"', 'with\\u0053hopifyRead(a)']) {
@@ -1115,13 +1158,13 @@ describe('who mints a Shopify read grant', () => {
     expect(count('mint')).toEqual({ 'tools/permission-guard.ts': 1, 'core/bulk-external-writer.ts': 2 });
     const callers = sources(join(__dirname, '..')).filter((f) => /\bbulkRunContract\b/.test(readFileSync(f, 'utf8'))).map((f) => f.slice(join(__dirname, '..').length + 1));
     expect(callers.sort()).toEqual(['core/bulk-external-writer.ts', 'core/worker-loop.ts']);
-  });
+  }, TREE_SCAN_MS);
 
   it('is handed a phase written out only by the preview, for its list pages and its read', () => {
     // permission-guard: the three members of the phase type. bulk-preview: the list page (of
     // products or of images) and the read.
     expect(count('phase')).toEqual({ 'tools/permission-guard.ts': 3, 'core/bulk-preview.ts': 3 });
-  });
+  }, TREE_SCAN_MS);
 });
 
 describe('shopifyPairedAfter', () => {
@@ -1481,7 +1524,8 @@ describe('applying a Shopify run', () => {
   // texts and nothing else: a run that writes a description halts before its first write.
   describe('a connection not confirmed under the current text', () => {
     const CURRENT = { consent_version: SHOPIFY_CONSENT_VERSION, consented_at: '2026-11-27T10:00:00.000Z' };
-    const applyUnder = (id: string, grant: unknown, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string; summary: string }> => runBulkEffect(id, effect, {
+    /** The run applied under exactly `grant`. */
+    const applyRaw = (id: string, grant: unknown, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string; summary: string; pushSummary?: string }> => runBulkEffect(id, effect, {
       ledger, trailFor: () => null, shopifyGrantOf: (host) => (host === HOST ? grant : undefined),
       writerFor: (run) => bulkWriterFor(run, null, (r) => externalRunWriter(r, ledger, (rr, _q, _r, shopifyApply) => {
         const stored = rr.contractJson === null ? null : parseBulkContract(rr.contractJson);
@@ -1489,6 +1533,9 @@ describe('applying a Shopify run', () => {
         return granted === null ? null : client(granted);
       })),
     });
+    /** The run applied under `grant` with `write_products` asked for and granted: what is tested is the text. */
+    const applyUnder = (id: string, grant: unknown, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string; summary: string }> =>
+      applyRaw(id, { ...WRITES_PRODUCTS, ...(grant as object | undefined) }, effect);
     const productWrites = (): unknown[] => s.requests.filter((r) => 'seoTitle' in r.variables || 'descriptionHtml' in r.variables);
     /** A previewed one-product run whose after-state also writes the description, approved. */
     const describing = async (): Promise<string> => {
@@ -1504,7 +1551,7 @@ describe('applying a Shopify run', () => {
     };
 
     it.each([
-      ['no grant', undefined],
+      ['a grant with no version', undefined],
       ['a grant from before the version was recorded', { origin: 'callback', asked_scope: ['write_products'] }],
       ['a grant with a time but no version', { consented_at: '2026-11-19T10:00:00.000Z' }],
       ['an earlier text', { consent_version: '0123456789abcdef', consented_at: '2026-11-19T10:00:00.000Z' }],
@@ -1518,7 +1565,7 @@ describe('applying a Shopify run', () => {
       expect(s.requests).toEqual([]);
       expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
       expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 0, sentUnknown: 0 });
-      expect(out.summary).toContain('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.');
+      expect(out.summary).toContain('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.');
     });
 
     it('writes the description once the connection was confirmed under the current text', async () => {
@@ -1623,6 +1670,114 @@ describe('applying a Shopify run', () => {
       expect(s.requests).toEqual([]);
       expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
     });
+
+    // The product form writes only through a connection that asked for `write_products` and was
+    // granted it: an app may grant it unasked, and then nobody saw the consent page.
+    describe('a connection that did not ask for write_products', () => {
+      const GRANTED_ONLY = { granted_scope: ['read_products', 'write_products'], consent_version: SHOPIFY_CONSENT_VERSION };
+      /** A previewed one-product run of a title and SEO texts alone, which any text covers, approved. */
+      const titling = async (): Promise<string> => {
+        fill(1);
+        const id = await previewed();
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+        s.requests.length = 0;
+        return id;
+      };
+
+      it.each([
+        ['no grant', undefined],
+        ['a grant that recorded no ask, though the app granted write_products', GRANTED_ONLY],
+        ['a grant whose ask is no list', { ...GRANTED_ONLY, asked_scope: 'write_products' }],
+        ['a grant that asked to read only', { ...GRANTED_ONLY, asked_scope: ['read_products'] }],
+      ])('writes nothing under %s, not even a title, and says how to ask', async (_what, grant) => {
+        const id = await titling();
+        const product = JSON.stringify(s.products.get(10));
+        const out = await applyRaw(id, grant);
+        expect(out.status).toBe('refused');
+        expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(s.requests).toEqual([]);
+        expect(JSON.stringify(s.products.get(10))).toBe(product);
+        expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 0, sentUnknown: 0 });
+        expect(out.summary).toContain('lynox wrote nothing. When this Shopify connection was set up, lynox did not ask for permission to change products.');
+        // The push says it shorter and points to the run page; the run result keeps the way.
+        expect(out.pushSummary).toContain('lynox wrote nothing. When connecting, lynox did not ask Shopify for permission to change products. What to do is under Bulk runs.');
+        // The short reason the run page and a push show, in both languages.
+        expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS.productWriteNotAsked)).toContain('This Shopify connection may not change products. Ask lynox in the chat how to get that permission, then have the run planned again.');
+        expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.productWriteNotAsked)).toContain('Diese Shopify-Verbindung darf keine Produkte ändern. Frag lynox im Chat, wie du die Erlaubnis bekommst, und plane den Lauf dann neu.');
+      });
+
+      it('writes nothing under a grant that asked for write_products but was not granted it, and says where to allow it', async () => {
+        const id = await titling();
+        const out = await applyRaw(id, { ...WRITES_PRODUCTS, granted_scope: ['read_products'], consent_version: SHOPIFY_CONSENT_VERSION });
+        expect(out.status).toBe('refused');
+        expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(s.requests).toEqual([]);
+        expect(out.summary).toContain('lynox wrote nothing. Shopify did not give this connection permission to change products. Allow it in the app settings in Shopify, then ask lynox in the chat to connect Shopify again and plan the run again.');
+        expect(out.pushSummary).toContain('lynox wrote nothing. Shopify does not let this connection change products. What to do is under Bulk runs.');
+      });
+
+      it('writes once the connection asked for write_products and was granted it', async () => {
+        const id = await titling();
+        await applyRaw(id, GRANTED_ONLY);
+        expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 1 })).toMatchObject({ ok: true });
+        await applyRaw(id, { ...GRANTED_ONLY, asked_scope: ['read_products', 'write_products'] });
+        expect(ledger.getStatus(id)!.haltReason).toBeNull();
+        expect(productWrites()).toHaveLength(1);
+        expect(s.products.get(10)!['seo']).toEqual({ title: 'New title', description: 'D1' });
+      });
+
+      it('says after a first write that what was written stays, and pushes that short with the counts', async () => {
+        fill(2);
+        const id = await previewed();
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+        s.requests.length = 0;
+        await applyRaw(id, { ...GRANTED_ONLY, asked_scope: ['read_products', 'write_products'] });
+        expect(productWrites()).toHaveLength(1);
+        expect(ledger.confirmProbe(id)).toEqual({ ok: true });
+        expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 2 })).toMatchObject({ ok: true });
+        const out = await applyRaw(id, GRANTED_ONLY);
+        expect(out.status).toBe('refused');
+        expect(productWrites()).toHaveLength(1);
+        expect(out.summary).toMatch(/^lynox writes nothing more in this run; what it already wrote stays\. When this Shopify connection was set up/);
+        expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\. When connecting, lynox did not ask Shopify for permission to change products\. What to do is under Bulk runs\. (?:.* )?1 applied, of 2 targets\.$/);
+      });
+
+      it('does not say it wrote nothing when a send of the run has an unclear end', async () => {
+        const id = await titling();
+        // A loop marked the target sent and died before recording what came of it.
+        ledger.markSent(id, ledger.getPreview(id)[0]!.seq, null);
+        const out = await applyRaw(id, GRANTED_ONLY);
+        expect(out.status).toBe('refused');
+        expect(out.summary).toMatch(/^lynox writes nothing more in this run; what it already wrote stays\./);
+        expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\./);
+        // The push names the unclear send first, then the counts.
+        expect(out.pushSummary).toMatch(/What to do is under Bulk runs\. 1 unclear: sent without a clear answer, not sent again\. 0 applied, of 1 targets\.$/);
+      });
+
+      it('lets an undo restore what a run wrote, under a connection that no longer asks', async () => {
+        const id = await titling();
+        const seoBefore = JSON.stringify(s.products.get(10)!['seo']);
+        await applyRaw(id, confirmedGrant());
+        expect(s.products.get(10)!['seo']).toEqual({ title: 'New title', description: 'D1' });
+        const undo = ledger.planUndo(id);
+        if (!undo.ok) throw new Error(undo.reason);
+        await runBulkPreview(undo.status.id, deps());
+        expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+        await applyRaw(undo.status.id, GRANTED_ONLY, 'bulk_undo');
+        expect(ledger.getStatus(undo.status.id)!.haltReason).toBeNull();
+        expect(JSON.stringify(s.products.get(10)!['seo'])).toBe(seoBefore);
+      });
+
+      it('holds an undo of an undo under a connection that did not ask: it writes the new values again', async () => {
+        const redo = await redoOf();
+        const out = await applyRaw(redo, GRANTED_ONLY, 'bulk_undo');
+        expect(out.status).toBe('refused');
+        expect(ledger.getStatus(redo)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(s.requests).toEqual([]);
+        expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
+      });
+    });
   });
 
   /** An applied run on product 10 and its planned undo, whose description is the source's before-image `held`. */
@@ -1658,6 +1813,28 @@ describe('applying a Shopify run', () => {
     db.prepare('UPDATE bulk_targets SET source_seq = 0 WHERE run_id = ? AND seq = 0').run(id);
     expect(ledger.shopifyApplyOf(undo)!.writes).toEqual([]);
     // Its read stays granted: the apply reads it and halts on the refused request.
+    expect(ledger.shopifyApplyOf(undo)!.reads).toEqual([gid(10)]);
+  });
+
+  it('mints no undo whose description a write of another family kept marked, recorded after planning', async () => {
+    const held = '<p>1</p><script>theirs()</script>';
+    const { id, undo } = await undoOf(held);
+    const db = engineDb.getDb();
+    // A run of its own family, on the same store and list form as the undo's source.
+    db.exec('CREATE TEMP TABLE other_run AS SELECT * FROM bulk_runs WHERE 0');
+    db.prepare('INSERT INTO other_run SELECT * FROM bulk_runs WHERE id = ?').run(id);
+    db.exec(`UPDATE other_run SET id = 'other-family', source_run_id = NULL; INSERT INTO bulk_runs SELECT * FROM other_run; DROP TABLE other_run`);
+    const mark = db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, applied_at, result, after_planned, after_actual, shop_added_markup)
+      VALUES ('other-family', ?, ?, 'update', '2026-11-01T00:00:00.000Z', ?, ?, ?, 1)`);
+    const sent = engineDb.enc(JSON.stringify({ descriptionHtml: '<p>2</p>' }));
+    // On another product, and on this one with another value: neither is this undo's after-state.
+    mark.run(0, engineDb.enc(gid(11)), engineDb.enc('written'), sent, engineDb.enc(JSON.stringify({ value: { descriptionHtml: held }, estimated: false })));
+    mark.run(1, engineDb.enc(gid(10)), engineDb.enc('written'), sent, engineDb.enc(JSON.stringify({ value: { descriptionHtml: '<p>2</p><script>theirs()</script>' }, estimated: false })));
+    expect(ledger.shopifyApplyOf(undo)!.writes.map((w) => w.gid)).toEqual([gid(10)]);
+    // No link to the undo's family: its chain check alone passes it.
+    db.prepare(`UPDATE bulk_targets SET after_actual = ? WHERE run_id = 'other-family' AND seq = 1`)
+      .run(engineDb.enc(JSON.stringify({ value: { descriptionHtml: held }, estimated: false })));
+    expect(ledger.shopifyApplyOf(undo)!.writes).toEqual([]);
     expect(ledger.shopifyApplyOf(undo)!.reads).toEqual([gid(10)]);
   });
 
@@ -1995,6 +2172,34 @@ describe('applying a Shopify run', () => {
       expect(descriptionWrites()).toEqual(['<p>1</p>']);
       expect(ledger.getStatus(undo)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.markupAddedByShop });
       expect(ledger.getPreview(undo)[0]).toMatchObject({ written: true, shopAddedMarkup: true });
+    });
+
+    // A new run, of another family, reads the marked description as the product's state.
+    it('leaves a product out of a new run whose description is what an earlier write left marked, reformatted too', async () => {
+      fill(1);
+      const id = await previewedWith({ descriptionHtml: '<p>Neu</p>' });
+      approvedOne(id);
+      keepsWithMarkup(SCRIPT);
+      expect((await applyLive(id)).status).toBe('halted');
+      expect(ledger.getPreview(id)[0]).toMatchObject({ written: true, shopAddedMarkup: true });
+      const row = (runId: string): { change: string; error: string | null } =>
+        engineDb.getDb().prepare('SELECT change, error FROM bulk_targets WHERE run_id = ? AND seq = 0').get(runId) as { change: string; error: string | null };
+      for (const kept of [`<p>Neu</p>${SCRIPT}`, `<P>Neu</P>${SCRIPT.replace('<script>', '<SCRIPT >')}`]) {
+        s.products.get(10)!['descriptionHtml'] = kept;
+        const next = await previewedWith({ descriptionHtml: '<p>Neuer</p>' });
+        expect(ledger.getRunForApply(next)).toMatchObject({ kind: 'apply' });
+        expect(row(next)).toEqual({ change: 'invalid', error: 'before_has_shop_markup' });
+        // Left out by its name: the title this read answered is kept, encrypted like the rest.
+        expect(ledger.getPreview(next)[0]!.title).toBe('T1');
+        const cell = (engineDb.getDb().prepare('SELECT target_title FROM bulk_targets WHERE run_id = ? AND seq = 0').get(next) as { target_title: string | null }).target_title;
+        expect(cell !== null && cell !== 'T1').toBe(true);
+        expect(stored(next, 'before')).toEqual({ absent: false, value: expect.objectContaining({ descriptionHtml: kept }) });
+        expect(ledger.shopifyApplyOf(next)!.writes).toEqual([]);
+      }
+      // The owner changed the text since: the product is no longer what the store added to.
+      s.products.get(10)!['descriptionHtml'] = `<p>Neu, vom Inhaber</p>${SCRIPT}`;
+      const owned = await previewedWith({ descriptionHtml: '<p>Neuer</p>' });
+      expect(row(owned)).toEqual({ change: 'update', error: null });
     });
 
     it('stores a planner\'s description in its canonical form, and the write sends exactly those bytes (#19)', async () => {
@@ -2910,5 +3115,187 @@ describe('a Shopify preview naming SEO text a theme may show as an entity', () =
     expect(t.change).toBe('update');
     expect(shopifySeoEntityFields(t.before?.absent === false ? t.before.value : null, t.after)).toEqual(['seo_title']);
     expect(t).not.toHaveProperty('seoEntityFields');
+  });
+});
+
+describe('shopifyProductWriteAccess', () => {
+  it.each([
+    ['no grant', undefined, 'not_asked'],
+    ['a grant that is no object', 'write_products', 'not_asked'],
+    ['a grant with no ask', { granted_scope: ['write_products'] }, 'not_asked'],
+    ['an ask that is no list', { asked_scope: 'write_products', granted_scope: ['write_products'] }, 'not_asked'],
+    ['an ask to read only', { asked_scope: ['read_products'], granted_scope: ['write_products'] }, 'not_asked'],
+    ['an ask granted nothing', { asked_scope: ['write_products'] }, 'not_granted'],
+    ['an ask granted read only', { asked_scope: ['write_products'], granted_scope: ['read_products'] }, 'not_granted'],
+    ['an ask granted', { asked_scope: ['read_products', 'write_products'], granted_scope: ['write_products'] }, 'writable'],
+  ])('reads %s', (_what, grant, access) => {
+    expect(shopifyProductWriteAccess(grant)).toBe(access);
+  });
+});
+
+// People know a product by its title. The preview keeps the title the store answered its read
+// with, encrypted like the before-image, and the targets route shows it; nothing else writes it.
+describe('a product target\'s title', () => {
+  async function previewed(src: BulkListSource = source()): Promise<string> {
+    const id = startedList(src);
+    await runBulkPreview(id, deps());
+    vi.stubEnv(FLAG, '1');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    return id;
+  }
+  const raw = (id: string): (string | null)[] => (engineDb.getDb()
+    .prepare('SELECT target_title FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(id) as { target_title: string | null }[]).map((r) => r.target_title);
+
+  it('is kept from the store\'s answer to the read, encrypted, and shown on the targets', async () => {
+    fill(3);
+    const id = await previewed();
+    expect(ledger.getPreview(id).map((t) => t.title)).toEqual(['T1', 'T2', 'T3']);
+    // Stored encrypted with the store's key: the row holds no title in clear.
+    const cells = raw(id);
+    expect(cells.every((c) => c !== null && !['T1', 'T2', 'T3'].includes(c))).toBe(true);
+    expect(cells.map((c) => engineDb.dec(c!))).toEqual(['T1', 'T2', 'T3']);
+  });
+
+  it('is the title the store answered, not the one a run that writes the title plans', async () => {
+    fill(2);
+    const id = await previewed(source({ title: 'Neuer Name' }));
+    expect(ledger.getPreview(id).map((t) => t.title)).toEqual(['T1', 'T2']);
+    expect(ledger.getPreview(id).map((t) => (t.after as Record<string, unknown>)['title'])).toEqual(['Neuer Name', 'Neuer Name']);
+  });
+
+  it('stays NULL where the store answered none, and an empty title is not stored either', async () => {
+    fill(2);
+    delete (s.products.get(10) as Record<string, unknown>)['title'];
+    (s.products.get(20) as Record<string, unknown>)['title'] = '';
+    const id = await previewed();
+    expect(raw(id)).toEqual([null, null]);
+    expect(ledger.getPreview(id).map((t) => 'title' in t)).toEqual([false, false]);
+  });
+
+  it('keeps at most 255 code points and never cuts inside a character', () => {
+    expect(BULK_TARGET_TITLE_MAX).toBe(255);
+    const emojiLast = `${'a'.repeat(254)}😀`;
+    expect(bulkTargetTitleCell(emojiLast)).toBe(emojiLast);
+    expect(bulkTargetTitleCell(`${emojiLast}b`)).toBe(emojiLast);
+    expect(bulkTargetTitleCell(`${'a'.repeat(255)}😀`)).toBe('a'.repeat(255));
+    expect(bulkTargetTitleCell(null)).toBeNull();
+    expect(bulkTargetTitleCell(undefined)).toBeNull();
+    expect(bulkTargetTitleCell('')).toBeNull();
+  });
+
+  const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
+    ledger, trailFor: () => null, shopifyGrantOf: confirmedGrant,
+    writerFor: (run) => bulkWriterFor(run, null, (r) => {
+      const granted = ledger.shopifyApplyOf(r.id);
+      const stored = r.contractJson === null ? null : parseBulkContract(r.contractJson);
+      if (granted === null || stored === null) return null;
+      const c = client(withShopifyApply(stored, HOST, granted));
+      return externalWriter(c, { sleep: async () => {}, io: shopifyTargetIo(c, ENDPOINT) });
+    }),
+  });
+  async function undoneOnce(withoutTitle: boolean): Promise<string> {
+    fill(1);
+    const id = await previewed(source({ seo_title: 'Neu' }));
+    const approved = ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    if (!approved.ok) throw new Error(JSON.stringify(approved));
+    await apply(id);
+    if (withoutTitle) engineDb.getDb().prepare('UPDATE bulk_targets SET target_title = NULL WHERE run_id = ?').run(id);
+    const undo = ledger.planUndo(id);
+    if (!undo.ok) throw new Error(undo.reason);
+    return undo.status.id;
+  }
+
+  it('goes with an undo, from the target it takes back, still encrypted', async () => {
+    const undoId = await undoneOnce(false);
+    expect(ledger.getPreview(undoId).map((t) => t.title)).toEqual(['T1']);
+    const [cell] = raw(undoId);
+    expect(cell).not.toBe('T1');
+    expect(engineDb.dec(cell!)).toBe('T1');
+  });
+
+  it('stays NULL on an undo whose source target had none', async () => {
+    const undoId = await undoneOnce(true);
+    expect(raw(undoId)).toEqual([null]);
+    expect(ledger.getPreview(undoId).map((t) => 'title' in t)).toEqual([false]);
+  });
+
+  it('is not part of what the judge reads', () => {
+    const src = readFileSync(join(__dirname, 'bulk-ledger.ts'), 'utf8');
+    const judge = src.slice(src.indexOf('  loadJudgeTarget('), src.indexOf('  loadJudgeTarget(') + 800);
+    expect(judge).toContain('SELECT target_key, before, context FROM bulk_targets');
+    expect(judge).not.toContain('target_title');
+  });
+});
+
+// What a store connection allows the image form. A connection that cannot write at all has its own
+// case, before the scope: Shopify ended its authorization, or its token is not bound to the store.
+describe('shopifyMediaAccess', () => {
+  const asked = ['read_products', 'write_files'];
+  const profile = (grant: Record<string, unknown> | undefined) => ({
+    base_url: `https://${HOST}`,
+    auth: { type: 'oauth2' as const, oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, scope: 'read_products write_files' } },
+    ...(grant === undefined ? {} : { oauth_grant: grant }),
+  }) as Parameters<typeof shopifyMediaAccess>[0];
+  const live = { asked_scope: asked, granted_scope: asked, store_binding: 'bound' };
+
+  it('is writable over a bound, live grant that asked for write_files and holds it', () => {
+    expect(shopifyMediaAccess(profile(live), HOST)).toBe('writable');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'connected' }), HOST)).toBe('writable');
+  });
+
+  it('is revoked where Shopify ended the authorization, whatever the scope or binding', () => {
+    expect(shopifyMediaAccess(profile({ ...live, state: 'revoked' }), HOST)).toBe('revoked');
+    expect(shopifyMediaAccess(profile({ state: 'revoked', store_binding: 'bound' }), HOST)).toBe('revoked');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'revoked', store_binding: undefined }), HOST)).toBe('revoked');
+  });
+
+  it('is unbound where the grant carries no store binding, whatever the scope', () => {
+    expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked }), HOST)).toBe('unbound');
+    expect(shopifyMediaAccess(profile({ granted_scope: ['read_products'] }), HOST)).toBe('unbound');
+    expect(shopifyMediaAccess(profile(undefined), HOST)).toBe('unbound');
+    // A refresh that left no refresh token is no revocation.
+    expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked, state: 'no-refresh' }), HOST)).toBe('unbound');
+  });
+
+  it('is expired where a refresh of the token failed, before the binding that refresh took away', () => {
+    // What the refresh leaves: the binding gone, the grant `refresh-dead`.
+    expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked, state: 'refresh-dead' }), HOST)).toBe('expired');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'refresh-dead' }), HOST)).toBe('expired');
+    // A revocation stays one; the refresh never overwrites it.
+    expect(shopifyMediaAccess(profile({ state: 'revoked', asked_scope: asked, granted_scope: asked }), HOST)).toBe('revoked');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'refresh-dead' }), 'other.myshopify.com')).toBe('no_connection');
+  });
+
+  it('keeps the scope cases on a bound grant, and no_connection before everything', () => {
+    expect(shopifyMediaAccess(profile({ store_binding: 'bound', granted_scope: asked }), HOST)).toBe('not_asked');
+    expect(shopifyMediaAccess(profile({ store_binding: 'bound', asked_scope: asked, granted_scope: ['read_products'] }), HOST)).toBe('not_granted');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'revoked' }), 'other.myshopify.com')).toBe('no_connection');
+    expect(shopifyMediaAccess(undefined, HOST)).toBe('no_connection');
+  });
+});
+
+// Who set up the store connection a run writes through: named only where a mandate did (U-301).
+describe('shopifyConnectedBy', () => {
+  const profile = (grant: Record<string, unknown>, shop = 'acme') => ({
+    base_url: `https://${shop}.myshopify.com`,
+    auth: { type: 'oauth2' as const, oauth: { preset_id: 'shopify', preset_params: { shop }, scope: 'read_products' } },
+    oauth_grant: grant,
+  }) as Parameters<typeof shopifyConnectedBy>[0];
+  const names: Record<string, string> = { 'grant-e': 'Eva Muster' };
+  const displayNameOf = (id: string): string | null => names[id] ?? null;
+
+  it('names a mandate by the name its grant was shown under, else by its address', () => {
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: 'grant-e' }), HOST, displayNameOf)).toEqual({ by: 'Eva Muster' });
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: 'grant-x' }), HOST, displayNameOf)).toEqual({ by: 'eva@kanzlei.example' });
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:eva@kanzlei.example' }), HOST, displayNameOf)).toEqual({ by: 'eva@kanzlei.example' });
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:' }), HOST, displayNameOf)).toEqual({ by: null });
+  });
+
+  it('names no one for the owner\'s own connection, one from before the tag, or another store\'s', () => {
+    expect(shopifyConnectedBy(profile({ connected_by: 'owner' }), HOST, displayNameOf)).toBeNull();
+    expect(shopifyConnectedBy(profile({}), HOST, displayNameOf)).toBeNull();
+    expect(shopifyConnectedBy(profile({ connected_by: 'mandate:eva@kanzlei.example' }, 'other'), HOST, displayNameOf)).toBeNull();
+    expect(shopifyConnectedBy(undefined, HOST, displayNameOf)).toBeNull();
   });
 });

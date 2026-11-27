@@ -25,7 +25,7 @@ function rng(seed: number): () => number {
 
 // White space of every kind `\s` and `trim` know, braces alone and paired, nested opens, Unicode
 // (two-unit characters among them) and the parts a path is made of.
-const PIECES = ['{', '}', '{{', '}}', '{{{', '}}}', 'a', 'ü', '😀', '.', 'params', 'step-1', ' ', '  ', '\t', '\n', '\r', ' ', ' ', '﻿', '　', '"', '\\'];
+const PIECES = ['{', '}', '{{', '}}', '{{{', '}}}', 'a', 'ü', '😀', '.', 'params', 'step-1', ' ', '  ', '\t', '\n', '\r', ' ', '\u2028', '\uFEFF', '　', '"', '\\'];
 
 function corpus(count: number, seed: number): string[] {
   const next = rng(seed);
@@ -44,7 +44,7 @@ function corpus(count: number, seed: number): string[] {
 const FIXED = [
   '', '{{', '}}', '{{}}', '{{ }}', '{{  }}', '{{a}}', '{{ a }}', '{{{a}}}', '{{a}}}', '{{{a}}', '{{a}b}}', '}}{{a}}',
   '{{a}}{{b}}', '{{a}} x {{ b.c }}', '{{ü.😀}}', '{{ x}}', '{{\na}}', '{{a\n}}', '{{{{a}}', '{{a{{b}}', 'x{{', 'x{{a',
-  '{{params.x}}', '{{ params . x }}', '{{ }}', '{{﻿a﻿}}',
+  '{{params.x}}', '{{ params . x }}', '{{\u2028}}', '{{\uFEFFa\uFEFF}}',
 ];
 
 const CASES = [...FIXED, ...corpus(20_000, 424_242)];

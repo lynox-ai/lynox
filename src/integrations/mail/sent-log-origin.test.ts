@@ -129,13 +129,13 @@ describe('migration v22', () => {
     fresh.recordSentMail({ accountId: 'acct', messageId: '<old@x>', to: [{ address: 'anna@firma.ch' }], subject: 's', bodyChars: 1, originOwnerKnown: true });
     fresh.close();
     const raw = new BetterSqlite3(path);
-    raw.exec('DROP TABLE mail_sent_owner_known; DELETE FROM schema_version WHERE version = 23; ALTER TABLE mail_sent_log DROP COLUMN origin_owner_known; DELETE FROM schema_version WHERE version = 22;');
+    raw.exec('ALTER TABLE inbox_items DROP COLUMN prefilter_rule; DELETE FROM schema_version WHERE version = 25; ALTER TABLE inbox_items DROP COLUMN rule_withheld_reason; ALTER TABLE inbox_items DROP COLUMN rule_withheld_name; ALTER TABLE inbox_items DROP COLUMN rule_withheld_id; DELETE FROM schema_version WHERE version = 24; DROP TABLE mail_sent_owner_known; DELETE FROM schema_version WHERE version = 23; ALTER TABLE mail_sent_log DROP COLUMN origin_owner_known; DELETE FROM schema_version WHERE version = 22;');
     raw.close();
 
     const migrated = new MailStateDb({ path });
     try {
       const conn = (migrated as unknown as { db: BetterSqlite3.Database }).db;
-      expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(23);
+      expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(25);
       expect(conn.prepare('SELECT origin_owner_known AS f FROM mail_sent_log').all()).toEqual([{ f: 0 }]);
       expect(migrated.isOwnerKnownRecipient('anna@firma.ch')).toBe(false);
     } finally {

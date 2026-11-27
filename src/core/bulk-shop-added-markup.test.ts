@@ -138,7 +138,7 @@ describe('markupAddedByHost: what the host kept against what was sent', () => {
   });
 
   it('does not refuse a hidden character the host added: that is no markup', () => {
-    expect(added('<p>Neu</p>', '<p>Ne​u</p>')).toBe(false);
+    expect(added('<p>Neu</p>', '<p>Ne\u200Bu</p>')).toBe(false);
   });
 });
 
@@ -281,6 +281,26 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     const redo = planned(undo);
     expect(byKey(redo, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
     expect(byKey(redo, `${LIST}/2`).change).toBe('update');
+  });
+
+  it('plans an undo of that undo with every target invalid where the store marked every write, and the ledger refuses to approve it as nothing to apply', async () => {
+    const id = approvedRun({ description: '<p>Neu</p>' }, [{ description: '<p>Alt</p>' }, { description: '<p>Alt 2</p>' }]);
+    const store = new Map<string, Record<string, unknown>>([[`${LIST}/1`, { description: '<p>Alt</p>' }], [`${LIST}/2`, { description: '<p>Alt 2</p>' }]]);
+    // The store adds the script to every write: each halts the run once, and the owner writes on.
+    const w = stubWriter(store, (v) => ({ ...v, description: `${String(v['description'])}${SCRIPT}` }));
+    await run(id, w);
+    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)! })).toMatchObject({ ok: true });
+    await run(id, w);
+    expect(ledger.getPreview(id).map((x) => x.shopAddedMarkup)).toEqual([true, true]);
+    const undo = planned(id);
+    approve(undo);
+    await run(undo, stubWriter(store), 'bulk_undo');
+    const redo = planned(undo);
+    const preview = ledger.getPreview(redo);
+    expect(preview).toHaveLength(2);
+    for (const t of preview) expect(t).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+    expect(ledger.getStatus(redo)!.changes).toMatchObject({ update: 0, create: 0, delete: 0, invalid: 2 });
+    expect(ledger.approve(redo, { checksum: ledger.computeChecksum(redo)!, unmeasuredConfirmed: true })).toEqual({ ok: false, reason: 'nothing_to_apply' });
   });
 
   it('reads the mark down the whole chain, not only on the run it undoes', async () => {

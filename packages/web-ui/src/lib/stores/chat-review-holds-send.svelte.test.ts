@@ -109,6 +109,18 @@ describe('an open changeset review holds the next send', () => {
 		expect(runPosts(), 'the held message was not sent').toBe(1);
 	});
 
+	it('the silent check holds the same as the said one, and says nothing', async () => {
+		serve([]);
+		expect(store.sendBlockedByReview({ silent: true }), 'with no review open, nothing is held').toBe(false);
+		serve([{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }]);
+		await store.sendMessage('edit the notes');
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: the review is open').not.toBeNull();
+		toasts.length = 0;
+		expect(store.sendBlockedByReview({ silent: true }), 'held').toBe(true);
+		expect(toasts, 'and nothing said').toEqual([]);
+	});
+
 	it('the tap on a failed message keeps it failed, and nothing is sent', async () => {
 		await reviewOpen();
 		const failed = { role: 'user' as const, content: 'lost?', failed: true };

@@ -318,7 +318,7 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — Phase 0.1 fan-out + receive-onl
 
     const ctx = makeCtx([{ id: infoProvider.accountId, address: INFO, type: 'info' }]);
     const tool = createMailSendTool(registry, ctx);
-    const promptSpy = vi.fn(async () => 'Yes');
+    const promptSpy = vi.fn(async () => 'send');
     const agent: IAgent = { promptUser: promptSpy, principal: OWNER_PRINCIPAL } as unknown as IAgent;
 
     const out = await tool.handler({
@@ -380,7 +380,7 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — Phase 0.1 fan-out + receive-onl
       { id: infoProvider.accountId, address: INFO, type: 'info' },
     ]);
     const sendTool = createMailSendTool(registry, ctx);
-    const promptSpy = vi.fn(async () => 'Yes');
+    const promptSpy = vi.fn(async () => 'send');
     const agent: IAgent = { promptUser: promptSpy, principal: OWNER_PRINCIPAL } as unknown as IAgent;
 
     const infoSendOut = await sendTool.handler({
@@ -573,7 +573,7 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — Phase 0.1 fan-out + receive-onl
     ]);
 
     const tool = createMailReplyTool(registry, ctx);
-    const agent: IAgent = { promptUser: async () => 'Yes', principal: OWNER_PRINCIPAL } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async () => 'send', principal: OWNER_PRINCIPAL } as unknown as IAgent;
     const out = await tool.handler({
       account: carolProvider.accountId, // reading from Carol's mailbox
       uid: target.uid,

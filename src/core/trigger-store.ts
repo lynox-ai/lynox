@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { MANDATE_TAG_PREFIX, TRIGGER_AUTHOR_PREFIX, UNKNOWN_RUN_TAG, WORKFLOW_AUTHOR_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
-import type { DeliverySummary } from './notification-router.js';
+import type { DeliveryCase, DeliveryDetail, DeliverySummary } from './notification-router.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
 import { PLAN_PAUSE_SQL_FN, planPauseOn } from './plan-pause.js';
 import { recipientConfirmDigest, recipientsConfirmable, type RecipientConfirmOutcome } from './recipient-confirm.js';
@@ -202,6 +202,8 @@ interface TriggerFullDbRow {
   last_run_at: string | null;
   last_run_result: string | null;
   last_run_status: string | null;
+  last_run_cause: string | null;
+  last_run_member_notes: string | null;
   notification_channel: string | null;
   max_retries: number | null;
   retry_count: number;
@@ -220,6 +222,9 @@ interface TriggerFullDbRow {
   model_tier: string | null;
   last_escalation_at: string | null;
   last_escalation_outcome: string | null;
+  last_escalation_case: string | null;
+  last_escalation_thread_id: string | null;
+  last_escalation_chat_kind: string | null;
   paused_at: number | null;
   paused_due_at: string | null;
   paused_for: string | null;
@@ -255,11 +260,13 @@ const EDITED_BY_RUN_SQL = `(substr(edited_by, 1, ${TRIGGER_AUTHOR_PREFIX.length}
 const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
-   last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
+   last_run_status, last_run_cause, notification_channel, max_retries, retry_count, created_at, updated_at,
    confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
    created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
-   last_escalation_outcome, paused_at, paused_due_at, paused_for,
-   covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at`;
+   last_escalation_outcome, last_escalation_case, last_escalation_thread_id, last_escalation_chat_kind,
+   paused_at, paused_due_at, paused_for,
+   covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at,
+   last_run_member_notes`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -276,6 +283,24 @@ const TRIGGER_READ_COLS =
  * Optional columns map `null → undefined` (the legacy cast types them
  * `string | undefined`; both mean "absent" and every consumer treats them so).
  */
+/**
+ * The stored lines of a last run; a malformed or empty value is none, never a throw. A run end
+ * stores its lines as an array, each read as it was recorded, so a line that holds `\n• ` itself
+ * stays one line. The entry the v80 migration split off a result (`{"migrated": …}`) holds every
+ * line after the first, joined as recorded: it alone is read as those lines, so a repeat compares
+ * line by line, and read back joined it is the same text.
+ */
+function memberNotesOf(raw: string | null): { last_run_member_notes?: string[] } {
+  if (raw === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const migrated = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as { migrated?: unknown }).migrated : undefined;
+    const lines = typeof migrated === 'string' ? migrated.split('\n• ')
+      : Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string') : [];
+    return lines.length > 0 ? { last_run_member_notes: lines } : {};
+  } catch { return {}; }
+}
+
 export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
   let scheduleCron: string | undefined;
   let watchConfig: string | undefined;
@@ -301,6 +326,8 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     last_run_at: row.last_run_at ?? undefined,
     last_run_result: row.last_run_result ?? undefined,
     last_run_status: row.last_run_status ?? undefined,
+    last_run_cause: row.last_run_cause ?? undefined,
+    ...memberNotesOf(row.last_run_member_notes),
     waiting_until: row.waiting_until ?? undefined,
     source: row.source as TriggerSource,
     effect: row.effect as TriggerEffect,
@@ -346,10 +373,24 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
 }
 
 /** A value no writer produces reads as no record, so the surface never shows a guess. */
-function escalationOf(row: TriggerFullDbRow): Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> {
+function escalationOf(row: TriggerFullDbRow): Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat'> {
   const outcome = row.last_escalation_outcome;
   if (row.last_escalation_at === null || !isEscalationOutcome(outcome)) return {};
-  return { last_escalation_at: row.last_escalation_at, last_escalation_outcome: outcome };
+  const escalationCase = outcome === 'not_delivered' && isDeliveryCase(row.last_escalation_case) ? row.last_escalation_case : undefined;
+  const kind = row.last_escalation_chat_kind;
+  const chat: TriggerRecord['last_escalation_chat'] = row.last_escalation_thread_id !== null && row.last_escalation_thread_id !== '' && (kind === 'question' || kind === 'alert')
+    ? { threadId: row.last_escalation_thread_id, kind }
+    : undefined;
+  return {
+    last_escalation_at: row.last_escalation_at,
+    last_escalation_outcome: outcome,
+    ...(escalationCase !== undefined ? { last_escalation_case: escalationCase } : {}),
+    ...(chat !== undefined ? { last_escalation_chat: chat } : {}),
+  };
+}
+
+function isDeliveryCase(v: string | null): v is DeliveryCase {
+  return v === 'no_subscription' || v === 'send_failed';
 }
 
 /** What `last_escalation_outcome` may hold: an answer, or `unconfirmed` until one arrives. */
@@ -477,6 +518,10 @@ export class TriggerStore {
         last_run_at = excluded.last_run_at,
         last_run_result = excluded.last_run_result,
         last_run_status = excluded.last_run_status,
+        -- The stored cause explains the status and the address it was told for: a re-write that
+        -- changes either clears it, so a cause is never older than its status or its watch.
+        last_run_cause = CASE WHEN excluded.last_run_status IS triggers.last_run_status
+          AND excluded.condition_json IS triggers.condition_json THEN triggers.last_run_cause ELSE NULL END,
         notification_channel = excluded.notification_channel,
         max_retries = excluded.max_retries,
         retry_count = excluded.retry_count,
@@ -964,11 +1009,16 @@ export class TriggerStore {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
+    /** The cause of a failed run (`RunCause`, as JSON), or null: written on every run end. */
+    lastRunCause: string | null;
+    /** The run's member-connection lines; none clears the last run's. */
+    lastRunMemberNotes?: readonly string[] | undefined;
     nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   }): void {
-    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?'];
-    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus];
+    const notes = update.lastRunMemberNotes ?? [];
+    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?', 'last_run_cause = ?', 'last_run_member_notes = ?'];
+    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus, update.lastRunCause, notes.length > 0 ? JSON.stringify(notes) : null];
     if (update.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(update.nextRunAt); }
     if (update.retryCount !== undefined) { sets.push('retry_count = ?'); values.push(update.retryCount); }
     sets.push("updated_at = datetime('now')");
@@ -1166,15 +1216,20 @@ export class TriggerStore {
    * `at` is an ISO-8601 instant from `toISOString`, which compares correctly as text.
    * False when the trigger is gone, or (`onlyIfLater`) when the recorded start is not older.
    */
-  startEscalation(id: string, at: string = new Date().toISOString(), onlyIfLater = false): boolean {
+  startEscalation(id: string, at: string = new Date().toISOString(), onlyIfLater = false, chat?: DeliveryDetail['chat']): boolean {
+    // A new start forgets the previous escalation's case and chat; a question's chat is known
+    // now, an alert's only once it is written (`recordEscalationOutcome`).
+    const set = "last_escalation_at = ?, last_escalation_outcome = 'unconfirmed', last_escalation_case = NULL, last_escalation_thread_id = ?, last_escalation_chat_kind = ?";
+    const threadId = chat?.threadId ?? null;
+    const kind = chat?.kind ?? null;
     if (onlyIfLater) {
       return this.db.prepare(
-        "UPDATE triggers SET last_escalation_at = ?, last_escalation_outcome = 'unconfirmed' WHERE id = ? AND (last_escalation_at IS NULL OR last_escalation_at < ?)",
-      ).run(at, id, at).changes > 0;
+        `UPDATE triggers SET ${set} WHERE id = ? AND (last_escalation_at IS NULL OR last_escalation_at < ?)`,
+      ).run(at, threadId, kind, id, at).changes > 0;
     }
     return this.db.prepare(
-      "UPDATE triggers SET last_escalation_at = ?, last_escalation_outcome = 'unconfirmed' WHERE id = ?",
-    ).run(at, id).changes > 0;
+      `UPDATE triggers SET ${set} WHERE id = ?`,
+    ).run(at, threadId, kind, id).changes > 0;
   }
 
   /**
@@ -1184,10 +1239,16 @@ export class TriggerStore {
    * them alone), because the record is about its last escalation, not its current shape.
    * False when the trigger is gone or a newer escalation has started.
    */
-  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string): boolean {
+  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string, detail?: DeliveryDetail): boolean {
+    // The case belongs to `not_delivered` only. A chat named here (an alert's) replaces the one
+    // the start wrote; none keeps it.
+    const escalationCase = outcome === 'not_delivered' ? detail?.case ?? null : null;
     return this.db.prepare(
-      'UPDATE triggers SET last_escalation_outcome = ? WHERE id = ? AND last_escalation_at = ?',
-    ).run(outcome, id, startedAt).changes > 0;
+      `UPDATE triggers SET last_escalation_outcome = ?, last_escalation_case = ?,
+         last_escalation_thread_id = COALESCE(?, last_escalation_thread_id),
+         last_escalation_chat_kind = COALESCE(?, last_escalation_chat_kind)
+       WHERE id = ? AND last_escalation_at = ?`,
+    ).run(outcome, escalationCase, detail?.chat?.threadId ?? null, detail?.chat?.kind ?? null, id, startedAt).changes > 0;
   }
 
   /**
@@ -1428,6 +1489,20 @@ export class TriggerStore {
       `SELECT COUNT(*) AS n FROM triggers WHERE paused_at IS NOT NULL AND status != 'completed' AND ${PLAN_PAUSE_SQL_FN}() = 1`,
     ).get() as { n: number };
     return row.n;
+  }
+
+  /**
+   * Every plan of a workflow that may still run: `target_workflow_id = ?`, not completed and not
+   * stopped, switched off ones included (switched on again, they run without a new stamp). No limit:
+   * the workflow's stamp counts whom their questions reach, and a plan left out is a person missed.
+   */
+  getPlansOfWorkflow(workflowId: string): TriggerRecord[] {
+    const rows = this.db.prepare(
+      `SELECT ${TRIGGER_READ_COLS} FROM triggers
+       WHERE target_workflow_id = ? AND status != 'completed' AND status != ?
+       ORDER BY created_at DESC`,
+    ).all(workflowId, STOPPED) as TriggerFullDbRow[];
+    return rows.map(triggerDbRowToRecord);
   }
 
   /**
