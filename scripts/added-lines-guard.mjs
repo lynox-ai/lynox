@@ -73,8 +73,8 @@
  * from pieces, or in a file PATH; wording outside the list, or broken across two
  * lines; commit messages, PR titles and bodies, and branch names (also for
  * invisible characters; with squash merges the public message is written at the
- * merge). A text file saved as UTF-16 is not read for invisible characters (its
- * bytes would only be guessed at; the repo carries none). A pull request that went
+ * merge). A text file saved as UTF-16 is refused for its NUL bytes rather than read
+ * for the characters it encodes (the repo carries none). A pull request that went
  * green before this rule merged stays green against the older base copy until its
  * check runs again. Those texts may
  * legitimately carry some ids, and which ones is decided by a reference that is
@@ -179,18 +179,24 @@ export function shown(text) {
 /**
  * A pictograph that is not also a letter or digit of a name: U+2139 is pictographic and
  * an identifier character, so a joiner between two of them would make a name that
- * reads the same as without it.
+ * reads the same as without it. The rule follows the Unicode property, not a list: a
+ * pictograph that is NOT an identifier character passes, e.g. U+24C2 (circled M), since
+ * a joiner next to it ends the name instead of hiding inside it. That is not a gap.
  */
 const PICTOGRAPH = /^(?=\p{Extended_Pictographic})\P{ID_Continue}$/u;
 const SKIN_TONE = /^[\u{1F3FB}-\u{1F3FF}]$/u;
-const TAG_SPEC = /^[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]$/u;
+/**
+ * The tag sequences of the three subdivision flags Unicode recommends (England, Scotland,
+ * Wales). Any other run of tag characters is text a reader cannot see and a model can.
+ */
+const FLAG_TAGS = ['gbeng', 'gbsct', 'gbwls'].map((code) => [...code].map((ch) => String.fromCodePoint(0xe0000 + ch.codePointAt(0))));
 const KEYCAP_BASE = /^[0-9#*]$/;
 
 /**
  * The positions of a line's code points that are part of an emoji and pass: a zero-width
  * joiner between two pictographs (after one, its skin tone or its U+FE0F), U+FE0F right
  * after a pictograph or before a keycap mark, and the tag characters of a complete flag
- * sequence (U+1F3F4, tag letters or digits, U+E007F). Checked per character, so a family
+ * sequence of the three recommended subdivision flags (U+1F3F4, the tags, U+E007F). Checked per character, so a family
  * of three passes and two joiners in a row do not.
  */
 export function emojiParts(points) {
@@ -205,9 +211,8 @@ export function emojiParts(points) {
       const before = points[i - 1];
       if (before !== undefined && (PICTOGRAPH.test(before) || (KEYCAP_BASE.test(before) && points[i + 1] === '\u20E3'))) ok.add(i);
     } else if (cp === '\u{1F3F4}') {
-      let j = i + 1;
-      while (j < points.length && TAG_SPEC.test(points[j])) j++;
-      if (j > i + 1 && points[j] === '\u{E007F}') for (let k = i + 1; k <= j; k++) ok.add(k);
+      const tags = FLAG_TAGS.find((t) => t.every((ch, k) => points[i + 1 + k] === ch) && points[i + 1 + t.length] === '\u{E007F}');
+      if (tags) for (let k = i + 1; k <= i + 1 + tags.length; k++) ok.add(k);
     }
   }
   return ok;
@@ -233,7 +238,7 @@ export function formatCharsIn(line) {
 /** How to write a code point instead, for the message. */
 export function wayFor(name) {
   const cp = parseInt(name.slice(2), 16);
-  if (cp === 0) return 'a text file carries no NUL byte: write \\0 in a string (a file saved as UTF-16 is not read as text)';
+  if (cp === 0) return 'a text file carries no NUL byte: write \\0 in a string (a text file saved as UTF-16 carries them too: save it as UTF-8)';
   if (cp === 0x0d) return 'write \\r in a string';
   if (cp === 0xad) return `write ${escaped(cp)} in a string, &shy; in markup`;
   return `write ${escaped(cp)}`;
@@ -291,7 +296,7 @@ export function diffLines(diff) {
       }
       continue;
     }
-    if (l.startsWith('@@@')) throw new Error(`a combined diff hunk in ${path}, which this check cannot read`);
+    if (l.startsWith('@@@')) throw new Error(`a combined diff hunk in ${shown(path ?? '')}, which this check cannot read`);
     const c = l.match(/^commit ([0-9a-f]+)$/);
     if (c) {
       commit = c[1];
@@ -323,21 +328,54 @@ function git(args) {
  * a subdirectory, quoted names, colour, prefixes, replace refs.
  */
 /**
- * The paths each commit in base..head adds or renames to, as { commit, path }: a name
- * is read for invisible characters too, also of a file that adds no line.
+ * The paths each commit in base..head adds, copies or renames to, as { commit, path,
+ * renamed }: a name is read for invisible characters too, also of a file that adds no
+ * line. Read NUL-separated, so a name holding a line break or `commit <sha>` stays one
+ * name.
  */
 function pathsOf(base, head) {
   const out = [];
   let commit = null;
-  for (const field of git(['--no-replace-objects', '-c', 'core.quotePath=false', 'log', '-z', '--format=commit %H',
-    '--name-only', '--diff-filter=ACR', '-M', '--diff-merges=remerge', '--no-relative', `${base}..${head}`]).split('\0')) {
-    for (const part of field.split('\n')) {
-      const c = part.match(/^commit ([0-9a-f]+)$/);
-      if (c) commit = c[1];
-      else if (part !== '' && commit !== null) out.push({ commit, path: part });
+  const parts = git(['--no-replace-objects', '-c', 'core.quotePath=false', 'log', '-z', '--format=commit %H',
+    '--name-status', '--diff-filter=ACR', '-M', '--diff-merges=remerge', '--no-relative', `${base}..${head}`]).split('\0');
+  for (let i = 0; i < parts.length; i++) {
+    const token = parts[i].replace(/^\n/, '');
+    const c = token.match(/^commit ([0-9a-f]{40,64})$/);
+    if (c) {
+      commit = c[1];
+      continue;
+    }
+    if (token === '' || commit === null) continue;
+    if (/^[RC]\d*$/.test(token)) {
+      out.push({ commit, path: parts[i + 2], renamed: token.startsWith('R') });
+      i += 2;
+    } else {
+      out.push({ commit, path: parts[i + 1], renamed: false });
+      i += 1;
     }
   }
-  return out;
+  return out.filter((p) => p.path !== undefined);
+}
+
+/**
+ * A renamed file shows only the lines its rename changed, so a file that was data under
+ * its old name (and skipped) could become text with no line read. The target of every
+ * rename that is text at its commit is therefore read in full for invisible characters.
+ */
+function blobOf(commit, path) {
+  try {
+    return execFileSync('git', ['--no-replace-objects', 'cat-file', 'blob', `${commit}:${path}`], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
+  } catch {
+    // Not readable as a blob at that commit (a submodule, a path git cannot address): read as text, empty.
+    return Buffer.alloc(0);
+  }
+}
+
+/** The invisible characters in a file name: those of a line, and a line break anywhere in it. */
+export function nameCharsIn(path) {
+  const found = formatCharsIn(path);
+  for (const [c, name] of [['\n', 'U+000A'], ['\r', 'U+000D']]) if (path.includes(c) && !found.includes(name)) found.push(name);
+  return found;
 }
 
 function patchesOf(base, head) {
@@ -422,13 +460,7 @@ export function main(argv) {
   const isBinaryAt = (commit, path) => {
     const key = `${commit}\0${path}`;
     if (!binary.has(key)) {
-      let bytes = Buffer.alloc(0);
-      try {
-        bytes = execFileSync('git', ['--no-replace-objects', 'cat-file', 'blob', `${commit}:${path}`], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
-      } catch {
-        // Not readable as a blob at that commit (a submodule, a path git cannot address): read as text.
-      }
-      binary.set(key, isBinaryFile(path, bytes));
+      binary.set(key, isBinaryFile(path, blobOf(commit, path)));
     }
     return binary.get(key);
   };
@@ -436,17 +468,26 @@ export function main(argv) {
     console.log(`${where}: ${what}`);
     total++;
   };
+  const readWhole = new Set(pathsAdded.filter((p) => p.renamed && !isBinaryAt(p.commit, p.path)).map((p) => `${p.commit}\0${p.path}`));
   for (const a of added) {
     const where = `commit ${a.commit.slice(0, 9)} ${shown(a.path)}:${a.line}`;
     for (const kind of findingsIn(a.text)) report(where, kind);
-    if (isBinaryAt(a.commit, a.path)) continue;
+    if (isBinaryAt(a.commit, a.path) || readWhole.has(`${a.commit}\0${a.path}`)) continue;
     for (const name of formatCharsIn(a.text)) {
       report(where, `raw invisible character ${name}, ${wayFor(name)}`);
       formats++;
     }
   }
-  for (const { commit, path } of pathsAdded) {
-    for (const name of formatCharsIn(path)) {
+  for (const { commit, path, renamed } of pathsAdded) {
+    if (renamed && readWhole.has(`${commit}\0${path}`)) {
+      blobOf(commit, path).toString('utf8').split('\n').forEach((line, i) => {
+        for (const name of formatCharsIn(line)) {
+          report(`commit ${commit.slice(0, 9)} ${shown(path)}:${i + 1}`, `raw invisible character ${name} in a renamed file, which is read in full, ${wayFor(name)}`);
+          formats++;
+        }
+      });
+    }
+    for (const name of nameCharsIn(path)) {
       report(`commit ${commit.slice(0, 9)} ${shown(path)}`, `raw invisible character ${name} in the file name`);
       formats++;
     }

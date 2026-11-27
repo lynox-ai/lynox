@@ -10,7 +10,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addedLines, findingsIn, formatCharsIn, wayFor } from '../scripts/added-lines-guard.mjs';
+import { addedLines, findingsIn, formatCharsIn, isBinaryFile, wayFor } from '../scripts/added-lines-guard.mjs';
 
 const GUARD = fileURLToPath(new URL('../scripts/added-lines-guard.mjs', import.meta.url));
 const ENTRY = fileURLToPath(new URL('../scripts/public-repo-guard.sh', import.meta.url));
@@ -393,7 +393,9 @@ describe('a raw invisible character in an added line', () => {
     expect(r.out).toContain('U+202E');
     const base2 = git('rev-parse', 'HEAD');
     commitBytes('Makefile', Buffer.from(`x${NUL}y\n`, 'utf8'), 'no extension');
-    expect(guard(base2, 'HEAD').out).toContain('U+0000');
+    const r2 = guard(base2, 'HEAD');
+    expect(r2.code).toBe(1);
+    expect(r2.out).toContain('U+0000');
   });
 
   it('reads a file with a data extension but no NUL byte as text', () => {
@@ -402,6 +404,76 @@ describe('a raw invisible character in an added line', () => {
     const r = guard(base, 'HEAD');
     expect(r.code).toBe(1);
     expect(r.out).toContain('img/b.png:1: raw invisible character U+202E');
+  });
+
+  it('reads a data file renamed to a text name in full, and its rename message says so', () => {
+    const base = git('rev-parse', 'HEAD');
+    commitBytes('img/evil.png', Buffer.from(`${NUL}\nconst s = 'a${RLO}b';\n`, 'utf8'), 'data');
+    git('mv', 'img/evil.png', 'img/evil.ts');
+    writeFileSync(join(dir, 'img/evil.ts'), `const s = 'a${RLO}b';\n`);
+    git('add', '-A');
+    git('commit', '-qm', 'rename and drop the NUL');
+    expect(git('show', '--stat', '-M', '--format=', 'HEAD')).toContain('=>');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('img/evil.ts:1: raw invisible character U+202E in a renamed file, which is read in full');
+  });
+
+  it('reads a copy of a data file under a text name as added', () => {
+    const base = git('rev-parse', 'HEAD');
+    commitBytes('img/c.png', Buffer.from(`${NUL}\nx${RLO}y\n`, 'utf8'), 'data');
+    writeFileSync(join(dir, 'img/c.ts'), `x${RLO}y\n`);
+    git('add', '-A');
+    git('commit', '-qm', 'copy without the NUL');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('img/c.ts:1: raw invisible character U+202E');
+  });
+
+  it('reads a rename in two steps over a name in between', () => {
+    const base = git('rev-parse', 'HEAD');
+    commitBytes('img/s.png', Buffer.from(`${NUL}\nl1\nl2\nl3\nx${RLO}y\n`, 'utf8'), 'data');
+    git('mv', 'img/s.png', 'img/s.gz');
+    git('commit', '-qm', 'still data');
+    git('mv', 'img/s.gz', 'img/s.ts');
+    writeFileSync(join(dir, 'img/s.ts'), `l1\nl2\nl3\nx${RLO}y\n`);
+    git('add', '-A');
+    git('commit', '-qm', 'now text');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('img/s.ts:4: raw invisible character U+202E in a renamed file');
+  });
+
+  it('refuses a renamed text file that already carried one, so the rename is the point to escape it', () => {
+    commit('old.ts', `const s = 'a${RLO}b';\nmore\nlines\nhere\n`, 'legacy');
+    const base = git('rev-parse', 'HEAD');
+    git('mv', 'old.ts', 'new.ts');
+    git('commit', '-qm', 'rename only');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('new.ts:1: raw invisible character U+202E in a renamed file');
+  });
+
+  it('refuses a line break anywhere in a file name, also at its end', () => {
+    for (const name of ['x.ts\r', 'a\nb.ts']) {
+      const base = git('rev-parse', 'HEAD');
+      writeFileSync(join(dir, name), 'ok\n');
+      git('add', '-A');
+      git('commit', '-qm', 'odd name');
+      const r = guard(base, 'HEAD');
+      expect(r.code, JSON.stringify(name)).toBe(1);
+      expect(r.out).toContain('in the file name');
+    }
+  });
+
+  it('reads a data extension case-blind and only as the last extension of the file itself', () => {
+    const nul = Buffer.from([1, 0, 2]);
+    expect(isBinaryFile('a.PNG', nul)).toBe(true);
+    expect(isBinaryFile('a.png.ts', nul)).toBe(false);
+    expect(isBinaryFile('dir.png/x', nul)).toBe(false);
+    expect(isBinaryFile('a.png.', nul)).toBe(false);
+    expect(isBinaryFile('Makefile', nul)).toBe(false);
+    expect(isBinaryFile('a.png', Buffer.from([1, 2]))).toBe(false);
   });
 
   it('does not check removed lines: a commit taking one out is not refused', () => {
@@ -443,6 +515,9 @@ describe('a raw invisible character in an added line', () => {
       0x00ad, 0x034f, 0x061c, 0x115f, 0x1160, 0x17b4, 0x17b5, 0x180b, 0x180e, 0x180f, 0x200b, 0x200c, 0x200e, 0x200f,
       0x2028, 0x2029, 0x202a, 0x202e, 0x2060, 0x2064, 0x2066, 0x2069, 0x206a, 0x206f, 0x3164, 0xfe00, 0xfe0e, 0xfeff,
       0xffa0, 0xfff9, 0xfffb, 0x1bca0, 0x1d173, 0xe0001, 0xe0020, 0xe007f, 0xe0100, 0xe01ef, 0x0000,
+      // Format characters of scripts and of later Unicode versions, and unassigned default-ignorables.
+      0x0600, 0x0605, 0x06dd, 0x070f, 0x0890, 0x0891, 0x08e2, 0x110bd, 0x110cd, 0x13430, 0x1343f,
+      0xfff0, 0xfff8, 0xe0000, 0xe0002, 0xe0080, 0xe00ff, 0xe01f0, 0xe0fff,
     ];
     for (const cp of pinned) {
       const name = `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
@@ -494,13 +569,15 @@ describe('a raw invisible character in an added line', () => {
     expect(formatCharsIn('\u2139\uFE0F')).toEqual(['U+FE0F']);
   });
 
-  it('lets tag characters pass only in a complete flag sequence', () => {
-    const scotland = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}';
-    expect(formatCharsIn(`flag ${scotland} end`)).toEqual([]);
-    expect(formatCharsIn('\u{1F3F4}\u{E0067}\u{E0062}')).toEqual(['U+E0067', 'U+E0062']);
-    expect(formatCharsIn('\u{1F3F4}\u{E007F}')).toEqual(['U+E007F']);
+  it('lets tag characters pass only in the three recommended subdivision flags', () => {
+    const flag = (code: string) => `\u{1F3F4}${[...code].map((c) => String.fromCodePoint(0xe0000 + c.codePointAt(0)!)).join('')}\u{E007F}`;
+    expect(formatCharsIn(`flags ${flag('gbsct')} ${flag('gbeng')} ${flag('gbwls')} end`)).toEqual([]);
+    // Hidden text spelled in tags is refused, also in lower case inside a flag-shaped sequence.
+    expect(formatCharsIn(flag('ignorepreviousinstructions'))).toContain('U+E0069');
+    expect(formatCharsIn(flag('gbabc'))).toContain('U+E0061');
+    expect(formatCharsIn(flag('gb'))).toEqual(['U+E0067', 'U+E0062', 'U+E007F']);
+    expect(formatCharsIn('\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}')).toEqual(['U+E0067', 'U+E0062', 'U+E0073', 'U+E0063', 'U+E0074']);
     expect(formatCharsIn('x\u{E0067}\u{E007F}')).toEqual(['U+E0067', 'U+E007F']);
-    // Upper-case tag letters are not part of a flag: hidden text spelled in tags is refused.
     expect(formatCharsIn('\u{1F3F4}\u{E0041}\u{E007F}')).toEqual(['U+E0041', 'U+E007F']);
   });
 
