@@ -9,6 +9,8 @@
 	import StampPreviewBody from './StampPreviewBody.svelte';
 	import WorkflowTakeoverDialog from './WorkflowTakeoverDialog.svelte';
 	import MarkedLine from './MarkedLine.svelte';
+	import DialogStatusLine from './DialogStatusLine.svelte';
+	import { DIALOG_FOOT_CLASS, bringIntoReview } from '../utils/dialog-sticky.js';
 	import { shownValue, shownWhole } from '../utils/plan-takeover.js';
 	import { contractLines } from '../utils/stamp-contract.js';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
@@ -442,11 +444,18 @@
 	let stampOpening = 0;
 	// After a stamp: plans the wait switched off, which stay off. Kept until the next review.
 	let stampOnceLine = $state('');
-	// The confirm button sits at the foot of the view, the line at its head: on a phone the line
-	// that says the steps changed would be out of sight, so it is brought into view when it appears.
+	// The confirm button sits at the foot of the view, the line at its head: where the frame is too
+	// low to keep it in sight, the line that says the steps changed would be out of sight, so it is
+	// brought into view when it appears.
 	let stampChangedLine = $state<HTMLElement | null>(null);
 	$effect(() => {
 		stampChangedLine?.scrollIntoView?.({ block: 'nearest' });
+	});
+	// Focus on the heading when the view opens: a reader hears what it is, and the confirm, which
+	// consents to something, is not one Enter away.
+	let stampHeading = $state<HTMLElement | null>(null);
+	$effect(() => {
+		stampHeading?.focus();
 	});
 
 	/** Loads the preview; true only when this load's preview is now the one on screen. */
@@ -515,11 +524,12 @@
 					stampLine = 'steps_changed';
 					stampChangesShown = stampChanges(shown, stampPreview);
 					// Brought into sight and focused: the changed part is what the owner has to read again.
-					// The line above, which says why, may scroll out of sight then (it carries role=status).
+					// It goes below the line above, which says why and stays in sight while it is short and
+					// the frame is high enough (DialogStatusLine).
 					await tick();
 					const mark = stampDialog?.querySelector<HTMLElement>('[data-stamp-changed]');
-					mark?.focus();
-					mark?.scrollIntoView?.({ block: 'nearest' });
+					mark?.focus({ preventScroll: true });
+					if (stampDialog && mark) bringIntoReview(stampDialog, mark);
 				}
 				return;
 			}
@@ -1177,21 +1187,23 @@
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
 		role="dialog"
 		aria-modal="true"
-		aria-label={t('workflow_library.stamp.review')}
+		aria-labelledby="workflow-stamp-title"
+		tabindex="-1"
 		data-testid="stamp-dialog"
 		bind:this={stampDialog}
+		onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); closeStamp(); } }}
 	>
 		<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 			<!-- Where the owner approves the steps: a name a person with access gave is set apart, whole. -->
-			<h2 class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
+			<h2 id="workflow-stamp-title" bind:this={stampHeading} tabindex="-1" class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
 			{#if stampLine === 'steps_changed'}
-				<p bind:this={stampChangedLine} role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
+				<DialogStatusLine text={t('workflow_library.stamp.refused.steps_changed')} testid="stamp-line" bind:el={stampChangedLine} />
 			{:else if stampLine === 'awaits_at_schedule' && stampPreview}
 				<!-- Worded by who changed it, which only the preview says: the line waits for it. -->
-				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t(awaitsLineKey(stampPreview.changedBy))}</p>
+				<DialogStatusLine text={t(awaitsLineKey(stampPreview.changedBy))} testid="stamp-line" />
 			{:else if stampLine === 'awaits_at_schedule' && !stampLoading}
 				<!-- The preview did not load, so who changed it is unknown: the line says why, not who. -->
-				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.awaits_at_schedule_unloaded')}</p>
+				<DialogStatusLine text={t('workflow_library.stamp.awaits_at_schedule_unloaded')} testid="stamp-line" />
 			{/if}
 			<!-- The schedule's line for a preview that did not load already says it did not load. -->
 			{#if error && !(stampLine === 'awaits_at_schedule' && !stampPreview && !stampLoading)}
@@ -1208,7 +1220,7 @@
 				<StampPreviewBody preview={stampPreview} changes={stampChangesShown} />
 			{/if}
 
-			<div class="flex items-center justify-end gap-2 mt-5">
+			<div data-dialog-foot class={DIALOG_FOOT_CLASS}>
 				<button
 					onclick={closeStamp}
 					class="min-h-11 md:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg-muted px-3 py-1 text-xs text-text-muted hover:bg-bg transition-colors"

@@ -414,6 +414,45 @@ describe('the dialog', () => {
 		expect(document.activeElement).toBe(stepEls[1]);
 	});
 
+	it('after a change, the line stays in sight, the buttons too, and the changed step goes below the line', async () => {
+		const moved = FULL();
+		moved['expect'] = 'digest-2';
+		(moved['steps'] as Array<Record<string, unknown>>)[1]!['inputTemplate'] = { url: 'https://evil.example.invalid/post' };
+		await open([ENDED], [FULL(), moved], { status: 409, body: { code: 'changed' } });
+		const d = await openDialog();
+		// jsdom lays nothing out: what stays in sight is read from the computed position, set here as
+		// a browser with a high enough frame reports it.
+		const realStyle = window.getComputedStyle;
+		const realRect = Element.prototype.getBoundingClientRect;
+		const held = (el: Element): number | null =>
+			el.hasAttribute('data-dialog-status') ? 64 : el.hasAttribute('data-dialog-foot') ? 52 : null;
+		window.getComputedStyle = ((el: Element) => {
+			const style = realStyle(el);
+			return held(el) === null ? style : ({ ...style, position: 'sticky' } as CSSStyleDeclaration);
+		}) as typeof window.getComputedStyle;
+		Element.prototype.getBoundingClientRect = function (this: Element) {
+			const h = held(this);
+			return h === null ? realRect.call(this) : ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: h, width: 0, height: h, toJSON: () => ({}) } as DOMRect);
+		};
+		try {
+			d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+			await settle();
+		} finally {
+			window.getComputedStyle = realStyle;
+			Element.prototype.getBoundingClientRect = realRect;
+		}
+		const status = d.querySelector<HTMLElement>('[data-dialog-status]');
+		expect(status?.contains(d.querySelector('[data-testid="takeover-changed"]'))).toBe(true);
+		expect(status!.className.split(/\s+/)).toContain('[@media(min-height:30rem)]:sticky');
+		const foot = d.querySelector<HTMLElement>('[data-dialog-foot]');
+		expect(foot?.contains(d.querySelector('[data-testid="takeover-confirm"]'))).toBe(true);
+		expect(foot!.className.split(/\s+/)).toEqual(expect.arrayContaining(['[@media(min-height:30rem)]:sticky', 'bg-bg', '[@media(min-height:30rem)]:border-t']));
+		const mark = d.querySelector<HTMLElement>('[data-stamp-changed]')!;
+		expect(document.activeElement).toBe(mark);
+		expect(mark.style.scrollMarginTop).toBe('72px');
+		expect(mark.style.scrollMarginBottom).toBe('60px');
+	});
+
 	it('a later refusal of another kind puts the focus back at the head, not on the old mark', async () => {
 		const moved = FULL();
 		moved['expect'] = 'digest-2';
