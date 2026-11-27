@@ -31,6 +31,8 @@ import type { SubjectStore } from './subject-store.js';
 import type { KnowledgeStore } from './knowledge-store.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { KnowledgeStatus, MemoryBlockId } from '../types/memory.js';
+import { readdirSync } from 'node:fs';
+import { setAsideDatabaseOf } from './set-aside-stores.js';
 
 /** The confirmation word the erase call must carry. */
 export const PERSON_ERASURE_CONFIRM = 'ERASE_PERSON';
@@ -95,6 +97,36 @@ export const PERSON_ERASURE_REACH: Readonly<Record<string, ReadonlyArray<'covere
   'push-subscriptions.db': { none: 'the devices that receive this instance\'s notifications' },
   'sessions': { none: 'sign-in sessions of this instance\'s users' },
 };
+
+/** A set-aside copy and the `-wal` and `-shm` the rename took along, those that exist. */
+export interface PersonErasureSetAsideCopy { file: string; companions: string[] }
+
+/**
+ * The set-aside copies of the databases the person erasure deletes in (file names only, never
+ * content): a corrupt database the boot or a restore renamed aside may still hold the person's
+ * rows, in the copy and in the `-wal` beside it, and the erasure does not reach them, so the
+ * answer names them. Throws when `dir` cannot be listed; the caller then says the copies could
+ * not be checked. A `-wal` or `-shm` left without its copy is named as a copy.
+ */
+export function personErasureSetAsideCopies(dir: string): PersonErasureSetAsideCopy[] {
+  const names = new Set(readdirSync(dir));
+  const erasedIn = (name: string): boolean => {
+    const db = setAsideDatabaseOf(name);
+    const reach = db === undefined ? undefined : PERSON_ERASURE_REACH[db];
+    return Array.isArray(reach) && reach.includes('covered');
+  };
+  const copies: PersonErasureSetAsideCopy[] = [];
+  for (const name of [...names].sort()) {
+    if (erasedIn(name)) {
+      copies.push({ file: name, companions: ['-wal', '-shm'].map(x => name + x).filter(c => names.has(c)) });
+      continue;
+    }
+    // A `-wal` or `-shm` whose copy is gone is named as a copy itself: it may hold the rows too.
+    const companionOf = /^(.+)-(?:wal|shm)$/.exec(name)?.[1];
+    if (companionOf !== undefined && erasedIn(companionOf) && !names.has(companionOf)) copies.push({ file: name, companions: [] });
+  }
+  return copies;
+}
 
 export type PersonErasureStep = 'durable_knowledge' | 'memories_legacy' | 'memories_engine' | 'subject';
 

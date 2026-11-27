@@ -9,6 +9,7 @@ import { ApiStore, type ApiProfile } from './api-store.js';
 import { RunHistory } from './run-history.js';
 import {
   blankRunHistoryContent,
+  blankRunHistoryRows,
   coveredGrantSet,
   erasureOnDeleteEnabled,
   erasureRecords,
@@ -347,7 +348,7 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
     const agentFor = (principal: typeof owner | typeof mandate): never => ({
       principal,
       sessionCounters: { httpRequests: 0 },
-      promptUser: async () => 'Allow',
+      promptUser: async () => 'allow',
       toolContext: { auditLog: testAuditLog().log, apiStore: store, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, connectionErasureSweep: null, secretReleases: null },
     }) as never;
     const save = (createdBy?: string): void => {
@@ -564,6 +565,10 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     tasks: 'tasks the customer keeps and deletes (remainder)',
     tenants: 'tenant configuration',
     thread_messages: 'the chat itself: deleted with the chat, cut by cut 1b',
+    // A copy of the typed part of a thread_messages row, keyed by thread and seq like it: no run
+    // id to blank it by, deleted with the chat (ON DELETE CASCADE), and cut wherever its message is.
+    thread_typed_text: 'the typed words of a chat message: deleted with the chat, cut with its message',
+    thread_read_outside: 'a thread id and a time: whether the chat read outside content',
     threads: 'the chat itself: deleted with the chat',
     triggers: 'the legacy table, superseded by engine.db',
     workflow_run_claims: 'workflow, key and run ids',
@@ -738,6 +743,13 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     expect(text(other)).toBe(`other ${MARK}`);
   });
 
+  it('names every workflow it reached, nested ones included, and no other', () => {
+    const db = history.getDb();
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES ('wf-a', 'wf', 'running', '{}', 'thread-a'), ('wf-b', 'wf', 'running', '{}', 'thread-b')`).run();
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, parent_run_id) VALUES ('wf-a-inner', 'wf2', 'running', '{}', 'wf-a')`).run();
+    expect([...blankRunHistoryRows(db, { threadIds: ['thread-a'] }).pipelineIds].sort()).toEqual(['wf-a', 'wf-a-inner']);
+  });
+
   it('a period given in ISO form reaches exactly the runs inside it', () => {
     const db = history.getDb();
     const at = (when: string): string => {
@@ -775,7 +787,7 @@ describe('the migration that adds where an epoch starts', () => {
       const backfill = ledger.mint('shop', 'api', 'backfill');
       db.getDb().prepare("UPDATE connection_grants SET minted_at = '2026-03-01 00:00:05' WHERE grant_id = ?").run(backfill);
       db.getDb().prepare("UPDATE connections SET config_json = json_set(config_json, '$.oauth_grant.grant_id', ?) WHERE id = 'shop'").run(backfill);
-      db.getDb().exec('DROP INDEX IF EXISTS idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; ALTER TABLE inbound_events DROP COLUMN attempt_id; ALTER TABLE inbound_events DROP COLUMN reported_at; ALTER TABLE inbound_events DROP COLUMN unknown_reported_at; ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; ALTER TABLE bulk_targets DROP COLUMN deselected_at; ALTER TABLE triggers DROP COLUMN paused_db_at; ALTER TABLE triggers DROP COLUMN covered_created_by; ALTER TABLE triggers DROP COLUMN covered_created_id; ALTER TABLE triggers DROP COLUMN covered_created_at; ALTER TABLE triggers DROP COLUMN covered_edited_by; ALTER TABLE triggers DROP COLUMN covered_edited_id; ALTER TABLE triggers DROP COLUMN covered_edited_at; ALTER TABLE triggers DROP COLUMN covered_at; ALTER TABLE workflows DROP COLUMN covered_created_by; ALTER TABLE workflows DROP COLUMN covered_created_id; ALTER TABLE workflows DROP COLUMN covered_created_at; ALTER TABLE workflows DROP COLUMN covered_edited_by; ALTER TABLE workflows DROP COLUMN covered_edited_id; ALTER TABLE workflows DROP COLUMN covered_edited_at; ALTER TABLE workflows DROP COLUMN covered_at; ALTER TABLE bulk_runs DROP COLUMN start_domains; ALTER TABLE triggers DROP COLUMN paused_at; ALTER TABLE triggers DROP COLUMN paused_due_at; ALTER TABLE triggers DROP COLUMN paused_for; ALTER TABLE triggers DROP COLUMN pause_noticed_at; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
+      db.getDb().exec('ALTER TABLE triggers DROP COLUMN last_escalation_chat_kind; ALTER TABLE triggers DROP COLUMN last_escalation_thread_id; ALTER TABLE triggers DROP COLUMN last_escalation_case; ALTER TABLE bulk_targets DROP COLUMN refusal_detail; ALTER TABLE bulk_targets DROP COLUMN target_title; DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause; DROP INDEX IF EXISTS idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; ALTER TABLE inbound_events DROP COLUMN attempt_id; ALTER TABLE inbound_events DROP COLUMN reported_at; ALTER TABLE inbound_events DROP COLUMN unknown_reported_at; ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; ALTER TABLE bulk_targets DROP COLUMN deselected_at; ALTER TABLE triggers DROP COLUMN paused_db_at; ALTER TABLE triggers DROP COLUMN covered_created_by; ALTER TABLE triggers DROP COLUMN covered_created_id; ALTER TABLE triggers DROP COLUMN covered_created_at; ALTER TABLE triggers DROP COLUMN covered_edited_by; ALTER TABLE triggers DROP COLUMN covered_edited_id; ALTER TABLE triggers DROP COLUMN covered_edited_at; ALTER TABLE triggers DROP COLUMN covered_at; ALTER TABLE workflows DROP COLUMN covered_created_by; ALTER TABLE workflows DROP COLUMN covered_created_id; ALTER TABLE workflows DROP COLUMN covered_created_at; ALTER TABLE workflows DROP COLUMN covered_edited_by; ALTER TABLE workflows DROP COLUMN covered_edited_id; ALTER TABLE workflows DROP COLUMN covered_edited_at; ALTER TABLE workflows DROP COLUMN covered_at; ALTER TABLE bulk_runs DROP COLUMN start_domains; ALTER TABLE triggers DROP COLUMN paused_at; ALTER TABLE triggers DROP COLUMN paused_due_at; ALTER TABLE triggers DROP COLUMN paused_for; ALTER TABLE triggers DROP COLUMN pause_noticed_at; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48; DROP INDEX IF EXISTS idx_audit_log_poll_fold; DROP INDEX IF EXISTS idx_audit_log_ts; ALTER TABLE audit_log DROP COLUMN poll_last; ALTER TABLE audit_log DROP COLUMN poll_count;');
       db.close();
 
       const migrated = new EngineDb(path);

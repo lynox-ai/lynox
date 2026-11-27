@@ -16,6 +16,7 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
+import { isConsentKind, type ConsentKind } from '../contract/prompt.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import { MandateKeyInputError, mandateCredentialInput, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
 
@@ -120,6 +121,23 @@ export type PromptOutcome =
   | { status: 'answered'; row: PendingPromptRow }
   | { status: 'expired' }
   | { status: 'aborted' };
+
+/**
+ * The engine's own confirmation a stored question is, read from its engine-only marker
+ * (`insertAskUser`'s `consent`). Parsed, not substring-matched; anything else — no marker, a
+ * malformed one, a question stored before the marker existed — is no consent at all.
+ */
+export function consentOfPayload(payloadJson: string | null): ConsentKind | undefined {
+  if (payloadJson === null) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(payloadJson);
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const { kind, consent } = parsed as { kind?: unknown; consent?: unknown };
+    return kind === 'consent' && isConsentKind(consent) ? consent : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Is this payload the engine-posed onboarding card?
@@ -370,6 +388,8 @@ export class PromptStore {
      *  Every other caller leaves it undefined. */
     triggerId?: string,
     stamp?: PromptStamp,
+    /** The engine's own confirmation this is (`PromptMeta.consent`); never set for a model's question. */
+    consent?: ConsentKind,
   ): string {
     return this._insert({
       sessionId,
@@ -385,7 +405,9 @@ export class PromptStore {
       secretName: null,
       secretKeyType: null,
       multiSelect: multiSelect === true,
-      payloadJson: null,
+      // The engine-only consent marker, like the onboarding card's: a question the model
+      // writes stores NULL here, so no option text can make it the engine's confirmation.
+      payloadJson: consent !== undefined ? JSON.stringify({ kind: 'consent', consent }) : null,
       origin,
     });
   }

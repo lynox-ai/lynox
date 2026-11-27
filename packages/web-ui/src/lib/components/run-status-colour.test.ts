@@ -68,6 +68,18 @@ describe('every recorded run status has a colour', () => {
     }
   });
 
+  it('and every one but success carries a word, so colour is never the only sign', () => {
+    // WCAG 1.4.1: a failed run in red and a successful one in green are the same to a reader
+    // who does not see colour. Derived from the writer, like the colours above.
+    const block = /const runStatusWord: Record<string, [^>]+> = \{([\s\S]*?)\};/.exec(VIEW);
+    if (!block) throw new Error('could not find runStatusWord in TriggersView — the regex, not the map, is what broke');
+    const worded = [...block[1]!.matchAll(/^\s*([a-z_]+):/gm)].map(m => m[1]!);
+    for (const status of writtenStatuses().filter(s => s !== 'success')) {
+      expect(worded, `'${status}' can be written to last_run_status and would be told apart by colour alone`).toContain(status);
+    }
+    expect(worded).not.toContain('success');
+  });
+
   it('and the fixtures really are the two artefacts, not an empty read', () => {
     // ⛔ The guard against the quiet version of this test passing: two regexes that both
     // miss would make the loop above iterate nothing and succeed. Measured values, so a

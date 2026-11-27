@@ -217,7 +217,7 @@ describe('a refused decision', () => {
 
 describe('what the card shows', () => {
 	it('a hidden character in the body and the subject shows as its code point', async () => {
-		lists.open = { entries: [card({ mail: { ...(card().mail as Card), subject: 'Rech​nung', bodyText: 'Bitte ‮zahlen​.' } })], pending: 1 };
+		lists.open = { entries: [card({ mail: { ...(card().mail as Card), subject: 'Rech\u200Bnung', bodyText: 'Bitte \u202Ezahlen\u200B.' } })], pending: 1 };
 		await render();
 		expect(q('[data-body]')?.textContent).toBe('Bitte ⟨U+202E⟩zahlen⟨U+200B⟩.');
 		expect(q('h2')?.textContent?.trim()).toBe('Rech⟨U+200B⟩nung');
@@ -858,5 +858,16 @@ describe('the note on a mail filed after outside content names which (U-209)', (
 		await render();
 		const notes = [...target.querySelectorAll('[data-note="after-untrusted"]')].map((n) => n.textContent?.trim());
 		expect(notes).toEqual([t('approvals.after_untrusted')]);
+	});
+});
+
+describe('the card says where a recipient the owner did not name comes from', () => {
+	it('shows the engine\'s line in the page\'s language, and none on a card without it', async () => {
+		const { getLocale } = await import('../i18n.svelte.js');
+		const line = { de: 'Empfänger stammt aus dem Trigger "Bericht" von h@x.ch.', en: 'Recipient comes from the trigger "Bericht" set up by h@x.ch.' };
+		lists.open = { entries: [card({ targetOrigin: line }), card({ id: 'e-2' }), card({ id: 'e-3', targetOrigin: null })], pending: 3, viewer: 'owner' };
+		await render();
+		const notes = [...target.querySelectorAll('[data-note="target-origin"]')].map((n) => n.textContent?.trim());
+		expect(notes).toEqual([getLocale() === 'de' ? line.de : line.en]);
 	});
 });

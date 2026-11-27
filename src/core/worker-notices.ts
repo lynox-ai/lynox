@@ -14,6 +14,8 @@
  * before, or by an instance in the other language, is said in the owner's language too.
  */
 import type { NoticeLanguage } from './notice-language.js';
+import type { WatchFetchCause } from './watch-fetch-cause.js';
+import { watchPolicyWordsDe, watchPolicyWordsEn, type WatchPolicyReason, type WatchPolicyWords } from './watch-policy-reason.js';
 import type { ShownMandate } from './request-principal.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { isProvisionedInstance } from './wire-capture.js';
@@ -123,6 +125,9 @@ export interface WorkerNotices {
   /** A saved workflow that did not run because step `step` (1-based) refers to the output of a step
    *  it does not read (`template-refs.ts`). The owner reads it, so no tool name and no stored text. */
   workflowRefUnresolved(step: number): string;
+  /** A saved workflow that did not run because step `step` (1-based) has an id a run already uses
+   *  (`params`; `step-id.ts`). The owner reads it, so no tool name and no stored text. */
+  workflowStepIdReserved(step: number): string;
   stoppedWith(message: string): string;
   /** The first line of a run the owner ended; the run's own text follows after a blank line. */
   readonly stopped: string;
@@ -273,6 +278,12 @@ export interface WorkerNotices {
   resumedRunNotContained(provisioned: boolean): string;
   /** A watched page that changed, with the analysis (E15): the push only, the thread's seed stays English. */
   watchChanged(url: string, analysis: string): string;
+  /** A watched page that could not be read, with the cause in lynox's own words: the run's failed result and its notice. */
+  watchFetchFailed(url: string, cause: WatchFetchCause): string;
+  /** The same reason and what happens next, without the lead that names the page (the trigger card shows the page). */
+  watchFetchReason(cause: WatchFetchCause): string;
+  /** A watch the network policy keeps from its page, at the poll: why, and what the owner or the operator can do. */
+  watchPolicyRefused(reason: WatchPolicyReason, alsoHttps: boolean): string;
 }
 
 /**
@@ -301,6 +312,7 @@ const EN: WorkerNotices = Object.freeze({
     `It came due and has not run.${outside ? ' It was set up after reading content from outside.' : ''} Review “${title}” under Automation › Triggers before you confirm it.`,
   failed: (message: string) => `Task failed: ${message}`,
   workflowRefUnresolved: (step: number) => `Step ${String(step)} of this workflow uses the result of a step it does not read, so the workflow did not run. Ask lynox in a chat to fix that step.`,
+  workflowStepIdReserved: (step: number) => `Step ${String(step)} of this workflow has a name lynox uses for something else, so the workflow did not run, and it will not run until that step is renamed or removed. Ask lynox in a chat to rename that step.`,
   stoppedWith: (message: string) => `Stopped on your instruction: ${message}`,
   stopped: 'Stopped on your instruction.',
   chipRunAgain: 'Run again',
@@ -378,6 +390,9 @@ const EN: WorkerNotices = Object.freeze({
     ? `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`
     : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`,
   watchChanged: (url: string, analysis: string) => `${url} changed.\n\n${analysis}`,
+  watchFetchFailed: (url: string, cause: WatchFetchCause) => `The watched page ${url} could not be read: ${watchFetchReasonEn(cause)}`,
+  watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonEn(cause),
+  watchPolicyRefused: (reason: WatchPolicyReason, alsoHttps: boolean) => withWayOut('The watched page was not read:', watchPolicyWordsEn(reason, alsoHttps)),
 });
 
 /** A resumed run whose new chat could not be contained, in English (ux U-089). */
@@ -436,6 +451,7 @@ const DE: WorkerNotices = Object.freeze({
     `Fällig, aber nicht gelaufen.${outside ? ' Eingerichtet, nachdem ein Lauf Inhalte von aussen gelesen hatte.' : ''} Prüf „${title}“ unter Automation → Trigger, bevor du bestätigst.`,
   failed: (message: string) => `Aufgabe fehlgeschlagen: ${message}`,
   workflowRefUnresolved: (step: number) => `Schritt ${String(step)} dieses Workflows nutzt das Ergebnis eines Schritts, den er nicht liest. Darum lief der Workflow nicht. Bitte lynox im Chat, diesen Schritt zu reparieren.`,
+  workflowStepIdReserved: (step: number) => `Schritt ${String(step)} dieses Workflows trägt einen Namen, den lynox für etwas anderes braucht. Darum lief der Workflow nicht, und er läuft erst wieder, wenn der Schritt anders heisst oder entfernt ist. Bitte lynox im Chat, diesen Schritt umzubenennen.`,
   stoppedWith: (message: string) => `Auf deine Anweisung gestoppt: ${message}`,
   stopped: 'Auf deine Anweisung gestoppt.',
   chipRunAgain: 'Erneut ausführen',
@@ -517,6 +533,86 @@ const DE: WorkerNotices = Object.freeze({
     ? `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, schreib an support@lynox.ai.`
     : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das Instanz-Protokoll den Grund.`,
   watchChanged: (url: string, analysis: string) => `${url} hat sich geändert.\n\n${analysis}`,
+  watchFetchFailed: (url: string, cause: WatchFetchCause) => `Die beobachtete Seite ${url} liess sich nicht lesen: ${watchFetchReasonDe(cause)}`,
+  watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonDe(cause),
+  watchPolicyRefused: (reason: WatchPolicyReason, alsoHttps: boolean) => withWayOut('Die beobachtete Seite wurde nicht gelesen:', watchPolicyWordsDe(reason, alsoHttps)),
 });
+
+/** A cause no new attempt changes: the owner has to change the watch's address or delete it. */
+function watchFetchPermanent(cause: WatchFetchCause): boolean {
+  return cause.kind === 'blocked' || cause.kind === 'refused' || cause.kind === 'too-large' || (cause.kind === 'http' && (cause.status === 404 || cause.status === 410));
+}
+
+/** A redirect: a watch does not follow one, so the page is never read until the address changes. */
+function isRedirect(cause: WatchFetchCause): boolean {
+  return cause.kind === 'http' && (cause.status === 301 || cause.status === 302 || cause.status === 303 || cause.status === 307 || cause.status === 308);
+}
+
+/** The word for the HTTP statuses an owner meets most, or none. */
+function httpStatusWord(status: number, language: NoticeLanguage): string | undefined {
+  const words: Readonly<Record<number, readonly [string, string]>> = {
+    401: ['sign-in required', 'Anmeldung nötig'],
+    403: ['access denied', 'Zugriff verweigert'],
+    404: ['not found', 'nicht gefunden'],
+    410: ['gone', 'entfernt'],
+    301: ['redirected', 'weitergeleitet'],
+    302: ['redirected', 'weitergeleitet'],
+    303: ['redirected', 'weitergeleitet'],
+    307: ['redirected', 'weitergeleitet'],
+    308: ['redirected', 'weitergeleitet'],
+    429: ['too many requests', 'zu viele Anfragen'],
+  };
+  const pair = words[status] ?? (status >= 500 && status <= 599 ? ['server error', 'Fehler beim Server'] as const : undefined);
+  return pair === undefined ? undefined : pair[language === 'de' ? 1 : 0];
+}
+
+/** A lead, the reason, and the way out when there is one. */
+function withWayOut(lead: string, words: WatchPolicyWords): string {
+  return `${lead} ${words.why}${words.wayOut === '' ? '' : ` ${words.wayOut}`}`;
+}
+
+/** Why a watched page could not be read, in English: one sentence per cause, then what happens next. */
+function watchFetchReasonEn(cause: WatchFetchCause): string {
+  const reason = ((): string => {
+    switch (cause.kind) {
+      case 'blocked': return 'The address leads into a private or internal network, which a watch does not read.';
+      case 'refused': return 'lynox does not read pages at this address.';
+      case 'unresolved': return 'The host name does not resolve.';
+      case 'tls': return "The server's certificate could not be verified. It may be misconfigured, or the connection may be intercepted.";
+      case 'unreachable': return 'The server did not accept the connection.';
+      case 'timeout': return `The server did not answer within ${String(cause.seconds)} seconds.`;
+      case 'http': {
+        const word = httpStatusWord(cause.status, 'en');
+        return `The server answered with HTTP status ${String(cause.status)}${word === undefined ? '' : ` (${word})`}.`;
+      }
+      case 'too-large': return `The page is larger than the ${String(cause.megabytes)} MB a watch reads.`;
+      case 'other': return 'The page could not be loaded.';
+    }
+  })();
+  if (isRedirect(cause)) return `${reason} A watch does not follow a redirect. Open the address in a browser and enter the address you end up at, or delete the watch.`;
+  return `${reason} ${watchFetchPermanent(cause) ? 'Trying again will not change that. Change the watch\'s address or delete the watch.' : 'The watch checks the page again next time.'}`;
+}
+
+/** Why a watched page could not be read, in German: one sentence per cause, then what happens next. */
+function watchFetchReasonDe(cause: WatchFetchCause): string {
+  const reason = ((): string => {
+    switch (cause.kind) {
+      case 'blocked': return 'Die Adresse führt in ein privates oder internes Netz, das eine Beobachtung nicht liest.';
+      case 'refused': return 'lynox liest Seiten an dieser Adresse nicht.';
+      case 'unresolved': return 'Der Hostname lässt sich nicht auflösen.';
+      case 'tls': return 'Das Zertifikat des Servers liess sich nicht prüfen. Es könnte falsch eingerichtet oder die Verbindung abgefangen sein.';
+      case 'unreachable': return 'Der Server hat die Verbindung nicht angenommen.';
+      case 'timeout': return `Der Server hat nicht innerhalb von ${String(cause.seconds)} Sekunden geantwortet.`;
+      case 'http': {
+        const word = httpStatusWord(cause.status, 'de');
+        return `Der Server hat mit HTTP-Status ${String(cause.status)}${word === undefined ? '' : ` (${word})`} geantwortet.`;
+      }
+      case 'too-large': return `Die Seite ist grösser als die ${String(cause.megabytes)} MB, die eine Beobachtung liest.`;
+      case 'other': return 'Die Seite liess sich nicht laden.';
+    }
+  })();
+  if (isRedirect(cause)) return `${reason} Eine Beobachtung folgt keiner Weiterleitung. Öffne die Adresse im Browser und trage die Adresse ein, bei der du landest, oder lösche die Beobachtung.`;
+  return `${reason} ${watchFetchPermanent(cause) ? 'Daran ändert ein neuer Versuch nichts. Ändere die Adresse der Beobachtung oder lösche sie.' : 'Die Beobachtung prüft die Seite beim nächsten Mal wieder.'}`;
+}
 
 export const WORKER_NOTICES: Readonly<Record<NoticeLanguage, WorkerNotices>> = Object.freeze({ en: EN, de: DE });

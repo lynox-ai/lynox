@@ -14,6 +14,7 @@ import type { MailContext } from '../context.js';
 import {
   buildSendPreview,
   parseAddressList,
+  recipientFieldTargets,
   sendMail,
   type SendCoreInput,
   type SendCoreOptions,
@@ -21,9 +22,9 @@ import {
 import type { MailRegistry } from './registry.js';
 import type { MailAddress } from '../provider.js';
 import { reflowMailBody } from '../body-reflow.js';
-import { mailTargets } from '../../../core/send-target.js';
-import { currentCallFiling } from '../../../core/call-connection.js';
+import { currentCallOwnerKnownFor, currentCallFiling } from '../../../core/call-connection.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
+import { wrapUntrustedData } from '../../../core/data-boundary.js';
 import { approvalFollowup, type StoredAddress } from '../../../core/approval-store.js';
 
 interface MailSendToolInput {
@@ -52,9 +53,7 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
   return {
     outwardWrite: () => 'send',
     // Every recipient, parsed as the handler parses them for the send.
-    sendTargets: (input) => mailTargets(
-      [input.to, input.cc, input.bcc].flatMap((field) => parseAddressList(field).map((a) => a.address)),
-    ),
+    sendTargets: (input) => recipientFieldTargets([input.to, input.cc, input.bcc], undefined, true),
     definition: {
       name: 'mail_send',
       description:
@@ -147,6 +146,9 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
         },
       };
       if (input.track_followup) opts.trackFollowup = input.track_followup;
+      // Logged as sent to owner-named recipients only when the dispatcher found every one of them
+      // owner-known before any question (`currentCallOwnerKnownFor`); a yes to its question is not that.
+      opts.originOwnerKnown = currentCallOwnerKnownFor([...to, ...cc, ...bcc].map((a) => a.address));
 
       const result = await sendMail(registry, coreInput, opts, ctx);
 
@@ -179,7 +181,9 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
             // in the preview already.
             return 'mail_send cancelled by user.';
           case 'provider_error':
-            return `mail_send error (${result.message})`;
+            // The provider's or the mail server's own text: marked, since the server (or a relay)
+            // chose it. The sentence says only that sending failed: on one path nothing was sent yet.
+            return `mail_send error: the mail could not be sent. The error text:\n${wrapUntrustedData(result.message, 'mail_send')}`;
         }
       }
 

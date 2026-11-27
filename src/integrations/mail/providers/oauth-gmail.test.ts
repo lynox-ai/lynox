@@ -218,6 +218,38 @@ describe('OAuthGmailProvider — list', () => {
     expect(envs.find((e) => e.messageId === '<m2@gmail.com>')?.listId, 'List-Unsubscribe alone is no list').toBeUndefined();
   });
 
+  it('asks for the autoresponder headers and marks them, a bounce, and not X-Auto-Response-Suppress', async () => {
+    const extra: Record<string, { name: string; value: string }> = {
+      m1: { name: 'X-Autoreply', value: 'yes' },
+      m2: { name: 'X-Autorespond', value: 'yes' },
+      m3: { name: 'Precedence', value: 'auto_reply' },
+      m4: { name: 'Content-Type', value: 'multipart/report; report-type=delivery-status; boundary="b"' },
+      m5: { name: 'X-Auto-Response-Suppress', value: 'All' },
+    };
+    const urls: string[] = [];
+    fetchMock.mockImplementation((url: string) => {
+      urls.push(url);
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: Object.keys(extra).map((id) => ({ id, threadId: `t-${id}` })) }));
+      const id = Object.keys(extra).find((k) => url.includes(`messages/${k}?`));
+      if (id !== undefined) {
+        const msg = metadataMessage(id) as { payload: { headers: Array<{ name: string; value: string }> } };
+        msg.payload.headers.push(extra[id]!);
+        return Promise.resolve(respondJson(msg));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const envs = await new OAuthGmailProvider(makeAccount(), makeAuth()).list();
+    const mark = (id: string) => {
+      const e = envs.find((x) => x.messageId === `<${id}@gmail.com>`);
+      return e && { isAutoReply: e.isAutoReply, isAutoReplied: e.isAutoReplied };
+    };
+    for (const id of ['m1', 'm2', 'm3']) expect(mark(id), id).toEqual({ isAutoReply: true, isAutoReplied: true });
+    expect(mark('m4'), 'the bounce').toEqual({ isAutoReply: true, isAutoReplied: false });
+    expect(mark('m5'), 'X-Auto-Response-Suppress alone').toEqual({ isAutoReply: false, isAutoReplied: false });
+    const metadataUrl = urls.find((u) => u.includes('format=metadata'))!;
+    for (const h of ['X-Autoreply', 'X-Autorespond', 'Precedence', 'Content-Type']) expect(metadataUrl, h).toContain(`metadataHeaders=${h}`);
+  });
+
   it('UNREAD label maps to absent \\Seen flag', async () => {
     fetchMock.mockImplementation((url: string) => {
       if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'unread1', threadId: 't' }] }));

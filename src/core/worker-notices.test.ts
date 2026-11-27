@@ -8,7 +8,7 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, SAID_WORKFLOW_ID_MAX, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, eventModeRefusedReason, inQuotes, firstRunUnconfirmedReason,
   type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
+import { BULK_NOTICES, BULK_STORE_REACH_REFUSALS, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { EVENT_STOPPED, OWN_FAILURE_REASONS, REMINDER_BODY_MAX } from './worker-loop.js';
@@ -282,7 +282,29 @@ describe('the notice tables', () => {
       expect([k, BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS[k])]).toEqual([k, own.en]);
     }
     // The reasons whose German push is the page's sentence word for word: the comparison above ran on them.
-    expect(shared).toEqual(['listNotAList', 'listUnreadable', 'listNoProgress', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'discarded']);
+    expect(shared).toEqual(['listNotAList', 'listUnreadable', 'listNoProgress', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifySelfHosted', 'shopifyNoApiVersion', 'discarded']);
+  });
+
+  it('says a store\'s own cause in the push and the start check with the run page\'s words (U-232)', () => {
+    const i18n = readFileSync(join(process.cwd(), 'packages/web-ui/src/lib/i18n.svelte.ts'), 'utf8');
+    const page = new Map<string, { de: string; en: string }>();
+    for (const m of i18n.matchAll(/'(bulk\.(?:halt|reach\.approve)\.[A-Za-z_]+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \}/g)) {
+      page.set(m[1]!, { de: m[2]!.replace(/\\'/g, "'"), en: m[3]!.replace(/\\'/g, "'") });
+    }
+    const causes = ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion'] as const;
+    for (const k of causes) {
+      const cause = page.get(`bulk.halt.${k}`)!;
+      const before = page.get(`bulk.halt.${k}_before`);
+      // The push leads to the page, so it leaves out "here" and the address the page links (U-105 cut).
+      const push = (lang: 'de' | 'en'): string => `${cause[lang]}${before === undefined ? '' : ` ${before[lang]}`}`
+        .replace(lang === 'de' ? ' hier fortsetzen' : ' continue the run here', lang === 'de' ? ' fortsetzen' : ' continue the run')
+        .replace(lang === 'de' ? ' den Lauf hier fortsetzen' : ' here in a few minutes', lang === 'de' ? ' den Lauf fortsetzen' : ' in a few minutes')
+        .replace(/ \(support@lynox\.ai\)\. /, '. ');
+      expect([k, BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS[k])]).toEqual([k, push('de')]);
+      expect([k, BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS[k])]).toEqual([k, push('en')]);
+      expect([k, BULK_STORE_REACH_REFUSALS.approve[k]]).toEqual([k, page.get(`bulk.reach.approve.${k}`)!.en]);
+      expect([k, BULK_STORE_REACH_REFUSALS.resume[k]]).toEqual([k, cause.en]);
+    }
   });
 
   it('says each bulk lead and each worker sentence in German as ux wrote it', () => {
@@ -398,7 +420,7 @@ describe('the notice tables', () => {
   // A bulk outcome is pushed whole: the longest a run produces in ordinary use must fit, and when
   // a body runs long the cut takes the counts, never the unclear-send warning before them.
   it('holds the released German halt reason for an outdated Shopify consent word for word (U-281)', () => {
-    expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.consentOutdated)).toBe('Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.');
+    expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.consentOutdated)).toBe('Diese Shopify-Verbindung lässt lynox diese Felder noch nicht ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen) und plane den Lauf im Chat neu.');
   });
 
   it('keeps a bulk outcome within the web-push cut, the warning first, in both languages', () => {
@@ -429,6 +451,26 @@ describe('the notice tables', () => {
       const leads = [b.notApproved('approved'), b.haltedResume, b.otherLoop, b.otherLoopHolds, b.notReadyToJudge('approved', true),
         b.notReadyToRead('approved', true), ...(['stopped', 'time', 'failed'] as const).flatMap((cause) => [b.atomicEnded(cause, true), b.atomicEnded(cause, false)])];
       for (const lead of leads) expect([lang, lead, `${lead} ${warning}`.length <= REMINDER_BODY_MAX]).toEqual([lang, lead, true]);
+      // A product run its connection may not write is pushed in its short version: in every version,
+      // before and after a first write, the lead stays at most 180 and the warning after it whole, and
+      // with four-digit written and total counts it fits the cut whole. Each version names its cause
+      // and points to the run page.
+      const fourDigits = b.applyCounts({ applied: 9_999, foundAsPlanned: 0, failed: 0, conflicts: 0, undone: 0, total: 9_999, sentUnknown: 0 });
+      const cause = { de: { not_asked: 'nicht um das Recht gebeten', not_granted: 'erlaubt dieser Verbindung nicht' },
+        en: { not_asked: 'did not ask Shopify for permission', not_granted: 'does not let this connection' } }[lang];
+      for (const access of ['not_asked', 'not_granted'] as const) {
+        for (const nothingYet of [true, false]) {
+          const lead = b.productWriteNotAskedPush(access, nothingYet);
+          const at = [lang, access, nothingYet];
+          expect([...at, lead.length <= 180]).toEqual([...at, true]);
+          expect([...at, `${lead} ${warning}`.length <= REMINDER_BODY_MAX]).toEqual([...at, true]);
+          expect([...at, `${lead} ${fourDigits}`.length <= REMINDER_BODY_MAX]).toEqual([...at, true]);
+          expect([...at, lead.includes(cause[access])]).toEqual([...at, true]);
+          expect([...at, lead.startsWith(b.productWriteNotAsked(access, nothingYet).slice(0, 12))]).toEqual([...at, true]);
+          expect([...at, lead.startsWith(nothingYet ? (lang === 'de' ? 'lynox hat nichts' : 'lynox wrote nothing') : (lang === 'de' ? 'lynox schreibt nichts mehr' : 'lynox writes nothing more'))]).toEqual([...at, true]);
+          expect([...at, lead.endsWith(lang === 'de' ? 'steht unter Massenläufe.' : 'is under Bulk runs.')]).toEqual([...at, true]);
+        }
+      }
       const counts = b.applyCounts(c);
       expect(counts.indexOf(lang === 'de' ? 'unklar' : 'unclear')).toBeLessThan(counts.indexOf(lang === 'de' ? 'geschrieben' : 'applied'));
       // A count of 0 is left out, but what was written and the total always stand.

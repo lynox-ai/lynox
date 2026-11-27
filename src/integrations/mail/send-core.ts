@@ -20,6 +20,7 @@
 // provider.send; the inbox-reply HTTP handler treats the explicit user
 // click as the confirmation and skips the prompt.
 
+import { mailTargets, UnknownSendTargetError, type SendTarget } from '../../core/send-target.js';
 import {
   MailError,
   isReceiveOnlyType,
@@ -466,10 +467,11 @@ export function buildBodyBlock(body: string): PromptText {
 /**
  * Render an address list for a preview: one line, each address flattened.
  *
- * `mail_send` gets its recipients from `parseAddressList`, which already drops
- * any segment containing CR/LF. `mail_reply` does NOT: its default recipient is
- * `original.envelope.replyTo[0] ?? original.envelope.from[0]` and its Cc comes
- * from `original.envelope.to`/`.cc` — parsed IMAP values that never pass
+ * `mail_send`, and `mail_reply`'s `to`/`cc` overrides, get their recipients from
+ * `parseAddressList`, which already drops any segment containing CR/LF.
+ * `mail_reply`'s default recipient does NOT: it is
+ * `original.envelope.replyTo[0] ?? original.envelope.from[0]`, and reply_all's Cc
+ * comes from `original.envelope.to`/`.cc` — parsed IMAP values that never pass
  * through `parseAddress`. The guarantee is therefore not uniform across
  * callers, so the preview does not depend on it.
  */
@@ -561,6 +563,32 @@ ${bodyPreview}`;
  * Parse a comma-separated recipient list into MailAddress objects.
  * Accepts `Name <addr@host>`, `"Name" <addr@host>`, or bare `addr@host`.
  */
+/**
+ * The send targets of a call's recipient fields, parsed as the send parses them. A field that is
+ * set but yields no address (only text that does not parse, or a value that is not text) makes the
+ * whole call's targets unreadable: the check before a send then refuses it.
+ *
+ * `requireOne`: a send whose recipients are only these fields (no default recipient) with none
+ * set at all is unreadable too. An empty list never means "nothing to check, so send".
+ */
+export function recipientFieldTargets(
+  fields: readonly unknown[],
+  parse: (raw: string) => MailAddress[] = parseAddressList,
+  requireOne = false,
+): SendTarget[] {
+  const addresses: string[] = [];
+  for (const field of fields) {
+    if (field === undefined || field === null) continue;
+    if (typeof field !== 'string') throw new UnknownSendTargetError('recipient field');
+    if (field.trim() === '') continue;
+    const parsed = parse(field);
+    if (parsed.length === 0) throw new UnknownSendTargetError('recipient field');
+    addresses.push(...parsed.map((a) => a.address));
+  }
+  if (requireOne && addresses.length === 0) throw new UnknownSendTargetError('recipient field');
+  return mailTargets(addresses);
+}
+
 export function parseAddressList(raw: string | undefined): MailAddress[] {
   if (!raw) return [];
   return raw
