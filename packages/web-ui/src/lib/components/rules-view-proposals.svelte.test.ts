@@ -615,15 +615,18 @@ describe('RulesView — list id rules', () => {
 		expect(kinds).toEqual(['from', 'subject_contains', 'matches_description']);
 	});
 
-	it('says under a stored list id rule that it does not apply, keeps its delete, and says it under no other rule', async () => {
+	// A stored list id rule applies: the watcher reads a mail's List-ID, so nothing under it says
+	// otherwise.
+	it('lists a stored list id rule like any other, with its kind and its delete, and no note that it does not apply', async () => {
 		await render({ viewer: 'owner', rules: [confirmed, listRule] });
 		const items = [...target.querySelectorAll<HTMLLIElement>('li[id^="rule-"]')];
 		expect(items.map((li) => li.id)).toEqual(['rule-rul_c1', 'rule-rul_l1']);
-		expect(items[0]!.querySelector('[data-testid="rules-list-id-inactive"]')).toBeNull();
-		expect(items[1]!.querySelector('[data-testid="rules-list-id-inactive"]')?.textContent).toBe(t('inbox.rules_list_id_inactive'));
-		expect(items[1]!.textContent).toContain(t('inbox.rules_match_list_id'));
-		expect(items[1]!.querySelector(`button[aria-label="${t('inbox.rules_delete')}"]`)).not.toBeNull();
-		expect(target.querySelectorAll('[data-testid="rules-list-id-inactive"]')).toHaveLength(1);
+		const list = target.querySelector<HTMLLIElement>('li#rule-rul_l1')!;
+		expect(list.textContent).toContain(t('inbox.rules_match_list_id'));
+		expect(list.textContent).toContain('news.shop.example');
+		expect(list.querySelector(`button[aria-label="${t('inbox.rules_delete')}"]`)).not.toBeNull();
+		expect(target.querySelector('[data-testid="rules-list-id-inactive"]')).toBeNull();
+		for (const li of items) expect(li.textContent).not.toMatch(/greift derzeit nicht|does not apply at the moment/);
 	});
 });
 
