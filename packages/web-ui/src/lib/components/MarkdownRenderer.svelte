@@ -12,7 +12,7 @@
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
-	import { fenceHoldsOnlyPlaceholder, resolveArtifactRender, withPlaceholderBadge } from '../utils/artifact-inline.js';
+	import { fenceHoldsOnlyPlaceholder, lostNoticeMarkup, resolveArtifactRender, withPlaceholderBadge } from '../utils/artifact-inline.js';
 	import { parseFences, type CodeFence } from '../utils/code-fences.js';
 	import { OWN_ATTR, OWN_MARK, resolveOwnAction } from '../utils/markdown-actions.js';
 	import { attachArtifactFrame, artifactFrameFor } from '../utils/artifact-frame-host.js';
@@ -140,8 +140,9 @@
 	 *  not an iframe. Collapsed by default like every type (lazy-expand pill).
 	 *  The raw markdown source is embedded as `data-md` so the toolbar
 	 *  buttons can produce a .md download and a print-to-PDF popup from the
-	 *  original text (not the rendered HTML). */
-	function buildMarkdownArtifact(code: string, artifactId = ''): string {
+	 *  original text (not the rendered HTML). With `lostNotice` set, the card shows it
+	 *  in place of the body. */
+	function buildMarkdownArtifact(code: string, artifactId = '', lostNotice: string | null = null): string {
 		const { title, clean } = extractTitle(code);
 		const body = clean.replace(/<!-{2}\s*type:\s*markdown\s*-->\s*/i, '').trim();
 		const displayTitle = title || 'Artifact';
@@ -158,7 +159,7 @@
 				<span class="artifact-title">${safeTitle}</span>
 				${actions}
 			</div>
-			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
+			${lostNotice ?? `<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>`}
 		</div>`;
 	}
 
@@ -183,8 +184,9 @@
 	/** Build a data-file artifact: a code preview plus a download button that
 	 *  produces a real Blob with the right extension and MIME type. The full
 	 *  body is embedded as `data-raw` so the download is the exact file, not
-	 *  the truncated preview. */
-	function buildDataArtifact(code: string, type: string, artifactId = ''): string {
+	 *  the truncated preview. With `lostNotice` set, the card shows it in place of
+	 *  the preview. */
+	function buildDataArtifact(code: string, type: string, artifactId = '', lostNotice: string | null = null): string {
 		const meta = DATA_ARTIFACT_META[type] ?? DATA_ARTIFACT_META['text']!;
 		const { title, clean } = extractTitle(code);
 		// Anchored: only strip the leading marker we ourselves prepended, never
@@ -210,8 +212,8 @@
 				<span class="artifact-title">${safeTitle}</span>
 				${actions}
 			</div>
-			<pre class="artifact-data-body"><code>${preview}</code></pre>
-			${moreLine}
+			${lostNotice ?? `<pre class="artifact-data-body"><code>${preview}</code></pre>
+			${moreLine}`}
 		</div>`;
 	}
 
@@ -224,22 +226,24 @@
 	function buildArtifact(code: string): BuiltArtifact {
 		// The gallery's badge ("Content missing"): for a card from a save, the store's flag the
 		// chat wrote into the fence; for a fence the model wrote, the store's rule on its text.
-		// Only the card's markup carries it; the frame document is the card's as built.
-		const built = buildArtifactCard(code);
-		return fenceHoldsOnlyPlaceholder(code)
-			? { markup: withPlaceholderBadge(built.markup, t('artifacts.lost_badge')), frame: built.frame }
-			: built;
+		// Opened, such a card shows the gallery's sentences for a lost document instead of the
+		// placeholder, and an HTML card gets no frame.
+		if (!fenceHoldsOnlyPlaceholder(code)) return buildArtifactCard(code, null);
+		const built = buildArtifactCard(code, lostNoticeMarkup(t('artifacts.lost_title'), t('artifacts.lost_body')));
+		return { markup: withPlaceholderBadge(built.markup, t('artifacts.lost_badge')), frame: built.frame };
 	}
 
-	function buildArtifactCard(code: string): BuiltArtifact {
+	/** `lostNotice`: the markup a card shows in place of its document, or `null` for the
+	 *  document. */
+	function buildArtifactCard(code: string, lostNotice: string | null): BuiltArtifact {
 		// The inline card threads the already-saved gallery id in as a marker.
 		// Pull it out and strip it from the body so it can't leak into the
 		// rendered prose / data preview, then hand it to the builder so the pill
 		// links to the existing entry instead of re-saving a duplicate.
 		const { artifactId, src } = resolveArtifactRender(code);
-		if (isMarkdownArtifact(src)) return { markup: buildMarkdownArtifact(src, artifactId), frame: null };
+		if (isMarkdownArtifact(src)) return { markup: buildMarkdownArtifact(src, artifactId, lostNotice), frame: null };
 		const dataType = artifactDataType(src);
-		if (dataType) return { markup: buildDataArtifact(src, dataType, artifactId), frame: null };
+		if (dataType) return { markup: buildDataArtifact(src, dataType, artifactId, lostNotice), frame: null };
 		const { title, clean } = extractTitle(src);
 		// PRD-LIGHT-MODE PR 2a — the frame document runs on the sandboxed frame
 		// endpoint; CSS-vars from parent don't inherit into it. Read the theme at
@@ -274,6 +278,7 @@
 		// The frame itself is not markup: the slot below is filled after the render by
 		// `attachFrames`, with a frame on the sandboxed endpoint. The slot carries OWN_MARK,
 		// which the sanitizer strips from message markup, so a message cannot forge one.
+		// A card with a notice has no slot and no frame: there is no document to show.
 		const markup = `<div class="artifact-container artifact-collapsed"${OWN_MARK} data-html="${encoded}" data-title="${safeTitle}" data-artifact-type="${typeKey}"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(typeKey)}</span>
@@ -281,9 +286,9 @@
 				<span class="artifact-title">${safeTitle}</span>
 				${actions}
 			</div>
-			<div class="artifact-frame-slot"${OWN_MARK}></div>
+			${lostNotice ?? `<div class="artifact-frame-slot"${OWN_MARK}></div>`}
 		</div>`;
-		return { markup, frame: fullHtml };
+		return { markup, frame: lostNotice === null ? fullHtml : null };
 	}
 
 	/** The copy button of a card: `null` for none, `lines` set when it copies more lines than the
@@ -1232,6 +1237,25 @@
 	div :global(.artifact-title:has(+ .artifact-lost-badge)) {
 		margin-right: 0;
 	}
+	/* An opened card with the badge: the gallery's notice for a lost document. */
+	div :global(.artifact-lost-notice) {
+		margin: 0.75rem;
+		padding: 0.75rem 1rem;
+		border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
+		border-radius: var(--radius-md);
+		background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+	}
+	div :global(.artifact-lost-notice-title) {
+		margin: 0 0 0.375rem;
+		font-size: 0.875rem;
+		font-weight: 500;
+		color: var(--color-text);
+	}
+	div :global(.artifact-lost-notice-body) {
+		margin: 0;
+		font-size: 0.875rem;
+		color: var(--color-text-muted);
+	}
 	div :global(.artifact-lost-badge) {
 		font-size: 0.625rem;
 		color: var(--color-warning);
@@ -1380,6 +1404,7 @@
 	/* Hide the body + the action buttons while collapsed — only the
 	   icon/type/title/chevron make up the pill. */
 	div :global(.artifact-collapsed .artifact-frame),
+	div :global(.artifact-collapsed .artifact-lost-notice),
 	div :global(.artifact-collapsed .artifact-md-body),
 	div :global(.artifact-collapsed .artifact-data-body),
 	div :global(.artifact-collapsed .artifact-data-more) {
@@ -1392,6 +1417,11 @@
 	}
 	div :global(.artifact-collapsed .artifact-toolbar) {
 		flex-wrap: wrap;
+	}
+	/* A closed card with the badge stays one line: the name gives way, the badge and the
+	   chevron stay whole. Not when it carries the copy button, which may wrap (above). */
+	div :global(.artifact-collapsed .artifact-toolbar:has(.artifact-lost-badge):not(:has(.artifact-copy))) {
+		flex-wrap: nowrap;
 	}
 	div :global(.artifact-data-more) {
 		font-size: 0.75rem;

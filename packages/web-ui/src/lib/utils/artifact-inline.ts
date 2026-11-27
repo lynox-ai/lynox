@@ -186,10 +186,22 @@ export function fenceHoldsOnlyPlaceholder(code: string): boolean {
  *  title span holds escaped text only, so the first such span is the card's. A
  *  card without a title span is returned unchanged. */
 export function withPlaceholderBadge(card: string, label: string): string {
-	const safe = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+	const safe = escapeText(label);
 	// A function, not a replacement string: `$&` or `$'` in a label would be read as patterns.
 	return card.replace(
 		/<span class="artifact-title">[^<]*<\/span>/,
 		(title) => `${title}\n\t\t\t\t<span class="artifact-lost-badge" data-testid="artifact-inline-lost-badge" title="${safe}">${safe}</span>`,
 	);
+}
+
+/** What a card with the badge shows when opened, in place of the document it
+ *  would show: the gallery's two sentences for a lost document, which also name
+ *  the way out. Both are shown as text and escaped here. The placeholder itself
+ *  is not shown: it is the engine's note, in English, with an internal id. */
+export function lostNoticeMarkup(title: string, body: string): string {
+	return `<div class="artifact-lost-notice" role="status" data-testid="artifact-inline-lost-notice"><p class="artifact-lost-notice-title">${escapeText(title)}</p><p class="artifact-lost-notice-body">${escapeText(body)}</p></div>`;
+}
+
+function escapeText(text: string): string {
+	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
