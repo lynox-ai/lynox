@@ -58,6 +58,28 @@ import { proseWarnings } from './disclosure-vocabulary-scan.mjs';
  */
 const MARK = ['gate', 'record'].join('-');
 
+/**
+ * The message of a `::warning::` or `::error::` line, escaped the way GitHub's own toolkit does
+ * it: `%`, CR and LF become `%25`, `%0D`, `%0A`. A message can quote text from the pull request
+ * (a route path, a file name, git's stderr), and the runner reads a command at the start of every
+ * line, a lone CR included. Unescaped, a route like `/api/x<LF>::stop-commands::t` would end the
+ * annotation and start a command of its own. The annotation still shows `%0A` as a line break.
+ * The older `##[cmd]` form is no concern here: the runner tries it only on a line that is not
+ * already a `::` command.
+ */
+export function commandText(text) {
+  return String(text).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+/**
+ * Plain log text, one printed line per line of it, each behind the mark, so no line of a note
+ * can begin with `::`. A plain line still meets the runner's older command form, `##[cmd]data`,
+ * which it finds anywhere in a line, so `##[` is printed as `# #[`.
+ */
+export function logLines(text) {
+  for (const line of String(text).split(/\r\n|\r|\n/)) console.log(`${MARK}: ${line.replace(/##\[/g, '# #[')}`);
+}
+
 /** Gate names the record may claim. An unknown name is a typo, not a new gate. */
 const KNOWN_GATES = new Set(['code-review', 'security', 'delta', 'prd', 'staging-walk', 'legal']);
 
@@ -1973,7 +1995,7 @@ function main() {
     localBranch: isLocalBranch,
   });
   if (wrong.length > 0) {
-    for (const e of wrong) console.log(`::error::${MARK}: ${e}`);
+    for (const e of wrong) console.log(`::error::${MARK}: ${commandText(e)}`);
     process.exitCode = 2;
     return;
   }
@@ -2005,13 +2027,15 @@ function main() {
   const securityModel = { predates: securityModelPredates({ base: args.base || '', read: gitRead }) };
   const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux, delta, securityModel, agentAwareness });
 
-  for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
-  for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${w}`);
+  // Every printed line passes one of these two, so text from the pull request cannot start a
+  // workflow command of its own.
+  for (const n of verdict.notes ?? []) logLines(n);
+  for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${commandText(w)}`);
   if (verdict.ok) {
     console.log(`${MARK}: ok`);
     return;
   }
-  for (const e of verdict.errors) console.log(`::error::${MARK}: ${e}`);
+  for (const e of verdict.errors) console.log(`::error::${MARK}: ${commandText(e)}`);
   process.exitCode = 1;
 }
 

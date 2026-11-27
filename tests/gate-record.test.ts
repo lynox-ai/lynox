@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, securityModelPredates, securityModelErrors, SECURITY_MODEL_MARK, SECURITY_MODELS, SECURITY_LINE_MAX, wrongRunErrors, OTHER_REPO_MARKER, agentAwarenessOwed, agentAwarenessWarnings } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, securityModelPredates, securityModelErrors, SECURITY_MODEL_MARK, SECURITY_MODELS, SECURITY_LINE_MAX, wrongRunErrors, OTHER_REPO_MARKER, agentAwarenessOwed, agentAwarenessWarnings, commandText, logLines } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -3892,5 +3892,62 @@ describe('agent-awareness: the line, review round 1', () => {
     expect(v.ok).toBe(false);
     expect(v.warnings?.join('\n')).toContain('adds the route `GET /api/approvals`');
     expect(v.errors?.join('\n')).not.toContain('agent-awareness');
+  });
+});
+
+describe('gate-record — printed text cannot start a workflow command (security round)', () => {
+  it.each([
+    ['LF', 'a\n::stop-commands::t', 'a%0A::stop-commands::t'],
+    ['CR', 'a\r::add-mask::x', 'a%0D::add-mask::x'],
+    ['%', 'a%0A::error::forged', 'a%250A::error::forged'],
+  ])('commandText escapes %s', (_k, raw, escaped) => {
+    expect(commandText(raw)).toBe(escaped);
+    expect(commandText(raw)).not.toMatch(/[\r\n]/);
+  });
+
+  it('the control: a plain warning is unchanged', () => {
+    expect(commandText('agent-awareness: src/tools/builtin/t.ts adds the tool `b`')).toBe('agent-awareness: src/tools/builtin/t.ts adds the tool `b`');
+  });
+
+  it('a multi-line git stderr in a warning stays one line', () => {
+    expect(commandText('cannot read src/server/x.ts: fatal: bad object\nusage: git cat-file\n::warning::x').split('\n')).toHaveLength(1);
+  });
+
+  it('a note is printed line by line behind the mark, with `##[` defused', () => {
+    const seen: string[] = [];
+    const log = console.log;
+    console.log = (s: string) => { seen.push(s); };
+    try { logLines('first\n::stop-commands::t\r\nsrc/##[add-mask]x.ts'); } finally { console.log = log; }
+    expect(seen).toEqual(['gate-record: first', 'gate-record: ::stop-commands::t', 'gate-record: src/# #[add-mask]x.ts']);
+  });
+
+  it('end to end: a backtick route with a line break prints no second workflow line', () => {
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    const dir = mkdtempSync(join(tmpdir(), 'gr-cmd-'));
+    try {
+      const g = (...a: string[]) => {
+        const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+        if (r.status !== 0) throw new Error(r.stderr);
+        return r.stdout.trim();
+      };
+      g('init', '-q'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+      const F = 'src/server/x.ts';
+      mkdirSync(join(dir, 'src/server'), { recursive: true });
+      writeFileSync(join(dir, F), "if (pathname === '/api/a') {}\n");
+      g('add', '-A'); g('commit', '-q', '-m', 'base');
+      const base = g('rev-parse', 'HEAD');
+      writeFileSync(join(dir, F), "if (pathname === '/api/a') {}\nif (pathname === `/api/x\n::stop-commands::tok`) {}\n");
+      g('commit', '-q', '-am', 'head');
+      const head = g('rev-parse', 'HEAD');
+      const ev = join(dir, 'event.json');
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Add a route', body: record({ head: head.slice(0, 12), gates: 'code-review, delta, security', security: 'own round (opus), no findings', ux: 'not user-facing — a route' }) } }));
+      writeFileSync(join(dir, 'files.txt'), `${F}\n`);
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE; delete env.GITHUB_REPOSITORY;
+      const out = spawnSync(process.execPath, [script, '--event-file', ev, '--head', head, '--base', base, '--files-file', join(dir, 'files.txt'), '--repo-visibility', 'private'], { cwd: dir, encoding: 'utf8', env });
+      expect(out.status, out.stdout).toBe(0);
+      expect(out.stdout).toContain('adds the route `/api/x%0A::stop-commands::tok`');
+      expect(out.stdout.split(/\r\n|\r|\n/).filter((l) => l.startsWith('::stop-commands'))).toEqual([]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
