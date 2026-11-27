@@ -14,6 +14,9 @@
  * before, or by an instance in the other language, is said in the owner's language too.
  */
 import type { NoticeLanguage } from './notice-language.js';
+import type { WatchFetchCause } from './watch-fetch-cause.js';
+import { watchPolicyWordsDe, watchPolicyWordsEn, type WatchPolicyReason, type WatchPolicyWords } from './watch-policy-reason.js';
+import type { ShownMandate } from './request-principal.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON } from '../server/webhook-receiver.js';
@@ -108,8 +111,7 @@ function saidWorkflowId(id: string): string {
   return `${kept}…`;
 }
 
-/** A mandate's address an escalation title may name, and whether it set the plan up or changed it. */
-export interface ShownMandate { readonly address: string; readonly changed: boolean }
+export type { ShownMandate };
 
 export interface WorkerNotices {
   /** The summary of more than a few triggers waiting for confirmation. */
@@ -120,6 +122,12 @@ export interface WorkerNotices {
   consentOneBody(title: string, setUpAfterOutsideContent: boolean): string;
   /** A run that failed or was stopped, with the error as it came. */
   failed(message: string): string;
+  /** A saved workflow that did not run because step `step` (1-based) refers to the output of a step
+   *  it does not read (`template-refs.ts`). The owner reads it, so no tool name and no stored text. */
+  workflowRefUnresolved(step: number): string;
+  /** A saved workflow that did not run because step `step` (1-based) has an id a run already uses
+   *  (`params`; `step-id.ts`). The owner reads it, so no tool name and no stored text. */
+  workflowStepIdReserved(step: number): string;
   stoppedWith(message: string): string;
   /** The first line of a run the owner ended; the run's own text follows after a blank line. */
   readonly stopped: string;
@@ -129,6 +137,13 @@ export interface WorkerNotices {
    * shows them, a task the user sees as their own message is localized too and gets an eval
    * (ux U-099).
    */
+  /**
+   * Every grant's push of a run's end that noted the owner's member-connection lines: a fixed
+   * sentence in place of the run's result, which the model words after a refusal that names
+   * another member, their provider and the owner's way (U-411). True for every mandate, so no
+   * "only the owner": a mandate under a later access can connect its own connection again.
+   */
+  readonly memberEndForMandates: string;
   readonly chipRunAgain: string;
   readonly chipRetry: string;
   readonly chipExplain: string;
@@ -163,8 +178,16 @@ export interface WorkerNotices {
   readonly questionOpener: string;
   /** The line above a scheduled workflow's question in its thread, the title quoted. */
   questionFrom(title: string): string;
+  /**
+   * A question from a plan someone the owner let in set up or changed (PRD B6): the thread's and
+   * the push's title, and the line above the question, in lynox's words. The plan's title stays
+   * out, as on the failure path: it is that person's text, and here it would be called the owner's.
+   */
+  helperQuestionTitle(by: ShownMandate | undefined): string;
+  readonly helperQuestionFrom: string;
   readonly errorLabel: string;
-  readonly failedStepsLabel: string;
+  /** The heading over the step lines; each line says what happened to its step (U-201). */
+  readonly affectedStepsLabel: string;
   readonly writesLabel: string;
   /**
    * A step that reported it could not complete its task (`fail_step`), in lynox's own words: its
@@ -176,6 +199,41 @@ export interface WorkerNotices {
   stepReported(stepId: string): string;
   stepReportedItem(stepId: string): string;
   readonly reportedReasonWhere: string;
+  /** What stands in for a step id outside the allowed shape (`step-id.ts`): an id stored before the
+   *  limit is not shown in the thread, where it would read as the assistant's own words (U-314). The
+   *  step is named by its position in the workflow, counted from 1 as `#2` is; `undefined` where no
+   *  position is known. */
+  unnamedStep(position: number | undefined): string;
+  /** `stepReported`, `stepFailed` and `stepDeclined` for a step named by `unnamedStep`, which is a
+   *  name and not quoted. */
+  stepReportedUnnamed(position: number | undefined): string;
+  stepFailedUnnamed(position: number | undefined): string;
+  stepDeclinedUnnamed(position: number | undefined): string;
+  /** `reportedReasonWhere` when more than one step reported. */
+  readonly reportedReasonsWhere: string;
+  /**
+   * A step that failed without reporting it: its error can carry a third party's text (a service's
+   * answer), so it stays out of the thread too and is named in lynox's own words (U-201).
+   * `stepFailed` is the run's error line when that step's error is the run's, `stepFailedItem` its
+   * line under the failed steps, `runFailed` a run error no step recorded and lynox did not write.
+   * After the steps, once: `errorWhere` (one error), `errorsWhere` (more), or
+   * `errorsAndReasonWhere` when steps also reported (then not `reportedReasonWhere`).
+   */
+  stepFailed(stepId: string): string;
+  stepFailedItem(stepId: string): string;
+  /** The run's error line for a step its approver declined with a reason: the reason, a person's text, stays out. */
+  stepDeclined(stepId: string): string;
+  /** A declined step's line under the affected steps, with or without a reason. */
+  stepDeclinedItem(stepId: string): string;
+  readonly runFailed: string;
+  readonly errorWhere: string;
+  readonly errorsWhere: string;
+  readonly errorsAndReasonWhere: string;
+  /** `errorsAndReasonWhere` when more than one step reported. */
+  readonly errorsAndReasonsWhere: string;
+  /** After a decline with a reason and no other error; `errorsAndDeclinedWhere` with other errors. */
+  readonly declinedWhere: string;
+  readonly errorsAndDeclinedWhere: string;
   /**
    * A run that stopped at its cost ceiling (`value` like `$0.50`) or turn limit (`value` the
    * count) with work still pending: the sentence the push leads with.
@@ -227,15 +285,23 @@ export interface WorkerNotices {
   resumedRunNotContained(provisioned: boolean): string;
   /** A watched page that changed, with the analysis (E15): the push only, the thread's seed stays English. */
   watchChanged(url: string, analysis: string): string;
+  /** A watched page that could not be read, with the cause in lynox's own words: the run's failed result and its notice. */
+  watchFetchFailed(url: string, cause: WatchFetchCause): string;
+  /** The same reason and what happens next, without the lead that names the page (the trigger card shows the page). */
+  watchFetchReason(cause: WatchFetchCause): string;
+  /** A watch the network policy keeps from its page, at the poll: why, and what the owner or the operator can do. */
+  watchPolicyRefused(reason: WatchPolicyReason, alsoHttps: boolean): string;
 }
 
 /**
  * A title as it goes between quotes in a turn the model reads: without the characters that close
  * a quote or start a line, so a title cannot end its quote and go on as the turn's own words.
+ * A line is started by every character Unicode counts as a line break: CR, LF, VT, FF, NEL,
+ * U+2028 and U+2029.
  * A title is set by the model or a delegated session and may carry text someone else wrote.
  */
 export function inQuotes(title: string): string {
-  return title.replace(/["\u201C\u201D\u201E\u201F\u00AB\u00BB\u2033\uFF02]/g, "'").replace(/[\r\n\u2028\u2029]+/g, ' ');
+  return title.replace(/["\u201C\u201D\u201E\u201F\u00AB\u00BB\u2033\uFF02]/g, "'").replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, ' ');
 }
 
 /** The workflow statuses a notice names; any other, `unknown` included, is left out rather than quoted raw. */
@@ -252,8 +318,11 @@ const EN: WorkerNotices = Object.freeze({
   consentOneBody: (title: string, outside: boolean) =>
     `It came due and has not run.${outside ? ' It was set up after reading content from outside.' : ''} Review “${title}” under Automation › Triggers before you confirm it.`,
   failed: (message: string) => `Task failed: ${message}`,
+  workflowRefUnresolved: (step: number) => `Step ${String(step)} of this workflow uses the result of a step it does not read, so the workflow did not run. Ask lynox in a chat to fix that step.`,
+  workflowStepIdReserved: (step: number) => `Step ${String(step)} of this workflow has a name lynox uses for something else, so the workflow did not run, and it will not run until that step is renamed or removed. Ask lynox in a chat to rename that step.`,
   stoppedWith: (message: string) => `Stopped on your instruction: ${message}`,
   stopped: 'Stopped on your instruction.',
+  memberEndForMandates: 'The run finished without a connection it may not use, so its result may be incomplete. Contact the owner of this instance.',
   chipRunAgain: 'Run again',
   chipRetry: 'Retry',
   chipExplain: 'Explain',
@@ -276,15 +345,35 @@ const EN: WorkerNotices = Object.freeze({
   reportOpener: 'What happened with my automation?',
   questionOpener: 'My scheduled workflow has a question.',
   questionFrom: (title: string) => `From your scheduled workflow "${inQuotes(title)}":`,
+  helperQuestionTitle: (by: ShownMandate | undefined) => by === undefined
+    ? 'A plan someone you let in set up has a question'
+    : by.changed ? `A plan changed by ${by.address} has a question` : `A plan set up by ${by.address} has a question`,
+  helperQuestionFrom: 'From a scheduled workflow that someone you let in set up or changed. Its name is left out here, because it can contain text from that person:',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
   budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
   errorLabel: 'Error:',
-  failedStepsLabel: 'Failed steps:',
+  affectedStepsLabel: 'Affected steps:',
   writesLabel: 'Writes:',
   stepReported: (stepId: string) => `Step "${stepId}" reported that it could not complete its task.`,
-  stepReportedItem: (stepId: string) => `• ${stepId}: reported that it could not complete its task.`,
+  stepReportedItem: (stepId: string) => `- ${stepId}: reported that it could not complete its task.`,
   reportedReasonWhere: 'You can ask here for the reason the step gave; it is kept in the run\'s record.',
+  unnamedStep: (position: number | undefined) => (position === undefined ? 'A step' : `Step ${String(position)}`),
+  stepReportedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} reported that it could not complete its task.`,
+  stepFailedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} failed.`,
+  stepDeclinedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} was declined at its approval.`,
+  reportedReasonsWhere: 'You can ask here for the reasons the steps gave; they are kept in the run\'s record.',
+  stepFailed: (stepId: string) => `Step "${stepId}" failed.`,
+  stepFailedItem: (stepId: string) => `- ${stepId}: failed.`,
+  stepDeclined: (stepId: string) => `Step "${stepId}" was declined at its approval.`,
+  stepDeclinedItem: (stepId: string) => `- ${stepId}: was declined at its approval.`,
+  runFailed: 'The run failed.',
+  errorWhere: 'You can ask here for the error; it is kept in the run\'s record.',
+  errorsWhere: 'You can ask here for the errors; they are kept in the run\'s record.',
+  errorsAndReasonWhere: 'You can ask here for the errors and for the reason a step gave; both are kept in the run\'s record.',
+  errorsAndReasonsWhere: 'You can ask here for the errors and for the reasons the steps gave; both are kept in the run\'s record.',
+  declinedWhere: 'You can ask here for the reason it was declined; it is kept in the run\'s record.',
+  errorsAndDeclinedWhere: 'You can ask here for the errors and the reasons for declining; they are kept in the run\'s record.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(run ${runId}${workflowId ? ` · workflow ${workflowId}` : ''})`
     : (workflowId ? `(workflow ${workflowId})` : ''),
@@ -309,6 +398,9 @@ const EN: WorkerNotices = Object.freeze({
     ? `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`
     : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`,
   watchChanged: (url: string, analysis: string) => `${url} changed.\n\n${analysis}`,
+  watchFetchFailed: (url: string, cause: WatchFetchCause) => `The watched page ${url} could not be read: ${watchFetchReasonEn(cause)}`,
+  watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonEn(cause),
+  watchPolicyRefused: (reason: WatchPolicyReason, alsoHttps: boolean) => withWayOut('The watched page was not read:', watchPolicyWordsEn(reason, alsoHttps)),
 });
 
 /** A resumed run whose new chat could not be contained, in English (ux U-089). */
@@ -366,8 +458,11 @@ const DE: WorkerNotices = Object.freeze({
   consentOneBody: (title: string, outside: boolean) =>
     `Fällig, aber nicht gelaufen.${outside ? ' Eingerichtet, nachdem ein Lauf Inhalte von aussen gelesen hatte.' : ''} Prüf „${title}“ unter Automation → Trigger, bevor du bestätigst.`,
   failed: (message: string) => `Aufgabe fehlgeschlagen: ${message}`,
+  workflowRefUnresolved: (step: number) => `Schritt ${String(step)} dieses Workflows nutzt das Ergebnis eines Schritts, den er nicht liest. Darum lief der Workflow nicht. Bitte lynox im Chat, diesen Schritt zu reparieren.`,
+  workflowStepIdReserved: (step: number) => `Schritt ${String(step)} dieses Workflows trägt einen Namen, den lynox für etwas anderes braucht. Darum lief der Workflow nicht, und er läuft erst wieder, wenn der Schritt anders heisst oder entfernt ist. Bitte lynox im Chat, diesen Schritt umzubenennen.`,
   stoppedWith: (message: string) => `Auf deine Anweisung gestoppt: ${message}`,
   stopped: 'Auf deine Anweisung gestoppt.',
+  memberEndForMandates: 'Der Lauf ist zu Ende, ohne eine Verbindung, die er nicht nutzen darf. Sein Ergebnis kann darum unvollständig sein. Wende dich an den Inhaber dieser Instanz.',
   chipRunAgain: 'Erneut ausführen',
   chipRetry: 'Erneut versuchen',
   chipExplain: 'Erklären',
@@ -394,15 +489,35 @@ const DE: WorkerNotices = Object.freeze({
   reportOpener: 'Was ist mit meiner Automation passiert?',
   questionOpener: 'Mein geplanter Workflow hat eine Frage.',
   questionFrom: (title: string) => `Aus deinem geplanten Workflow „${inQuotes(title)}“:`,
+  helperQuestionTitle: (by: ShownMandate | undefined) => by === undefined
+    ? 'Ein Plan von jemandem, dem du Zugang gegeben hast, hat eine Frage'
+    : by.changed ? `Ein Plan, den ${by.address} geändert hat, hat eine Frage` : `Ein Plan von ${by.address} hat eine Frage`,
+  helperQuestionFrom: 'Aus einem geplanten Workflow, den jemand, dem du Zugang gegeben hast, eingerichtet oder geändert hat. Der Name des Workflows steht hier nicht, weil er Text dieser Person enthalten kann:',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `${kind === 'cost' ? `Gestoppt an der Kostengrenze (${value})` : `Gestoppt am Rundenlimit (${value})`}, obwohl noch Arbeit offen war.`,
   budgetCutWayOut: 'Ein Neustart kann wieder an derselben Stelle stoppen. Bitte lynox im Chat, die Aufgabe in kleinere Pläne aufzuteilen.',
   errorLabel: 'Fehler:',
-  failedStepsLabel: 'Fehlgeschlagene Schritte:',
+  affectedStepsLabel: 'Betroffene Schritte:',
   writesLabel: 'Schreibvorgänge:',
   stepReported: (stepId: string) => `Schritt „${stepId}“ hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
-  stepReportedItem: (stepId: string) => `• ${stepId}: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  stepReportedItem: (stepId: string) => `- ${stepId}: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
   reportedReasonWhere: 'Den Grund, den der Schritt angegeben hat, kannst du hier erfragen; er steht im Protokoll des Laufs.',
+  unnamedStep: (position: number | undefined) => (position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`),
+  stepReportedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  stepFailedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} ist fehlgeschlagen.`,
+  stepDeclinedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} wurde bei der Freigabe abgelehnt.`,
+  reportedReasonsWhere: 'Die Gründe, die die Schritte angegeben haben, kannst du hier erfragen; sie stehen im Protokoll des Laufs.',
+  stepFailed: (stepId: string) => `Schritt „${stepId}“ ist fehlgeschlagen.`,
+  stepFailedItem: (stepId: string) => `- ${stepId}: ist fehlgeschlagen.`,
+  stepDeclined: (stepId: string) => `Schritt „${stepId}“ wurde bei der Freigabe abgelehnt.`,
+  stepDeclinedItem: (stepId: string) => `- ${stepId}: wurde bei der Freigabe abgelehnt.`,
+  runFailed: 'Der Lauf ist fehlgeschlagen.',
+  errorWhere: 'Den Fehler kannst du hier erfragen; er steht im Protokoll des Laufs.',
+  errorsWhere: 'Die Fehler kannst du hier erfragen; sie stehen im Protokoll des Laufs.',
+  errorsAndReasonWhere: 'Die Fehler und den Grund, den ein Schritt angegeben hat, kannst du hier erfragen; beides steht im Protokoll des Laufs.',
+  errorsAndReasonsWhere: 'Die Fehler und die Gründe, die die Schritte angegeben haben, kannst du hier erfragen; beides steht im Protokoll des Laufs.',
+  declinedWhere: 'Den Grund der Ablehnung kannst du hier erfragen; er steht im Protokoll des Laufs.',
+  errorsAndDeclinedWhere: 'Fehler und Ablehnungsgründe kannst du hier erfragen; sie stehen im Protokoll des Laufs.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(Lauf ${runId}${workflowId ? ` · Workflow ${workflowId}` : ''})`
     : (workflowId ? `(Workflow ${workflowId})` : ''),
@@ -427,6 +542,86 @@ const DE: WorkerNotices = Object.freeze({
     ? `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, schreib an support@lynox.ai.`
     : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das Instanz-Protokoll den Grund.`,
   watchChanged: (url: string, analysis: string) => `${url} hat sich geändert.\n\n${analysis}`,
+  watchFetchFailed: (url: string, cause: WatchFetchCause) => `Die beobachtete Seite ${url} liess sich nicht lesen: ${watchFetchReasonDe(cause)}`,
+  watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonDe(cause),
+  watchPolicyRefused: (reason: WatchPolicyReason, alsoHttps: boolean) => withWayOut('Die beobachtete Seite wurde nicht gelesen:', watchPolicyWordsDe(reason, alsoHttps)),
 });
+
+/** A cause no new attempt changes: the owner has to change the watch's address or delete it. */
+function watchFetchPermanent(cause: WatchFetchCause): boolean {
+  return cause.kind === 'blocked' || cause.kind === 'refused' || cause.kind === 'too-large' || (cause.kind === 'http' && (cause.status === 404 || cause.status === 410));
+}
+
+/** A redirect: a watch does not follow one, so the page is never read until the address changes. */
+function isRedirect(cause: WatchFetchCause): boolean {
+  return cause.kind === 'http' && (cause.status === 301 || cause.status === 302 || cause.status === 303 || cause.status === 307 || cause.status === 308);
+}
+
+/** The word for the HTTP statuses an owner meets most, or none. */
+function httpStatusWord(status: number, language: NoticeLanguage): string | undefined {
+  const words: Readonly<Record<number, readonly [string, string]>> = {
+    401: ['sign-in required', 'Anmeldung nötig'],
+    403: ['access denied', 'Zugriff verweigert'],
+    404: ['not found', 'nicht gefunden'],
+    410: ['gone', 'entfernt'],
+    301: ['redirected', 'weitergeleitet'],
+    302: ['redirected', 'weitergeleitet'],
+    303: ['redirected', 'weitergeleitet'],
+    307: ['redirected', 'weitergeleitet'],
+    308: ['redirected', 'weitergeleitet'],
+    429: ['too many requests', 'zu viele Anfragen'],
+  };
+  const pair = words[status] ?? (status >= 500 && status <= 599 ? ['server error', 'Fehler beim Server'] as const : undefined);
+  return pair === undefined ? undefined : pair[language === 'de' ? 1 : 0];
+}
+
+/** A lead, the reason, and the way out when there is one. */
+function withWayOut(lead: string, words: WatchPolicyWords): string {
+  return `${lead} ${words.why}${words.wayOut === '' ? '' : ` ${words.wayOut}`}`;
+}
+
+/** Why a watched page could not be read, in English: one sentence per cause, then what happens next. */
+function watchFetchReasonEn(cause: WatchFetchCause): string {
+  const reason = ((): string => {
+    switch (cause.kind) {
+      case 'blocked': return 'The address leads into a private or internal network, which a watch does not read.';
+      case 'refused': return 'lynox does not read pages at this address.';
+      case 'unresolved': return 'The host name does not resolve.';
+      case 'tls': return "The server's certificate could not be verified. It may be misconfigured, or the connection may be intercepted.";
+      case 'unreachable': return 'The server did not accept the connection.';
+      case 'timeout': return `The server did not answer within ${String(cause.seconds)} seconds.`;
+      case 'http': {
+        const word = httpStatusWord(cause.status, 'en');
+        return `The server answered with HTTP status ${String(cause.status)}${word === undefined ? '' : ` (${word})`}.`;
+      }
+      case 'too-large': return `The page is larger than the ${String(cause.megabytes)} MB a watch reads.`;
+      case 'other': return 'The page could not be loaded.';
+    }
+  })();
+  if (isRedirect(cause)) return `${reason} A watch does not follow a redirect. Open the address in a browser and enter the address you end up at, or delete the watch.`;
+  return `${reason} ${watchFetchPermanent(cause) ? 'Trying again will not change that. Change the watch\'s address or delete the watch.' : 'The watch checks the page again next time.'}`;
+}
+
+/** Why a watched page could not be read, in German: one sentence per cause, then what happens next. */
+function watchFetchReasonDe(cause: WatchFetchCause): string {
+  const reason = ((): string => {
+    switch (cause.kind) {
+      case 'blocked': return 'Die Adresse führt in ein privates oder internes Netz, das eine Beobachtung nicht liest.';
+      case 'refused': return 'lynox liest Seiten an dieser Adresse nicht.';
+      case 'unresolved': return 'Der Hostname lässt sich nicht auflösen.';
+      case 'tls': return 'Das Zertifikat des Servers liess sich nicht prüfen. Es könnte falsch eingerichtet oder die Verbindung abgefangen sein.';
+      case 'unreachable': return 'Der Server hat die Verbindung nicht angenommen.';
+      case 'timeout': return `Der Server hat nicht innerhalb von ${String(cause.seconds)} Sekunden geantwortet.`;
+      case 'http': {
+        const word = httpStatusWord(cause.status, 'de');
+        return `Der Server hat mit HTTP-Status ${String(cause.status)}${word === undefined ? '' : ` (${word})`} geantwortet.`;
+      }
+      case 'too-large': return `Die Seite ist grösser als die ${String(cause.megabytes)} MB, die eine Beobachtung liest.`;
+      case 'other': return 'Die Seite liess sich nicht laden.';
+    }
+  })();
+  if (isRedirect(cause)) return `${reason} Eine Beobachtung folgt keiner Weiterleitung. Öffne die Adresse im Browser und trage die Adresse ein, bei der du landest, oder lösche die Beobachtung.`;
+  return `${reason} ${watchFetchPermanent(cause) ? 'Daran ändert ein neuer Versuch nichts. Ändere die Adresse der Beobachtung oder lösche sie.' : 'Die Beobachtung prüft die Seite beim nächsten Mal wieder.'}`;
+}
 
 export const WORKER_NOTICES: Readonly<Record<NoticeLanguage, WorkerNotices>> = Object.freeze({ en: EN, de: DE });

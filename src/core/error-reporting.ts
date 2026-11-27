@@ -162,9 +162,25 @@ let _sentryModule: typeof import('@sentry/node') | null = null;
  * inside a request. An init inside a request binds its client to that request's scope only, so
  * every init also binds its client here; without that, reporting turned on again from the
  * settings reached only the request that turned it on. A scope forked before that (a request or a
- * timer still running) keeps the client of its time.
+ * timer still running) keeps the client of its time; this module's own captures override it with
+ * `_currentClient` below.
  */
 let _defaultScope: ReturnType<typeof import('@sentry/node').getCurrentScope> | null = null;
+/**
+ * The client the last init built (null if it built none); read only while reporting is on. A scope forked
+ * before that init (a request still streaming, a timer a request started) still names an older,
+ * closed client, so this module's captures set this one on the scope they fork instead of trusting
+ * the scope's own.
+ */
+let _currentClient: NonNullable<ReturnType<typeof import('@sentry/node').init>> | null = null;
+
+/** Runs `capture` in a scope forked from the current one, with the current client set on it. */
+function withCurrentClient(Sentry: typeof import('@sentry/node'), capture: (scope: ReturnType<typeof Sentry.getCurrentScope>) => void): void {
+  Sentry.withScope((scope) => {
+    if (_currentClient !== null) scope.setClient(_currentClient);
+    capture(scope);
+  });
+}
 /**
  * Every init and shutdown runs after the one called before it, so the state at the end is the
  * one the last call asked for. Without that, a shutdown that ran while an init was still loading
@@ -254,6 +270,10 @@ async function startErrorReporting(dsn: string | undefined): Promise<boolean> {
       },
 
       beforeBreadcrumb(breadcrumb) {
+        // The SDK records a breadcrumb through any client a scope names, closed or not, and its
+        // integrations (console, http) keep running after an off. One recorded while reporting is
+        // off would ride along with the next report once it is on again.
+        if (!_enabled) return null;
         if (breadcrumb.data) {
           delete breadcrumb.data['prompt'];
           delete breadcrumb.data['response'];
@@ -338,6 +358,7 @@ async function startErrorReporting(dsn: string | undefined): Promise<boolean> {
         return event;
       },
     });
+    _currentClient = built ?? null;
     if (built) {
       _builtClients.add(built);
       _defaultScope.setClient(built);
@@ -381,7 +402,7 @@ export function addLLMBreadcrumb(model: string, inputTokens: number, outputToken
 export function captureLynoxError(error: LynoxError): void {
   if (!_enabled || !_sentry) return;
   const Sentry = _sentry;
-  Sentry.withScope((scope) => {
+  withCurrentClient(Sentry, (scope) => {
     scope.setTag('error.code', error.code);
     scope.setTag('error.type', error.name);
     if (error.context) {
@@ -398,7 +419,8 @@ export function captureLynoxError(error: LynoxError): void {
 /** Capture any generic error. */
 export function captureError(error: unknown): void {
   if (!_enabled || !_sentry) return;
-  _sentry.captureException(error);
+  const Sentry = _sentry;
+  withCurrentClient(Sentry, () => Sentry.captureException(error));
 }
 
 // ── User Feedback (for /bug command) ──
@@ -410,14 +432,17 @@ export async function captureUserFeedback(opts: {
   if (!_enabled || !_sentry) return null;
   try {
     const Sentry = _sentry;
-    const eventId = Sentry.captureMessage('User bug report', 'info');
-    // Feedback travels as its own envelope item and does not pass `beforeSend`, so
-    // the comment, free text the person typed or pasted, is masked here before it
-    // reaches the SDK.
-    Sentry.captureFeedback({
-      name: opts.name,
-      message: maskSecretText(opts.comments),
-      associatedEventId: eventId,
+    let eventId: string | null = null;
+    withCurrentClient(Sentry, () => {
+      eventId = Sentry.captureMessage('User bug report', 'info');
+      // Feedback travels as its own envelope item and does not pass `beforeSend`, so
+      // the comment, free text the person typed or pasted, is masked here before it
+      // reaches the SDK.
+      Sentry.captureFeedback({
+        name: opts.name,
+        message: maskSecretText(opts.comments),
+        associatedEventId: eventId,
+      });
     });
     return eventId;
   } catch {
@@ -440,16 +465,19 @@ export function installGlobalHandlers(): void {
   if (_uncaughtHandler !== null) return;  // idempotent — re-init in same process keeps single handler
   const Sentry = _sentry;
 
+  // Should one run inside a scope forked before a later init, it reaches the live client like the
+  // captures do.
   _uncaughtHandler = (error) => {
     process.stderr.write(`[lynox] uncaught exception: ${processErrorText(error, true)}\n`);
-    Sentry.captureException(error);
-    void Sentry.flush(2000).finally(() => {
+    withCurrentClient(Sentry, () => Sentry.captureException(error));
+    // run-group-starter: a one-shot callback that ends the process, nothing long-lived.
+    void Promise.resolve((_currentClient ?? Sentry).flush(2000)).finally(() => {
       process.exit(1);
     });
   };
   _rejectionHandler = (reason) => {
     process.stderr.write(`[lynox] unhandled rejection: ${processErrorText(reason, true)}\n`);
-    Sentry.captureException(reason);
+    withCurrentClient(Sentry, () => Sentry.captureException(reason));
   };
 
   process.on('uncaughtException', _uncaughtHandler);
@@ -577,4 +605,5 @@ export function _resetForTesting(): void {
   _initialized = false;
   _enabled = false;
   _sentry = null;
+  _currentClient = null;
 }

@@ -12,7 +12,7 @@ copies of these files:
 
 | Consumer | Copy | Guard |
 |---|---|---|
-| web-ui (`packages/web-ui/src/lib/contract/`) | in-repo, currently `vocab.ts` + `http.ts` | every file present there must be byte-equal to its twin here (`tests/contract-drift.test.ts`) |
+| web-ui (`packages/web-ui/src/lib/contract/`) | in-repo, currently `vocab.ts` + `http.ts` + `prompt.ts` | every file present there must be byte-equal to its twin here (`tests/contract-drift.test.ts`) |
 | control plane (private repo, `packages/managed/src/vendor/contract/`) | SHA-pinned (`CONTRACT.lock`, git tree hash) | required `contract-sync` CI job + a release-path freshness gate | <!-- drift-guard:allow: path lives in the private lynox-pro repo (created by its contract-sync wave) -->
 
 Rules:

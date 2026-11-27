@@ -14,7 +14,7 @@ if { exec 3<&0; } 2>/dev/null; then exec 3<&-; else
   echo "public-repo-guard-files: stdin is closed, so what this push transfers is unknown." >&2; exit 2
 fi
 cd "$(git rev-parse --show-toplevel)" || exit 2
-ranges=$(bash .lefthook/pre-push/pushed-ranges.sh public-repo-guard-files) || exit $?
+ranges=$(bash .lefthook/pre-push/pushed-ranges.sh public-repo-guard-files "${1-}") || exit $?
 while read -r base tip; do
   [ -n "$base" ] || continue  # no line at all: the push only deletes refs
   bash scripts/public-repo-guard.sh check-files "$base" "$tip" || exit $?

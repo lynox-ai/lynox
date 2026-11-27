@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { getLocale, setLocale } from '../i18n.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -100,5 +101,18 @@ describe('the instance log item in settings', () => {
 		await render();
 		expect(hrefs()).not.toContain('/app/settings/account/access-log');
 		expect(hrefs(), 'the control: the index itself is there').toContain('/app/settings/account/security');
+	});
+});
+
+// The page heading is in the page's language, like the navigation item that leads here. A literal,
+// not `t()`: a wrong value in the table would pass a test that reads it back from there.
+describe('the settings heading', () => {
+	it.each([['de', 'Einstellungen'], ['en', 'Settings']] as const)('reads %s: %s', async (locale, heading) => {
+		const before = getLocale();
+		setLocale(locale);
+		try {
+			await render();
+			expect(target.querySelector('h1')?.textContent?.trim()).toBe(heading);
+		} finally { setLocale(before); }
 	});
 });

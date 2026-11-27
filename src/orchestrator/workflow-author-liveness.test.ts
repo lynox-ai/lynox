@@ -107,6 +107,7 @@ function chat(principal?: IAgent['principal']): IAgent {
   return {
     toolContext: ctx,
     getAvailableTools: () => ctx.tools,
+    hasRunCostCeiling: () => false,
     currentThreadId: 't-1',
     userTimezone: 'UTC',
     principal: principal ?? OWNER_PRINCIPAL,
