@@ -26283,10 +26283,10 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       // The live session holds the owner's review of a file it changed, so the mandate's answer
       // there comes from the check of who may answer it, not from a session without a review.
       const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-foreign-'));
+      const csm = new ChangesetManager(cwd, 'run-owner', [], { createdBy: principalTag(OWNER_PRINCIPAL) });
       try {
         const file = join(cwd, 'a.txt');
         writeFileSync(file, 'before', 'utf-8');
-        const csm = new ChangesetManager(cwd, 'run-owner', [], { createdBy: principalTag(OWNER_PRINCIPAL) });
         csm.backupBeforeWrite(file);
         writeFileSync(file, 'after', 'utf-8');
         sessionRanBy(OWNER_PRINCIPAL, { getChangesetManager: vi.fn(() => csm) });
@@ -26300,6 +26300,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
         expect(none.status, 'without a session').toBe(200);
         expect(await none.text(), 'the answer differs with the session').toBe(await live.text());
       } finally {
+        csm.cleanup();
         rmSync(cwd, { recursive: true, force: true });
       }
     });
