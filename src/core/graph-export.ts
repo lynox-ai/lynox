@@ -317,7 +317,7 @@ export function readMemoryTextsForExport(opts: {
           legacyHalf.entities = read(legacy, 'entities', '', 't.first_seen_at, t.id', 'agent-memory.db entities')
             .map(row => ['canonical_name', 'aliases', 'description', 'metadata'].reduce(maskField, row));
           legacyHalf.relations = read(legacy, 'relations', '', 't.created_at, t.id', 'agent-memory.db relations')
-            .map(row => maskField(row, 'description'));
+            .map(row => maskField(maskField(row, 'relation_type'), 'description'));
         }
       }
     }

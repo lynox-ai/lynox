@@ -301,12 +301,12 @@ describe('readMemoryTextsForExport', () => {
     const db = new AgentMemoryDb(file);
     const alice = db.createEntity({ canonicalName: 'Alice', entityType: 'person', description: 'pin hunter2', scopeType: 'global', scopeId: 'global' });
     const acme = db.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'global' });
-    db.createRelation(alice, acme, 'works_at', 'badge hunter2', 'm-source');
+    db.createRelation(alice, acme, 'hunter2_contact', 'badge hunter2', 'm-source');
     db.close();
     const on = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, subjectGraph: true })['agent-memory.db'];
     expect(on.entities.map(r => [r['id'], r['canonical_name'], r['description']]).sort(), 'entities, masked').toEqual([[alice, 'Alice', 'pin [masked]'], [acme, 'Acme', '']].sort());
     expect(on.entities.every(r => !('embedding' in r)), 'no embedding').toBe(true);
-    expect(on.relations.map(r => [r['from_entity_id'], r['to_entity_id'], r['description']]), 'relations, masked').toEqual([[alice, acme, 'badge [masked]']]);
+    expect(on.relations.map(r => [r['from_entity_id'], r['to_entity_id'], r['relation_type'], r['description']]), 'relations, type and description masked').toEqual([[alice, acme, '[masked]_contact', 'badge [masked]']]);
     const off = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask, subjectGraph: false })['agent-memory.db'];
     expect([off.entities, off.relations], 'with it off the graph block lists them').toEqual([[], []]);
   });
