@@ -121,7 +121,8 @@ describe('api_setup answers the reader reads as done', () => {
   }
 
   const answers: string[] = [];
-  for (const m of source.slice(from, to).matchAll(/\breturn\s+(?=[`'"])/g)) {
+  // A refusal after a consent is the decline text handed to `consentRefusal`, which says it as it is.
+  for (const m of source.slice(from, to).matchAll(/\breturn\s+(?:consentRefusal\(\w+, )?(?=[`'"])/g)) {
     const at = from + m.index + m[0].length;
     answers.push(source[at] === '`' ? template(at)[0] : quoted(at));
   }

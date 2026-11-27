@@ -30,7 +30,7 @@ describe('a connected Shopify preset profile is still refused', () => {
     const store = new ApiStore();
     expect(store.register(profile)).toBe(true);
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential(`${STORE}/admin/api/2025-10/shop.json`, headers, false, {
+    const attached = await attachStoredCredential(`${STORE}/admin/api/2025-10/shop.json`, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: store,
       secretStore: { resolve: (n: string) => (n === accessTokenKey(profile.id) ? 'shpat-value' : null) } as never,
       principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),
@@ -43,7 +43,7 @@ describe('a connected Shopify preset profile is still refused', () => {
     const vetted = vetTokenEndpoint(endpoints.tokenUrl, profile.custom_endpoint_ack);
     if (isTokenEndpointRefused(vetted)) throw new Error('fixture endpoint is not vetted');
     const result = await exchangeToken({ endpoint: vetted, params: { client_secret: 's' }, bodyFormat: 'form' }, undefined);
-    expect(result).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
+    expect(result).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}`, unsentForPass: true });
   });
 
   it('at the pinned fetch under both', async () => {

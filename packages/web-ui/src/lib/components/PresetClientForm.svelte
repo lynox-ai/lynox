@@ -9,8 +9,12 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import { presetProviderLabel } from '../utils/preset-provider-label.js';
+	import WholeValue from './WholeValue.svelte';
 
-	let { profileId }: { profileId: string } = $props();
+	// `connectHref`: the engine's connect route for this profile, given by the page only while the
+	// profile has no grant and no revocation of one to show; with the secret saved, the form then
+	// offers the first connect right below the app credentials.
+	let { profileId, connectHref = null }: { profileId: string; connectHref?: string | null } = $props();
 
 	interface ClientState {
 		preset: string;
@@ -39,6 +43,8 @@
 	// A different client id is a different app, whose secret is not the stored one: the field opens.
 	const idDiffers = $derived(client !== null && client.client_id !== null && clientId.trim() !== client.client_id);
 	const secretInputShown = $derived(client !== null && (!client.client_secret_set || replacing || idDiffers));
+	// Not while another app is being entered: the connect would use the stored one.
+	const connectFirst = $derived(connectHref !== null && client !== null && client.client_secret_set && !secretInputShown);
 	const canSave = $derived(
 		client !== null && !saving && clientId.trim() !== '' && (secretInputShown ? clientSecret.trim() !== '' : true),
 	);
@@ -93,7 +99,8 @@
 				clientSecret = '';
 				replacing = false;
 				client = { ...client, client_id: body.client_id, client_secret_set: client.client_secret_set || body.client_secret !== undefined };
-				notice = { kind: 'ok', text: t('integrations.preset_client_saved') };
+				// "With the button below" only where the button is: a connected profile's save just says saved.
+				notice = { kind: 'ok', text: t(connectHref !== null ? 'integrations.preset_client_saved' : 'integrations.preset_client_saved_plain') };
 			}
 		} catch {
 			notice = { kind: 'error', text: t('integrations.preset_client_save_failed') };
@@ -120,7 +127,7 @@
 
 		<div>
 			<p class="text-xs text-text-muted mb-1">{tf('integrations.preset_client_redirect_label', { provider })}</p>
-			<p class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-xs font-mono text-text-muted select-all break-all">{client.redirect_uri}</p>
+			<p class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-xs font-mono text-text-muted select-all"><WholeValue value={client.redirect_uri} kind="url" testid="preset-redirect-uri" /></p>
 		</div>
 
 		<label class="block">
@@ -148,11 +155,14 @@
 				/>
 			</label>
 		{:else}
-			<div class="flex items-center justify-between gap-3">
+			<!-- A button's label never breaks: where the line is too narrow for both, the button moves
+			     under the note as a whole. It looks like a button (border, padding), so under the note it
+			     does not read as the note's next line. -->
+			<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
 				<p class="text-xs text-text-muted">{t('integrations.preset_client_secret_set')}</p>
 				<button
 					onclick={() => { replacing = true; }}
-					class="text-xs text-text-subtle hover:text-text-muted transition-colors"
+					class="whitespace-nowrap rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:border-border-hover hover:text-text transition-colors"
 				>
 					{t('integrations.preset_client_replace')}
 				</button>
@@ -182,6 +192,15 @@
 
 		{#if notice}
 			<p class="text-xs {notice.kind === 'ok' ? 'text-success' : 'text-danger'}" role="status">{notice.text}</p>
+		{/if}
+
+		{#if connectFirst}
+			<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
+			<div class="space-y-2 border-t border-border pt-3" data-testid="api-connect-first">
+				<p class="text-sm text-text-muted">{tf('apis.connect_first_intro', { provider })}</p>
+				<a href={connectHref} data-sveltekit-reload data-testid="api-connect-first-link"
+					class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.connect_first')}</a>
+			</div>
 		{/if}
 	</div>
 {/if}

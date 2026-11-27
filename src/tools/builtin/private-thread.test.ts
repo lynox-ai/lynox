@@ -59,7 +59,7 @@ describe('memory-writing tools refuse in a private chat', () => {
       skipMemoryExtraction: opts.globalExtractionOff ?? false,
       currentThreadId: 't1',
       currentRunId: 'r1',
-      promptUser: async (_q: unknown, options: string[] = []) => options[0] ?? 'Apply',
+      promptUser: async (_q: unknown, options: string[] = []) => options[0] ?? 'apply',
     } as unknown as IAgent;
     return { agent, ks, memory };
   }
@@ -122,7 +122,7 @@ describe('memory-writing tools refuse in a private chat', () => {
     const { agent, ks } = make(opts);
     ks.setBlockContent('profile', 'Operator: Alex.');
     const flipping = Object.assign(Object.create(agent) as object, {
-      promptUser: async () => { opts.privateThread = true; return 'Apply'; },
+      promptUser: async () => { opts.privateThread = true; return 'apply'; },
     }) as IAgent;
     const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'Jana Reber lives in Bern' } as never, flipping);
     expect(out).toContain('private mode');

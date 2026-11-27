@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  deliveryCase,
   inquiryOptions,
   NotificationRouter,
+  outcomeOf,
   summarizeDelivery,
   type ChannelOutcome,
   type NotificationChannel,
@@ -202,6 +204,59 @@ describe('NotificationRouter', () => {
     expect(await router.sendTo('person', MSG)).toBe(true);
     expect(await router.sendTo('down', MSG)).toBe(false);
     stderrSpy.mockRestore();
+  });
+
+  // ---- no_recipient: a channel with nobody to deliver to ----
+
+  it('reads the raw no_recipient as itself, not as failed', () => {
+    expect(outcomeOf('no_recipient')).toBe('no_recipient');
+    // Control: an unknown string still reads as failed.
+    expect(outcomeOf('no_recipients')).toBe('failed');
+  });
+
+  it('a channel with nobody to deliver to reads as not delivered, and is not logged as a failure', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    router.register(makeChannel('push', () => Promise.resolve('no_recipient')));
+    const report = await router.notify(MSG);
+    expect(report).toEqual([{ channel: 'push', outcome: 'no_recipient' }]);
+    expect(summarizeDelivery(report)).toBe('not_delivered');
+    expect(stderrSpy).not.toHaveBeenCalledWith(expect.stringContaining('did not deliver'));
+    stderrSpy.mockRestore();
+  });
+
+  it('sendTo reads no_recipient as not handled (false), as a channel without subscriptions always was', async () => {
+    router.register(makeChannel('push', () => Promise.resolve('no_recipient')));
+    expect(await router.sendTo('push', MSG)).toBe(false);
+  });
+
+  // ---- deliveryCase: why a notice reached nobody ----
+
+  const report = (...outcomes: ChannelOutcome[]) => outcomes.map((outcome, i) => ({ channel: `c${String(i)}`, outcome }));
+
+  it('says no_subscription only when every channel that was meant had nobody to deliver to', () => {
+    expect(deliveryCase(report('no_recipient'))).toBe('no_subscription');
+    expect(deliveryCase(report('skipped', 'no_recipient'))).toBe('no_subscription');
+  });
+
+  it('says send_failed when a channel tried and did not get through, beside one with nobody', () => {
+    expect(deliveryCase(report('failed'))).toBe('send_failed');
+    expect(deliveryCase(report('no_recipient', 'failed'))).toBe('send_failed');
+  });
+
+  it('has no case when the push reached only others (a mandate\'s device): whether the owner had a device is not known', () => {
+    expect(deliveryCase(report('reached_others'))).toBeUndefined();
+    expect(deliveryCase(report('no_recipient', 'reached_others'))).toBeUndefined();
+    // Control: a failed send beside it is still a failed send, in either order.
+    expect(deliveryCase(report('failed', 'reached_others'))).toBe('send_failed');
+    expect(deliveryCase(report('reached_others', 'failed'))).toBe('send_failed');
+    expect(deliveryCase(report('reached_others', 'no_recipient'))).toBeUndefined();
+  });
+
+  it('has no case unless the notice was not delivered', () => {
+    expect(deliveryCase(report('delivered', 'no_recipient'))).toBeUndefined();
+    expect(deliveryCase(report())).toBeUndefined();
+    // Only skipped: not delivered, but no channel was meant, so neither case is true.
+    expect(deliveryCase(report('skipped'))).toBeUndefined();
   });
 
   // ---- sendTo ----

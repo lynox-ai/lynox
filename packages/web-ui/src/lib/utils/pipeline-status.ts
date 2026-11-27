@@ -123,15 +123,73 @@ export function isPipelineRunning(
  * the bare `[data-pending-prompt]` first-match would race the kind that
  * `selectPendingPromptHead` prioritises (secret > permission > tabs).
  * PromptAnchor's [Antworten] jump uses this so the scroll target matches.
+ *
+ * Looked up only inside the chat's prompt stack (`[data-chat-stack]`), never in the whole page: a chat
+ * message is rendered markdown that keeps `data-*` attributes, so a message could carry an element
+ * that matches the selector and would come first in the document — taking the jump, and the bar's
+ * reading of whether the question is on screen. No stack, no form.
  */
 export function findPromptFormByKind(
 	doc: Document | undefined,
 	kind: PromptKind | null,
 ): HTMLElement | null {
-	if (!doc) return null;
+	const stack = doc?.querySelector<HTMLElement>('[data-chat-stack]');
+	if (!stack) return null;
 	if (kind) {
-		const el = doc.querySelector<HTMLElement>(`[data-pending-prompt][data-prompt-kind="${kind}"]`);
+		const el = stack.querySelector<HTMLElement>(`[data-pending-prompt][data-prompt-kind="${kind}"]`);
 		if (el) return el;
 	}
-	return doc.querySelector<HTMLElement>('[data-pending-prompt]');
+	return stack.querySelector<HTMLElement>('[data-pending-prompt]');
+}
+
+/**
+ * Where the question opens inside its form: the element marked `data-prompt-question`, else the form's
+ * own top. The form starts with padding and, for a workflow's question, a line naming the workflow —
+ * neither says what is asked.
+ */
+export function promptQuestionElement(form: HTMLElement): HTMLElement {
+	return form.querySelector<HTMLElement>('[data-prompt-question]') ?? form;
+}
+
+/**
+ * How much of the inline question's top must be on screen for it to count as seen: about its first
+ * line. The question text opens the card; below it come the value block and the buttons.
+ */
+export const PROMPT_FORM_SEEN_PX = 48;
+
+/** What the anchor bar knows about the inline question it points to. */
+export type PromptFormSight =
+	/** This browser cannot be watched (no layout APIs): the bar shows, as it always did. */
+	| { kind: 'unobservable' }
+	/** The question's form is not in the page: nothing to point to beside the bar itself. */
+	| { kind: 'absent' }
+	/** Measured: whether the question's opening line is on screen. */
+	| { kind: 'seen'; inView: boolean };
+
+/**
+ * Whether the opening line of the question is on screen: the card's top lies inside the visible part
+ * of the area that scrolls it (`viewTop`..`viewBottom`, already cut to the window), with room for a
+ * line below it — or the whole card when it is shorter than a line. A card whose top has scrolled
+ * away does not count, even when its buttons still show: the user would see the buttons and not what
+ * they answer.
+ */
+export function promptFormInView(card: { top: number; bottom: number }, viewTop: number, viewBottom: number): boolean {
+	if (viewBottom <= viewTop) return false;
+	const line = Math.min(PROMPT_FORM_SEEN_PX, card.bottom - card.top);
+	return card.top >= viewTop - 1 && card.top + line <= viewBottom + 1;
+}
+
+/**
+ * Whether the anchor bar shows. It is a locator for a question that is off screen; while the question
+ * is on screen the bar would only say the same text a second time. Where the bar cannot know (no
+ * layout APIs, no form found), it shows — a question nobody finds is worse than one shown twice.
+ */
+export function promptAnchorShown(sight: PromptFormSight): boolean {
+	switch (sight.kind) {
+		case 'unobservable':
+		case 'absent':
+			return true;
+		case 'seen':
+			return !sight.inView;
+	}
 }

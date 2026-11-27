@@ -16,8 +16,8 @@ import { ENCRYPTED_PREFIX } from './strict-decrypt.js';
  */
 
 const OWNER: ApprovalScope = { viewer: 'owner' };
-const GRANT_A: ApprovalScope = { viewer: 'mandate', mandateId: 'grant-a' };
-const GRANT_B: ApprovalScope = { viewer: 'mandate', mandateId: 'grant-b' };
+const GRANT_A: ApprovalScope = { viewer: 'mandate', mandateId: 'grant-a', tag: 'mandate:anna@example.com' };
+const GRANT_B: ApprovalScope = { viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' };
 
 const send = (over: Partial<MailSendPayload> = {}): MailSendPayload => ({
   accountId: 'acc-1', fromAddress: 'owner@example.com', to: [{ name: 'Bob', address: 'bob@example.com' }],

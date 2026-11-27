@@ -8,25 +8,32 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { CONSENT_KEYS, type ConsentAction, type ConsentKind } from '../contract/prompt.js';
+import { CONSENT_ACTION_LABELS, CONSENT_LABELS } from '../tools/dialog-text.js';
+import { join } from 'node:path';
+import { claimStoreReconnectHints } from './store-token-refresh.js';
+import { recipientsConfirmable } from './recipient-confirm.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { noticeLanguage } from './notice-language.js';
+import { WatchFetchFailure, WatchHttpStatusError, watchFetchCause } from './watch-fetch-cause.js';
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
-  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices, type ShownMandate,
+  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
+import { BULK_NOTICES, bulkHaltForReaders, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
+import { originRunNotice, type OriginRefusal, type SendOrigin, type TriggerSetUpBy } from './origin-notices.js';
 import { isFeatureEnabled } from './features.js';
 import { InboundEventStore, type EventOutcome, type InboundEventRecord } from './inbound-events.js';
 import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, ownedBy, ownerInstructionCounts, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
@@ -43,11 +50,11 @@ import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from '
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
-import { inquiryOptions, summarizeDelivery } from './notification-router.js';
+import { deliveryCase, inquiryOptions, summarizeDelivery, type DeliveryDetail } from './notification-router.js';
 import { stripHidden } from './hidden-text.js';
 import { runTaskPrompt, RUN_TASK_ANSWERED, RUN_TASK_ANSWER_PREAMBLE } from './run-task-turn.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
-import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL } from './task-manager.js';
+import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type RunCause } from './task-manager.js';
 import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -61,6 +68,8 @@ import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
+import { runStepIds, stepRunNames, storedStepOrder } from '../orchestrator/step-id.js';
+import { failedRunBody } from './escalation-failure.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { WEBHOOK_AWAITS_STAMP_REASON, workflowAwaitsStampResult, workflowStampStateOf } from './workflow-stamp.js';
@@ -310,6 +319,8 @@ const DEFER_RELOG_MS = 10 * 60_000;
 // the window would buffer the whole body into memory and OOM the worker. 10 MB
 // is far above any real HTML page; the signal extractor caps further at 256 KB.
 const WATCH_MAX_BODY_BYTES = 10 * 1024 * 1024;
+/** How long a watch waits for its page. */
+const WATCH_FETCH_TIMEOUT_MS = 30_000;
 /** How much of a watch's last summary is kept with its baseline and handed to the next change. */
 const WATCH_SUMMARY_CHARS = 2000;
 
@@ -669,35 +680,6 @@ export function reservationEstimate(task: TriggerRecord): number {
 /** Re-exported where it was born; it lives beside the tags it reads. */
 export { mandateNeedsOwnerStamp };
 
-/**
- * Whether a plan was set up or last changed by someone other than the owner: the last mandate
- * that changed it, else its creator. The owner's stamp and the owner's later edit leave
- * `mandate_editor` as it is, and so the text as written (PRD customer-granted-operator-access B6).
- * Fail-closed: any tag but the owner's (or none: a row from before tags, or the owner's agent)
- * counts.
- */
-export function setUpByOther(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): boolean {
-  const tag = t.mandate_editor ?? t.created_by;
-  return !(tag === undefined || tag === null || tag === principalTag(OWNER_PRINCIPAL));
-}
-
-/** A plain address: what an owner types when letting someone in. Anything else is not shown. */
-const SHOWN_ADDRESS = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$/;
-
-/**
- * The mandate an escalation's title may name: who changed the plan, if a mandate other
- * than its creator did, else the mandate that set it up. The engine sets these tags from the
- * grant, so the address is not the helper's text. `undefined` for a plan no mandate set up or
- * changed, an unknown tag, or an address of another shape; the title then says "someone you let in".
- */
-export function shownMandate(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): ShownMandate | undefined {
-  const editor = t.mandate_editor ?? undefined;
-  const changed = editor !== undefined && editor !== t.created_by;
-  const tag = changed ? editor : t.created_by;
-  if (tag === undefined || tag === null || !isMandateTag(tag)) return undefined;
-  const address = tag.slice(MANDATE_TAG_PREFIX.length);
-  return address.length <= 254 && SHOWN_ADDRESS.test(address) ? { address, changed } : undefined;
-}
 
 /**
  * Whether a hand-run grant covers this trigger: only the proposal of the person who holds
@@ -710,6 +692,14 @@ export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: stri
   const lastParty = t.edited_by ?? t.created_by;
   return isMandateTag(lastParty) && lastParty === principalTag(grant.principal);
 }
+
+/** An engine consent's options as a notification lists them: the keys in the owner's words. */
+function consentInquiryOptions(kind: ConsentKind, language: 'de' | 'en', action?: ConsentAction): string[] {
+  return CONSENT_KEYS[kind].map((key) => (key === 'confirm' && action !== undefined ? CONSENT_ACTION_LABELS[language][action] : CONSENT_LABELS[language][key]));
+}
+
+/** The refusal notice of a run that ended by throwing, carried from the run to where the failure is recorded. */
+const ORIGIN_NOTICE_OF_ERROR = new WeakMap<object, string>();
 
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -737,6 +727,39 @@ export class WorkerLoop {
     /** The run lease's timing; only tests shorten it. */
     private readonly lease: { heartbeatMs: number; ttlMs: number } = { heartbeatMs: LEASE_HEARTBEAT_MS, ttlMs: LEASE_TTL_MS },
   ) {}
+
+  /** Where a target this trigger's run sends to comes from, when its instruction does not count. */
+  #triggerSendOrigin(task: TriggerRecord, instructionCounts: boolean): SendOrigin | undefined {
+    if (instructionCounts) return undefined;
+    const mandate = shownMandate(task);
+    const setUpBy: TriggerSetUpBy = mandate !== undefined ? { kind: 'other', who: mandate.address }
+      : task.created_by === principalTag(OWNER_PRINCIPAL) ? { kind: 'owner' }
+        : { kind: 'unknown' };
+    // A trigger from before its creator was recorded, nobody else's hand in it: its refusal points
+    // the owner at "Confirm recipients" in the Triggers view (`recipient-confirm.ts`).
+    return { kind: 'triggerRun', name: task.title, setUpBy, ...(recipientsConfirmable(task) ? { predatesRecord: true } : {}) };
+  }
+
+  /** The result lines for the sends this run refused, or null when it refused none. */
+  #originRefusedNotice(task: TriggerRecord, refusals: readonly OriginRefusal[]): string | null {
+    if (refusals.length === 0) return null;
+    const lang = noticeLanguage(this.engine.config?.language);
+    // One line per target and origin: a run that tried the same send again refused one thing, not two.
+    return [...new Set(refusals.map((r) => originRunNotice(task.title, r, lang)))].join('\n');
+  }
+
+  /**
+   * Hands the refusal notice of a run that ended by throwing to where the failure is recorded
+   * (`ORIGIN_NOTICE_OF_ERROR`). Never throws: a notice that cannot be built is left out, and the
+   * run's own error, with the status it decides (failed, timeout, stopped), is what is recorded.
+   */
+  #carryOriginNotice(err: unknown, task: TriggerRecord, refusals: () => readonly OriginRefusal[]): void {
+    if (typeof err !== 'object' || err === null) return;
+    try {
+      const notice = this.#originRefusedNotice(task, refusals());
+      if (notice !== null) ORIGIN_NOTICE_OF_ERROR.set(err, notice);
+    } catch { /* the run's own error stands */ }
+  }
 
   /** The worker's own sentences in the instance's notice language, read per notice (`notice-language.ts`). */
   #notices(): WorkerNotices {
@@ -833,7 +856,7 @@ export class WorkerLoop {
     result: string,
     status: RunEndStatus,
     run?: RunStarterSlot | null,
-    opts?: { readonly keepSchedule: true },
+    opts?: { readonly keepSchedule?: true; readonly noRetry?: true; readonly cause?: RunCause },
   ): boolean {
     // A request of this run that would have carried someone else's own login was refused: its
     // line goes under the result, and what ends as a success halts (`withMemberNotes`).
@@ -861,7 +884,12 @@ export class WorkerLoop {
     // A webhook run's event takes the end where nothing more specific was set: lynox's own
     // sentence, or the masked error of a run that threw.
     endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
-    const record = { ...(startedByOther(slot) ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
+    const record = {
+      ...(startedByOther(slot) || opts?.noRetry === true ? { noRetry: true } : {}),
+      ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}),
+      // Why this run failed, as a cause lynox knows; the run's end stores it, or clears it.
+      ...(opts?.cause !== undefined ? { cause: opts.cause } : {}),
+    };
     return tm?.recordTaskRun(id, result, status, ...(Object.keys(record).length > 0 ? [record] : [])) ?? false;
   }
 
@@ -1508,11 +1536,25 @@ export class WorkerLoop {
         );
       }
 
+      // The owner's hint that a store's access runs out soon (`store-token-refresh.ts`): only with a
+      // channel, claimed on the grant before it is sent. No timer and no refresh of its own.
+      try {
+        const apiStore = this.engine.getApiStore();
+        if (apiStore && this.notificationRouter.hasChannels()) {
+          const { getLynoxDir } = await import('./config.js');
+          for (const message of claimStoreReconnectHints(apiStore, join(getLynoxDir(), 'apis'), noticeLanguage(this.engine.config?.language))) {
+            void this.notificationRouter.notify(message);
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] store reconnect hint failed: ${processErrorText(err)}\n`);
+      }
+
       // The owner's notice of paused plans (`plan-pause.ts`), in the reminder's order: only with a
       // channel, claimed before it is sent, so two processes on one file send it once and none is
-      // used up while no channel is registered. At boot the worker starts before the server
-      // registers its push channel, so a pause from the boot sweep is told on the first tick that
-      // has a channel — usually the second. Fenced like the reminder.
+      // used up while no channel is registered. The server registers its push channel before it
+      // starts the worker, so a pause from the boot sweep is told on the first tick when push is
+      // set up. Fenced like the reminder.
       try {
         if (planPauseOn() && this.notificationRouter.hasChannels()) {
           const db = this.engine.getEngineDb()?.getDb();
@@ -2337,7 +2379,12 @@ export class WorkerLoop {
       // Nor is a run a non-owner started by hand: a retry carries no request, so it would run as
       // the schedule's run, not the request's (§3.12 point 6, "once per request").
       const taskManager = this.engine.getTaskManager();
-      const willRetry = this.#recordRun(taskManager, task.id, errorMsg, status, entry);
+      const refusedNotice = typeof err === 'object' && err !== null ? ORIGIN_NOTICE_OF_ERROR.get(err) : undefined;
+      const recordedError = refusedNotice === undefined ? errorMsg : `${refusedNotice}\n\n${errorMsg}`;
+      // A watch that could not read its page failed for a cause lynox told: stored with the run, so
+      // the trigger list can say it (`blocked_reason`). Any other error stores none.
+      const runCause: RunCause | undefined = status === 'failed' && err instanceof WatchFetchFailure ? { kind: 'watch_fetch', cause: err.watchCause } : undefined;
+      const willRetry = this.#recordRun(taskManager, task.id, recordedError, status, entry, runCause === undefined ? undefined : { cause: runCause });
 
       // If the task was parked on a human it was interrupted while waiting.
       // It used to be RESOLVED with 'Task failed while waiting for your
@@ -2368,7 +2415,7 @@ export class WorkerLoop {
         const pushedMsg = reduce && !isTimeout ? errorText(err, true) : errorMsg;
         const notices = this.#notices();
         await this.notificationRouter.notify({
-          title: `${stopped ? '\u23f9' : '\u2717'} ${task.title}`,
+          title: `${stopped ? '\u23f9' : '\u2717'} ${this.#pushTitleOf(task, stopped ? 'stopped' : this.#bulkRunHalted(task) ? 'halted' : 'failed')}`,
           body: stopped ? notices.stoppedWith(pushedMsg) : notices.failed(pushedMsg),
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
@@ -2463,6 +2510,8 @@ export class WorkerLoop {
         ownerStopped,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
         notices: this.#bulkNotices(),
+        // Read at the call, so a connection confirmed again since the run halted counts.
+        shopifyGrantOf: (host) => this.engine.getApiStore()?.getByHostname(host)?.oauth_grant,
       });
     } catch (err: unknown) {
       // What leaves here reaches the run result, the notification, the follow-up prompt and the
@@ -2492,7 +2541,9 @@ export class WorkerLoop {
     }
     // A halt at the approved maximum is the run doing what it was told: recorded as such,
     // not as the failure every other halt is.
-    this.recordAndNotify(task, outcome.summary, outcome.status === 'done' ? true : outcome.planned === true ? 'halted' : false);
+    // A halt whose summary is too long for a push is pushed in its short version; the run result
+    // keeps the summary with the way.
+    this.recordAndNotify(task, outcome.summary, outcome.status === 'done' ? true : outcome.planned === true ? 'halted' : false, outcome.pushSummary);
   }
 
   /**
@@ -2566,6 +2617,7 @@ export class WorkerLoop {
       });
       return;
     }
+    if (outcome.gone === true) { this.#endGonePass(task, outcome.summary, 'preview'); return; }
     this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
   }
 
@@ -2617,7 +2669,7 @@ export class WorkerLoop {
           notices: this.#bulkNotices(),
         }),
         resolveModel: (tier) => resolveJudgeModel(this.engine.getUserConfig(), tier, this.engine.client, getActiveProvider()),
-        gate: (tier) => fireBeforeRunGate(this.engine, tier),
+        gate: (tier, maxCostCents) => fireBeforeRunGate(this.engine, tier, { maxCostCents }),
         report: (gateRunId, usd, tier) => reportMeteredCost(this.engine, gateRunId, usd, tier),
         bookSpend: (entry) => history?.recordBulkJudgeCost(entry),
         settleSpend: (row, entry) => history?.settleBulkJudgeCost(row, entry),
@@ -2660,6 +2712,7 @@ export class WorkerLoop {
       });
       return;
     }
+    if (outcome.gone === true) { this.#endGonePass(task, outcome.summary, 'judge'); return; }
     this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
   }
 
@@ -2697,7 +2750,7 @@ export class WorkerLoop {
         // The connection a request carried: the attached profile's id and the grant it held when
         // its credential was read. An empty or non-string grant (a file-loaded profile) is none.
         attach: async (url, headers, method, out) => {
-          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out);
+          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings, hostPolicy: toolContext }, { bulkRunId: run.id }, out);
           if (profile === null) return null;
           const grantId: unknown = profile.oauth_grant?.grant_id;
           return { id: profile.id, grantId: typeof grantId === 'string' && grantId !== '' ? grantId : null };
@@ -2818,10 +2871,21 @@ export class WorkerLoop {
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
     const runAs = this.#runAs(task.id, starter);
     const triggerTier = admittedTriggerTier(task.model_tier);
+    // An answer given in a conversation that is not the one of whom the run is for is not taken:
+    // a run by hand of a mandate, or a mandate's plan, that picked up a question asked in the
+    // owner's chat would write into that chat, or, in a new thread, put its question and answer
+    // where the mandate reads them (a mandate reads every chat it opened, contained or not). The
+    // answer is released unread, as for an access that has ended, and the run goes on without it.
+    // The owner owns every conversation; a missing row is no one's.
+    const threads = answered !== undefined ? this.engine.getThreadStore() : null;
+    if (answered !== undefined && !isOwnerPrincipal(runAs) && !ownedBy(threads?.getThread(answered.session_id), runAs)) {
+      this.engine.getPromptStore()?.releaseTrigger(answered.id);
+      answered = undefined;
+    }
     // Same thread, so the run's own history shows the exchange it continues — unless the owner
     // deleted that conversation in the meantime. Then the run goes to a new thread: a deleted
     // one is not opened again, and the question and its answer reach the run as input anyway.
-    const continueIn = answered !== undefined && this.engine.getThreadStore()?.isDeleted(answered.session_id) !== true
+    const continueIn = answered !== undefined && threads?.isDeleted(answered.session_id) !== true
       ? answered.session_id
       : undefined;
     const session = this.engine.createSession({
@@ -2963,7 +3027,7 @@ export class WorkerLoop {
         promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: false }, session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
           principal: runAs,
           handRun: active?.handRun === true,
-        });
+        }, meta?.consent, meta?.consentAction);
       } catch (err: unknown) {
         if (err instanceof UnattendedBlockError) return UNATTENDED_BLOCK_ANSWER;
         throw err;
@@ -3033,7 +3097,7 @@ export class WorkerLoop {
       // Whether the question reached anyone goes onto the trigger and, through the engine as a
       // workflow question's does, to the hooks: on a managed instance a push that reached nobody
       // then mails the owner a fixed text that names neither the question nor the task.
-      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id));
+      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: session.sessionId, kind: 'question' }), 'question');
       const notices = this.#notices();
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
@@ -3047,8 +3111,8 @@ export class WorkerLoop {
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: questionReduced
           ? { question: notices.containedQuestionInquiry }
-          : { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
-      }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
+          : { question: offBoxQuestion, options: meta?.consent !== undefined ? consentInquiryOptions(meta.consent, noticeLanguage(this.engine.config?.language), meta.consentAction) : inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+      }).then((report) => { recordDelivery(summarizeDelivery(report), { case: deliveryCase(report) }); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });
       try {
@@ -3281,7 +3345,28 @@ export class WorkerLoop {
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     this.#stopIfStarterEnded(active, starter, task.id);
-    const result = await session.run(prompt, { triggerOrigin: task.source, principal: runAs });
+    // The trigger's own instruction, from its stored title and description, not from the prompt
+    // built above (which carries answers and fences): the targets it names are owner-known in this
+    // run only when the owner wrote it and nobody else changed it. Otherwise a target the run was
+    // not given comes from this trigger, by whom it was set up.
+    const instructionCounts = ownerInstructionCounts(task);
+    const runOrigin = this.#triggerSendOrigin(task, instructionCounts);
+    let result: string;
+    try {
+      result = await session.run(prompt, {
+        triggerOrigin: task.source, triggerId: task.id, principal: runAs,
+        ...(instructionCounts ? { ownerInstruction: `${task.title}\n${task.description}` } : {}),
+        ...(runOrigin !== undefined ? { sendOrigin: runOrigin } : {}),
+      });
+    } catch (err: unknown) {
+      // A run that fails, times out or is stopped after a send was refused still says so in its
+      // recorded result: the owner learns of the refusal from the result, not from the model.
+      this.#carryOriginNotice(err, task, () => session.getOriginRefusals?.() ?? []);
+      throw err;
+    }
+    // A send this run refused because the owner did not name its target is said in the result,
+    // with where the target came from and the way through the chat.
+    const originRefused = this.#originRefusedNotice(task, session.getOriginRefusals?.() ?? []);
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
     // knowing it ever happened: `costGuard` makes the agent stop and RETURN its text — it
@@ -3323,7 +3408,8 @@ export class WorkerLoop {
     const truncate = (text: string): string => text.length > MAX_TASK_RESULT_CHARS
       ? text.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : text;
-    const truncatedResult = truncate(budgetCut === null ? result : `${budgetCut}\n\n${result}`);
+    const withRefusals = originRefused === null ? result : `${originRefused}\n\n${result}`;
+    const truncatedResult = truncate(budgetCut === null ? withRefusals : `${budgetCut}\n\n${withRefusals}`);
 
     // Who ended the run, when an unanswered question is how it ended (see below).
     const endedByOwner = questionWentUnanswered && active?.stopRequested === true;
@@ -3367,11 +3453,11 @@ export class WorkerLoop {
       const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
-      const pushed = resultReduced
-        ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberSaid).result
-        : capStop === null ? memberTold.result
-          : withMemberNotes(truncate(`${capStop}\n\n${result}`), 'other', memberSaid).result;
-      await this.notificationRouter.notify({
+      const pushedText = resultReduced
+        ? (capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`)
+        : capStop === null ? truncatedResult : truncate(`${capStop}\n\n${withRefusals}`);
+      const pushed = withMemberNotes(pushedText, 'other', memberSaid).result;
+      const message: NotificationMessage = {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
         //
@@ -3396,7 +3482,10 @@ export class WorkerLoop {
           { label: notices.chipDetails, task: `Show me more details about: ${stripHidden(task.title)}` },
           { label: notices.chipRunAgain, task: stripHidden(task.description ?? task.title) },
         ],
-      });
+      };
+      // With the owner's member-connection lines, told by reader (#notifyMemberEnd).
+      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, notices.memberEndForMandates);
+      else await this.notificationRouter.notify(message);
     }
   }
 
@@ -3605,9 +3694,15 @@ export class WorkerLoop {
       // build site is here, not a session).
       principal: runAs,
       // A mapped value reaches only a step's task text, where it is fenced as untrusted; asked
-      // by the runner of the workflow exactly as it read it, so no edit falls in between.
+      // by the runner of the workflow exactly as it read it, so no edit falls in between, and read
+      // as the run will execute it: a step id stored outside the shape runs under its run name, and
+      // its references move with it (`runStepIds`), so a reference the stored text shows as a param
+      // can be a step's output in the run. In the fields a run resolves, the copy refuses every
+      // reference the stored text would: a moved reference becomes a run name, never `params`.
+      // Only an id or an `input_from` entry outside the shape, whose text no run substitutes into,
+      // is read as its run name there.
       ...(event !== undefined ? { checkWorkflow: (p: PlannedPipeline) => {
-        const where = mappedValueOutsideTaskText(p.steps, event.mappedNames);
+        const where = mappedValueOutsideTaskText(runStepIds(p.steps, stepRunNames(p.steps)), event.mappedNames);
         return where === null ? null : `${EVENT_MAPPING_REFUSED} ${where}`;
       } } : {}),
       stopSignal: ownerStop,
@@ -3668,6 +3763,19 @@ export class WorkerLoop {
       return;
     }
 
+    // A step refers to the output of a step it does not read, or has an id a run already uses: a retry
+    // meets the same refusal, so it is recorded as a failure without one and told in the owner's words
+    // (a webhook run's by its event). The record keeps the full refusal, which says how to repair it
+    // (`template-refs.ts`).
+    if (!result.ok && (result.unresolvedRefStep !== undefined || result.reservedIdStep !== undefined)) {
+      const told = result.reservedIdStep !== undefined
+        ? this.#notices().workflowStepIdReserved(result.reservedIdStep)
+        : this.#notices().workflowRefUnresolved(result.unresolvedRefStep!);
+      endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: told, runId: result.runId });
+      this.recordAndNotify(task, result.error ?? told, false, told, { noRetry: true });
+      return;
+    }
+
     if (!result.ok) {
       endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: result.error ?? 'The workflow run was refused.', runId: result.runId });
       // Surface conversion / validation / not-found / not-template errors as
@@ -3676,14 +3784,20 @@ export class WorkerLoop {
       // A refusal that names stored text carries its fixed wording too: a push from a contained
       // instance then says why the run did not start, not only that it failed.
       const message = result.error ?? `Pipeline ${task.pipeline_id} execution failed`;
-      throw result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
+      const failure = result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
+      // A send a step refused before the run failed is said before the error, as for a task run.
+      this.#carryOriginNotice(failure, task, () => result.originRefusals ?? []);
+      throw failure;
     }
 
     // What the owner must read even when every step completed: a write the run was
     // refused, or one that may have landed before a refused redirect, and why the run
     // had no write grant. A refused write does not fail its step, so without this the
     // only trace is a tool result nobody reads.
-    const grantLines = [...(result.grantNote !== undefined ? [result.grantNote] : []), ...(result.writeNotes ?? [])];
+    // And each send a step refused for a target the owner did not name, in the trigger's words:
+    // also when the run ended for it (a question it could not ask), so the end names the cause.
+    const originNotice = this.#originRefusedNotice(task, result.originRefusals ?? []);
+    const grantLines = [...(originNotice !== null ? originNotice.split('\n') : []), ...(result.grantNote !== undefined ? [result.grantNote] : []), ...(result.writeNotes ?? [])];
     const grantReport = grantLines.length > 0 ? `\n${grantLines.map((l) => `• ${l}`).join('\n')}` : '';
     const success = result.status === 'completed';
     endEvent(this.#runSlotOf(task.id), success
@@ -3705,18 +3819,24 @@ export class WorkerLoop {
     // its error can carry a third party's text, which a thread would hand the owner's next
     // turn as the assistant's own.
     if (event !== undefined) return;
-    // A reported failure's reason (`fail_step`) is the model's text, often written after reading
-    // untrusted content; the thread hands its body to the owner's next turn in the assistant's
-    // voice. So the body names the step in lynox's own words, and the reason stays in the run's
-    // record, readable through diagnose_workflow_run.
+    // Neither a step's error (it can carry a third party's text) nor a reported reason (model text)
+    // goes into the thread, which hands its body to the owner's next turn in the assistant's voice:
+    // the body names the failed steps in lynox's own words, and the errors stay in the run's record,
+    // readable through diagnose_workflow_run (U-192, U-201).
     const notices = this.#notices();
-    const failedSteps = (result.stepErrors ?? []).filter(s => s.error);
-    const stepDetail = failedSteps
-      .map(s => (s.reported === true ? notices.stepReportedItem(s.stepId) : `• ${s.stepId}: ${s.error}`))
-      .join('\n');
-    const runError = result.errorReportedBy !== undefined ? notices.stepReported(result.errorReportedBy) : result.error;
-    // Said once, after the steps, when a step reported: the owner learns the reason is there to ask for (U-192).
-    const reported = result.errorReportedBy !== undefined || failedSteps.some(s => s.reported === true);
+    // A step id stored before ids had a shape (`step-id.ts`) is not shown: this body reads as the
+    // assistant's own words. It is named by its position in the stored workflow, as the model sees it
+    // (`#2`); the run and workflow ids below still lead to it (diagnose_workflow_run). The position is
+    // read from the workflow as stored now: an edit between the run and this thread can shift it, and
+    // an id no longer there is named without one. A lookup that fails costs the position, never the
+    // thread: the owner hears of the failure either way.
+    let order: string[] | undefined;
+    try {
+      order = task.pipeline_id ? storedStepOrder(this.engine.getRunHistory()?.getPlannedPipeline(task.pipeline_id)) : undefined;
+    } catch {
+      order = undefined;
+    }
+    const positionOf = (id: string): number | undefined => { const at = order?.indexOf(id) ?? -1; return at === -1 ? undefined : at + 1; };
     // The run + workflow ids ride in the seeded body so the agent, when the user
     // replies, can diagnose the run (diagnose_workflow_run), edit the workflow
     // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
@@ -3732,12 +3852,7 @@ export class WorkerLoop {
       opener: notices.reportOpener,
       body: othersPlan
         ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
-        : `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
-        (runError ? `${notices.errorLabel} ${runError}\n\n` : '') +
-        (stepDetail ? `${notices.failedStepsLabel}\n${stepDetail}\n\n` : '') +
-        (reported ? `${notices.reportedReasonWhere}\n\n` : '') +
-        (grantLines.length > 0 ? `${notices.writesLabel}\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
-        notices.workflowReply(ref),
+        : failedRunBody(notices, { title: task.title, status: result.status, run: result, grantLines, ref, positionOf }),
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
       onReported: this.#recordEscalation(task.id),
     });
@@ -3789,7 +3904,7 @@ export class WorkerLoop {
       maskOffBox: (text) => this.engine.getSecretStore()?.maskAll(text) ?? text,
       notify: (msg) => this.notificationRouter.notify(msg),
       // Through the engine, as an escalation's is, so the hooks hear of a question that reached nobody.
-      recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id)),
+      recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: runId, kind: 'question' }), 'question'),
       ownerStop,
       teardown,
       tearingDown: () => active?.tearingDown === true,
@@ -3806,25 +3921,25 @@ export class WorkerLoop {
    * (`unconfirmed`) is on the trigger before the wakeup leaves; the answer is written against
    * that start and cannot overwrite a newer escalation.
    */
-  #recordEscalation(triggerId: string): (delivery: DeliverySummary) => void {
+  #recordEscalation(triggerId: string, chat?: DeliveryDetail['chat']): (delivery: DeliverySummary, detail?: DeliveryDetail) => void {
     const startedAt = this.#nextEscalationStart();
     // A record that cannot be written must not stop the escalation it describes: the owner
     // still gets the thread and the wakeup.
     const start = (retry: boolean): boolean => {
       try {
-        return this.engine.getTaskManager()?.startEscalation(triggerId, startedAt, retry) ?? false;
+        return this.engine.getTaskManager()?.startEscalation(triggerId, startedAt, retry, chat) ?? false;
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${processErrorText(err)}\n`);
         return false;
       }
     };
     const started = start(false);
-    return (delivery) => {
+    return (delivery, detail) => {
       // A start that did not land is tried once more, so the answer has a start to match;
       // otherwise the case would keep the previous escalation's outcome as if it were this one.
       // The retry lands only if no later escalation has started meanwhile.
       if (!started && !start(true)) return;
-      this.engine.getTaskManager()?.recordEscalationOutcome(triggerId, delivery, startedAt);
+      this.engine.getTaskManager()?.recordEscalationOutcome(triggerId, delivery, startedAt, detail);
     };
   }
 
@@ -3866,11 +3981,24 @@ export class WorkerLoop {
    *   · `'interrupted'` — the engine lost the run mid-way and did not start it again. It did
    *     not finish, so it stays high priority, but it is not a tool's or provider's failure.
    */
-  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string): void {
+  /**
+   * A bulk run that failed and is left halted (a reason in its ledger, not ended) stays recorded
+   * and marked as failed (✗, high priority: told apart from a planned halt); its push title says
+   * it halted, which its body no longer says (U-324). Read from the ledger, not from how the
+   * pass returned: a pass that found its run dropped or moved on has not halted it.
+   */
+  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
+    // A bulk halt whose way on only the owner can take: the history, which a mandate reads too,
+    // keeps the fact; the owner's push keeps the way; every mandate's push says the owner
+    // resolves it (U-383).
+    const haltRow = this.#bulkRunRow(task);
+    const lang = noticeLanguage(this.engine.config?.language);
+    const byReader = haltRow !== null;
+    const recordAs = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, resultSummary, lang);
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      this.#recordRun(taskManager, task.id, resultSummary, look.status);
+      this.#recordRun(taskManager, task.id, recordAs?.record ?? resultSummary, look.status, undefined, opts);
     }
 
     // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that
@@ -3885,13 +4013,140 @@ export class WorkerLoop {
     // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
+      const shownEnd: BulkPushEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
+        : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
+      const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
+      const readers = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
+      const withLines = notes.length > 0;
+      const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
+      if (readers === null && withLines) {
+        // Not split by reader, but with the owner's member-connection lines: see #notifyMemberEnd.
+        void this.#notifyMemberEnd(message, WORKER_NOTICES[lang].memberEndForMandates);
+        return;
+      }
       void this.notificationRouter.notify({
-        title: `${toldLook.mark} ${task.title}`,
-        body: told.result,
-        taskId: task.id,
-        priority: toldLook.priority,
+        ...message,
+        // Only the owner can take the way this sentence names: no other device reads it.
+        ...(readers === null ? {} : { audience: 'owner' as const }),
       });
+      // Every live grant reads the same end in the mandates' sentence, not only the planning one:
+      // a mandate gets the notices the owner gets, in the sentence that is true for it. It reads
+      // the fact without the member-connection lines: they are the owner's, naming another
+      // member's provider and profile and the owner's way to change it. They stand in the history,
+      // which a mandate reads, as recorded. The sentence is where `told.result` starts, so this
+      // finds a part only where `readers` found one too.
+      const forMandate = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, said ?? resultSummary, lang);
+      if (forMandate !== null) {
+        void this.notificationRouter.notify({
+          title,
+          body: forMandate.mandate,
+          taskId: task.id,
+          priority: toldLook.priority,
+          audience: 'all_mandates',
+        });
+      }
     }
+  }
+
+  /**
+   * A run's end that carries the owner's member-connection lines, told by reader. The lines name
+   * another member's provider, profile and login and the owner's way to change it, so only the
+   * owner's devices read `message` as it is. Every live grant reads the same end in its own
+   * sentence (`forMandates`), a fixed one, not the run's result: the model words its reply after a
+   * refusal that names the other member, so the result without the lines can still carry them. A
+   * mandate gets the notices the owner gets, in the sentence that is true for it. A push without an
+   * audience would reach every live grant's devices with the lines.
+   */
+  async #notifyMemberEnd(message: NotificationMessage, forMandates: string): Promise<void> {
+    const owner = this.notificationRouter.notify({ ...message, audience: 'owner' });
+    // Only what names the end: no deep link into the run's thread and no follow-ups, which would
+    // lead a mandate back to the reply this sentence stands in for.
+    void this.notificationRouter.notify({
+      title: message.title,
+      body: forMandates,
+      taskId: message.taskId,
+      priority: message.priority,
+      audience: 'all_mandates',
+    });
+    await owner;
+  }
+
+  /**
+   * The run a bulk trigger leads to, as its ledger row holds it: null for any other trigger, a
+   * run that is gone, or a read that fails, which costs a push its words, never the push.
+   */
+  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null {
+    const row = this.#readBulkRunRow(task);
+    return row === 'unreadable' ? null : row;
+  }
+
+  /** {@link #bulkRunRow}, with a read that failed told apart from a run that is gone. */
+  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null | 'unreadable' {
+    if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return null;
+    try {
+      const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
+      // A plain row read: `getStatus` frees dead reads as it reads, and a push must not write.
+      const st = ledger?.getRunForApply(task.bulk_run_id);
+      if (st === null || st === undefined) return null;
+      return { phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null };
+    } catch {
+      return 'unreadable';
+    }
+  }
+
+  /** Whether a bulk run's trigger leads to a run its ledger holds halted and not ended. */
+  #bulkRunHalted(task: TriggerRecord): boolean {
+    const row = this.#bulkRunRow(task);
+    return row !== null && row.haltReason !== null && row.phase !== 'aborted' && row.phase !== 'done' && row.phase !== 'undone';
+  }
+
+  /** Whether a bulk run's trigger leads to a run the owner discarded before approving it. */
+  #bulkRunDiscarded(task: TriggerRecord): boolean {
+    const row = this.#bulkRunRow(task);
+    return row !== null && row.phase === 'aborted' && isDiscardReason(row.haltReason);
+  }
+
+  /**
+   * A preview or judge pass that found its run no longer its own to read. The pass knows only
+   * that; the ledger knows why, and the record and the push say it (U-324). A run ended before
+   * its approval (discarded by the owner, superseded, or planned under an access that ended) is
+   * told as stopped with its own sentence. A run another pass left halted in this stage is told
+   * as that halt. A run that is gone or moved past this stage is recorded and not pushed: the pass
+   * that took it on reports for itself. lynox wrote nothing in any of them. A ledger that cannot
+   * be read, or a run still planned and unhalted, says nothing of the kind: it is told as before.
+   */
+  #endGonePass(task: TriggerRecord, summary: string, phase: 'preview' | 'judge'): void {
+    const row = this.#readBulkRunRow(task);
+    if (row === 'unreadable' || (row !== null && row.phase === 'planned' && row.haltReason === null)) {
+      this.recordAndNotify(task, summary, false);
+      return;
+    }
+    if (row !== null && row.haltReason !== null && (row.phase === 'aborted' || row.phase === 'planned')) {
+      const sentence = this.#bulkNotices().halted(phase, row.haltReason);
+      this.recordAndNotify(task, sentence, row.phase === 'aborted' ? 'stopped' : false);
+      return;
+    }
+    const taskManager = this.engine.getTaskManager();
+    if (taskManager) this.#recordRun(taskManager, task.id, summary, 'failed');
+  }
+
+  /**
+   * The words after a push's end mark. A bulk run's trigger is titled with its run id, for the
+   * model that lists it; its push names the stage, how it ended and the host instead (U-324),
+   * in the owner's language. Every other trigger's push carries its title as it is.
+   */
+  #pushTitleOf(task: TriggerRecord, end: BulkPushEnd): string {
+    const effect = task.effect;
+    if (effect !== 'bulk_preview' && effect !== 'bulk_judge' && effect !== 'bulk_apply' && effect !== 'bulk_undo') return task.title;
+    // The host is a read of the ledger: a read that fails costs the title its host, never the push.
+    let system: string | undefined;
+    try {
+      const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
+      system = task.bulk_run_id === undefined ? undefined : ledger?.getRunForApply(task.bulk_run_id)?.targetSystem;
+    } catch {
+      system = undefined;
+    }
+    return bulkPushTitle(effect, end, system ?? null, noticeLanguage(this.engine.config?.language));
   }
 
   /**
@@ -3940,6 +4195,21 @@ export class WorkerLoop {
       return;
     }
 
+    // The instance's network_policy decides whether the page may be read at all, at every poll:
+    // the policy may have changed since the watch was created.
+    const refusedBy = watchPolicyRefusal(config.url, this.engine.getToolContext());
+    if (refusedBy !== null) {
+      const taskManager = this.engine.getTaskManager();
+      if (taskManager) {
+        this.#recordRun(taskManager, task.id, refusedBy.privateAddress === true
+          // The address may carry a key; the run's catch masks a thrown failure, this one is recorded here.
+          ? maskSecretPatterns(this.#notices().watchFetchFailed(config.url, { kind: 'blocked' }), { includeGeneric: true })
+          : this.#notices().watchPolicyRefused(refusedBy.reason, refusedBy.alsoHttps === true), 'failed',
+          undefined, refusedBy.privateAddress === true ? { cause: { kind: 'watch_fetch', cause: { kind: 'blocked' } } } : undefined);
+      }
+      return;
+    }
+
     // A page a delegated session watches is read on its behalf: by hand, it started the run;
     // on schedule, it chose the page, and the owner's stamp let it run. Either way the read is
     // a row of its own first, and is not sent without one (PRD customer-granted-operator-access
@@ -3961,17 +4231,21 @@ export class WorkerLoop {
     // socket to that IP (closing the rebind window) + never follows redirects,
     // so it subsumes the protocol/host/IP SSRF checks we used to hand-roll here.
     let fetchResult: string;
+    const deadline = AbortSignal.timeout(WATCH_FETCH_TIMEOUT_MS);
     try {
       const res = await fetchPinned(config.url, {
-        signal: AbortSignal.timeout(30_000),
+        signal: deadline,
         headers: { 'User-Agent': 'lynox-watch/1.0' },
       });
       if (!res.ok) {
-        throw new Error(`HTTP ${String(res.status)} ${res.statusText}`);
+        throw new WatchHttpStatusError(res.status, res.statusText);
       }
       fetchResult = await readBodyCapped(res, WATCH_MAX_BODY_BYTES);
     } catch (err: unknown) {
-      throw new Error(`Watch fetch failed for ${config.url}: ${err instanceof Error ? err.message : String(err)}`);
+      // The owner reads lynox's own sentence for the cause, in the instance's language; the raw
+      // error goes with it as the cause, to the error report, and is not shown.
+      const cause = watchFetchCause(err, { timeoutSeconds: WATCH_FETCH_TIMEOUT_MS / 1000, maxBytes: WATCH_MAX_BODY_BYTES, timedOut: deadline.aborted });
+      throw new WatchFetchFailure(this.#notices().watchFetchFailed(config.url, cause), cause, { cause: err });
     }
 
     // Reduce to a stable visible-content signal before hashing. Hashing the raw
@@ -4067,7 +4341,7 @@ export class WorkerLoop {
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
     this.#stopIfStarterEnded(stopEntry, starter, task.id);
-    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', principal: runAs });
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', triggerId: task.id, principal: runAs });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;

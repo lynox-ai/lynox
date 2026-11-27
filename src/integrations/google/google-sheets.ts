@@ -6,7 +6,12 @@ import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
 import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
-import { pv } from '../../core/prompt-value.js';
+import { pv, joinPrompts, singleLine } from '../../core/prompt-value.js';
+import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
+import { formulaCells, formulasAsText, type FormulaCell } from './sheets-formula.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import type { ConsentAction } from '../../contract/prompt.js';
+import { GOOGLE_DIALOG, SHEETS_NOTE_DIALOG, type DialogLanguage, type SheetsNoteDialog } from '../../tools/dialog-text.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
@@ -120,6 +125,234 @@ function valuesToMarkdownTable(values: string[][]): string {
   return [headerLine, separatorLine, ...dataLines].join('\n');
 }
 
+// === Formulas after content from outside ===
+
+const WRITE_AS_TEXT = 'Write as text';
+const WRITE_AS_FORMULAS = 'Write as formulas';
+const DONT_WRITE = 'Don’t write';
+/** Listed first: the choice that writes no formula. */
+const FORMULA_OPTIONS = [WRITE_AS_TEXT, WRITE_AS_FORMULAS, DONT_WRITE];
+/**
+ * When some formulas are only counted: writing formulas the owner was not shown is not offered,
+ * since a harmless five could stand in front of the one that fetches.
+ */
+const FORMULA_OPTIONS_SOME_HIDDEN = [WRITE_AS_TEXT, DONT_WRITE];
+/** Formula lines shown before the rest is counted. */
+export const FORMULAS_SHOWN = 5;
+
+/** The cells of a write or an append that may be read as a formula, in call order. */
+function formulasToShow(input: SheetsInput, language: DialogLanguage): FormulaCell[] {
+  if (input.action === 'write') return formulaCells(input.values, input.range, 'write', language);
+  if (input.action === 'append') return formulaCells(input.values, input.range, 'append', language);
+  return [];
+}
+
+/** The option an answer names: by its label, or by its number in the list (1-based). */
+function chosenOption(answer: string, options: readonly string[]): string | undefined {
+  const byLabel = options.find((o) => o.toLowerCase() === answer.trim().toLowerCase());
+  if (byLabel !== undefined) return byLabel;
+  const index = /^\d+$/.test(answer.trim()) ? Number(answer.trim()) - 1 : -1;
+  return options[index];
+}
+
+/**
+ * What the question adds: why it asks, then each cell and its whole formula as a value. A
+ * formula is never shortened, since the address in it is what the owner decides on; a line
+ * break in it is not kept, so it cannot draw another cell's line.
+ */
+function formulaNote(formulas: readonly FormulaCell[], said: SheetsNoteDialog): PromptText {
+  const n = formulas.length;
+  const head = joinPrompts([said.formulaHead(n), said.formulaFetches], ' ');
+  const lines = formulas.slice(0, FORMULAS_SHOWN).map(({ cell, formula }) => pv`${cell}: ${singleLine(formula)}`);
+  // With some only counted, the question offers no "Write as formulas" and says why, and how
+  // to get it: each call is asked about on its own, so a call with at most FORMULAS_SHOWN shows
+  // every formula. The sentence writes that number out, so it stays the question's own words;
+  // tests hold the sentence to a copy of it and the copy's number to the constant.
+  const more = n > FORMULAS_SHOWN ? [said.formulaMore(n - FORMULAS_SHOWN), said.formulaOnlyShown(WRITE_AS_FORMULAS)] : [];
+  return joinPrompts([head, ...lines, ...more], '\n');
+}
+
+/**
+ * Request types that only change how cells look or how rows and columns are sized: none of them
+ * carries cell content or a rule, so none can hold a formula. A list of what may pass, never of
+ * what may not: a type missing here, or one Google adds later, is shown in full.
+ * `updateDimensionProperties` is checked further, since it can also hide rows (see below).
+ */
+const PURE_FORMAT_TYPES = new Set([
+  'updateBorders', 'mergeCells', 'unmergeCells', 'autoResizeDimensions',
+  'addBanding', 'updateBanding', 'deleteBanding',
+]);
+
+/**
+ * The parts of a cell format that show no text and no address of their own: colours, borders,
+ * spacing, alignment and text style. They can still make data hard to see (white on white, a tiny
+ * size), which the plain question covers as it covers merges. Left out on purpose, so shown:
+ * `numberFormat` (its pattern shows literal text in place of the value), `textFormat.link` (a
+ * link to any address), `hyperlinkDisplayType` and `textDirection` (both change how existing text
+ * reads). A part missing here is shown in full.
+ */
+const FORMAT_FIELDS = new Set(['backgroundColor', 'backgroundColorStyle', 'borders', 'padding', 'horizontalAlignment', 'verticalAlignment', 'wrapStrategy', 'textRotation']);
+const TEXT_FORMAT_FIELDS = new Set(['bold', 'italic', 'underline', 'strikethrough', 'fontFamily', 'fontSize', 'foregroundColor', 'foregroundColorStyle']);
+
+/** Deeper groups than this are not read as a mask; such a request is shown. */
+const MASK_DEPTH = 8;
+
+/**
+ * The full paths a field mask names, or null when it is not a mask in Google's grammar: paths of
+ * names joined by `.`, separated by `,`, where `a(b,c)` stands for `a.b,a.c`. Read whole, so a
+ * path that only starts with an allowed name cannot carry another one behind it.
+ */
+function maskPaths(fields: string): string[] | null {
+  let i = 0;
+  const spaces = (): void => { while (fields[i] === ' ') i++; };
+  const name = (): string | null => {
+    const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(fields.slice(i));
+    if (m === null) return null;
+    i += m[0].length;
+    return m[0];
+  };
+  const list = (depth: number): string[] | null => {
+    if (depth > MASK_DEPTH) return null;
+    const out: string[] = [];
+    // run-group-starter: a synchronous parse of one mask string; it ends before the call returns.
+    for (;;) {
+      spaces();
+      let path = name();
+      if (path === null) return null;
+      while (fields[i] === '.') {
+        i++;
+        const next = name();
+        if (next === null) return null;
+        path += `.${next}`;
+      }
+      spaces();
+      if (fields[i] === '(') {
+        i++;
+        const inner = list(depth + 1);
+        if (inner === null || fields[i] !== ')') return null;
+        i++;
+        const prefix = path;
+        out.push(...inner.map((p) => `${prefix}.${p}`));
+        spaces();
+      } else {
+        out.push(path);
+      }
+      if (fields[i] !== ',') return out;
+      i++;
+    }
+  };
+  const paths = list(0);
+  return paths !== null && i === fields.length ? paths : null;
+}
+
+/**
+ * Paths that name a whole format, or its whole text format. Such a mask writes exactly what the
+ * cell holds under it and clears the rest of the range, so it is pure when the cell holds
+ * looks-only parts alone. Clearing returns a value to automatic display (a date may read as its
+ * serial number, a link is gone), but it writes no text and no address of its own, which is what
+ * is held back for the owner to see; the plain question still says cells can be overwritten.
+ */
+const WHOLE_FORMAT_PATHS = new Set(['userEnteredFormat', 'userEnteredFormat.textFormat']);
+
+/** Whether a full mask path lies inside one of the looks-only parts, or names a whole format. */
+function looksOnlyPath(path: string): boolean {
+  if (WHOLE_FORMAT_PATHS.has(path)) return true;
+  const [root, field, sub] = path.split('.');
+  if (root !== 'userEnteredFormat' || field === undefined) return false;
+  if (FORMAT_FIELDS.has(field)) return true;
+  return field === 'textFormat' && sub !== undefined && TEXT_FORMAT_FIELDS.has(sub);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function keysWithin(value: unknown, allowed: ReadonlySet<string>): boolean {
+  return value === undefined || (isPlainObject(value) && Object.keys(value).every((k) => allowed.has(k)));
+}
+
+const CELL_KEYS = new Set(['userEnteredFormat']);
+const CELL_FORMAT_KEYS = new Set([...FORMAT_FIELDS, 'textFormat']);
+const PIXEL_SIZE = new Set(['pixelSize']);
+
+/**
+ * Whether one :batchUpdate request can write no cell content, no rule, and nothing that changes
+ * what a cell reads as. A request names its type as its only key; anything else is not taken as
+ * pure. `repeatCell` is pure only when every path of its mask, and every part of its cell, is one
+ * of the looks-only parts above; `updateDimensionProperties` only when it sets sizes, since it
+ * can also hide rows.
+ */
+function isPureFormatRequest(request: unknown): boolean {
+  if (!isPlainObject(request)) return false;
+  const keys = Object.keys(request);
+  if (keys.length !== 1) return false;
+  const type = keys[0]!;
+  if (PURE_FORMAT_TYPES.has(type)) return true;
+  const body = request[type];
+  if (!isPlainObject(body) || typeof body['fields'] !== 'string') return false;
+  const paths = maskPaths(body['fields']);
+  if (paths === null) return false;
+  if (type === 'updateDimensionProperties') {
+    return paths.every((p) => p === 'pixelSize') && keysWithin(body['properties'], PIXEL_SIZE);
+  }
+  if (type !== 'repeatCell' || !paths.every(looksOnlyPath)) return false;
+  const cell = body['cell'];
+  if (!keysWithin(cell, CELL_KEYS)) return false;
+  const format = isPlainObject(cell) ? cell['userEnteredFormat'] : undefined;
+  if (!keysWithin(format, CELL_FORMAT_KEYS)) return false;
+  return keysWithin(isPlainObject(format) ? format['textFormat'] : undefined, TEXT_FORMAT_FIELDS);
+}
+
+/** Requests that can write cells shown with one question, and the length of each line. */
+export const FORMAT_REQUESTS_SHOWN = 5;
+export const FORMAT_LINE_MAX = 1000;
+
+/**
+ * A character a reader cannot see, or that changes how the text around it reads, written as its
+ * escape, so nothing in a request can hide in a short line: the hidden class of
+ * `core/hidden-chars.ts` (default-ignorables, controls, format characters, separators, the
+ * braille blank, noncharacters), plus unassigned code points, combining marks and every space but
+ * the plain one. Unlike there, nothing is let through in place: a request is no text to read.
+ */
+const UNSEEN = /[\p{Default_Ignorable_Code_Point}\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Noncharacter_Code_Point}\p{Cn}\p{Mn}\p{Me}\u2800]|[^\S ]/gu;
+function seen(text: string): string {
+  return text.replace(UNSEEN, (c) => {
+    const cp = c.codePointAt(0)!;
+    return cp > 0xffff ? `\\u{${cp.toString(16)}}` : `\\u${cp.toString(16).padStart(4, '0')}`;
+  });
+}
+
+/** The line a request is shown on: its type and its body as JSON, each character visible. */
+function requestLine(request: unknown): { type: string | null; body: string; length: number } {
+  const type = isPlainObject(request) && Object.keys(request).length === 1 ? Object.keys(request)[0]! : null;
+  const body = seen(JSON.stringify(type === null ? request : (request as Record<string, unknown>)[type]) ?? 'null');
+  const shownType = type === null ? 'request' : seen(type);
+  return { type: type === null ? null : shownType, body, length: [...`${shownType}: ${body}`].length };
+}
+
+/**
+ * What a format question adds after content from outside, when some requests can write cell
+ * content or a rule: why it asks, then each of those requests in full, on one line each, so the
+ * range and the content the owner decides on are in front of them. Null when every request is
+ * pure formatting. A request is never shortened, since the part a line would lose is the part
+ * that fetches; when more requests, or a longer one, than a question can show come in one call,
+ * the call is refused instead, and the refusal says how to split it.
+ */
+function formatRequestsNote(requests: readonly unknown[], said: SheetsNoteDialog): { note: PromptText } | { refusal: string } | null {
+  const shown = requests.filter((r) => !isPureFormatRequest(r));
+  if (shown.length === 0) return null;
+  const n = shown.length;
+  const lines = shown.map(requestLine);
+  if (n > FORMAT_REQUESTS_SHOWN || lines.some((l) => l.length > FORMAT_LINE_MAX)) {
+    return { refusal: `Error: this chat has read content from outside lynox, so a "format" call must show the owner, in full, every request that can write cell content or a rule. This call has ${n} such request(s); one question shows at most ${FORMAT_REQUESTS_SHOWN}, each at most ${FORMAT_LINE_MAX} characters. Split it: send pure formatting (borders, merges, sizes, bands, colours, bold) in one call, and at most ${FORMAT_REQUESTS_SHOWN} of the other requests per call, each small enough to show in full (fewer cells or rows per request). A repeatCell is pure formatting when its mask names only those parts or the whole format, and its cell sets only colours, borders, padding, alignment, wrapping, rotation and text style (bold, italic, underline, strikethrough, font, size, text colour); number formats, links and text direction count as the other requests. Nothing was sent.` };
+  }
+  const head = joinPrompts([said.formatHead(n), said.formulaFetches, said.formatShown(n)], ' ');
+  const shownLines = lines.map((l) => (l.type === null ? said.formatUntyped(l.body) : pv`${l.type}: ${l.body}`));
+  const rest = requests.length - n;
+  const more = rest === 0 ? [] : [said.formatMore(rest)];
+  return { note: joinPrompts([head, ...shownLines, ...more], '\n') };
+}
+
 // === Tool Creation ===
 
 // Actions flagged destructive to the permission guard. `format` is included
@@ -194,6 +427,8 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
       // Registered from boot, connected or not — see google/index.ts.
       const auth = getAuth();
       if (!auth) return GOOGLE_NOT_CONNECTED;
+      // The call as it is carried out: the owner may choose to write formula cells as text.
+      let call = input;
       try {
         // `hasOwn`, not a truthiness check on the lookup: `input.action` is
         // typed but arrives from the model, so an unrecognised value is
@@ -204,31 +439,61 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           if (refusal) return refusal;
         }
 
+        // Read as a list before anything is asked: the question shows the requests it covers.
+        if (input.action === 'format' && input.format_requests !== undefined && !Array.isArray(input.format_requests)) {
+          return 'Error: "format_requests" must be an array of batchUpdate requests.';
+        }
+
         // Confirmation for destructive actions — fail-safe: block if no prompt available
         if (CONFIRM_ACTIONS.has(input.action) && !agent.promptUser) {
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
         }
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
-          // `pv` splits frame from value, so the renderer can put the id and
+          // The dialog table builds the question with `pv`, which splits frame from value, so the renderer can put the id and
           // the range in text nodes — see core/prompt-value.ts. They are no
           // longer collapsed on the way in, which means the prompt now shows
           // the value that is actually about to be used.
-          const confirmMsg: PromptText = input.action === 'format'
-            ? pv`Apply batch changes to spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Formatting requests can delete or overwrite cells and sheets.`
-            : pv`Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
-          const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
-          if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-            return 'Action cancelled by user.';
+          const language = agent.dialogLanguage ?? 'en';
+          const said = GOOGLE_DIALOG[language];
+          const sheet = input.spreadsheet_id ?? said.unknown;
+          const range = input.range ?? said.unspecified;
+          // An append inserts its rows (`insertDataOption=INSERT_ROWS`), so it overwrites nothing
+          // and is not asked about as if it did.
+          const action: ConsentAction = input.action === 'format' ? 'format' : input.action === 'append' ? 'append' : 'overwrite';
+          const confirmMsg: PromptText = action === 'format' ? said.format(sheet)
+            : action === 'append' ? said.append(range, sheet)
+            : said.overwrite(range, sheet);
+          // After content from outside the chat, a cell that starts like a formula is shown with
+          // the question: Google runs it on its side, where no check on the engine's requests
+          // sees the address it may fetch. Before that, the question is the plain one above.
+          const tainted = deriveTurnUntrusted(agent);
+          const formulas = tainted ? formulasToShow(input, language) : [];
+          // A format call is asked about as one batch: a request that can write cell content or a
+          // rule is shown in full beside the question, and the answer covers every request in it.
+          const requests = tainted && input.action === 'format' ? formatRequestsNote(input.format_requests ?? [], SHEETS_NOTE_DIALOG[language]) : null;
+          if (requests !== null && 'refusal' in requests) return requests.refusal;
+          if (formulas.length === 0) {
+            // Only the `confirm` key goes ahead; its button names `action`, which decides nothing.
+            const consent = decideConsent('google', await agent.promptUser(requests === null ? confirmMsg : joinPrompts([confirmMsg, requests.note], '\n\n'), consentOptions('google'), consentMeta('google', undefined, action)));
+            if (consent !== 'confirm') return consentRefusal(consent, 'Action cancelled by user.');
+          } else {
+            const options = formulas.length > FORMULAS_SHOWN ? FORMULA_OPTIONS_SOME_HIDDEN : FORMULA_OPTIONS;
+            const chosen = chosenOption(await agent.promptUser(joinPrompts([confirmMsg, formulaNote(formulas, SHEETS_NOTE_DIALOG[language])], '\n\n'), options), options);
+            if (chosen === WRITE_AS_TEXT) {
+              call = { ...input, values: formulasAsText(input.values ?? []) };
+            } else if (chosen !== WRITE_AS_FORMULAS) {
+              return 'Action cancelled by user.';
+            }
           }
         }
 
-        switch (input.action) {
-          case 'read': return await handleRead(auth, input);
-          case 'write': return await handleWrite(auth, input);
-          case 'append': return await handleAppend(auth, input);
-          case 'create': return await handleCreate(auth, input);
+        switch (call.action) {
+          case 'read': return await handleRead(auth, call);
+          case 'write': return await handleWrite(auth, call);
+          case 'append': return await handleAppend(auth, call);
+          case 'create': return await handleCreate(auth, call);
           case 'list': return await handleList(auth);
-          case 'format': return await handleFormat(auth, input);
+          case 'format': return await handleFormat(auth, call);
           default: return `Error: Unknown action "${input.action}". Valid: read, write, append, create, list, format.`;
         }
       } catch (err: unknown) {
