@@ -63,7 +63,8 @@ import type { TriggerRecord, TriggerEffect, PlannedPipeline, PromptMeta } from '
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
 import type { RunState, AgentOutput } from '../types/orchestration.js';
-import { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } from './session-budget.js';
+import { configurePersistentBudget, resetPersistentBudget, getReservedInFlight, isHeldReservation } from './session-budget.js';
+import type { CostGuardConfig } from '../types/index.js';
 
 /** A workflow in these tests counts as stamped when it carries `confirmedAt`, as before the stamp
  *  bound its steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts. */
@@ -1690,6 +1691,33 @@ describe('WorkerLoop', () => {
 
       expect(session.run, 'the run the old projection refused').toHaveBeenCalled();
       expect(grantedCap(engine)).toBeCloseTo(14.78, 2);
+    });
+
+    it('hands the run the reservation that holds its grant, and takes it back once the run settled', async () => {
+      // A sub-agent batch carved out of this run's budget is not held against the caps again
+      // only on the strength of this object, so it has to be the admission's own, live while
+      // the run runs and given back after.
+      configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+      const session = makeSession('Done.');
+      let heldWhileRunning: boolean | undefined;
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session });
+      vi.mocked(session.run).mockImplementation(async () => {
+        const opts = (engine.createSession as unknown as { mock: { calls: Array<[{ costGuard?: CostGuardConfig }?]> } })
+          .mock.calls[0]?.[0]?.costGuard;
+        heldWhileRunning = isHeldReservation(opts?.heldAgainstCaps)
+          && opts?.heldAgainstCaps?.reservedUSD === opts?.maxBudgetUSD;
+        return 'Done.';
+      });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.run, 'positive control: the run ran').toHaveBeenCalled();
+      expect(heldWhileRunning, 'a live reservation the size of the grant').toBe(true);
+      const after = (engine.createSession as unknown as { mock: { calls: Array<[{ costGuard?: CostGuardConfig }?]> } })
+        .mock.calls[0]?.[0]?.costGuard?.heldAgainstCaps;
+      expect(isHeldReservation(after), 'given back once the run settled').toBe(false);
+      expect(getReservedInFlight()).toBe(0);
     });
 
     it('never grants more than the daily cap has left', async () => {

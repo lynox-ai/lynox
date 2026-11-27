@@ -3891,6 +3891,15 @@ describe('LynoxHTTPApi', () => {
           expect(again.idempotent, answer).toBe(true);
           expect(again.refused, answer).toBe(refused ? 'unrecognised_answer' : undefined);
         }
+        // The Sheets formula question is read against the kind stored with it: the one that showed
+        // only some formulas has no key that writes them, so that key is no answer to it.
+        for (const [kind, answer, refused] of [['formula-text', 'as-formulas', true], ['formula', 'as-formulas', false], ['formula-text', 'as-text', false], ['formula', '2', true], ['formula', 'Write as formulas', true]] as const) {
+          const sid = `s-${kind}-${answer.replace(/\W/g, '_')}`;
+          const id = store.insertAskUser(sid, 'Formulas?', [...(kind === 'formula' ? ['as-text', 'as-formulas', 'cancel'] : ['as-text', 'cancel'])], false, undefined, undefined, undefined, undefined, kind);
+          const res = await jsonFetch(`/api/sessions/${sid}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer }) });
+          expect(res.status, `${kind} ${answer}`).toBe(200);
+          expect((await res.json() as { refused?: string }).refused, `${kind} ${answer}`).toBe(refused ? 'unrecognised_answer' : undefined);
+        }
         // An older client answers without a promptId: nothing is answered, and the gate stays open.
         const legacyId = guard('s-consent-legacy');
         const legacy = await jsonFetch('/api/sessions/s-consent-legacy/reply', { method: 'POST', body: JSON.stringify({ answer: 'y' }) });
@@ -15118,6 +15127,18 @@ describe('LynoxHTTPApi', () => {
       const id = planRun();
       const res = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
       expect(res.status).toBe(409);
+    });
+
+    it('refuses an undo that would put back a run whose phase was not kept, saying why', async () => {
+      const spy = vi.spyOn(bulkLedger, 'planUndo').mockReturnValue({ ok: false, reason: 'phase_not_kept' });
+      try {
+        const res = await jsonFetch('/api/bulk/runs/u1/undo', { method: 'POST' });
+        expect(res.status).toBe(409);
+        expect(JSON.stringify(await res.json())).toContain('This run was undone before lynox kept the phase a run had before its undo, so it cannot be reapplied. Nothing was written. To write its values again, plan a new bulk run with the same targets and values; it needs its own approval.');
+        expect(spy).toHaveBeenCalledWith('u1');
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('plans an undo of a finished run as a previewed run with its own checksum', async () => {

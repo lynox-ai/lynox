@@ -9,7 +9,7 @@
  */
 
 import { CONSENT_KEYS, type ConsentAction, type ConsentKind } from '../contract/prompt.js';
-import { CONSENT_ACTION_LABELS, CONSENT_LABELS } from '../tools/dialog-text.js';
+import { CONSENT_ACTION_LABELS, consentLabel } from '../tools/dialog-text.js';
 import { join } from 'node:path';
 import { claimStoreReconnectHints } from './store-token-refresh.js';
 import { recipientsConfirmable } from './recipient-confirm.js';
@@ -53,13 +53,13 @@ import type { DeliverySummary, NotificationRouter, NotificationMessage } from '.
 import { deliveryCase, inquiryOptions, summarizeDelivery, type DeliveryDetail } from './notification-router.js';
 import { stripHidden } from './hidden-text.js';
 import { runTaskPrompt, RUN_TASK_ANSWERED, RUN_TASK_ANSWER_PREAMBLE } from './run-task-turn.js';
-import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
+import type { PersistentBudgetReservation, TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
 import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type RunCause } from './task-manager.js';
 import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
-import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget } from './session-budget.js';
+import { persistentBudgetHeadroom, reservePersistentBudget, releaseReservation, getSessionCostCeiling, checkPersistentBudget } from './session-budget.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
 // handler was its first consumer; src/core/ is the better home now that there
 // are two. `src/core/config.ts` already imports across the same seam, so this
@@ -695,7 +695,7 @@ export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: stri
 
 /** An engine consent's options as a notification lists them: the keys in the owner's words. */
 function consentInquiryOptions(kind: ConsentKind, language: 'de' | 'en', action?: ConsentAction): string[] {
-  return CONSENT_KEYS[kind].map((key) => (key === 'confirm' && action !== undefined ? CONSENT_ACTION_LABELS[language][action] : CONSENT_LABELS[language][key]));
+  return CONSENT_KEYS[kind].map((key) => (key === 'confirm' && action !== undefined ? CONSENT_ACTION_LABELS[language][action] : consentLabel(kind, key, language)));
 }
 
 /** The refusal notice of a run that ended by throwing, carried from the run to where the failure is recorded. */
@@ -1687,7 +1687,7 @@ export class WorkerLoop {
         // Taken after the reservation, so a deferred task never holds a lease it does not use.
         const lease = this.takeLease(task.id);
         if (lease === 'held' || lease === 'not_found') {
-          releasePersistentBudget(reservation.reservedUSD);
+          releaseReservation(reservation);
           continue;
         }
         // AFTER the lease, so the word is true of a task that really proceeds. Said before
@@ -1703,7 +1703,7 @@ export class WorkerLoop {
           // were set up for), and the owner can run it again by hand. Fenced per task: a
           // store error here must not stop the other due triggers of this tick; the lease
           // then stays and lapses again, and the run is reported once more, never re-run.
-          releasePersistentBudget(reservation.reservedUSD);
+          releaseReservation(reservation);
           try {
             this.recordAndNotify(task, this.#notices().interrupted, 'interrupted');
             this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
@@ -1719,7 +1719,11 @@ export class WorkerLoop {
         // reservation once the task settles, via .finally so it runs even if
         // executeTask's synchronous prologue throws — a leaked reservation would
         // otherwise shrink the tenant's daily headroom for the process lifetime.
-        void this.executeTask(task, capUSD).finally(() => releasePersistentBudget(reservation.reservedUSD));
+        // The run's cost guard is told its budget is held only when the grant IS that budget
+        // (`capUSD`); an estimate-sized hold under a larger constant ceiling covers less than it.
+        void this.executeTask(task, capUSD, undefined, capUSD !== null ? reservation : undefined)
+          // run-group-starter: fires once, when this run settles; it only frees the run's budget reservation and reports no spend.
+          .finally(() => releaseReservation(reservation));
       }
       // After the due triggers, and on its own: a drain that throws leaves the next tick's
       // due triggers as they were. No signal from the receiver wakes it, so an event waits
@@ -1834,11 +1838,11 @@ export class WorkerLoop {
           lease = this.takeLease(triggerId);
         } catch (err: unknown) {
           // Not held up by the trigger's catch below with the reservation still taken.
-          releasePersistentBudget(reservation.reservedUSD);
+          releaseReservation(reservation);
           throw err;
         }
         if (lease !== 'claimed') {
-          releasePersistentBudget(reservation.reservedUSD);
+          releaseReservation(reservation);
           if (lease === 'interrupted') {
             // Fails closed: never read as `claimed`. The lease is ours now; give it back.
             process.stderr.write(`[lynox:worker] "${trigger.title}" (${triggerId}) webhook trigger reported a lost run on its lease; no event run\n`);
@@ -1877,10 +1881,10 @@ export class WorkerLoop {
           // The row read again now that the lease is held, as `executeTask` does: an owner's takeover
           // of the plan may have committed since the read above.
           // run-group-starter: fires once, when this run settles; it only frees the run's budget reservation and reports no spend.
-          void this.#runInSlot(this.#freshRecord(trigger), null, false, undefined, slotEvent).finally(() => releasePersistentBudget(reservation.reservedUSD));
+          void this.#runInSlot(this.#freshRecord(trigger), null, false, undefined, slotEvent).finally(() => releaseReservation(reservation));
         } finally {
           if (!started) {
-            releasePersistentBudget(reservation.reservedUSD);
+            releaseReservation(reservation);
             try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
           }
         }
@@ -1953,7 +1957,7 @@ export class WorkerLoop {
    * paths that do not reserve (the manual "Run now" below, and any direct caller). Null
    * keeps each executor's own constant, so an unreserved run behaves exactly as before.
    */
-  private async executeTask(record: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker): Promise<void> {
+  private async executeTask(record: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker, hold?: PersistentBudgetReservation): Promise<void> {
     // Who a plan depends on is read from the row as it is now, not as `getDue` returned it: the
     // owner's takeover (`plan-takeover.ts`) can commit in between, and every reader below — the
     // stamp checks, the plan's members and whom it acts for, the gate, the trail, the watch's
@@ -1980,14 +1984,14 @@ export class WorkerLoop {
     //
     // It is read from the grant, so it holds for the attempt this dispatch starts.
     const starter = grant?.principal;
-    if (!handRun || !grant) return this.#executeTask(task, capUSD, false, starter);
+    if (!handRun || !grant) return this.#executeTask(task, capUSD, false, starter, hold);
     // One line per hand start, naming who started it. A process log, not a record.
     process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) test run by hand by ${principalTag(grant.principal)}\n`);
-    return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true, grant.principal));
+    return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true, grant.principal, hold));
   }
 
-  async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter?: RequestPrincipal): Promise<void> {
-    return this.#runInSlot(task, capUSD, handRun, starter, undefined);
+  async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter?: RequestPrincipal, hold?: PersistentBudgetReservation): Promise<void> {
+    return this.#runInSlot(task, capUSD, handRun, starter, undefined, hold);
   }
 
   /**
@@ -2000,11 +2004,11 @@ export class WorkerLoop {
    * (`worker-run-start.ts`): a workflow the run's session starts records it. A hand run of
    * a mandate's proposal (`handRun`) always comes through `runTriggerNow`, inside the hand scope.
    */
-  #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
+  #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined, hold?: PersistentBudgetReservation): Promise<void> {
     const start: WorkerRunStart = isStartedByHand(task.id) ? 'hand'
       : event !== undefined ? 'event'
         : task.effect === 'run_agent' && this.#picksUpAnswer(task.id) ? 'answered' : 'schedule';
-    return runAsWorkerRun(start, () => this.#runFramed(task, capUSD, handRun, starter, event));
+    return runAsWorkerRun(start, () => this.#runFramed(task, capUSD, handRun, starter, event, hold));
   }
 
   /** Whether this run picks up an answered question: then how the run that asked was started is
@@ -2021,7 +2025,7 @@ export class WorkerLoop {
     }
   }
 
-  async #runFramed(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
+  async #runFramed(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined, hold?: PersistentBudgetReservation): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
@@ -2233,7 +2237,7 @@ export class WorkerLoop {
               if (task.source === 'watch') {
                 await this.executeWatch(task, capUSD, starter);
               } else {
-                await this.executeStandard(task, capUSD, starter);
+                await this.executeStandard(task, capUSD, starter, hold);
               }
               break;
             case 'bulk_apply':
@@ -2818,7 +2822,7 @@ export class WorkerLoop {
   /** Execute a standard or scheduled task via headless Session. */
   /** @param starter Who started this run by hand, when a request did. The run is built for the
    *  mandate its plan acts for, else for this starter (`#runAs`), and that one's tool lock applies. */
-  private async executeStandard(task: TriggerRecord, capUSD: number | null = null, handStarter?: RequestPrincipal): Promise<void> {
+  private async executeStandard(task: TriggerRecord, capUSD: number | null = null, handStarter?: RequestPrincipal, hold?: PersistentBudgetReservation): Promise<void> {
     // §0 A10 — is this run happening BECAUSE a question was answered?
     //
     // The answered row carries both halves the new run needs: the thread the
@@ -2902,7 +2906,10 @@ export class WorkerLoop {
       // a grant of, say, $0.40 — the reservation would then under-count by the
       // difference and the daily cap would be the thing that breaks. Null means nobody
       // reserved (a manual run), and then the constant is the only bound there is.
-      costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
+      // The admission's reservation, so a sub-agent batch carved out of this budget is not held
+      // against the caps a second time. The guard checks it is a live reservation that covers
+      // the limit; a hand run or a run without a grant has none.
+      costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD, heldAgainstCaps: hold },
       principal: runAs,
       // The tier the user chose for this trigger, held to the ceiling by the session.
       ...(triggerTier ? { model: triggerTier } : {}),

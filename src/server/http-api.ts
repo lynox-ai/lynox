@@ -147,7 +147,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import type { KnowledgeStore } from '../core/knowledge-store.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
+import { BULK_PHASE_NOT_KEPT, BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
 import { judgeRuleSourceChanged } from '../core/bulk-judge-rule.js';
 import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
@@ -10736,6 +10736,7 @@ export class LynoxHTTPApi {
       unmeasured_unconfirmed: [409, `lynox has not checked this kind of change with this provider. Approve it with "unmeasuredConfirmed": true — the statement "${BULK_UNMEASURED_CONFIRMATION}"`],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
       source_running: [409, 'The bulk run this undo takes back is still writing. Approve the undo once that run has stopped.'],
+      phase_not_kept: [409, BULK_PHASE_NOT_KEPT],
       undo_stale: [409, 'The bulk run this undo takes back has changed since the undo was planned. If it wrote more targets, plan the undo again. If another undo already took it back, nothing is left for this one to undo.'],
       cost_cap: [400, 'Starting a judged run needs "costCapUsd": the most it may spend on model calls, in US dollars, a whole number of cents above zero.'],
       not_at_this_start: [400, 'This start only reads the list. Give the spend limit and "supersedes" when you start the judging, once the list is read.'],
@@ -15105,26 +15106,32 @@ export class LynoxHTTPApi {
       // The remembered texts both stores hold, read the same way on either path and masked as the
       // durable knowledge block is; read before the graph, so a graph read that fails does not
       // take them with it.
-      // Graph rows no block carries (subjects the graph block does not list; with the subject
-      // graph on, the older store's entities and relations) are counted, and any marks the
-      // block too: the export says "complete" only when nothing stored is left out.
+      // With the subject graph on, the older store's entities and relations are carried here too.
+      // Graph rows no block carries (subjects the graph block does not list) are counted, and any
+      // marks the block too: the export says "complete" only when nothing stored is left out.
+      // Which store the graph block is read from. With a layer, the setting it started with: a
+      // config reload does not rebuild it. Off as well where the block falls back to the older
+      // store (the subject-graph store did not open, or engine.db is missing), so the older
+      // store's entities and relations are carried once, not in both blocks.
+      const exportLayer = engine.getKnowledgeLayer();
+      const subjectGraph = (exportLayer ? exportLayer.readsSubjectGraph === true && !exportLayer.subjectGraphUnavailable : engine.getUserConfig().subject_graph_enabled === true)
+        && engine.getEngineDb() !== null;
       let memoryTexts: { block: Record<string, unknown>; mayBeIncomplete: boolean };
       try {
         const { graphHoldsRowsNotExported, readMemoryTextsForExport } = await import('../core/graph-export.js');
         const exportSecrets = engine.getSecretStore();
         const agentMemoryFile = join(getLynoxDir(), 'agent-memory.db');
+        // What this block and the count read must agree with what the graph block lists.
         const read = readMemoryTextsForExport({
           agentMemoryFile,
           engineDb: engine.getEngineDb(),
           mask: (t: string) => maskSecretPatterns(exportSecrets ? exportSecrets.maskSecrets(t) : t),
+          subjectGraph,
         });
-        // With a layer, the setting it started with: a config reload does not rebuild it, and the
-        // count must agree with what the layer lists.
-        const layer = engine.getKnowledgeLayer();
         const notExported = graphHoldsRowsNotExported({
           agentMemoryFile,
           engineDb: engine.getEngineDb(),
-          subjectGraph: layer ? layer.readsSubjectGraph === true : engine.getUserConfig().subject_graph_enabled === true,
+          subjectGraph,
         });
         memoryTexts = { block: { 'agent-memory.db': read['agent-memory.db'], 'engine.db': read['engine.db'] }, mayBeIncomplete: read.mayBeIncomplete || notExported };
       } catch {

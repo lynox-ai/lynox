@@ -127,16 +127,6 @@ function valuesToMarkdownTable(values: string[][]): string {
 
 // === Formulas after content from outside ===
 
-const WRITE_AS_TEXT = 'Write as text';
-const WRITE_AS_FORMULAS = 'Write as formulas';
-const DONT_WRITE = 'Don’t write';
-/** Listed first: the choice that writes no formula. */
-const FORMULA_OPTIONS = [WRITE_AS_TEXT, WRITE_AS_FORMULAS, DONT_WRITE];
-/**
- * When some formulas are only counted: writing formulas the owner was not shown is not offered,
- * since a harmless five could stand in front of the one that fetches.
- */
-const FORMULA_OPTIONS_SOME_HIDDEN = [WRITE_AS_TEXT, DONT_WRITE];
 /** Formula lines shown before the rest is counted. */
 export const FORMULAS_SHOWN = 5;
 
@@ -147,12 +137,14 @@ function formulasToShow(input: SheetsInput, language: DialogLanguage): FormulaCe
   return [];
 }
 
-/** The option an answer names: by its label, or by its number in the list (1-based). */
-function chosenOption(answer: string, options: readonly string[]): string | undefined {
-  const byLabel = options.find((o) => o.toLowerCase() === answer.trim().toLowerCase());
-  if (byLabel !== undefined) return byLabel;
-  const index = /^\d+$/.test(answer.trim()) ? Number(answer.trim()) - 1 : -1;
-  return options[index];
+/**
+ * Which question the formulas get: with every one shown, `formula` (as text, as formulas, or not
+ * at all); with some only counted, `formula-text`, which has no key that writes formulas, since a
+ * harmless five could stand in front of the one that fetches. Decided when asking, and stored
+ * with the question, so the answer is read against the question as it was shown.
+ */
+export function formulaConsentKind(formulas: number): 'formula' | 'formula-text' {
+  return formulas > FORMULAS_SHOWN ? 'formula-text' : 'formula';
 }
 
 /**
@@ -164,11 +156,11 @@ function formulaNote(formulas: readonly FormulaCell[], said: SheetsNoteDialog): 
   const n = formulas.length;
   const head = joinPrompts([said.formulaHead(n), said.formulaFetches], ' ');
   const lines = formulas.slice(0, FORMULAS_SHOWN).map(({ cell, formula }) => pv`${cell}: ${singleLine(formula)}`);
-  // With some only counted, the question offers no "Write as formulas" and says why, and how
+  // With some only counted, the question offers no key that writes formulas and says why, and how
   // to get it: each call is asked about on its own, so a call with at most FORMULAS_SHOWN shows
   // every formula. The sentence writes that number out, so it stays the question's own words;
   // tests hold the sentence to a copy of it and the copy's number to the constant.
-  const more = n > FORMULAS_SHOWN ? [said.formulaMore(n - FORMULAS_SHOWN), said.formulaOnlyShown(WRITE_AS_FORMULAS)] : [];
+  const more = n > FORMULAS_SHOWN ? [said.formulaMore(n - FORMULAS_SHOWN), said.formulaOnlyShown] : [];
   return joinPrompts([head, ...lines, ...more], '\n');
 }
 
@@ -477,12 +469,14 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
             const consent = decideConsent('google', await agent.promptUser(requests === null ? confirmMsg : joinPrompts([confirmMsg, requests.note], '\n\n'), consentOptions('google'), consentMeta('google', undefined, action)));
             if (consent !== 'confirm') return consentRefusal(consent, 'Action cancelled by user.');
           } else {
-            const options = formulas.length > FORMULAS_SHOWN ? FORMULA_OPTIONS_SOME_HIDDEN : FORMULA_OPTIONS;
-            const chosen = chosenOption(await agent.promptUser(joinPrompts([confirmMsg, formulaNote(formulas, SHEETS_NOTE_DIALOG[language])], '\n\n'), options), options);
-            if (chosen === WRITE_AS_TEXT) {
+            // Only a key of the question's own kind counts: `as-formulas` to the question that does
+            // not offer it, a label, another language's word or a number writes nothing.
+            const kind = formulaConsentKind(formulas.length);
+            const consent = decideConsent(kind, await agent.promptUser(joinPrompts([confirmMsg, formulaNote(formulas, SHEETS_NOTE_DIALOG[language])], '\n\n'), consentOptions(kind), consentMeta(kind)));
+            if (consent === 'as-text') {
               call = { ...input, values: formulasAsText(input.values ?? []) };
-            } else if (chosen !== WRITE_AS_FORMULAS) {
-              return 'Action cancelled by user.';
+            } else if (consent !== 'as-formulas') {
+              return consentRefusal(consent, 'Action cancelled by user.');
             }
           }
         }
