@@ -4012,11 +4012,16 @@ export class WorkerLoop {
         ...(readers === null ? {} : { audience: 'owner' as const }),
       });
       // Every live grant reads the same end in the mandates' sentence, not only the planning one:
-      // a mandate gets the notices the owner gets, in the sentence that is true for it.
-      if (readers !== null) {
+      // a mandate gets the notices the owner gets, in the sentence that is true for it. It reads
+      // the fact without the member-connection lines: they are the owner's, naming another
+      // member's provider and profile and the owner's way to change it. They stand in the history,
+      // which a mandate reads, as recorded. The sentence is where `told.result` starts, so this
+      // finds a part only where `readers` found one too.
+      const forMandate = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, said ?? resultSummary, lang);
+      if (forMandate !== null) {
         void this.notificationRouter.notify({
           title,
-          body: readers.mandate,
+          body: forMandate.mandate,
           taskId: task.id,
           priority: toldLook.priority,
           audience: 'all_mandates',
