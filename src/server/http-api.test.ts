@@ -20788,7 +20788,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           getBlock: () => { throw new Error('export must use getBlockMasked'); },
           getBlockMasked: (id: string) => `block:${id}`,
           // Nothing rejected or superseded is held, so the block can read complete.
-          countRejectedOrSuperseded: () => 0,
+          listRejectedOrSupersededMasked: () => [],
         }),
         getKnowledgeLayer: () => null,
         getCRM: () => null,
