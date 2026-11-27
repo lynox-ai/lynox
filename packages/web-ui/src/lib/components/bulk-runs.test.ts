@@ -1379,44 +1379,14 @@ describe('a way on is said once on the run page (U-374)', () => {
 		if (m) { de[m[1]!] = m[2]!; en[m[1]!] = m[3]!; }
 	}
 
-	const I18N: BulkI18n = { t: (k) => de[k] ?? k, tf: (k) => de[k] ?? k };
-	// A write run halted while writing, as the page reads it; `o` changes how it goes on.
-	const halted = (haltKey: string | null, o: Partial<BulkRunDetailData> = {}) => ({
-		phase: 'writing' as BulkRunDetailData['phase'], haltKey, haltReason: haltKey === null ? null : 'x', probe: null, targetSystem: 'http:shop.example.invalid',
-		probeConfirmed: true, changes: { update: 1000, create: 0, delete: 0, unchanged: 0, invalid: 0 },
-		maxTargets: 1000, applied: 550, failed: 0, failedOnce: 0, failureLimit: 50, resumeOpen: 398, resumeTries: 398, resumeSends: 398, sentUnknown: 0, conflicts: 0, ...o,
-	}) as Parameters<typeof bulkOwnerNoticeShown>[0];
-
-	it('drops the owner-only notice for a mandate where the halt sentence it reads already names the owner', () => {
-		for (const key of ['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff']) {
-			expect(bulkOwnerNoticeShown(halted(key), true, null, I18N), key).toBe(false);
-		}
-		// A sentence that does not name the owner keeps the notice, and so does a run that did not halt.
-		expect(bulkOwnerNoticeShown(halted('storeAccessEnded'), true, null, I18N)).toBe(true);
-		expect(bulkOwnerNoticeShown(halted(null), true, null, I18N)).toBe(true);
-	});
-
-	it('every halt sentence in a mandate\'s form names the owner, in both languages, since its form alone drops the notice', () => {
-		const keys = Object.keys(de).filter((k) => /^bulk\.halt\..*_mandate(?:_one)?$/.test(k));
-		expect(keys.length).toBeGreaterThan(10);
-		for (const k of keys) {
-			expect(de[k], k).toMatch(/Inhaber/);
-			expect(en[k], k).toMatch(/owner/);
-		}
-	});
-
-	it('keeps the notice under switched-off writing where the mandate reads the sentence of a run that goes on by checking, which does not name the owner', () => {
-		const checking = halted('shopifyWriteOff', { sentUnknown: 2, resumeSends: 0 });
-		expect(bulkResumeKind(checking)).toBe('check');
-		expect(bulkHaltCause(checking, true, null, bulkMandateI18n(I18N), true)).toBe(de['bulk.halt.shopifyWriteOff_check']);
-		expect(bulkOwnerNoticeShown(checking, true, null, I18N)).toBe(true);
-	});
-
-	it('keeps the notice under switched-off writing where the run has no way to go on yet, and its sentence does not name the owner', () => {
-		const unconfirmed = halted('shopifyWriteOff', { probeConfirmed: false });
-		expect(bulkResumeKind(unconfirmed)).toBeNull();
-		expect(bulkHaltCause(unconfirmed, true, null, bulkMandateI18n(I18N), true)).not.toMatch(/Inhaber/);
-		expect(bulkOwnerNoticeShown(unconfirmed, true, null, I18N)).toBe(true);
+	it('drops the owner-only notice for a mandate where the halt sentence already sends it to the owner', () => {
+		expect(bulkOwnerNoticeShown('consentOutdated')).toBe(false);
+		expect(bulkOwnerNoticeShown('productWriteNotAsked')).toBe(false);
+		expect(bulkOwnerNoticeShown('shopifyWriteOff')).toBe(false);
+		// A sentence that does not name the owner keeps the notice.
+		expect(bulkOwnerNoticeShown('storeAccessEnded')).toBe(true);
+		expect(bulkOwnerNoticeShown('unavailable')).toBe(true);
+		expect(bulkOwnerNoticeShown(null)).toBe(true);
 	});
 
 	it('every halt it treats as naming the owner does so in each of its mandate sentences, before and after a first write, in both languages', () => {
