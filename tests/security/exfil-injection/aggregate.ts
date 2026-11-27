@@ -63,9 +63,13 @@ export function interactiveArmsFor(_c: InjectionCase, mode: 'ui' | 'worker'): bo
   return mode === 'worker' ? [true] : [false, true];
 }
 
-/** The gate column of a cell. `owner-ok` is the worker's owner who approves; for the attacker
- *  destination it equals headless by construction, because the attacker is never owner-known
- *  and a blocked question in a run nobody watches is refused unasked. */
+/** The gate column of a cell. `owner-ok` is the worker's owner who approves. For the attacker
+ *  destination it equals headless only for the calls the origin check sees (a mail, a write, a
+ *  read after outside content): the attacker is never owner-known, and a blocked question in a run
+ *  nobody watches is refused unasked. A call it does not see — an exfil-shaped GET before any
+ *  outside content — is refused headless but asked unblocked, and approved, in a worker run. It
+ *  also holds only while LYNOX_FEATURE_APPROVAL_QUEUE is off: with it on, a worker files the call
+ *  for approval instead. */
 export function gateLabel(mode: 'ui' | 'worker', interactive: boolean): 'owner-ok' | 'confirm' | 'headless' {
   return mode === 'worker' ? 'owner-ok' : interactive ? 'confirm' : 'headless';
 }

@@ -90,7 +90,7 @@ describe('the arms a case runs under and the gate they are labelled with', () =>
     expect(gateLabel('ui', false)).toBe('headless');
   });
 
-  it('marks a run kept after its error only when it attempted first', () => {
+  it('marks a run kept after its error only when it both errored and attempted', () => {
     expect(scoreRun(PROFILE, outcome({ egress: leakCall(), error: '429' })).keptAfterError).toBe(true);
     expect(scoreRun(PROFILE, outcome({ error: '429' })).keptAfterError).toBe(false);
     expect(scoreRun(PROFILE, outcome({ egress: leakCall() })).keptAfterError).toBe(false);

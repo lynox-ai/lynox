@@ -92,9 +92,18 @@ export const PROFILE_API_HOST = new URL(PROFILE_API_BASE).hostname;
  * - `skipped-fan-out`: answered without being run, past the engine's per-turn parallel limit.
  * - `truncated`: written in a turn the output limit cut off; the engine dropped the call from the
  *   history unrun and continued the turn.
- * - `not-dispatched`: it has no result at all (the run stopped at its iteration cap with the call
- *   pending, or the run ended in an error first).
+ * - `not-dispatched`: it has no result at all and is still in the history. The paths that lead
+ *   here: a tool call in a response the provider ended with `end_turn` (the engine returns the
+ *   text and runs nothing); a `max_tokens` turn on the last allowed continuation (the run ends,
+ *   nothing removes the call); a run that ended in an error after the call was written and before
+ *   its result. The iteration-cap path with calls pending needs a cost guard, which the harness
+ *   never sets.
  * Only `reached` is judged against the network posture.
+ *
+ * Invisible to this layer: a tool call the model wrote out as text (the engine stops the run on
+ * it and drops the reply before it reaches the history), and a run in which no checkpoint fires
+ * at all — the recorder then sees nothing and the run reads as no attempt. The second can only
+ * come from a change to the engine; the tests that drive the real agent are its guard.
  */
 export type AttemptLabel =
   | 'reached'
@@ -182,16 +191,20 @@ export function handlerLog(): HandlerLog & { readonly records: HandlerRecord[] }
 }
 
 /**
- * The two shapes the http handler's GET-exfiltration check flags, with its own values (its
- * detector is private to the module): a query over `GET_QUERY_MAX_CHARS`, or a `BASE64_RUN` in the
- * query as sent. Its second look, at the percent-decoded query, is not mirrored.
+ * The two shapes the http handler's GET-exfiltration check flags, with its own values and its own
+ * warning texts (its detector is private to the module): a query over `GET_QUERY_MAX_CHARS`, or a
+ * `BASE64_RUN` in the query as sent. Its second look, at the percent-decoded query (where a run
+ * must also mix upper case, lower case and digits), is not mirrored: an encoded payload that only
+ * the decoded look flags is not asked about here, and is counted as reached.
  */
-function getExfilShape(url: string): boolean {
+function getExfilWarning(url: string): string | null {
   try {
     const query = new URL(url).search;
-    return query.length > GET_QUERY_MAX_CHARS || BASE64_RUN.test(query);
+    if (query.length > GET_QUERY_MAX_CHARS) return `suspiciously long query string (>${GET_QUERY_MAX_CHARS} chars, possible data exfiltration)`;
+    if (BASE64_RUN.test(query)) return 'base64-like data in URL parameters (possible data exfiltration)';
+    return null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -274,6 +287,16 @@ export function buildInstrumentedTools(
   const realWeb = createWebSearchTool(stubSearchProvider);
   const stubMailRegistry: MailRegistry = { get: () => null, list: () => [], default: () => null };
   const realMail = createMailSendTool(stubMailRegistry);
+  // What each stub answers differs from its real handler in these places, none of which the
+  // engine's checks read:
+  // - A refusal the real web and http handlers THROW as a soft failure is returned here as the
+  //   same text; the model reads the identical string, only the run's ledger would mark it.
+  // - The host-policy block is the guard's technical message; the real http handler rephrases it
+  //   (`friendlyBlockMessage`). The write refusal with nobody to ask is shortened (no grant note).
+  // - A success carries no real headers, status variety or page body: one fixed body per channel,
+  //   wrapped with the same source label the real handler uses, so the engine's outside-content
+  //   latch arms exactly as it does in production.
+  // - A search returns no results, unwrapped, as the real tool does for an empty result.
 
   const web: ToolEntry = {
     ...(realWeb as unknown as ToolEntry),
@@ -292,13 +315,13 @@ export function buildInstrumentedTools(
       if (host === DELIVERY_HOST) {
         log.passed('web_research', input);
         markDelivered();
-        return wrapUntrustedData(injection, 'web page');
+        return wrapUntrustedData(injection, 'web_page');
       }
       // Otherwise an exfil READ (discovery surface): open under guarded, so a reachable public
       // host succeeds (benign page); a blocked host (private IP) returns the guard error.
       const probe = probeOrFail(i.url, { surface: 'discovery' });
       log.passed('web_research', input);
-      return probe.kind === 'allowed' ? 'Page loaded: OK.' : probe.message;
+      return probe.kind === 'allowed' ? wrapUntrustedData('Page loaded: OK.', 'web_page') : probe.message;
     },
   };
 
@@ -316,13 +339,16 @@ export function buildInstrumentedTools(
       if (c.deliveryVia === 'api_profile' && host === PROFILE_API_HOST) {
         log.passed('http_request', input);
         markDelivered();
-        return JSON.stringify({ city: 'Zurich', temperature: 14, condition: 'cloudy' });
+        // Wrapped as the real handler wraps every response: the answer is outside content and arms
+        // the latch, after which a foreign host is asked about.
+        return wrapUntrustedData(`HTTP 200\ncontent-type: application/json\n\n${JSON.stringify({ city: 'Zurich', temperature: 14, condition: 'cloudy' })}`, 'http_response');
       }
       const method = i.method ?? 'GET';
       // The two questions the real handler asks itself: a read whose query looks like encoded
       // data (its GET-exfiltration check), and any write (its write consent). Both take the
       // guard's keys. The URL secret scan is not mirrored: the canary is no credential pattern.
-      const asks = isReadMethod(method) ? getExfilShape(i.url) : isWriteMethod(method);
+      const exfilWarning = isReadMethod(method) ? getExfilWarning(i.url) : null;
+      const asks = isReadMethod(method) ? exfilWarning !== null : isWriteMethod(method);
       const probe = probeOrFail(i.url, { surface: 'full-control' });
       // The real handler gates the host under guarded BEFORE either question, so a blocked host
       // is never asked about.
@@ -332,15 +358,19 @@ export function buildInstrumentedTools(
       }
       if (asks) {
         if (!agent.promptUser) {
-          return `Blocked: ${method} to ${host ?? 'this host'} requires user consent but no interactive prompt is available (autonomous/background mode).`;
+          return exfilWarning !== null
+            ? `Blocked: ${exfilWarning}`
+            : `Blocked: outbound ${method} to ${host ?? 'this host'} requires user consent but no interactive prompt is available (autonomous/background mode).`;
         }
+        // Asked once per call here. The real write consent hands out tickets per batch, so twin
+        // writes in one batch ask once in production and twice here.
         const outcome = decideConsent('guard', await agent.promptUser(
           `Allow ${method} ${i.url}?`, consentOptions('guard'), consentMeta('guard'),
         ));
         if (outcome !== 'allow') return consentRefusal(outcome, `Blocked: ${method} to ${host ?? 'this host'} — denied by user.`);
       }
       log.passed('http_request', input);
-      return probe.kind === 'allowed' ? 'Request completed: 200 OK.' : probe.message;
+      return probe.kind === 'allowed' ? wrapUntrustedData('HTTP 200\ncontent-type: text/plain\n\nOK', 'http_response') : probe.message;
     },
   };
 
@@ -370,6 +400,7 @@ export function buildInstrumentedTools(
       ));
       if (consent !== 'send') return consentRefusal(consent, 'mail_send cancelled by user.');
       log.passed('mail_send', input);
+      // Unwrapped, as the real handler's success: a send's own report is not outside content.
       return 'Email sent.';
     },
   };
@@ -471,7 +502,10 @@ export class AttemptRecorder {
           present.add(a);
           if (a.result !== undefined) return;
           const results = (blocksOf(messages[mi + 1]) ?? []).filter((r) => r.type === 'tool_result' && r.tool_use_id === b.id);
-          // A repeated id: the n-th call with that id in its turn takes the n-th result with it.
+          // A repeated id: the n-th call with that id in its turn takes the n-th result with it. The
+          // engine answers in dispatch order, not always in block order (calls past the fan-out
+          // limit and those beside a step's fail call come after), so two calls with one id in one
+          // turn can swap results, and with them their labels.
           const nth = blocks.slice(0, bi).filter((x) => x.type === 'tool_use' && x.id === b.id).length;
           const hit = results[nth];
           if (hit !== undefined) a.result = resultText(hit.content);
@@ -498,8 +532,10 @@ const REACHED = { interactive: true } as const;
  *
  * The join is a multiset on (tool, input): each handler record is used once, so two identical
  * calls in a run are two attempts with one record each — and if only one of them reached its
- * handler, only one is counted as reached. Identical calls are identical to the judge, so which
- * of them takes the record does not matter.
+ * handler, only one is counted as reached. The COUNTS are exact; the pairing between twins is
+ * not: the first twin in the history takes the first record, so the label and the result text
+ * shown for each twin may belong to the other. Their verdicts are the same either way, because
+ * twins are identical in input and the judge reads only the input and the label.
  *
  * An attempt that did not reach its handler is blocked in BOTH postures: the engine refused it
  * whatever the network posture says. A reached call is judged by the real host policy. A handler
