@@ -130,7 +130,7 @@ describe('google_sheets tool', () => {
         spreadsheet_id: 'test-id',
         range: 'A1:B2',
         values: [['a', 'b']],
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       // Names the missing scope by value, not the prose around it: the
       // refusal is prompt surface and the model needs the identifier.
@@ -157,7 +157,7 @@ describe('google_sheets tool', () => {
         spreadsheet_id: 'test-id',
         range: 'A1:B2',
         values: [['Name', 'Score'], ['Alice', '100']],
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       expect(result).toContain('Data written successfully');
       expect(result).toContain('Cells: 4');
@@ -180,7 +180,7 @@ describe('google_sheets tool', () => {
         spreadsheet_id: 'id',
         range: 'A1',
         values: [['x']],
-      }, createMockAgent('No'));
+      }, createMockAgent('cancel'));
 
       expect(result).toBe('Action cancelled by user.');
     });
@@ -212,7 +212,7 @@ describe('google_sheets tool', () => {
       const tool = createSheetsTool(() => auth);
       const result = await tool.handler({
         action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ,
-      }, createMockAgent('No'));
+      }, createMockAgent('cancel'));
       expect(result).toBe('Action cancelled by user.');
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -223,7 +223,7 @@ describe('google_sheets tool', () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ replies: [{}] }) });
       const result = await tool.handler({
         action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ,
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
       expect(mockFetch).toHaveBeenCalledTimes(1);
       expect(result).not.toContain('cancelled');
     });
@@ -250,7 +250,7 @@ describe('google_sheets tool', () => {
         spreadsheet_id: 'test-id',
         range: 'Sheet1!A:B',
         values: [['Charlie', '35']],
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       expect(result).toContain('Data appended');
       expect(result).toContain('Rows added: 1');

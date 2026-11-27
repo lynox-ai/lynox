@@ -29,7 +29,7 @@ import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { containedPrefill } from './contained-way-out.js';
 import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, isConsentCard, type ClosedCode } from './closed-question.js';
-import { CONSENT_UNRECOGNISED, isConsentKind, type ConsentKind } from '../contract/prompt.js';
+import { CONSENT_UNRECOGNISED, isConsentKind, type ConsentKind, isConsentAction, type ConsentAction, consentTakesText } from '../contract/prompt.js';
 import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
@@ -232,6 +232,8 @@ export interface PermissionPrompt {
 	/** One of the engine's own confirmations, by its marker: the card is drawn from this alone,
 	 *  its options are that kind's keys, and its answer is one of them. */
 	consent?: ConsentKind;
+	/** What the card's confirming button names (a Google write); words only. */
+	consentAction?: ConsentAction;
 }
 
 /** Question descriptor inside a multi-question tabs prompt. Mirrors the
@@ -2656,6 +2658,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				multiSelect: data['multi_select'] === true,
 				origin: originFromEvent(data),
 				...(isConsentKind(data['consent']) ? { consent: data['consent'] } : {}),
+				...(isConsentAction(data['consentAction']) ? { consentAction: data['consentAction'] } : {}),
 			};
 			break;
 		case 'prompt_tabs': {
@@ -3076,7 +3079,8 @@ export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
 	// A consent card's answer is a click; as text in the message field it would approve nothing.
-	const draftable = isConsentCard(pendingPermission?.consent) ? null : answer;
+	const consent = pendingPermission?.consent;
+	const draftable = isConsentCard(consent) && !consentTakesText(consent) ? null : answer;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
@@ -3517,6 +3521,7 @@ export async function checkPendingPrompt(onAnswered?: (nothingOpen: boolean) => 
 				multiSelect: data['multiSelect'] === true,
 				origin,
 				...(isConsentKind(data['consent']) ? { consent: data['consent'] } : {}),
+				...(isConsentAction(data['consentAction']) ? { consentAction: data['consentAction'] } : {}),
 			};
 			card = isConsentCard(pendingPermission.consent) ? 'decision' : 'question';
 		} else if (promptType === 'ask_secret') {

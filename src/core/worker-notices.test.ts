@@ -44,7 +44,7 @@ function workerSamples(n: WorkerNotices): Record<string, string> {
   return {
     consentManyTitle: n.consentManyTitle(4), consentManyBody: n.consentManyBody, consentOneTitle: n.consentOneTitle,
     consentOneBody: n.consentOneBody('Wochenbericht', true), failed: n.failed('E'), stoppedWith: n.stoppedWith('E'),
-    stopped: n.stopped, chipRunAgain: n.chipRunAgain, chipRetry: n.chipRetry, chipExplain: n.chipExplain,
+    stopped: n.stopped, memberEndForMandates: n.memberEndForMandates, chipRunAgain: n.chipRunAgain, chipRetry: n.chipRetry, chipExplain: n.chipExplain,
     containedResult: n.containedResult, containedQuestion: n.containedQuestion, containedQuestionInquiry: n.containedQuestionInquiry,
     workflowIncomplete: n.workflowIncomplete('Wochenbericht', 'failed'), errorLabel: n.errorLabel,
     affectedStepsLabel: n.affectedStepsLabel, writesLabel: n.writesLabel, workflowRef: n.workflowRef('r-1', 'w-1'),

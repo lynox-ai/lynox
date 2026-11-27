@@ -156,7 +156,7 @@ export interface OutboundContext {
 
 export interface MailHooks {
   /**
-   * Fires for every fresh (post-dedup, post-prefilter) inbound envelope. A hook that cannot
+   * Fires for every fresh (post-dedup) inbound envelope. A hook that cannot
    * take the mail now throws `InboundMailDeferred`; the batch then stays unseen.
    */
   onInboundMail?: (accountId: string, envelope: MailEnvelope) => Promise<void>;

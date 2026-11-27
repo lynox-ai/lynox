@@ -16,7 +16,7 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
-import { isConsentKind, type ConsentKind } from '../contract/prompt.js';
+import { isConsentKind, type ConsentKind, isConsentAction, type ConsentAction } from '../contract/prompt.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import { MandateKeyInputError, mandateCredentialInput, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
 
@@ -137,6 +137,13 @@ export function consentOfPayload(payloadJson: string | null): ConsentKind | unde
   } catch {
     return undefined;
   }
+}
+
+/** The action a stored consent names on its button (`PromptMeta.consentAction`), if it is one. */
+export function consentActionOfPayload(payloadJson: string | null): ConsentAction | undefined {
+  if (consentOfPayload(payloadJson) === undefined || payloadJson === null) return undefined;
+  const { action } = JSON.parse(payloadJson) as { action?: unknown };
+  return isConsentAction(action) ? action : undefined;
 }
 
 /**
@@ -390,6 +397,8 @@ export class PromptStore {
     stamp?: PromptStamp,
     /** The engine's own confirmation this is (`PromptMeta.consent`); never set for a model's question. */
     consent?: ConsentKind,
+    /** What that confirmation's button names (`PromptMeta.consentAction`). */
+    consentAction?: ConsentAction,
   ): string {
     return this._insert({
       sessionId,
@@ -407,7 +416,7 @@ export class PromptStore {
       multiSelect: multiSelect === true,
       // The engine-only consent marker, like the onboarding card's: a question the model
       // writes stores NULL here, so no option text can make it the engine's confirmation.
-      payloadJson: consent !== undefined ? JSON.stringify({ kind: 'consent', consent }) : null,
+      payloadJson: consent !== undefined ? JSON.stringify(consentAction !== undefined ? { kind: 'consent', consent, action: consentAction } : { kind: 'consent', consent }) : null,
       origin,
     });
   }
