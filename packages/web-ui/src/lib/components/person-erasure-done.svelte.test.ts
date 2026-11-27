@@ -49,6 +49,8 @@ let component: Record<string, unknown> | undefined;
 let t: (key: string) => string;
 
 /** Mounts the panel, the erase call answering with `answer`, and returns once the preview shows. */
+let closed = 0;
+
 async function mountPanel(answer: Response): Promise<void> {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
 		const path = String(input).split('?')[0]!;
@@ -57,7 +59,7 @@ async function mountPanel(answer: Response): Promise<void> {
 		return json({});
 	}));
 	const { default: PersonErasurePanel } = await import('./PersonErasurePanel.svelte');
-	component = svelte.mount(PersonErasurePanel, { target, props: { subjectId: 's1', onclose: () => {}, onerased: () => {} } });
+	component = svelte.mount(PersonErasurePanel, { target, props: { subjectId: 's1', onclose: () => { closed++; }, onerased: () => {} } });
 	svelte.flushSync();
 	await settle();
 	svelte.flushSync();
@@ -97,6 +99,9 @@ describe('PersonErasurePanel once the erasure has answered', () => {
 		await confirmErasure();
 		expect(target.querySelector('[role="status"]'), 'positive control: the done answer is shown').not.toBeNull();
 		expect([heading(), region(), topButton()]).toEqual([t('erasure.done_title'), t('erasure.done_title'), t('erasure.close')]);
+		const before = closed;
+		target.querySelector('h3')?.parentElement?.querySelector('button')?.click();
+		expect(closed - before, 'the button closes the panel').toBe(1);
 	});
 
 	it('keeps the erase heading and the cancel button after a partial answer', async () => {

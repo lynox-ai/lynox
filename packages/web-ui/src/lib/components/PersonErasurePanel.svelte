@@ -31,7 +31,7 @@
 	let result = $state<PersonErasureResult | null>(null);
 	// Once the erasure has answered in full there is nothing left to do or cancel: the panel
 	// says it is done and offers to close. A partial answer is not done and keeps both.
-	const done = $derived(notice === 'erased' && result !== null);
+	const done = $derived(notice === 'erased');
 
 	const bound = $derived(preview ? [
 		...preview.entries.filter(e => e.matchedBy === 'subject'),
