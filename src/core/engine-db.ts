@@ -1692,6 +1692,14 @@ const MIGRATIONS: string[] = [
    ALTER TABLE triggers ADD COLUMN last_escalation_case TEXT;
    ALTER TABLE triggers ADD COLUMN last_escalation_thread_id TEXT;
    ALTER TABLE triggers ADD COLUMN last_escalation_chat_kind TEXT;`,
+  // v78: the run that superseded a judged run (`BulkLedger.resumePreview`). Set with the halt, so the
+  // ended run's page can link the run that took its place; null on every run before and on any other end.
+  // Pruning may delete the newer run first: like `source_run_id`, the link then falls back to null
+  // instead of naming a run that is gone. Indexed like `source_run_id`, so a delete does not scan the
+  // table for runs to unlink.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (78);
+   ALTER TABLE bulk_runs ADD COLUMN superseded_by TEXT REFERENCES bulk_runs(id) ON DELETE SET NULL;
+   CREATE INDEX IF NOT EXISTS idx_bulk_runs_superseded ON bulk_runs(superseded_by);`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */

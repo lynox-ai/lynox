@@ -861,7 +861,7 @@
 					<!-- The engine's own words for a halt (its reason, when the page has no sentence for it) stay text. -->
 					{@const cause = bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}
 					<!-- An atomic undo that rolled back links the run it takes back, where it says to start again (U-335). -->
-					<dd data-testid="bulk-halt-cause">{#if rolledBack}{rolledBack.before}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{rolledBack.link}</button>{rolledBack.after}{:else if cause === run.haltReason}{cause}{:else}{@render hostText(cause)}{/if}</dd>
+					<dd data-testid="bulk-halt-cause">{#if rolledBack}{rolledBack.before}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{rolledBack.link}</button>{rolledBack.after}{:else if cause === run.haltReason}{cause}{:else}{@render hostText(cause)}{/if}<!-- A replaced run names the run that took its place: the link goes there, as an undo links its source. -->{#if run.haltKey === 'superseded' && run.supersededBy}<button type="button" class="{btnPlain} ml-1" data-testid="bulk-superseded-open" onclick={() => onOpen(run!.supersededBy!)}>{t('bulk.superseded.open')}</button>{/if}</dd>
 				{/if}
 			</dl>
 

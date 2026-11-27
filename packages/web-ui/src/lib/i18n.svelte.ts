@@ -993,6 +993,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.undone.sentence': { de: '{n} Ziele haben ihren Wert von vorher zurück. Zurückgenommen am {date} um {time}.', en: '{n} targets have their previous value back. Undone on {date} at {time}.' },
 	'bulk.undone.sentence_one': { de: '1 Ziel hat seinen Wert von vorher zurück. Zurückgenommen am {date} um {time}.', en: '1 target has its previous value back. Undone on {date} at {time}.' },
 	'bulk.undone.open': { de: 'Zur Rücknahme', en: 'Go to the undo run' },
+	'bulk.superseded.open': { de: 'Zum neueren Lauf', en: 'Go to the newer run' },
 	'bulk.undo.prepare': { de: 'Rücknahme vorbereiten', en: 'Prepare the undo' },
 	'bulk.undo.approve_title': { de: 'Rücknahme freigeben', en: 'Approve the undo' },
 	'bulk.undo.now_back': { de: 'Jetzt → zurück auf', en: 'Now → back to' },
