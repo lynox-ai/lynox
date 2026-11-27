@@ -199,7 +199,7 @@ export function withPlaceholderBadge(card: string, label: string): string {
  *  the way out. Both are shown as text and escaped here. The placeholder itself
  *  is not shown: it is the engine's note, in English, with an internal id. */
 export function lostNoticeMarkup(title: string, body: string): string {
-	return `<div class="artifact-lost-notice" role="status" data-testid="artifact-inline-lost-notice"><p class="artifact-lost-notice-title">${escapeText(title)}</p><p class="artifact-lost-notice-body">${escapeText(body)}</p></div>`;
+	return `<div class="artifact-lost-notice" role="note" data-testid="artifact-inline-lost-notice"><p class="artifact-lost-notice-title">${escapeText(title)}</p><p class="artifact-lost-notice-body">${escapeText(body)}</p></div>`;
 }
 
 function escapeText(text: string): string {

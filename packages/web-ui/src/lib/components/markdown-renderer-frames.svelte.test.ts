@@ -295,6 +295,17 @@ describe('an artifact card the chat marks as lost', () => {
 		});
 	}
 
+	it('keeps the content of a short fence the model wrote: the rule on its text gives the badge only', async () => {
+		// The same kind of fence as below, under the store's bound: the rule on its text marks it,
+		// but no save stands behind it, so it keeps its frame and its document.
+		const short = '<!' + '-- type: html -->\n<h1>Debug</h1><p>The note ' + PLACEHOLDER + ' replaced a body.</p>';
+		await render({ content: '```artifact\n' + short + '\n```' });
+		expect(badges(), 'positive control: the rule on the text marks it').toHaveLength(1);
+		expect(notices(), 'no notice').toHaveLength(0);
+		expect(frames(), 'its frame').toHaveLength(1);
+		expect(documentOf(frames()[0]!), 'with its document').toContain('Debug');
+	});
+
 	it('is not raised by an intact document that only quotes the placeholder', async () => {
 		// A fence the model wrote (no title comment first), longer than the store's bound, with a
 		// placeholder opening inside: a document quoting it, still readable.

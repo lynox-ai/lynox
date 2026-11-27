@@ -226,10 +226,13 @@
 	function buildArtifact(code: string): BuiltArtifact {
 		// The gallery's badge ("Content missing"): for a card from a save, the store's flag the
 		// chat wrote into the fence; for a fence the model wrote, the store's rule on its text.
-		// Opened, such a card shows the gallery's sentences for a lost document instead of the
-		// placeholder, and an HTML card gets no frame.
+		// Opened, a card the store found lost shows the gallery's sentences for a lost document
+		// instead of the placeholder, and an HTML card gets no frame. A fence the model wrote
+		// keeps its content: the rule on its text can mistake a short document that quotes the
+		// placeholder, and no save or gallery entry stands behind it for those sentences.
 		if (!fenceHoldsOnlyPlaceholder(code)) return buildArtifactCard(code, null);
-		const built = buildArtifactCard(code, lostNoticeMarkup(t('artifacts.lost_title'), t('artifacts.lost_body')));
+		const storeFoundLost = resolveArtifactRender(code).lost;
+		const built = buildArtifactCard(code, storeFoundLost ? lostNoticeMarkup(t('artifacts.lost_title'), t('artifacts.lost_body')) : null);
 		return { markup: withPlaceholderBadge(built.markup, t('artifacts.lost_badge')), frame: built.frame };
 	}
 
