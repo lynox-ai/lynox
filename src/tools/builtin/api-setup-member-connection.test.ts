@@ -152,6 +152,23 @@ describe('the owner saving over a member\'s connection (P3)', () => {
     expect(reply).toContain('was not set up in this session\'s name');
     expect(store.get('crm-api')?.created_by).toBe(TAG);
   });
+
+  it('inside a run, the refusal is noted for the run\'s end, with the owner\'s own note, and the reply is the same', async () => {
+    const store = storeWith();
+    const { notes, said, done } = runCollectingMemberNotes(() => run(agentWith(store, OWNER_PRINCIPAL, ['M-1']), { action: 'update', profile: crmProfile({ description: 'edited', created_by: undefined }) }));
+    const reply = await done;
+
+    expect(reply).toBe(`Error: API profile "crm-api" was not saved. ${LEAD}, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this connection under Settings → API connections and connect it yourself (that disconnects setup@example.org).`);
+    expect([...notes]).toEqual([expect.stringMatching(/^Connection not used: setup@example\.org set up this connection/)]);
+    expect(said.get([...notes][0]!), 'the owner reads a note of their own').toBeTruthy();
+    expect(store.get('crm-api')?.description).toBe('CRM API');
+  });
+
+  it('control: a save that goes through notes nothing for the run', async () => {
+    const { notes, done } = runCollectingMemberNotes(() => run(agentWith(storeWith(), OWNER_PRINCIPAL, []), { action: 'update', profile: crmProfile({ description: 'edited' }) }));
+    expect(await done).toContain('Profile saved');
+    expect([...notes]).toEqual([]);
+  });
 });
 
 describe('the owner refining a member\'s connection (F6)', () => {
