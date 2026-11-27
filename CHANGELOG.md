@@ -128,8 +128,8 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - Mail from an outside mailing list (`List-Id` header) is no longer dropped
   unseen: list mail from a no-reply or newsletter sender is filed as handled
   with the list named, other list mail is classified as usual, and existing
-  List-ID rules now match. List mail from such a sender under a domain
-  connected to the instance is still dropped. (#2111)
+  List-ID rules now match. List mail under a domain connected to the instance
+  from such a sender is still dropped. (#2111)
 - A new Shopify connection asks for expiring offline tokens, and the engine
   renews them before they run out and once after the store answers 401. A bulk
   run renews once and resends, and, when only connecting the store again
@@ -496,18 +496,19 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   delete. (#2585, #2838, #2844)
 - A failed or malformed answer from a Google or Microsoft token endpoint is
   named by its status and OAuth error code only, never by its text. (#2697)
-- Once a conversation holds outside content, every `web_research` read and
-  `http_request` GET or HEAD to a host the owner did not name is asked about,
-  and refused where nobody can be asked; so are an `api_setup` discovery read
-  and saving an OAuth token address, also after the provider's own web search.
-  (#2680, #2695, #2704, #2716)
-- With the egress proxy, a `bash` call after outside content reaches only the
-  provider hosts, `network_allowed_hosts` and the hosts the owner typed. Before
-  outside content, a `bash` call under `guarded` now also reaches the hosts the
-  owner typed in the thread. (#2701, #2712)
+- Once a conversation holds outside content, also from the provider's own web
+  search, every `web_research` read and `http_request` GET or HEAD to a host
+  the owner did not name is asked about, and refused where nobody can be
+  asked; so are an `api_setup` discovery read and saving an OAuth token
+  address. (#2680, #2695, #2704, #2716)
+- With the egress proxy, a `bash` call in a tool round that starts after
+  outside content reaches only the provider hosts, `network_allowed_hosts` and
+  the hosts the owner typed. Before outside content, a `bash` call under
+  `guarded` now also reaches the hosts the owner typed in the thread.
+  (#2701, #2712)
 - The approval question before an outgoing write finds stored secrets in more
-  encodings of a value; past fixed depth and size limits a value counts as
-  holding a secret. (#2650, #2702)
+  encodings of a value; past fixed depth and size limits, JSON text inside a
+  value counts as holding a secret. (#2650, #2702)
 - Provider keys from the environment, credential fields inside JSON env values
   and the web push key are masked, and overlapping values are masked as one.
   (#2619)
@@ -551,8 +552,9 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   per mail. Set `LYNOX_FEATURE_INBOX_USER_RULES=0` to keep them off. Fixed rules
   now compare sender and subject normalized and may match more mail. (#2465)
 - `POST /api/inbox/rules` answers 400 for a new `list_id` rule and for a fixed
-  value with hidden characters, a line break, too many characters, more than
-  one sender address or a too short subject; stored rules load as they are.
+  value with hidden characters, a line break, too many characters, a sender
+  that is not one whole address or a too short subject; stored rules load as
+  they are.
   (#2465)
 - A chat run waiting on its own question keeps the conversation after its
   client drops until the question is answered, the run is stopped or the
@@ -596,10 +598,11 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   can change that. Watches on a listed page, under `guarded` and under
   `allow-all` are unchanged, except a plain `http://` page with
   `enforce_https`. (#2730)
-- With the egress proxy, a `bash` call after outside content now reaches only
-  the provider hosts, `network_allowed_hosts` and the hosts the owner typed,
-  also under `allow-all`; a command that needs another host reaches it once the
-  owner names the host in the chat. (#2701, #2712)
+- With the egress proxy, a `bash` call in a tool round that starts after
+  outside content now reaches only the provider hosts, `network_allowed_hosts`
+  and the hosts the owner typed, also under `allow-all`; a command that needs
+  another host reaches it once the owner names the host in the chat.
+  (#2701, #2712)
 - A stored workflow with a step id `params`, `__proto__` or `constructor` no
   longer runs until the step is renamed (`rename_step`). A stored contract
   whose lists have another shape grants nothing until it is saved again.
