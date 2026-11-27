@@ -1444,6 +1444,60 @@ describe('WorkerLoop', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(loop.runningPlanTag('po-1')).toBeUndefined();
     });
+
+    // A run for the mandate picks up an answer given in a conversation that is not the mandate's:
+    // the owner answered the trigger's question in the owner's chat. It does not continue there.
+    describe('an answered question in a conversation that is not the mandate\'s', () => {
+      const THREADS: Record<string, string> = { 'thread-owner': 'owner', 'thread-eva': 'mandate:eva@kanzlei.example' };
+      function withAnswerIn(s: { engine: Engine }, threadId: string): void {
+        const answeredStore = {
+          getAnsweredForTrigger: vi.fn(() => ({
+            id: 'prompt-1', session_id: threadId, question: 'Send the report?', answer: 'Yes, send it.', created_by: 'owner',
+          })),
+          releaseTrigger: vi.fn(),
+          getPendingForTrigger: vi.fn(() => undefined),
+        } as unknown as PromptStore;
+        const ref = s.engine as unknown as Record<string, unknown>;
+        ref['getPromptStore'] = () => answeredStore;
+        ref['getThreadStore'] = () => ({
+          isDeleted: () => false,
+          getThread: (id: string) => (THREADS[id] === undefined ? undefined : { id, created_by: THREADS[id] }),
+        });
+      }
+      const sessionIdOf = (engine: Engine): string | undefined =>
+        (engine.createSession as unknown as { mock: { calls: Array<[{ sessionId?: string }?]> } }).mock.calls[0]?.[0]?.sessionId;
+      const promptOf = (session: Session): string =>
+        (session.run as unknown as { mock: { calls: string[][] } }).mock.calls[0]?.[0] ?? '';
+
+      it('a stamped plan of the mandate runs in a new conversation, with the answer as input', async () => {
+        const s = setup(stamped());
+        withAnswerIn(s, 'thread-owner');
+        await s.loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+        expect(sessionIdOf(s.engine), 'not in the owner\'s conversation').toBeUndefined();
+        expect(promptOf(s.session), 'and the answer reached the run').toContain('Yes, send it.');
+      });
+
+      it('a mandate\'s start by hand runs in a new conversation, with the answer as input', async () => {
+        const task = makeTask({ id: 'po-prop', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, schedule_cron: undefined, next_run_at: undefined });
+        const s = setup(task);
+        withAnswerIn(s, 'thread-owner');
+        expect(await s.loop.runTriggerNow('po-prop', s.loop.claimHandRunMinter()('po-prop', EVA))).toEqual({ ok: true });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+        expect(sessionIdOf(s.engine), 'not in the owner\'s conversation').toBeUndefined();
+        expect(promptOf(s.session), 'and the answer reached the run').toContain('Yes, send it.');
+      });
+
+      it('control: an answer in the mandate\'s own conversation is continued there', async () => {
+        const s = setup(stamped());
+        withAnswerIn(s, 'thread-eva');
+        await s.loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sessionIdOf(s.engine)).toBe('thread-eva');
+      });
+    });
   });
 
   describe('planRunTrail', () => {

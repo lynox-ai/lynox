@@ -33,7 +33,7 @@ import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, ownerInstructionCounts, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, ownedBy, ownerInstructionCounts, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
@@ -2872,9 +2872,14 @@ export class WorkerLoop {
     const runAs = this.#runAs(task.id, starter);
     const triggerTier = admittedTriggerTier(task.model_tier);
     // Same thread, so the run's own history shows the exchange it continues — unless the owner
-    // deleted that conversation in the meantime. Then the run goes to a new thread: a deleted
-    // one is not opened again, and the question and its answer reach the run as input anyway.
-    const continueIn = answered !== undefined && this.engine.getThreadStore()?.isDeleted(answered.session_id) !== true
+    // deleted that conversation in the meantime, or it is not the conversation of the one the run
+    // is for. Then the run goes to a new thread: a deleted one is not opened again, a run does not
+    // write into someone else's conversation (the routes refuse a mandate there, and a run by hand
+    // or a mandate's plan must not get around that), and the question and its answer reach the run
+    // as input anyway. The owner owns every conversation.
+    const threads = this.engine.getThreadStore();
+    const continueIn = answered !== undefined && threads?.isDeleted(answered.session_id) !== true
+      && (isOwnerPrincipal(runAs) || ownedBy(threads?.getThread(answered.session_id), runAs))
       ? answered.session_id
       : undefined;
     const session = this.engine.createSession({
@@ -2897,8 +2902,9 @@ export class WorkerLoop {
       ...(triggerTier ? { model: triggerTier } : {}),
     });
     // The new thread takes the question and its answer as input, and the question may quote what
-    // a connected store returned: when the deleted conversation was contained, the new thread is
-    // contained before the run starts (`containThreadFrom`), or the run does not start.
+    // a connected store returned: when the conversation it leaves (deleted, or not the run's own)
+    // was contained, the new thread is contained before the run starts (`containThreadFrom`), or
+    // the run does not start.
     if (answered !== undefined && continueIn === undefined) {
       const { containment } = this.engine.getToolContext();
       if (threadIsContained(containment, answered.session_id)) {
@@ -2906,7 +2912,7 @@ export class WorkerLoop {
           containThreadFrom({ containment, threadStore: this.engine.getThreadStore() }, answered.session_id, session.sessionId);
         } catch (err: unknown) {
           // The cause, for the instance log the refusal points to; neither the question nor the thread.
-          process.stderr.write(`[lynox:worker] task ${task.id}: the new thread of a run resumed from a deleted contained one could not be contained: ${processErrorText(err)}\n`);
+          process.stderr.write(`[lynox:worker] task ${task.id}: the new thread of a run resumed from a deleted or foreign contained one could not be contained: ${processErrorText(err)}\n`);
           // The answer is released unread, as the refusal says: kept, every later pickup of this
           // trigger would meet the same refusal until the question expires.
           try {
