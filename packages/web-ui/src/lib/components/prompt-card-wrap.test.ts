@@ -4,12 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { PROMPT_EMITTED_TAGS, renderPromptSegments } from '../utils/prompt-markdown.js';
 
 /** A class that keeps a line from wrapping, scrolls sideways, or sets a width the box cannot hold. */
-const HOLDS_SIDEWAYS = /overflow-x-(auto|scroll|hidden)|overflow-(auto|scroll|hidden)!?$|\[overflow(-x)?:|whitespace-(nowrap|pre)!?$|text-nowrap|\[white-space:(pre|nowrap)\]|truncate|break-(keep|normal)|wrap-(normal|break-word)|overflow-wrap:normal|\[word-break:|_table\]:block|table-auto|\[table-layout:auto\]|(^|:)!?(min-)?w-(max|screen|[1-9]|\[)/;
+const HOLDS_SIDEWAYS = /overflow-x-(auto|scroll|hidden|clip)|overflow-(auto|scroll|hidden|clip)!?$|\[overflow(-x)?:|whitespace-(nowrap|pre|pre-wrap)!?$|text-nowrap|\[white-space:(pre|pre-wrap|nowrap)\]|truncate|break-(keep|normal)|wrap-(normal|break-word)|overflow-wrap:normal|\[word-break:|_table\]:block|table-auto|\[table-layout:auto\]|(^|:)!?(min-)?w-(max|screen|[1-9]|\[)/;
 
 /** Classes the check must refuse, so a regex that never matches cannot pass the tests below. */
-const REFUSED = ['[&_pre]:overflow-x-auto', 'overflow-x-hidden', '[&_pre]:whitespace-pre', 'whitespace-nowrap!', 'text-nowrap', '[&_pre]:[white-space:nowrap]', 'truncate', '[&_td]:break-keep', '[&_td]:wrap-normal', '[&_td]:wrap-break-word', '[word-break:keep-all]', '[&_table]:block', '[&_table]:table-auto', '[table-layout:auto]', 'w-96', 'w-screen', 'min-w-max', 'w-[600px]', '[overflow-x:auto]'];
+const REFUSED = ['[&_pre]:overflow-x-auto', 'overflow-x-hidden', '[&_pre]:whitespace-pre', 'whitespace-nowrap!', 'text-nowrap', '[&_pre]:[white-space:nowrap]', 'truncate', '[&_td]:break-keep', '[&_td]:wrap-normal', '[&_td]:wrap-break-word', '[word-break:keep-all]', '[&_table]:block', '[&_table]:table-auto', '[table-layout:auto]', 'w-96', 'w-screen', 'min-w-max', 'w-[600px]', '[overflow-x:auto]', 'overflow-x-clip', '[&_pre]:whitespace-pre-wrap', '[&_pre]:[white-space:pre-wrap]'];
 
-/** Classes it must let through: the box's own, and widths that cannot push it sideways. */
+/**
+ * Classes it must let through: the box's own. The check is strict on widths on purpose: any fixed
+ * width (`w-96`, `w-1/2`) is refused, though a fraction cannot push the box sideways; the box needs none.
+ */
 const ALLOWED = ['min-w-0', 'max-w-full', '[&_pre]:max-w-full', 'w-full', 'overflow-y-auto', '[overflow-wrap:anywhere]', '[&_pre]:[white-space:break-spaces]'];
 
 /**
