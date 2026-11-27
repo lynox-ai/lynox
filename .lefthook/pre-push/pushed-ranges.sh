@@ -5,7 +5,12 @@
 # HEAD`, so a push of a branch you are not standing on (`git push origin other` from main) scanned
 # nothing of `other`.
 #
-#   bash .lefthook/pre-push/pushed-ranges.sh <hook-name>      (the pre-push ref lines on stdin)
+#   bash .lefthook/pre-push/pushed-ranges.sh <hook-name> [<remote>]   (the pre-push ref lines on stdin)
+#
+# <remote> is the hook's own $1, the name git pushes to. Only a push to `origin` may measure from
+# origin/main (below): pushed elsewhere — another remote, a URL — origin/main says nothing about what
+# that target already holds. Without it (a run by hand) nothing is measured from origin/main that
+# the remote sha would not cover.
 #
 # The refs come from git on stdin (`<local ref> <local sha> <remote ref> <remote sha>` per line).
 # Only the BACK three fields have a guaranteed form, so a line is matched anchored from the RIGHT.
@@ -16,7 +21,7 @@
 # ref (field 3), which git restricts to a real ref name.
 #   · a deleted ref (local sha all zeros) adds nothing and yields no line;
 #   · a ref whose remote sha this clone has is measured from it: exactly what this push adds;
-#     unless the push brings main in (a merge of origin/main above that sha). Then it is measured
+#     unless the push goes to origin and brings main in (a merge of origin/main above that sha). Then it is measured
 #     like a new ref, from where it leaves origin/main: the commits main already carries are not
 #     this push's to answer for, and without this a first main merge put hundreds of them in the
 #     scan. Every commit not on origin/main stays in the range, since nothing under a commit of
@@ -56,6 +61,7 @@
 # Like every hook file, this only runs where it exists: a branch cut from an older main pushes with
 # the older hooks until it merges origin/main, which brings the guards along with the base.
 label=${1:-pre-push}
+push_remote=${2-}
 unreadable() {
   echo "$label: could not read the refs git hands this hook on stdin, so what this push" >&2
   echo "  transfers is unknown. Push again; a wrapper must pass git's pre-push lines through." >&2
@@ -90,14 +96,14 @@ else
 fi
 for pair in "${pairs[@]}"; do
   read -r tip remote remote_ref <<<"$pair"
-  switched=''
   if ! is_zero "$remote" && git cat-file -e "${remote}^{commit}" 2>/dev/null; then
     base="$remote"
     # A merge base that is not under the remote sha means the push brings main in: measure from it.
-    if git rev-parse -q --verify refs/remotes/origin/main >/dev/null &&
+    if [ "$push_remote" = origin ] &&
+      git rev-parse -q --verify refs/remotes/origin/main >/dev/null &&
       mb="$(git merge-base origin/main "$tip" 2>/dev/null)" &&
       ! git merge-base --is-ancestor "$mb" "$remote"; then
-      base="$mb" switched=1
+      base="$mb"
     fi
   elif ! git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
     if ! is_zero "$remote"; then
@@ -116,9 +122,10 @@ for pair in "${pairs[@]}"; do
   fi
   # A range with a merge in it is where a stale origin/main shows: main's commits between it and the
   # merged main are scanned as if they were this push's. Say so once per ref, on stderr; the first
-  # line says which of the three cases it is, so it never claims a skip that did not happen.
+  # line says which of the three cases it is, so it never claims a skip that did not happen: a base
+  # other than the remote sha is a merge base with origin/main (moved, new ref, unknown remote sha).
   if [ -n "$(git rev-list --merges -n 1 "$base..$tip" 2>/dev/null)" ]; then
-    if [ -n "$switched" ]; then
+    if [ "$base" != "$remote" ]; then
       echo "$label: ${remote_ref:-the pushed ref} merges main; commits already on origin/main are not scanned." >&2
     elif git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
       echo "$label: ${remote_ref:-the pushed ref} contains a merge; whatever it brings in is scanned with it." >&2

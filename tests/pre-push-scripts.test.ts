@@ -574,6 +574,62 @@ describe('a push that merges main scans what main does not carry, and all of it'
     expect(r.out).toContain('merges main; commits already on origin/main are not scanned');
   }, T);
 
+  it('a NEW branch that merges main says main was left out, and lands', () => {
+    const c = setup();
+    own(c, 'a.md', 'neutral\n');
+    onMain(c, 'm.md', DIRTY);
+    merge(c);
+    const r = pushHead(c);
+    expect(r.head, r.out).toBe(true);
+    expect(r.out).toContain('merges main; commits already on origin/main are not scanned');
+    expect(r.out).not.toContain('whatever it brings in is scanned');
+  }, T);
+
+  /** The same bare repo under a second name: the pushed sha is the same, only the name differs. */
+  const toMirror = (c: ReturnType<typeof setup>) => {
+    c.git('remote', 'add', 'mirror', remote(c));
+    const r = spawnSync('git', ['push', 'mirror', 'feat/x'], { cwd: c.work, encoding: 'utf8', env: c.env });
+    const at = spawnSync('git', ['ls-remote', remote(c), 'refs/heads/feat/x'], { encoding: 'utf8', env: c.env }).stdout.slice(0, 40);
+    return { out: `${r.stdout}${r.stderr}`, head: at === c.git('rev-parse', 'HEAD').stdout.trim() };
+  };
+
+  it('pushed to another remote name, a main merge is measured from the remote sha: main\'s dirty commit is refused there, lands via origin', () => {
+    const c = pushedOnce();
+    onMain(c, 'm.md', DIRTY);
+    merge(c);
+    const r = toMirror(c);
+    expect(r.head, r.out).toBe(false);
+    expect(r.out).not.toContain('merges main');
+    expect(pushHead(c).head).toBe(true);
+  }, T);
+
+  it('pushed to another remote name, an own dirty commit behind a main merge is refused, its clean twin lands', () => {
+    const c = pushedOnce();
+    onMain(c, 'm.md', 'neutral\n');
+    merge(c);
+    own(c, 'b.md', DIRTY);
+    expect(toMirror(c).head).toBe(false);
+    const t = pushedOnce();
+    onMain(t, 'm.md', 'neutral\n');
+    merge(t);
+    own(t, 'b.md', 'neutral\n');
+    const r = toMirror(t);
+    expect(r.head, r.out).toBe(true);
+  }, 2 * T);
+
+  it('run by hand without a remote name, the range starts at the remote sha; named origin, at the merge base', () => {
+    const c = pushedOnce();
+    const pushed = c.git('rev-parse', 'HEAD').stdout.trim();
+    const mainTip = onMain(c, 'm.md', DIRTY);
+    merge(c);
+    const tip = c.git('rev-parse', 'HEAD').stdout.trim();
+    const line = `refs/heads/feat/x ${tip} refs/heads/feat/x ${pushed}\n`;
+    const run = (...a: string[]) => spawnSync('bash', ['.lefthook/pre-push/pushed-ranges.sh', ...a], { cwd: c.work, encoding: 'utf8', env: c.env, input: line });
+    expect(run('t').stdout.trim()).toBe(`${pushed} ${tip}`);
+    expect(run('t', 'mirror').stdout.trim()).toBe(`${pushed} ${tip}`);
+    expect(run('t', 'origin').stdout.trim()).toBe(`${mainTip} ${tip}`);
+  }, T);
+
   it('an own dirty commit behind a main merge is refused', () => {
     const c = pushedOnce();
     onMain(c, 'm.md', DIRTY);
