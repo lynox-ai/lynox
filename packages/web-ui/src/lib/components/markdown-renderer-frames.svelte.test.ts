@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { answerFrameReady } from '../utils/artifact-frame-host.js';
 import { setThemeMode } from '../stores/theme.svelte.js';
 import { buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
+import { artifactFenceHeader } from '../utils/artifact-inline.js';
 
 // The chat view's artifact frames across re-renders: a frame whose document did not change keeps
 // its element (matched by document, not by position), a rebuilt one starts at the last measured
@@ -233,11 +234,10 @@ describe('the artifact frames of a message', () => {
 });
 
 describe('an html artifact card the chat marks as lost', () => {
-	// Spelled in two parts: a module parser reads the comment opener as an HTML-like comment.
-	const open = '<!' + '--';
 	const body = '<p>[evicted after successful save]</p>';
+	// The fence as the chat writes it for a save: the two cards differ only in the store's flag.
 	const card = (lost: boolean, title = 'Report'): string =>
-		'```artifact\n' + (lost ? open + ' lynox-artifact-lost -->\n' : '') + open + ' type: html -->\n' + open + ' title: ' + title + ' -->\n' + body + '\n```';
+		'```artifact\n' + artifactFenceHeader({ title, type: 'html', id: '', typed: true, lost }) + body + '\n```';
 	const BADGE = /^(Content missing|Inhalt fehlt)$/;
 
 	it('keeps its frame: the badge leaves the slot the frame is put in', async () => {
@@ -261,6 +261,7 @@ describe('an html artifact card the chat marks as lost', () => {
 
 	it('gets the same frame document as the card without the badge: the policy and the frame path are the frame builder\'s', async () => {
 		await render({ content: card(false) });
+		expect(target.querySelector('[data-testid="artifact-inline-lost-badge"]'), 'positive control: the card the store keeps has no badge').toBeNull();
 		const without = documentOf(frames()[0]!);
 		if (component) unmount(component);
 		component = undefined;
