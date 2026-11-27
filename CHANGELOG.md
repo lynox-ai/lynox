@@ -1,6 +1,640 @@
 # Changelog
 
-## Unreleased
+## 2.20.0 — 2026-12-01
+
+This release adds the workflow takeover, turns inbox rules on by default,
+holds reads, watches and shell calls after outside content to the owner's
+words, and carries the AI budget cap of 2.19.2, which was not tagged.
+
+### Added
+
+- The control plane can now send `overrun_hold` on the usage flush and status
+  responses. While it is set and the control plane reports the AI balance as
+  the spend gate, a new run starts only when some budget is free. Its cost
+  guard is capped at that free amount, and the amount stays reserved until the
+  run ends. While one run holds the budget, any other run on the instance
+  (another chat, a scheduled task, a workflow) is refused until it ends or a
+  top-up reaches the instance. (#2699)
+- While the cap is in force, single model calls (a chat title, memory and
+  knowledge extraction, inbox classification, voice, the bulk-run judge) start
+  only when the call's allowance is free: a fixed amount by default, the cost
+  of the text for text-to-speech, and the call's own worst case for a bulk-run
+  judge call. While a run holds the budget they are refused. A chat title
+  and a memory extraction are tried once more when that run ends. A
+  knowledge-graph extraction is skipped and the memory is stored without its
+  entities. An inbox mail is left for manual review, a voice request gets a
+  402, and a bulk run halts. (#2699, #2842)
+- While the cap is in force, in-conversation workflows and batch runs are
+  refused. A saved workflow, started by hand or on a schedule, starts only when
+  the free budget covers the session cost ceiling (`max_session_cost_usd`, $50
+  by default); that amount stays reserved until the workflow ends. Knowledge
+  retrieval skips the extra query-expansion call and searches on the question
+  alone. (#2699)
+- A chat message refused this way shows as a note in the user's language, in
+  place of the toast and the raw "Run blocked" reply. A voice request refused
+  this way gets a 402 with its own message. (#2699)
+- The owner can now take over a workflow that someone they gave access to
+  created or last changed, once that person's access has ended. The library
+  card offers "Take over workflow"; the dialog shows whose marks are covered,
+  what the stamp binds, the steps that call that person's connections, which
+  plans change or run again, and who may start the workflow afterwards. The
+  takeover covers the marks, releases the paused plans, stamps the steps and
+  writes one audit row in one transaction. New routes:
+  `GET /api/workflows/:id/takeover-preview` and
+  `POST /api/workflows/:id/takeover` (owner only, browser session only,
+  `expect` digest from the preview required; `409` `changed` when something
+  moved, `409` `mandate_live` while the person still has access, `503` when
+  the takeover cannot be read or recorded). The library list sets
+  `runs_as.undetermined` when it cannot tell who shaped a workflow. Without the
+  store of ended access, the plan takeover's preview and commit now answer
+  `503` instead of reading every person as ended. (#2590, #2775)
+- The stamp and takeover previews now show: mode and failure strategy by name
+  (`notify` reads as "Continue"), tier, thoroughness and thinking by the names
+  the settings use, where the workflow may run (chat, schedule, background),
+  each parameter's contract rule, a sentence when the contract grants no write,
+  the person with access who can also answer a plan's questions, and the steps
+  whose target is set only at run time and may reach someone else's
+  connection. After a confirm refused because the workflow changed, the view
+  marks what differs. (#2735, #2791, #2801, #2848, #2864)
+- The run and schedule forms of a saved workflow show the owner which values
+  a parameter takes: a choice for a parameter with allowed values, and a hint
+  such as "Between 1 and 10" for one with bounds. Other viewers keep free
+  text. (#2661)
+- A trigger card now says why a watch's last run failed (an HTTP status, a
+  host that does not resolve, a private address, a timeout, a page over the
+  size limit and so on), in lynox's words, and what to change; other failed
+  runs still show only their status word. A watch's fetch failure is recorded
+  in the instance language instead of the transport's raw error.
+  `GET /api/triggers` returns the stored cause as `blocked_reason`.
+  (#2807, #2810)
+- When a scheduled run's question or an escalation reached nobody by push, the
+  trigger card now says whether there was no device to deliver to or a send
+  failed, names it a question or an alert, and links to its chat when that
+  chat exists and holds a message. `GET /api/triggers` gives the owner
+  `last_escalation_case`, `last_escalation_kind` and `last_escalation_chat`;
+  a person with access gets none of them. (#2857, #2860)
+- The schedules list names the person with access who set up or last changed
+  a trigger ("Set up by …", "Changed by …", "…, taken over by you"). A person
+  with access sees another person's mark without name or address, and a mark
+  of their own address under an earlier grant as their own. `GET /api/triggers`
+  adds `setup` to each row. (#2671, #2687)
+- A message typed into a chat while a scheduled run's question waits there is
+  held as an unsent bubble ("Not sent yet — tap to send") instead of being
+  taken as the answer or failing. A tap sends it once the question is gone;
+  it survives a reload. An offline message marked failed is cleared when the
+  server shows it arrived. (#2489)
+- The approval of a bulk run with at least 20 decided verdicts lists the ones
+  that differ from the rest of the run first (up to 50), such as an added link,
+  address, phone number or script. A note per kind can filter the table to
+  those verdicts; approving still covers the whole run. (#2747, #2758, #2759)
+- `bulk_plan` takes `judge.rule_artifact`, the id of a saved markdown or text
+  artifact, and stores its text byte for byte as the run's rule. Starting the
+  judging answers 409 (`rule_source_changed`, `rule_source_gone`,
+  `rule_source_unreadable`) when the artifact no longer matches. (#2817)
+- A judged run's rule now stands at its start, at its approval and where it
+  judges again, with a sentence that lynox wrote it or that it was taken word
+  for word from the named artifact. A judged run that a newer one replaced
+  links to that run from its page. (#2617, #2625, #2648)
+- Shopify product targets show the product title the store returned, with a
+  link into the Shopify admin. The title is stored encrypted and included in
+  the data export. (#2530)
+- A target whose judge answer the rule's schema refused says which field broke
+  which bound; a non-Shopify target without such a field reads a sentence
+  instead of `verdict_invalid`. The detail is stored encrypted and exported.
+  (#2829, #2840)
+- The preview marks targets that get the same new text in a field as another
+  target. Fields the judge fills from a fixed list are not compared, nor one
+  value that a run without a judge sets for all its targets. (#2476)
+- While the engine works on a bulk run, its page says what it is doing and how
+  far it got. Counts show a dash while the list is read, and "List not read
+  yet" or "List not read" where no read runs, instead of "0 targets".
+  (#2514, #2615, #2852)
+- An undo's approval lists every target with its current and restored value.
+  In the undo of a run that is not atomic, the owner can take targets out.
+  (#2831)
+- The web UI has an inbox rules view: proposals to confirm, description rules,
+  a rule filter and, in the reading pane, a note when a rule was held back for
+  a mail. Inbox rules are now on by default (see Upgrade notes). (#2465)
+- An inbox item says when new mail came into its thread since the owner last
+  dealt with it, in the list and in the reading pane with a link to that mail.
+  The item routes carry `followUps`. (#2771)
+- Mail with a `List-Id` header is no longer dropped unseen: list mail from a
+  no-reply or newsletter sender is filed as handled with the list named, other
+  list mail is classified as usual, and existing List-ID rules now match.
+  (#2111)
+- A new Shopify connection asks for expiring offline tokens, and the engine
+  renews them before they run out and once after the store answers 401. A bulk
+  run renews once and resends, and halts with a reason of its own, which can be
+  resumed, when only connecting the store again helps. (#2679)
+- The owner learns before a store's access runs out: one notice 14 days ahead
+  through the notification channels, a banner in the app and a line in Settings
+  → API connections, each with "Reconnect". `GET /api/api-profiles` carries
+  `store_access_ends` for such a store. (#2679, #2720, #2794, #2797, #2847)
+- The owner can end every other owner session without a new instance secret,
+  through `POST /api/auth/owner-sessions/end`; the device that asks stays signed
+  in. On managed hosting the control plane can do the same through
+  `POST /api/admin/owner-sessions/end`. Owner sign-ins from before the upgrade
+  stay valid. (#2815)
+- `GET /api/export` has new fields. `knowledge_graph_may_be_incomplete` is
+  `true` when the knowledge graph was not read in full. While the graph is
+  switched off, or on without its layer, the export still reads what it holds,
+  with `enabled: false` (or `true`); `agent-memory.db` is then opened read-only,
+  with no migration and no checkpoint, though SQLite may create the `-shm`, and
+  an empty `-wal`, beside it. A file from a newer build is left unread, with
+  the flag `true`. `secrets` now also lists names written to the vault after
+  boot, `secrets_may_be_incomplete` says when the secret store or its vault did
+  not open, and `secrets_note` says that only secret names are exported, never
+  values. (#2703, #2837, #2841)
+- `GET /api/export` now carries the remembered texts of the knowledge graph
+  under `knowledge_graph.memories`, keyed by the store that holds them:
+  `agent-memory.db` with its `memories` and `mentions`, and `engine.db` with
+  its `memories`, `memory_subjects` and every row of `relationships`, with
+  `source_deleted` and a `relationships_note`. Every stored column is included
+  except the embedding, also for replaced or retired texts, with `is_active`
+  and `superseded_by`. Texts, relationship descriptions and notes are masked
+  the way durable knowledge is; a text that cannot be decrypted, or is not
+  stored as text, is written as a marker. `knowledge_graph_may_be_incomplete`
+  turns `true` when one of these tables could not be read, a table returned
+  more than 20,000 rows (the rest is left out), a text could not be decrypted,
+  `engine.db` is not open, `agent-memory.db` comes from a newer build, or graph
+  rows are stored that no block carries; those are counted, not read. (#2851)
+- The person erasure's preview and answer now name the set-aside copies of the
+  databases it deletes in (`engine.db`, its `migration-tmp` staging copy, and
+  `agent-memory.db`) in `setAsideCopies` (file names only, never content),
+  each with its `-wal` and `-shm` in `companions`. The web app lists them under
+  "Not covered" with the way to them for the instance's hosting. Such a copy
+  may still hold data about the person, and the erasure does not reach it.
+  When the data directory cannot be listed, `setAsideCopies` is `null` and the
+  web app says the copies could not be checked. (#2724)
+- The health body's `engine` block may carry `audit_retention` (`ok` or
+  `stalled`), whether the instance log keeps its retention. It is optional and
+  absent on older engines and on an engine without `engine.db`. (#2800)
+- Data cards (CSV, JSON, text) in the chat have a copy button that copies the
+  whole file, with invisible characters removed. In a chat that only reads,
+  "Plan in a new chat" now says that only the user's own messages come along.
+  (#2859)
+
+### Changed
+
+- For every run with a cost guard, tool-side helper model calls (API
+  documentation extraction, web-search reranking, planning, workflow
+  annotation) now count against the run's guard, and a spawned child's helper
+  spend counts against its parent. A run can therefore reach its per-run budget
+  slightly earlier than before. Nothing extra is billed. (#2699)
+- Confirmation questions are now asked in the instance's language
+  (`config.language`, `de` or `en`; without it German on a managed instance,
+  English on a self-hosted one): the permission guard, `http_request`,
+  `api_setup` (save, vault-key release, vault binding), `spawn_agent` and the
+  secret consent. What the guard decides, the audit and every text the model
+  reads stay English. (#2600, #2793)
+- The schedules list words a failed or timed-out last run instead of showing
+  only red, shows "Due since" for a next run whose time has passed, and shows
+  no time for a trigger that will not start or is running. Schedule lines name
+  the local day and weekday, not only the local hour, and fall back to UTC
+  where a clock change would move the day; English monthly days read as
+  ordinals. A watched page's host no longer breaks inside the host. On narrow
+  screens a card's controls stay visible. (#2674, #2676, #2683, #2764, #2799)
+- A plan scheduled without a title now stores the workflow's name instead of
+  "Scheduled: <name>", and the view adds the prefix in the reader's language;
+  `GET /api/triggers` sets `title_workflow` for such plans and for the older
+  prefixed titles. At a plan waiting for its takeover, "Run now" and the pause
+  switch are hidden; a person with access no longer sees Delete or the switch
+  at a paused plan. A completed plan that kept its pause says that it cannot
+  be taken over or run again and that a new plan is the way, in the view, in
+  the `409` answers and to the model. (#2525, #2749, #2767, #2825)
+- The plan takeover dialog names a person once per workflow, says when the
+  plan's workflow is missing, does not repeat a list of plans it just gave,
+  and folds more than five plans behind a button inside the sentence. Values
+  written by others (names, labels, accounts) are shown in their own box in
+  the stamp's binding sentence and the connection list. (#2551, #2688, #2748,
+  #2785, #2808)
+- An open question shows once, in its card; the bar above the input appears
+  only when the question's opening line is out of view. Every question card
+  now says how many lines lie below its box. The deep-tier consent reads
+  "Estimated model cost for this session: about $…". (#2665, #2853)
+- A workflow refused for a character that renders as nothing names the step by
+  its number before its path (`step #3 (steps[2].task)`). (#2596)
+- A bulk run's head counts every target in exactly one class (taken out,
+  unchanged, written, conflicts, failed, open and others); the run detail API
+  carries them as `heads`. (#2667)
+- A bulk run's page marks the step it stands at and reads "Aborted", "Replaced"
+  or "Stopped" where it cannot go on. A finished run opens on the targets it
+  changed, written ones first. A run that halted with a send left unclear and
+  goes on by checking puts what the check needs first and no longer says
+  "continue". (#2502, #2637, #2779)
+- An undo speaks of taking back, not writing, and says to start it again from
+  the page of the run it undoes. Its offer names written targets apart from
+  sends without a clear answer; the API adds `undoableParts` and `undoOpen`.
+  (#2621, #2718, #2744, #2768, #2789)
+- Shopify bulk runs name the store's own cause when they halt or cannot start,
+  and ask to connect again when a token cannot be renewed; `bulk_plan` refuses
+  a revoked, expired or unbound connection up front. A failure-rate halt names
+  unclear sends apart. (#2567, #2578, #2605, #2682, #2804)
+- On a bulk run's page, the approval is switched off with its reason when a
+  store can never be reached from this instance. A request the store refuses as
+  it is formed halts the run with its own reason instead of as a network
+  refusal, and the page no longer offers to continue it. (#2790, #2796)
+- A bulk halt push goes to the owner with the way on, and separately to the
+  people with access, saying only the owner can resolve it. The run history
+  keeps the fact only. (#2865)
+- On bulk pages, hosts stand boxed as code, the note on an unchecked change no
+  longer repeats the line below it, a target toggle reloads only the run, and
+  a 429 reads as a rate limit, not an unreachable engine.
+  (#2480, #2554, #2765, #2843)
+- The inbox rule form offers "File as handled", with a sentence on where the
+  mail goes and that the mailbox stays unchanged, in place of "Auto-archive"
+  and "Mark read & hide", which did the same. (#2713, #2839)
+- The inbox thread history marks where a jump lands and says when a
+  confidential message's text was not kept. German texts read "Posteingang"
+  and "Zurückstellen", and more labels follow the page language. (#2786)
+- The API Profiles page (Settings → APIs) is now called "API connections". A
+  connection on a built-in provider whose app credentials are saved but that
+  was never connected gets a "Connect account" button. Questions and notes
+  about an API connection call it a "connection" and its sign-in a "sign-in",
+  also in bulk-run halts and the run preview's cost line. (#2500, #2814)
+- An API connection's card names how it signs in ("Sign-in via {provider}", "API
+  key", "Username and password") instead of the raw auth type, and shows its
+  description only when opened. `GET /api/api-profiles` carries
+  `built_in_provider` per profile. (#2754)
+- When a Shopify connect gets no exchange pass, its result page says why, in
+  English and German, instead of suggesting to start again. (#2537)
+- The question before a vault key is released to a profile names what the value
+  becomes in words (for example the bearer token or the Basic password), with
+  the field name in brackets. (#2802)
+- The agent is told that the engine attaches a profile's credential itself. A
+  guessed token name of an OAuth2 profile is pointed to that profile, so the
+  owner is not asked for a token the vault already holds. (#2568)
+- The migration wizard says why a migration stopped once, on its error card, in
+  the UI's language, and no longer repeats it in a toast. The `error` event of
+  `POST /api/migration/export` now carries a `code`, its `params` and a `retry`
+  state (`now`, `later`, `check`, `none`) beside the English `message`, and the
+  card offers a retry, a wait until a given time, or a check of the target
+  accordingly. Error texts no longer pass on a failed request's own text, and
+  the browser checks the target address by the engine's rule before sending.
+  (#2616, #2634, #2751, #2778)
+- A migration transfer now has one deadline as a whole, from the bundle's size
+  (20 minutes plus the bundle at about 1 Mbit/s), on top of each request's own.
+  A migration over a slower link can now be stopped. (#2623)
+- Facts lynox remembers after a turn, and those written by the `remember` tool,
+  are now written in the language the operator writes in, and no longer name
+  the operator or user as "operator" or "user". (#2522)
+- With the subject graph on, `GET /api/export` reads the knowledge graph's
+  entities by key instead of by offset, so its time grows with the number of
+  subjects rather than with the square of that number;
+  `knowledge_graph.entities` is then in id order, unless a key read fails and
+  the export pages by offset instead. Without a search term, the entity list
+  of the web app on the subject graph cuts its page in the query and breaks
+  ties in its order by id. (#2866)
+- The owner's access view shows a folded day row of status polls inside its
+  group, with its count and the time of its last request (see Upgrade notes).
+  (#2782)
+- The chat's tool line names every built-in tool by a word in German and
+  English instead of its raw name, with a readable subject where the call has
+  one. A memory recall without a query no longer shows its namespace.
+  (#2571, #2576)
+- A confirmation dialog opens with a word for the tool instead of its raw name;
+  a tool without a word (a plugin's) is named `External tool "<name>"`, and a
+  plugin tool's own confirmation text is shown as a quoted value whose payload
+  no longer changes the buttons offered. Dialogs quote values in the
+  language's quotation marks, put a long value on its own line, and name the
+  model tiers as the settings do. (#2579, #2816)
+- While the changes of the last run wait for review, a queued chat message
+  waits for the review to be answered before it is sent, also after a
+  reconnect or a reload. `POST /api/sessions/:id/run` from a client that shows
+  the review card answers 409 `review_pending` meanwhile. A queued message is
+  sent only in the thread it was queued in. (#2766, #2774, #2783)
+- The footer's cost now says it is today's ("today $0.40"); a real zero shows
+  as "$0.00" and an unknown figure as "-". (#2763)
+- The hint to set up a passkey is now a strip at the top of the chat instead of
+  a toast over every page. (#2805)
+- Voice settings name a voice by its name and language instead of its id. The
+  offline voice list now holds only voices the provider offers, one of them
+  French. (#2614)
+- Deleting a chat now also blanks the content of its runs (prompts, answers,
+  tool inputs and outputs, workflow step results, open questions) in the same
+  transaction. The run rows and their costs stay. (#2655)
+- The person erasure's done line uses the singular for a count of one, leaves
+  out a count of zero, and says "no entries and no memories" when both are
+  zero. On a narrow screen the subject panel is now opaque, so the page behind
+  it no longer shows through. (#2823)
+
+### Fixed
+
+- `GET /api/workflows/library` no longer answers 500 when one stored
+  definition is not valid JSON; that row is left out and logged by id. (#2753)
+- A step id can no longer take the place of a run's own context: `params`,
+  `__proto__` and `constructor` are refused as step ids, a stored workflow
+  that has one is refused before its run with `rename_step` as the way out,
+  and every manifest a run executes is checked, nested ones included. With a
+  stored step `a.result` beside step `a`, `{{a.result}}` reads step a's result
+  again, also after a rename. (#2640, #2645)
+- A helper's change of a plan is marked only after it passed its checks, so a
+  refused change no longer removes the owner's stamp. A change that names only
+  fields a plan does not carry now answers `400` with its own message instead
+  of `404` "Task not found". (#2521)
+- A workflow started from a chat starts no further step once the chat's run
+  ends, also under `on_failure: continue`. A plugin's tool gate now hears a
+  stop and refuses the call when it gives no answer within 30 s. (#2516)
+- A chat run whose wait on its own question fails is unparked and its
+  question closed, so a later stop no longer ends another run's question.
+  (#2534)
+- A `save_workflow` call that saved nothing is recorded as a failed call in
+  the run history and shown as unsuccessful in the chat. (#2855)
+- An escalation right after start (a scheduled question, a failed workflow, a
+  watch finding) is no longer recorded as having no push channel. (#2538)
+- A bulk target found already holding its planned value, also after a refused
+  send, counts as unchanged instead of written, and an undo leaves it alone
+  instead of overwriting someone else's value. (#2692, #2723)
+- An undo of a Shopify description checks marks of other runs again right
+  before it sends, not only at planning. (#2612)
+- A bulk run's send that a stopped loop left without an answer now counts as
+  unclear, and the page offers a check instead of "write on". A start check
+  that can never pass now takes "write on" away, as it does for approving.
+  (#2686, #2806)
+- "N in chat" on several inbox items answers each item's newest follow-up, as
+  "Reply in chat" on one item does, with the same sensitive-content checks.
+  (#2721)
+- A reply-snoozed inbox item wakes only for a message that may reopen it, in
+  the item's own tenant. Follow-up counts after a reply or archive hold, and
+  bulk actions and bulk undo write an audit row per item. (#2733, #2792)
+- Mail marked by `X-Autoreply`, `X-Autorespond` or `Precedence: auto_reply`,
+  and delivery reports, count as automatic on IMAP, Gmail and Graph; copies
+  sent from another account on the instance count as our own. Neither reopens
+  an answered item. (#2769)
+- On IMAP servers without thread ids, a reply finds its inbox item through
+  In-Reply-To and References, and reply reminders also resolve by those
+  headers. A follow-up's push names its own sender. (#2772, #2780)
+- A store token refresh that got new tokens but could not keep them now ends
+  the connection, so the app shows it as ended. After a 401, a connection that
+  cannot be renewed as it stands is told to connect again, and one whose
+  renewal just did not run is told to send the request once more.
+  (#2784, #2788, #2809)
+- For a built-in OAuth provider's profile, the token renewal hint and the 401
+  reminder now name the same way forward, and the reminder also reaches a
+  profile without a stored token URL. Checking whether a secret is stored no
+  longer records a credential read in the instance log. (#2419)
+- The OAuth callback's trail rows name a person the owner let in by their name,
+  like their other rows. (#2773)
+- On Settings → APIs, the label of the button that replaces a saved secret no
+  longer breaks onto two lines on a narrow screen, addresses, hosts and
+  accounts no longer break inside a word, and revocation and erasure dates
+  name the month. (#2725, #2743)
+- Two `http_request` calls of one turn can no longer both pass the session's
+  request limit. (#2533)
+- A request to a priced API that answered during a redirect is counted in the
+  run's cost, also when a later hop is refused or fails. (#2684)
+- `GET /api/export` now sets `contacts_may_be_incomplete`,
+  `deals_may_be_incomplete`, `datastore_may_be_incomplete`,
+  `threads_may_be_incomplete` and `durable_knowledge.may_be_incomplete` to
+  `true` when the store behind the block could not be opened at boot. Until now
+  those blocks came out empty and marked complete. (#2691)
+- With durable memory switched off, `GET /api/export` now carries the durable
+  knowledge entries and memory blocks still held from when it was on, read
+  without changing anything; until now the block came out empty and marked
+  complete. The block's new `enabled` field says whether durable memory is on.
+  The same read runs when durable memory is on but its store did not open, and
+  the block is marked incomplete while rejected or superseded entries are
+  stored, since the export does not carry those yet. (#2711)
+- When a database was set aside as corrupt (`<name>.corrupt-<ms>`, by the boot
+  or by a restore), `GET /api/export` now names the set-aside files in
+  `set_aside_databases` (names only) and marks the blocks read from that
+  database incomplete. Until now the database opened in its place exported as
+  complete. When the data directory cannot be listed,
+  `set_aside_databases_unknown` is set and all of those blocks are marked.
+  (#2717)
+- When a migration stopped on the source after the handshake, the target kept
+  its session for 30 minutes and turned away every new attempt. The source now
+  ends that session through the target's new `POST /api/migration/abort`, and
+  the wizard offers a new attempt at once when the target confirms. (#2602)
+- Migration's count of values that stay unreadable on the target, and the check
+  for encrypted data without a key, now include a bulk run's refused link
+  domain. (#2643)
+- A relation in the memory graph now moves to the memory that replaces its
+  memory with the same fact, instead of staying on the retired one where no
+  deletion could reach it later; the migration counts and logs what it moves
+  before it runs. A relation of a memory replaced by a contradiction is
+  hidden. (#2798)
+- A changeset rollback that stops partway keeps the review and the backups of
+  the files not restored yet. A run no longer replaces a review its sender may
+  not answer; `POST /api/sessions/:id/run` answers 409 `review_pending_owner`.
+  (#2830)
+- After a reload, the chat shows again which model it runs on.
+  `GET /api/threads/:id` now carries `run_tier`. (#2762)
+- The run route now notices a client that went away: the run goes on without a
+  stream, and the next message takes it over only when its engine has been
+  silent for 60 s and no tool call is still within its own time limit.
+  (#2526, #2813)
+- With workspace isolation (the HTTP server and the Docker image), a relative
+  path in the file tools is now read from the workspace, not from the process's
+  working directory. (#2727)
+- A refused tool call keeps its own answer for the model when delivering its
+  result event fails, and a gate that needs input ends the run as such. (#2651)
+- At little window height, a confirmation's Allow and Deny buttons stay in view
+  and only the question's value scrolls, with a hint how many lines are left.
+  (#2745)
+- After error reporting was turned off and on again, reports from work started
+  before that are no longer lost. (#2577)
+
+### Security
+
+- Workflow and plan consents (`POST /api/workflows/:id/confirm`, the workflow
+  and the plan takeover) are accepted only in the owner's browser session. A
+  person the owner let in gets the same answer on another person's
+  conversation whether or not a session is live in it. (#2820, #2867)
+- A watch (`task_create` with `watch_url`) now follows `network_policy` like
+  every other credential-free read: under `allow-list` a page outside the list
+  is not watched, under `deny-all` no page is, and with `enforce_https` a plain
+  `http://` page is not either; an address that is not http or https is
+  refused at set-up. A watch the policy refuses is refused at once, and the
+  refusal is recorded in the instance language. After outside content, a watch
+  on a host the owner did not name is asked about in the owner's chat before
+  it is created, and refused where nobody can be asked.
+  (#2700, #2730, #2781, #2818)
+- In a run an inbound webhook started, the check on event values reads each
+  string of a step on its own and the steps as the run executes them, and its
+  refusal no longer quotes stored ids or placeholders outside the id form.
+  (#2628, #2635, #2646)
+- Refusals about workflow parameters and contracts no longer quote stored
+  values: allowed values are counted, host and paths described, and names
+  quoted only in a plain shape. A run applies only the contract's own
+  parameter rules. A stored contract whose tool, method, host or path list is
+  not a list of names grants nothing, and a parameter pattern that does not
+  compile on its own is refused at bind. (#2660, #2801, #2832)
+- The question that releases a vault key to an API profile uses fixed wording
+  and names the profile by its opaque id; free-text fields are counted, not
+  printed. `api_setup` `view`, `release_secret` and `withdraw_release` accept
+  the opaque id. A new profile id may not take the opaque-id shape. (#2420)
+- A Shopify bulk run in the product form writes only through a connection
+  that asked for and was granted `write_products` when it was set up;
+  otherwise it halts and says how to connect again. (#2681)
+- When lynox refuses a send to a target the owner did not name, the model's
+  refusal names only plainly shaped addresses and hosts in its sentence; any
+  other target is given apart, as marked untrusted data. (#2850)
+- The halt push to people with access no longer carries the owner's notes on
+  another member's connection. A run end that names a connection another
+  member set up is pushed with those lines to the owner's devices only; other
+  members get a fixed sentence. (#2868, #2870)
+- `mail_reply` parses its `to` and `cc` overrides with the shared send parser,
+  which drops values with a line break or control character. (#2664)
+- The API profile save question names every change that widens what a
+  credential may do or where it goes. An autonomous run refuses such a save, a
+  save to an unlisted host, a new profile on a bound secret and a profile
+  delete. (#2585, #2838, #2844)
+- A failed or malformed answer from a Google or Microsoft token endpoint is
+  named by its status and OAuth error code only, never by its text. (#2697)
+- Once a conversation holds outside content, every `web_research` read and
+  `http_request` GET or HEAD to a host the owner did not name is asked about,
+  and refused where nobody can be asked; so are an `api_setup` discovery read
+  and saving an OAuth token address. The provider's own web search counts as
+  outside content. (#2680, #2695, #2704, #2716)
+- In sidecar mode with the egress proxy, a `bash` call whose tool round started
+  after the conversation read outside content (a web page, a search, a mail, a
+  previous `bash` call) no longer reaches every host under `allow-all` or no
+  policy. Its proxy credential then names the built-in provider hosts, the
+  operator's `network_allowed_hosts` and the hosts the owner typed in the
+  thread; under `guarded` a connected API's host is left out. Before outside
+  content, a `bash` call under `guarded` now also reaches the hosts the owner
+  typed in the thread. `allow-list` and `deny-all` are unchanged.
+  (#2701, #2712)
+- The approval question before an outgoing write now also finds stored secrets
+  inside a value that is itself JSON text, also when written with escapes a
+  lenient parser accepts; past fixed depth and size limits such a value counts
+  as holding a secret. (#2650, #2702)
+- Provider keys from the environment, credential fields inside JSON env values
+  and the web push key are masked, and overlapping values are masked as one.
+  (#2619)
+- Stored and outside text in eight tools' results is marked as such, and
+  refusals of hidden characters and of `save_workflow` parameter names no
+  longer quote that text. (#2642, #2833, #2845)
+- Titles and names that a person with access wrote (plans, workflows, the
+  person a workflow runs as, API connections and profiles) are shown set apart
+  from lynox's own text. (#2705)
+- After outside content, a `google_sheets` write or append shows each cell that
+  starts like a formula and offers to write it as text; `format` shows each
+  request that can write cells. (#2738, #2812)
+- The engine's own confirmations approve only on an exact offered key, and a
+  question the model asks is never shown as one of them. (#2608)
+- `write_file` and `edit_file` write the file the permission check judged,
+  resolved once per call. (#2821)
+- The egress proxy log names a host the model chose only in part, never a path
+  or query, and DataStore boot lines name no table on an instance that reduces
+  error text. (#2760, #2761)
+- A `config.json` that does not parse, and a control-plane answer to the
+  managed Google claim that does not parse, are named by the fault's position
+  only, without quoting the text around it. The claim then answers 500 with
+  code `google_claim_invalid`. (#2690)
+- HTML artifacts run in a sandboxed frame endpoint, and the app's page policy
+  no longer allows inline script or public CDNs. Pages refuse to be framed. An
+  SVG exported from the gallery reaches no other address when opened.
+  (#2722, #2740)
+
+### Upgrade notes
+
+- On first start `engine.db` moves from schema **70** to **78**,
+  `mail-state.db` from **23** to **24** and `agent-memory.db` from **7** to
+  **8**; `history.db` stays at **74**. There is no down path. (#2465, #2530,
+  #2648, #2782, #2798, #2810, #2815, #2829, #2857)
+- Without `overrun_hold` from the control plane, runs are admitted as before;
+  the helper-cost change above still applies. An instance without managed
+  billing configured (`LYNOX_BILLING_TIER`) never reads `overrun_hold`, so
+  self-hosted instances are unaffected. (#2699)
+- Inbox rules are now on by default; rules the agent proposes still wait for
+  the owner, and a rule that describes mail in words costs one cheap model call
+  per mail. Set `LYNOX_FEATURE_INBOX_USER_RULES=0` to keep them off. Fixed rules
+  now compare sender and subject normalized and may match more mail. (#2465)
+- The instance log now keeps its entries for 365 days: older entries are
+  deleted. Status polls the web UI makes by itself are folded into one entry
+  per day once they are older than 30 days. The first sweeps after the upgrade
+  work through a long history a few days at a time. (#2782)
+- A Shopify bulk run in the product form now halts when its connection was not
+  shown to ask for `write_products`, also every connection made before that was
+  recorded; connect the store again. New connections get expiring tokens; one
+  holding a token that does not expire keeps it. (#2679, #2681)
+- An app that embeds `@lynox-ai/web-ui` has to serve `/_artifact-frame`
+  itself, or HTML artifacts stay blank; the package README says which files to
+  copy. `createInboxRule` now returns `{ ok: true, id }` or
+  `{ ok: false, refusal }` instead of `{ id }` or `null`. (#2465, #2722)
+- The web UI can no longer be shown in a frame: its pages send
+  `X-Frame-Options: DENY` and `frame-ancestors 'none'`, and a frame request
+  for any path but `/_artifact-frame` gets 403. Its page policy allows no
+  inline script but its own and no public CDNs. (#2722)
+- `POST /api/workflows/:id/confirm`, `POST /api/workflows/:id/takeover` and
+  `POST /api/triggers/:id/takeover` answer a token, the owner's included, with
+  403 `session_only`. On another person's conversation without a live
+  session, a person the owner let in now gets 403 instead of 404. (#2820)
+- The engine's own confirmations approve only on an offered key (`allow`,
+  `deny`; `deep`, `balanced`, `cancel`); other text, or an older client's `y`,
+  gets `refused: "unrecognised_answer"` from `POST /api/sessions/:id/reply`.
+  An API client that answers them sends the key. (#2608)
+- Question texts now follow the instance language (German on a managed
+  instance without `language`) and quote values in the language's marks; a
+  client that parses the text sees that. The answer keys do not change.
+  (#2600, #2793, #2816)
+- An unattended run now refuses a widening profile save, one to an unlisted
+  host, a profile on a bound secret and a profile delete instead of filing a
+  question, and after outside content any read or token address on a host the
+  owner did not name. (#2680, #2695, #2704, #2838, #2844)
+- An existing watch that `network_policy` now refuses stops being read at its
+  next check and records why; the Triggers view says on its row why and who
+  can change that. Watches on a listed page, under `guarded` and under
+  `allow-all` are unchanged. (#2730)
+- With the egress proxy, a `bash` call after outside content now reaches only
+  the provider hosts, `network_allowed_hosts` and the hosts the owner typed,
+  also under `allow-all`; a command that needs another host reaches it once the
+  owner names the host in the chat. (#2701, #2712)
+- A stored workflow with a step id `params`, `__proto__` or `constructor` no
+  longer runs until the step is renamed (`rename_step`). A stored contract
+  whose lists have another shape grants nothing until it is saved again.
+  (#2640, #2801)
+- A plugin's `onToolGate` that gives no answer within 30 s refuses the call. A
+  plugin's confirmation payload no longer changes the buttons offered, and is
+  blocked in an unattended run. (#2516, #2579)
+- `POST /api/sessions/:id/run` can answer 409 `review_pending_owner`, and 409
+  `review_pending` for a client that sends `shows_changeset_review: true`.
+  `PATCH /api/tasks/:id` with only fields a plan lacks answers 400, not 404.
+  (#2521, #2774, #2830)
+- The migration token is accepted only as 64 hex characters, on both sides;
+  a `LYNOX_MIGRATION_TOKEN` of another shape fails. The `error` event of
+  `POST /api/migration/export` carries `code`, `params` and `retry` beside
+  `message`. (#2602, #2751)
+- `GET /api/export` marks more blocks incomplete (a store that did not open, a
+  set-aside database, graph rows no block carries) and adds blocks and fields;
+  a client that reads the flags only as "a cap was reached" sees them in more
+  cases. (#2691, #2703, #2711, #2717, #2837, #2841, #2851, #2866)
+
+## 2.19.1 — 2026-11-26
+
+This release contains one security fix. Upgrading is recommended for every
+instance.
+
+### Security
+
+- The node processes the image itself starts run with Node's signal debugger
+  off (`--disable-sigusr1`): the engine and the two `node -e` calls of the
+  entrypoint in their argv, the egress proxy and the shell sidecar's exec
+  daemon through the image's `NODE_OPTIONS`. The engine started from the
+  image, the egress proxy and the exec daemon refuse to start when the flag is
+  not in force or an option opens a debugger, and the refusal says how to
+  start. (#2822)
+
+### Upgrade notes
+
+- The image's own entrypoint passes the new start check, unless your
+  `NODE_OPTIONS` holds an `--inspect` option (other than the port settings) or
+  another spelling of `--disable-sigusr1`; then the engine refuses to start.
+  Remove it from `NODE_OPTIONS`.
+- A setup that starts the engine with its own command, bypassing the
+  entrypoint, needs `--disable-sigusr1` in that command, or a plain
+  `NODE_OPTIONS` that contains it, and no `--inspect` option; otherwise the
+  engine does not start and says why. `npx` and a source checkout are not
+  checked.
+- The egress proxy and the shell sidecar refuse to start if a `NODE_OPTIONS`
+  you set for them replaces the image's and is not a plain one with
+  `--disable-sigusr1`, or holds an `--inspect` option.
+- Apart from this fix, the code is the same as 2.19.0. There are no database
+  migrations.
+
+## 2.19.0 — 2026-11-26
 
 ### Upgrade notes
 
@@ -20,122 +654,225 @@
   `web_search`), which runs at the provider rather than through this
   instance's network settings. It is offered only under no policy,
   `allow-all` or `guarded`, and never to an agent whose policy cannot be read.
-- A watch (`task_create` with `watch_url`) now follows `network_policy` like
-  every other credential-free read: under `allow-list` a page outside the list
-  is not watched, under `deny-all` no page is, and with `enforce_https` a plain
-  `http://` page is not either; an address that is not http or https is refused
-  when the watch is set up instead of failing at every check. A new watch is refused when it is
-  set up; an existing one stops being read at its next check and records why,
-  and the Triggers view says on its row why the page is not read and who can
-  change that.
-  Apart from that, watches on a page in the list and watches under `guarded`
-  and `allow-all` are unchanged.
 - `POST /api/tasks/:id/confirm` now requires `{ "expect": "<digest>" }`, the
   digest from `GET /api/tasks/:id/stamp-preview`, and answers 400 without it.
   Until now a confirm without it stamped whatever the schedule held when the
   request arrived, unbound to anything the owner was shown. The web UI sends it
-  from the release that carries #2207 on; a tab opened before the upgrade gets
-  "confirm failed" until it is reloaded. An API client that confirms schedules
-  reads the preview first.
-- In sidecar mode with the egress proxy, a `bash` call whose tool round started after
-  the conversation read outside content (a web page, a search, a mail, a
-  previous `bash` call) no longer reaches every host under `allow-all` or no
-  policy. Its proxy credential then names the built-in provider hosts, the
-  operator's `network_allowed_hosts` and the hosts the owner typed in the thread; under
-  `guarded` a connected API's host is left out. `allow-list` and `deny-all` are
-  unchanged. A command that needs another host after that reaches it once the
-  owner names the host in the chat.
-- `GET /api/export` now sets `contacts_may_be_incomplete`,
-  `deals_may_be_incomplete`, `datastore_may_be_incomplete`,
-  `threads_may_be_incomplete` and `durable_knowledge.may_be_incomplete` to
-  `true` when the store behind the block could not be opened at boot. Until now
-  those blocks came out empty and marked complete, as if the account held no
-  contacts, deals, tables, chats or memory entries. A client that reads the
-  flags only as "a cap was reached" also sees them on such an instance.
-- With durable memory switched off, `GET /api/export` now carries the durable
-  knowledge entries and memory blocks still held from when it was on, read
-  without changing anything. Switching it off never deleted them, and until now
-  the block came out empty and marked complete. The block's new `enabled` field
-  says whether durable memory is switched on. The same read runs when durable
-  memory is on but its store did not open, and the block is marked incomplete
-  while entries the owner rejected or that were superseded are stored, since
-  the export does not carry those yet.
-- `GET /api/export` has three new fields. `knowledge_graph_may_be_incomplete`
-  is `true` when the knowledge graph was not read in full: reading it failed,
-  a read fell back to the older store, the subject graph is on without
-  `engine.db`, an entity reached the per-entity relation limit, or a remembered
-  text could not be read (see `knowledge_graph.memories` below). While the graph is switched off, or on
-  without its layer, the export still reads what the graph holds, since
-  switching it off deletes nothing: the block carries those entities and
-  relations with `enabled: false` (or `true`). `agent-memory.db` is opened
-  read-only for that: no migration and no checkpoint, so the file and its
-  `-wal` stay as they are; SQLite may create the `-shm`, and an empty `-wal`
-  where none was, beside them. A file from a newer build is left unread, and
-  one that cannot be read gives an empty block, both with the flag `true`; one
-  stamped with an older schema is read, and the flag is `true`. `secrets` now also lists names
-  written to the vault after boot (mail and OAuth credentials, for example).
-  `secrets_may_be_incomplete` is `true` when the secret store or its vault did
-  not open. `secrets_note` says that only secret names are exported, never
-  values.
-- With the subject graph on, `GET /api/export` reads the knowledge graph's
-  entities by key instead of by offset, so its time grows with the number of
-  subjects rather than with the square of that number;
-  `knowledge_graph.entities` is then in id order, unless a key read fails and
-  the export pages by offset instead. Without a search term, the entity list
-  of the web app on the subject graph cuts its page in the query and breaks
-  ties in its order by id.
-- `GET /api/export` now carries the remembered texts of the knowledge graph,
-  under `knowledge_graph.memories`, keyed by the store that holds them:
-  `agent-memory.db` with its `memories` and `mentions`, and `engine.db` with
-  its `memories`, `memory_subjects` and every row of `relationships`, with
-  `source_deleted` and a `relationships_note`; the graph block lists only the
-  subjects it maps to entities, so relations between other subjects were in no
-  block. Every stored column is included except the embedding, and replaced or
-  retired texts are included as well, with their `is_active` and
-  `superseded_by`. Texts and relationship descriptions and notes are masked the
-  way durable knowledge is. A text that cannot be decrypted, or is not stored as
-  text, is written as a marker, never as what is stored.
-  `knowledge_graph_may_be_incomplete` no longer turns `true` just because such
-  texts are stored. It turns `true` when one of these tables could not be read,
-  a table returned more than 20,000 rows (the rest is left out), a text could not
-  be decrypted, `engine.db` is not open, or `agent-memory.db` comes from a newer
-  build. It also stays `true` while graph rows are stored that no block carries:
-  subjects the graph block does not list (archived ones and those of kind
-  `service` or `other` with the subject graph on, every subject with it off),
-  the tables no block carries (`supersedes` in both stores, `cooccurrences`,
-  `subject_cooccurrences`, `subject_mints`), with the subject graph on the
-  entities and relations of `agent-memory.db`, and with it off relations neither
-  of whose entities is stored. Those are counted, not read. Both files are only read, as for the entities and
-  relations.
-- When a database was set aside as corrupt (`<name>.corrupt-<ms>`: by the boot
-  for `history.db` and `engine.db`, by a restore for those and `datastore.db`
-  and `agent-memory.db`, and an `engine.db.migration-tmp.corrupt-<ms>` left by
-  older builds), `GET /api/export` now names the set-aside files in
-  `set_aside_databases` (names only) and marks the blocks read from that
-  database incomplete: the threads for `history.db`; durable knowledge for
-  `engine.db`, and the knowledge graph too; the
-  knowledge graph for `agent-memory.db`; contacts, deals and tables for
-  `datastore.db`. Until now the database opened in its place exported as
-  complete, while the older data sat in the set-aside file. When the data
-  directory cannot be listed, `set_aside_databases_unknown` is set and all
-  of those blocks are marked.
-- The person erasure's preview and answer now name the set-aside copies of the
-  databases it deletes in (`engine.db`, its `migration-tmp` staging copy, and
-  `agent-memory.db`) in `setAsideCopies` (file names only, never content):
-  each copy with the `-wal` and `-shm` beside it in `companions`, and a `-wal`
-  or `-shm` whose copy is gone as a copy itself. The web app lists them under
-  "Not covered" with the way to them for the instance's hosting; self-hosted,
-  the companions are named with it. Such a copy may still hold data about the
-  person, and the erasure does not reach it; until now the answer did not say
-  so. When the data directory cannot be listed, `setAsideCopies` is `null` and
-  the web app says the copies could not be checked.
+  since 2.18.0 (#2207); a tab still open from 2.17.x or earlier gets "confirm
+  failed" until it is reloaded. An API client that confirms schedules reads the
+  preview first.
+- On first start `engine.db` moves from schema **68** to **70**, `history.db`
+  from **72** to **74** and `mail-state.db` from **20** to **23**. The steps add
+  tables, columns and indexes. Existing inbox rules are marked confirmed as of
+  their creation, and once after the step a pass gives every workflow the owner
+  had confirmed the digest of its steps. In `datastore.db`, which carries no
+  version, each table gains the columns that say who wrote a row last, and each
+  table gets an opaque id, at every start for a table that has none. There is
+  no down path. (#2451, #2595, #2593, #2636, #2347, #2558)
+- A sent mail, an HTTP write, a Drive share or a Calendar invite whose
+  recipient or host the owner did not name (in the words they typed in the
+  conversation, in a contact they wrote, or as a recipient of an earlier send
+  to owner-named recipients) now asks the owner first; a send filed for
+  approval names where the target came from on its card. A session of someone
+  the owner let in is refused. Approving a send does not make its recipient
+  owner-named. Contacts, earlier sends and conversation text from before the
+  update do not count as owner-named either: a send to such a recipient asks
+  until the owner names it again. A trigger
+  from before its creator was recorded counts as the owner's only once the
+  owner confirms its recipients in the Triggers view. Once the
+  conversation has read outside content, a `web_research` read whose URL has a
+  query goes through the same question and follows no redirect to another
+  host. (#2636, #2658)
+- An unattended run, schedule, webhook or grant of a workflow now runs only
+  steps the owner stamped: the stamp holds a digest of the steps. Workflows
+  the owner had confirmed are stamped once at the first start; a workflow
+  someone with access built or changed waits for the owner's stamp, through
+  `GET /api/workflows/:id/stamp-preview` and `POST /api/workflows/:id/confirm`
+  (owner only, `expect` required). Meanwhile `POST /api/workflows/:id/run`
+  answers `409` with code `workflow_awaits_stamp`; a webhook or one-shot
+  trigger of such a workflow is switched off and has to be switched on again
+  after the stamp, while a schedule or watch waits and resumes by itself.
+  Workflow exports leave the digest out. (#2451)
+- `POST /api/sessions/:id/reply` answers a question only when the body names
+  it with `promptId` (from the `prompt` event or
+  `GET /api/sessions/:id/pending-prompt`).
+  Without it (and with an `answer`) nothing is answered: `409` with code
+  `prompt_id_required` while an `ask_user` question is open, `404` otherwise.
+  (#2644)
+- A Shopify connection records the version of the consent text it was
+  confirmed under. A bulk run on a connection from before writes a product's
+  title and SEO texts as before, but not its description or image alt text;
+  for those, connect the store again. A Shopify connection can now also ask for
+  writing files (`write_files`); the alt-text form runs only where that was
+  asked and granted. (#2580, #2485)
+- A new workflow step id is 1 to 40 characters of `a-z`, `0-9`, `_` and `-`.
+  A save with another id, or with a step reference no run can resolve, is
+  refused; a stored step id from before still runs and is shown by its
+  position. (#2589, #2604, #2606)
+- An engine that started without one of its stores now says so and refuses
+  what it could not keep: without `history.db` the agent does not run, since
+  the spending caps (by default $100 a day and $500 a month) cannot be
+  checked, and an HTTP or mail send limit that is set refuses the send instead
+  of sending uncounted; without `engine.db` API profile changes, memory
+  changes and to-do changes are refused. The status bar names the missing
+  store and what it stops. (#2423, #2443, #2447, #2457, #2540)
+- The daily and monthly spending caps are now checked before model calls
+  outside a run as well: memory and knowledge extraction, the inbox
+  classifier and `Engine.batch`. Voice routes answer 402 at the cap; local
+  whisper.cpp dictation and extraction by pattern alone cost nothing and are
+  not refused. (#2453)
+- `POST /api/searxng/check` is owner only. On an instance the control plane
+  provisions it checks only the provisioned `SEARXNG_URL` or a public
+  address. (#2436)
+- A plugin tool may no longer be named `fail_step`: workflow steps use that
+  name for their own tool. (#2495)
+- The health body may carry a `migration` block (`import_limit_mb`,
+  `baseline_mb`, `k`, `rest_factor`): what a migration into this instance may
+  hold in memory. It is optional and absent on older engines. (#2486)
+- When the access token file or the data folder belongs to another uid, the
+  container stops with the file, its owner, the uid it runs as and the way
+  out, instead of a bare "Permission denied" and a restart loop. (#2504)
+
+### Added
+
+- Inbox rules the agent proposes wait for the owner's confirmation and file
+  no mail before it; a rule can also describe mail in words, checked with one
+  cheap model call per mail before the classifier. Both sit behind
+  `LYNOX_FEATURE_INBOX_USER_RULES` (off by default). Rules have a name, items
+  name the rule that filed them, and the inbox lists by rule. (#2347, #2354)
+- A Shopify bulk run can write a product's description, under the HTML check
+  WooCommerce descriptions go through. (#2580)
+- The owner can discard a bulk run before approving it. (#2610)
+- The start of a judged list run has a field for the link domains it may
+  add. (#2561)
+- A workflow step can end itself as failed with `fail_step`; the run reports
+  it as failed instead of completed. (#2495)
+- `update_workflow_steps` can repair a stored step reference with
+  `set_input_from`. (#2604)
+- The Triggers view lets the owner confirm the recipients of a trigger from
+  before its creator was recorded. (#2636)
+- The complete data export can be staged as an archive by an engine command
+  (`node dist/scripts/export-archive.js`), with readable, masked stores and the
+  files; it shares one slot with the erasures across processes, and
+  `DELETE /api/data` answers 409 while it runs. (#2430)
+- A tool call that did not do what was asked shows as unsuccessful in the
+  chat, live and after a reload. (#2555)
+
+### Changed: bulk runs
+
+- Hidden characters a planner or judge adds are marked in the preview and
+  counted at approval and at the probe. (#2428)
+- Links inside WordPress shortcodes are held to the run's link domains, read
+  as the shop prints them; links, schemes and control characters are refused
+  on every run. (#2427)
+- The markup check, the read-back and the hidden-character check read HTML
+  only within bounds of size, nesting, tags and attributes; a field past them
+  is refused or listed as not checked. (#2438, #2449, #2556)
+- Descriptions the store added markup to are compared, minted and refused
+  in the form the store saves; a marked row whose key does not decrypt is
+  read for every target. (#2370, #2545, #2539)
+- The preview names a changed or refused field by its label, a judged run's
+  fields in words, and a field name the planner set in a box inside the
+  sentence; the page says why a judged start is held. (#2584, #2622, #2626)
+- A bulk run's push names its stage, end and host, and the trail names a
+  delegated run's planner by name. (#2603, #2570)
+- The Shopify and bexio consent pages say what lynox may change instead of
+  listing fields. (#2485)
+
+### Changed: plans, workflows and triggers
+
+- A step id outside the shape is shown by its position, and edit refusals
+  name steps by position. (#2589, #2606, #2618)
+- Escalation, workflow-question and scheduled-run threads open with a fixed
+  engine sentence, not a title or the task as the owner's turn; the task is
+  fenced as the task. (#2490, #2496)
+- A failed run's escalation thread names its steps in fixed lines, and
+  `diagnose_workflow_run` and the question thread leave out a plan name the
+  owner did not write. (#2582, #2583, #2536)
+- A scheduled run's workflow start is recorded as a schedule. (#2493)
+- A mandate is told who confirms a held-back task and where it stands; a
+  thread is titled in the language of its first message. (#2498)
+- A plan's refused connection is told to the owner in the owner's words.
+  (#2484)
+- Every trigger a turn that read outside content files or rewrites is marked,
+  and the approval card says which side read it. (#2440)
+- A watch whose stored address hides characters shows that address, marked,
+  in the stamp block. (#2429)
+
+### Changed: inbox and mail
+
+- A mail the sensitive check flagged is never filed as handled, and its
+  sender and subject stay off pushes and reminders. (#2492, #2509)
+- An inbox item comes back when a flagged message arrives in its thread.
+  (#2510)
+- A dropped IMAP session is reported as its own error, `connection_dropped`,
+  also for a read or a Sent copy after it. (#2487, #2548)
+- Sent replies are written to the sent log. (#2607)
+
+### Changed: cost
+
+- On a managed instance the control plane's usage count raises the local sum
+  only for its own billing period. (#2442)
+
+### Changed: backup and migration
+
+- A migration carries encrypted stores readable when the target takes them,
+  and the target encrypts them under its own key; the source checks the
+  bounds and its memory before it encrypts. (#2519, #2557, #2535, #2588,
+  #2599)
+- The backup list keeps its signature answers across restarts, in a file
+  MACed under a key derived from the vault key. (#2552)
+- The migration done step names the target's support, and Web UI notices name
+  the same way out as the engine's refusals. (#2574, #2566)
 
 ### Changed: web UI
 
-- The person erasure's done line uses the singular for a count of one, leaves
-  out a count of zero, and says "no entries and no memories" when both are zero.
-  On a narrow screen the subject panel is now opaque, so the page behind it no
-  longer shows through.
+- A failed session request fails the turn before a run is sent, and a tap on
+  a failed message sends that message again. (#2560)
+- The side panel names tools as the chat does; `api_setup` reads as API
+  profiles. (#2563, #2559)
+- The setup banner does not check a typed key while only managed access may
+  be used. (#2569)
+- The privacy page points to the instance log and the export path. (#2435)
+- One backup file is named in the singular, and the settings link is in
+  German on German pages. (#2573)
+
+### Changed: API profiles and connections
+
+- A built-in provider profile's token slot is never collected by `ask_secret`;
+  the model is sent to `connect`. (#2469, #2506)
+- A save over a profile the boot held back reads its grant. (#2471)
+- A refused request to a Shopify store names its own cause. (#2501)
+
+### Security
+
+- The owner's turn in a thread a helper wrote in is read as untrusted.
+  (#2426)
+- A key in a file a helper attaches is refused before it is saved; a helper's
+  turn gets prompt texts that do not send it to collect keys. (#2418, #2513)
+- A scoped sub-agent asks only for keys inside its scope. (#2483)
+- The vault's resolve guard is set before API profiles load. (#2454)
+- Reads and spec reads refuse a method override, a redirect hop a server may
+  run as a write, and a watch or feed address that may run as a write; a
+  contract write to GraphQL is held by its body on any path. (#2473, #2474,
+  #2478, #2488)
+- A refused write's note never shows a stored value, or part of one, in the
+  URL. (#2611, #2627)
+- A person's refused owner-only attempts and a revoke are recorded in the
+  trail; a table is named there by an opaque id. (#2595, #2558)
+- Who wrote each message, data-store row and sent mail is recorded. (#2593)
+- Error text on boot, mail, voice, push and store paths is reduced before it
+  is kept or shown. (#2421, #2422, #2515)
+- `{{…}}` placeholders are scanned in linear time. (#2632)
+- The release image installs its packages fresh, and both architectures are
+  scanned. (#2503)
+
+### Fixed
+
+- A tool call whose result event fails to deliver is recorded once. (#2638)
+- A chat run beside a scheduled question reads as running and stays apart on
+  takeover. (#2417, #2425)
+- An open connection check closes when its row stops offering it. (#2446)
 
 ## 2.18.0 — 2026-11-17
 
