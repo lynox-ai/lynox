@@ -31,7 +31,7 @@ function auth(scopes: readonly string[], ownPair = true): GoogleAuth {
 
 function agent(): IAgent {
   return { name: 't', model: 'm', memory: null, tools: [], onStream: null,
-    promptUser: vi.fn().mockResolvedValue('Yes') } as unknown as IAgent;
+    promptUser: vi.fn().mockResolvedValue('confirm') } as unknown as IAgent;
 }
 
 /**

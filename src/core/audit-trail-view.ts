@@ -36,6 +36,10 @@ export interface TrailRow {
   readonly correlation_id: string;
   readonly run_id: string | null;
   readonly plan_run: string | null;
+  /** On a day row (audit-retention.ts): how many polls it stands for. Null on every other row. */
+  readonly poll_count?: number | null | undefined;
+  /** On a day row: the last poll's time; `ts` is the first. */
+  readonly poll_last?: string | null | undefined;
 }
 
 /**
@@ -93,13 +97,20 @@ export interface TrailEvent {
   readonly person: TrailPerson;
   /** A read on a route the web UI polls by itself (`INTERFACE_POLLS`); the view groups these. */
   readonly auto?: true | undefined;
+  /**
+   * A day row: the polls of one person, route and day, folded once the day was more than 30 days
+   * past (audit-retention.ts). `count` reads, the first at `at`, the last at `until`.
+   */
+  readonly count?: number | undefined;
+  readonly until?: string | undefined;
 }
 
 /**
  * The routes the web UI polls by itself, without the person doing anything, by the action
  * `_recordedMandateRead` writes for them (`GET <route template>`). A helper's open tab leaves about
  * 23 reads a minute on them (row 1034), and the owner's view groups them so the person's own steps stay
- * findable. The trail itself keeps every row (D15).
+ * findable. Grouping here changes no row (D15). After 30 days, only the reads of `FOLDED_POLLS`
+ * (audit-retention.ts) are folded into one row per day; the others on this list stay single rows.
  *
  * Decided here, from the route the engine dispatched, never from a mark the client sends. Listed
  * are only routes without a path parameter, whose answer holds no session's messages (the task list
@@ -364,6 +375,7 @@ function stepsOf(rows: readonly TrailRow[], src: TrailSources, sends: ReadonlyMa
       out.push({
         kind: 'event', id: `event:${String(r.id)}`, action: r.action, target: r.target, phase: r.phase, at: r.ts, person: personOf(r),
         ...(isInterfacePoll(r) ? { auto: true as const } : {}),
+        ...(typeof r.poll_count === 'number' ? { count: r.poll_count, until: r.poll_last ?? r.ts } : {}),
       });
     }
   }
@@ -467,7 +479,7 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources, opts: {
     .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
 }
 
-const TRAIL_COLUMNS = 'SELECT id, ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, run_id, plan_run FROM audit_log';
+const TRAIL_COLUMNS = 'SELECT id, ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, run_id, plan_run, poll_count, poll_last FROM audit_log';
 /** The view's rows: written since the view existed (`trail_form`) and by a person with delegated access. */
 const TRAIL_ROWS = "trail_form = ? AND actor_kind = 'mandate'";
 /** How often a page reaches out for the rest of its groups; each round can only add rows. */

@@ -905,7 +905,7 @@ describe('spawnInline + parentPrompt propagation', () => {
     await spawnViaAgent({ id: 'a', agent: 'a', runtime: 'agent' }, named, {}, mockConfig, undefined, 'run-1', 'autonomous', { approvalFiling });
     expect(last()['approvalFiling']).toBe(approvalFiling);
 
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     await spawnInline({ id: 's', agent: 's', runtime: 'inline', task: 't' }, {}, mockConfig, mockParentTools, undefined, undefined, { parentPromptUser: promptUser });
     expect(last()['approvalFiling']).toBeUndefined();
     await spawnViaAgent({ id: 'a', agent: 'a', runtime: 'agent' }, named, {}, mockConfig, undefined, 'run-1', undefined, { parentPromptUser: promptUser });
@@ -2081,6 +2081,16 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
     expect(config['noticeLanguage']).toBe('de');
     // A step's refusal is reported to the run that started the workflow.
     expect(config['onOriginRefused']).toBe(onOriginRefused);
+  });
+
+  it('a step shares the calling conversation\'s record of what its searches listed', async () => {
+    const searches = { has: () => false };
+    await runInline(newRunTaint({ searchResultAddresses: searches } as unknown as Parameters<typeof newRunTaint>[0]));
+    const config = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect(config['searchResultAddresses']).toBe(searches);
+    await runInline(newRunTaint());
+    const bare = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect(bare['searchResultAddresses']).toBeUndefined();
   });
 
   it('CONTROL: a run with no calling conversation hands its steps no owner-known targets', async () => {

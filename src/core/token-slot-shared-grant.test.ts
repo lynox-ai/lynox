@@ -208,7 +208,7 @@ function agentOf(store: ApiStore, vault: Vault): never {
     principal: { kind: 'owner' },
     sessionCounters: { httpRequests: 0 },
     secretStore: vault,
-    promptUser: async () => 'Allow',
+    promptUser: async () => 'allow',
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
     toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   } as never;
@@ -227,7 +227,7 @@ async function referenced(store: ApiStore, vault: Record<string, string>, url: s
   mockProcess
     .mockResolvedValueOnce({ content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'http_request', input: { url, method: 'GET', headers: { 'X-Data': `secret:${name}` } } }], stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } })
     .mockResolvedValueOnce({ content: [{ type: 'text' as const, text: 'Done' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } });
-  const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: agentVault, toolContext: ctx, promptUser: vi.fn().mockResolvedValue('Allow') });
+  const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: agentVault, toolContext: ctx, promptUser: vi.fn().mockResolvedValue('allow') });
   await agent.send('go');
   return JSON.stringify(agent.getMessages()[2]);
 }

@@ -206,24 +206,24 @@ describe('a run the engine works on', () => {
 		expect(line()).toBe('lynox urteilt …');
 	});
 
-	it('says lynox writes, with the written targets out of those it writes, approved and while writing, and the head moves too', async () => {
+	it('says lynox writes, with the targets done out of those it writes, approved and while writing, and the head moves too', async () => {
 		run = makeRun({ phase: 'approved', total: 4, changes: { ...UPDATES(3), unchanged: 1 } });
 		await render();
-		expect(line()).toBe('lynox schreibt … 0 von 3');
+		expect(line()).toBe('lynox schreibt … 0 von 3 erledigt');
 		run = { ...run, phase: 'writing', applied: 2 };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox schreibt … 2 von 3');
+		expect(line()).toBe('lynox schreibt … 2 von 3 erledigt');
 		expect(counts()).toBe(tf('bulk.head.counts', { n: '4', a: '2', c: '0', f: '0' }));
 	});
 
 	it('says lynox takes back an undo with its numbers, so a running undo does not look finished, and the head counts what it took back', async () => {
 		run = makeRun({ kind: 'undo', sourceRunId: 'r0', phase: 'writing', total: 3, changes: UPDATES(3), applied: 1 });
 		await render();
-		expect(line()).toBe('lynox nimmt zurück … 1 von 3');
+		expect(line()).toBe('lynox nimmt zurück … 1 von 3 erledigt');
 		expect(counts()).toBe('3 · zurückgenommen 1 · Konflikte 0 · fehlgeschlagen 0');
 		run = { ...run, applied: 2 };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox nimmt zurück … 2 von 3');
+		expect(line()).toBe('lynox nimmt zurück … 2 von 3 erledigt');
 		expect(counts()).toBe('3 · zurückgenommen 2 · Konflikte 0 · fehlgeschlagen 0');
 	});
 
@@ -255,7 +255,7 @@ describe('a run the engine works on', () => {
 		await render();
 		run = { ...run, phase: 'writing', changes: UPDATES(3), applied: 1, judge: { tier: 'standard', unjudged: 0, judged: 3 } };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox schreibt … 1 von 3');
+		expect(line()).toBe('lynox schreibt … 1 von 3 erledigt');
 	});
 
 	it('drops an answer that arrives after the page is gone, and loads nothing for it', async () => {
@@ -297,7 +297,7 @@ describe('a run the engine works on', () => {
 		try {
 			run = makeRun({ kind: 'undo', sourceRunId: 'r0', phase: 'writing', total: 3, changes: UPDATES(3), applied: 1 });
 			await render();
-			expect(line()).toBe('lynox is undoing … 1 of 3');
+			expect(line()).toBe('lynox is undoing … 1 of 3 done');
 		} finally { setLocale('de'); }
 	});
 
@@ -308,7 +308,7 @@ describe('a run the engine works on', () => {
 		retryAfter = '4';
 		await pass(BULK_FOLLOW_MS);
 		await pass(10_000);
-		expect(line()).toBe('lynox schreibt … 0 von 3');
+		expect(line()).toBe('lynox schreibt … 0 von 3 erledigt');
 		expect(shown()).not.toContain(t('common.load_failed'));
 	});
 
@@ -371,6 +371,70 @@ describe('a run the engine works on', () => {
 	});
 });
 
+describe('a run whose list is not read yet', () => {
+	const LIST = { state: 'pending' };
+	it('says so in its title while it waits for its start, with no status line, in DE and EN', async () => {
+		run = makeRun({ total: 0, list: LIST, haltKey: 'awaitingStart', haltReason: 'awaitingStart' });
+		await render();
+		expect(title()).toBe(`Liste noch nicht gelesen · ${HOST}`);
+		expect(counts()).toBeNull();
+		expect(line()).toBeNull();
+		unmount(component!);
+		component = undefined;
+		const before = getLocale();
+		setLocale('en');
+		onTestFinished(() => setLocale(before));
+		await render();
+		expect(title()).toBe(`List not read yet · ${HOST}`);
+		expect(counts()).toBeNull();
+	});
+
+	it('says so in its title when the read halted before it found a target, and keeps the halt\'s own sentence', async () => {
+		run = makeRun({ total: 0, list: LIST, haltKey: 'unavailable', haltReason: 'engine English' });
+		await render();
+		expect(title()).toBe(`Liste noch nicht gelesen · ${HOST}`);
+		expect(counts()).toBeNull();
+		// The halt says why where it always does, in its own sentence.
+		expect(shown()).toContain('Angehalten');
+		expect(shown()).toContain('Der Lauf kam nicht weiter.');
+	});
+
+	it('says the list was not read, without „yet“, when the run halted on a cause it has to be planned again for, in DE and EN', async () => {
+		run = makeRun({ total: 0, list: LIST, haltKey: 'listTooLarge', haltReason: 'engine English' });
+		await render();
+		expect(title()).toBe(`Liste nicht gelesen · ${HOST}`);
+		expect(counts()).toBeNull();
+		expect(shown()).toContain('Angehalten');
+		unmount(component!);
+		component = undefined;
+		const before = getLocale();
+		setLocale('en');
+		onTestFinished(() => setLocale(before));
+		await render();
+		expect(title()).toBe(`List not read · ${HOST}`);
+		expect(counts()).toBeNull();
+	});
+
+	it('counts the targets of a read that halted part-way, shows the dash while the list is read, and counts a run that ended before it read its list', async () => {
+		run = makeRun({ total: 40, changes: UPDATES(40), list: LIST, haltKey: 'unavailable', haltReason: 'engine English' });
+		await render();
+		expect(title()).toBe(`40 Ziele · ${HOST}`);
+		expect(counts()).toBe('40 Ziele');
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ total: 0, list: LIST, listFirstPage: `https://${HOST}/admin/api/2026-10/graphql.json` });
+		await render();
+		expect(title()).toBe(`– Ziele · ${HOST}`);
+		expect(counts()).toBe('–');
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ phase: 'aborted', total: 0, list: LIST, haltKey: 'mandateEnded', haltReason: 'mandateEnded' });
+		await render();
+		expect(title()).toBe(`0 Ziele · ${HOST}`);
+		expect(counts()).not.toBeNull();
+	});
+});
+
 describe('the head names every target once', () => {
 	const NONE: BulkHeads = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 };
 	const i18n = { t, tf };
@@ -395,6 +459,36 @@ describe('the head names every target once', () => {
 		await render();
 		expect(label()).toBe('Status');
 		expect(counts()).toBe('16 targets: 2 taken out · 3 unchanged · 9 written · 0 conflicts · 1 failed · 1 open');
+	});
+
+	it('a run halted because the store\'s access ended reads halted in its head, counts its targets, and names connecting again as the step before continuing, in DE and EN', async () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		setLocale('de');
+		run = makeRun({
+			phase: 'writing', total: 6, changes: UPDATES(6), applied: 2, haltKey: 'storeAccessEnded', haltReason: 'engine English',
+			probeConfirmed: true, writeForm: 'measured', checksum: 'c1', resumeOpen: 4, resumeTries: 4,
+			heads: { ...NONE, written: 2, open: 4 },
+		});
+		const dts = (): string[] => [...target.querySelectorAll('dt')].map((d) => d.textContent?.trim() ?? '');
+		await render();
+		expect(dts()).toContain('Angehalten');
+		expect(dts()).not.toContain('Abgebrochen');
+		expect(label()).toBe('Stand');
+		expect(counts()).toBe('6 Ziele: 2 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 4 offen');
+		expect(shown()).not.toContain('engine English');
+		expect(shown()).toContain(tf('bulk.halt.storeAccessEnded', { provider: HOST }));
+		expect(shown()).toContain('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du den Lauf hier fortsetzen.');
+		if (component) unmount(component);
+		component = undefined;
+		setLocale('en');
+		await render();
+		expect(dts()).toContain('Halted');
+		expect(dts()).not.toContain('Aborted');
+		expect(shown()).not.toContain('engine English');
+		expect(counts()).toBe('6 targets: 2 written · 0 conflicts · 0 failed · 4 open');
+		expect(shown()).toContain(tf('bulk.halt.storeAccessEnded', { provider: HOST }));
+		expect(shown()).toContain('Ask lynox in the chat to connect the store again. Then you can continue the run here.');
 	});
 
 	it('names each class in the engine\'s order, a target taken back unwritten with the ones taken back', () => {

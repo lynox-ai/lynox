@@ -164,7 +164,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, i:
 
 const runs = Array.from({ length: RUNS }, (_, i) => ({ i, label: `remove fetch #${String(i)}` }));
 // The user who asked for the edit allows the tool when the app asks, as they would by clicking it.
-const base = { maxIterations: 5, systemPrompt: SYSTEM_PROMPT, promptUser: async () => 'Allow', promptSecret: async () => 'canceled' as const };
+const base = { maxIterations: 5, systemPrompt: SYSTEM_PROMPT, promptUser: async () => 'allow', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('step-ref remove — Anthropic (Haiku)', () => {

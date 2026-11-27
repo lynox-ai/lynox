@@ -8,6 +8,7 @@ import type { AutonomyLevel } from './modes.js';
 import type { AgentWarning } from './models.js';
 import type { ConversationGrants } from '../core/conversation-grants.js';
 import type { CallApiCost, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { ConsentKind, ConsentAction } from '../contract/prompt.js';
 
 export interface TabQuestion {
   question: string;
@@ -92,6 +93,16 @@ export interface PromptMeta extends PromptOrigin {
    * only, like `signal`.
    */
   blocked?: boolean | undefined;
+  /**
+   * The question is one of the engine's own confirmations (`src/contract/prompt.ts`): its
+   * options are that kind's fixed keys, the client draws its consent card from this marker
+   * alone, and the answer approves only as one of those keys. Set only by the engine's
+   * consent gates through `consentMeta`; a question the model writes (`ask_user`) never
+   * carries it, whatever its options say.
+   */
+  consent?: ConsentKind | undefined;
+  /** For a consent whose button names what it does (a Google write): that action. Words only. */
+  consentAction?: ConsentAction | undefined;
 }
 
 /**
@@ -345,6 +356,18 @@ export interface IAgent {
    */
   getRemainingRunBudgetUSD(): number | null;
   /**
+   * Whether this run was admitted with a spending bound of its own (`RunAdmission`), on top
+   * of the configured budget. Required, so every agent says it; a caller that reads it must
+   * treat an agent that cannot answer as bounded.
+   */
+  hasRunCostCeiling(): boolean;
+  /**
+   * Whether this run's whole budget is already held against the instance's daily and monthly
+   * caps (a background run the admission reserved for). Work carved out of the run's budget
+   * then needs no hold of its own there. An agent that cannot answer counts as not held.
+   */
+  budgetHeldAgainstCaps?(): boolean;
+  /**
    * Hold `usd` against this run's ceiling for work about to start. `false` means it did
    * not fit and nothing was held, so a refused caller has nothing to give back.
    */
@@ -406,6 +429,15 @@ export interface IAgent {
    *  to it. A sub-agent and a workflow step get their conversation's, by reference. Absent: every
    *  target is foreign. */
   readonly ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
+  /** The page addresses searches in this agent's conversation listed as results, as the provider
+   *  gave them (`web_research` search adds to it, nothing else does). The origin check reads it for
+   *  a read after foreign content (`ToolEntry.readAddress`). A sub-agent and a workflow step share their
+   *  conversation's, by reference. Absent: none. */
+  readonly searchResultAddresses?: import('../core/search-result-addresses.js').SearchResultAddresses | undefined;
+  /** See `Agent.batchStartedTainted`. */
+  batchStartedTainted?(): boolean;
+  /** See `Agent.heldProviderSearch`. */
+  heldProviderSearch?(): boolean;
   /** Where a target the owner did not name comes from in this agent's run, as far as the run
    *  knows it (a trigger's, a workflow's, a sub-agent, a helper's thread). Absent: read from the
    *  agent's taint (`readContent`), else unknown. */
@@ -452,6 +484,8 @@ export interface IAgent {
   readonly activeScopes?: MemoryScopeRef[] | undefined;
   readonly isolation?: IsolationConfig | undefined;
   readonly autonomy?: AutonomyLevel | undefined;
+  /** The language this agent asks its confirmation questions in (`'de' | 'en'`). */
+  readonly dialogLanguage?: 'de' | 'en' | undefined;
   /**
    * The capability contract that governs a tool call dispatched now, or why none does.
    * The one question both readers ask — the danger check in the agent loop and the

@@ -50,9 +50,11 @@ describe('AgentMemoryDb', () => {
       fresh.setEmbeddingDimensions(3);
       fresh.close();
 
+      // The DDL migration is v7: v8 only moves relations and re-runs cleanly, so the stamps
+      // from v7 on are dropped and v7's ALTER is what throws.
       const raw = new Database(path);
-      const latest = (raw.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v;
-      raw.prepare('DELETE FROM schema_version WHERE version = ?').run(latest);
+      const latest = 7;
+      raw.prepare('DELETE FROM schema_version WHERE version >= ?').run(latest);
       raw.close();
 
       // Re-opening re-runs the latest migration; its DDL now throws. The version
@@ -581,7 +583,7 @@ describe('AgentMemoryDb', () => {
       expect(db.getEntity(extracted)).not.toBeNull();
     });
 
-    it('removes the relations sourced from a deleted memory, and keeps those of a superseded one', () => {
+    it('removes the relations sourced from a deleted or a contradicted memory, and keeps what a replacement handed on', () => {
       // `relations.source_memory_id` has no foreign key: without the reap the relation of a
       // deleted memory stays, its description (text derived from that memory) included, and
       // points at an id nothing resolves.
@@ -598,13 +600,19 @@ describe('AgentMemoryDb', () => {
       db.createRelation(bob, acme, 'member_of', 'Bob joined Acme', superseded);
       db.createRelation(alice, bob, 'knows', 'Alice knows Bob', live);
       db.createRelation(acme, bob, 'employs', 'Acme employs Bob', '');
+      const merged = db.createMemory({ text: 'Bob is with Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 0, 1] });
+      db.createRelation(bob, acme, 'part_of', 'Bob is with Acme', merged);
       expect(db.deactivateMemoriesByPattern('works at Acme')).toEqual([deleted]);
+      // Replaced without handing its relations on, as a contradiction does.
       db.supersedMemory(superseded, live);
+      // Replaced by the same fact: its relations go to the successor first.
+      db.supersedMemory(merged, live);
+      expect(db.repointRelations(merged, live)).toBe(1);
 
       db.gc(false);
 
       const rels = db.listAllRelations().map(r => r.relation_type).sort();
-      expect(rels).toEqual(['employs', 'knows', 'member_of']);
+      expect(rels).toEqual(['employs', 'knows', 'part_of']);
       expect(db.getMemory(deleted)).toBeNull();
       expect(db.getMemory(superseded)).toBeNull();
     });

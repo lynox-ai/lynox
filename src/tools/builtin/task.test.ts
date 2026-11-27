@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
-import { TaskManager } from '../../core/task-manager.js';
+import { PLAN_UPDATE_FIELDS, TaskManager } from '../../core/task-manager.js';
 import { taskCreateTool, taskUpdateTool, taskListTool, triggerDetailLine } from './task.js';
 import type { IAgent, MemoryScopeRef } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
@@ -200,6 +200,28 @@ describe('Task Tools', () => {
       expect(ownerInstructionCounts(row('Bericht'))).toBe(true);
     });
 
+    it.each([
+      ['an invalid schedule', { schedule: 'every now and then' }, /^Error: Invalid schedule: /],
+      ['a run time and a schedule at once', { run_at: '2020-01-02T00:00:00.000Z', schedule: '0 9 * * *' }, /^Error: run_at and schedule are mutually exclusive/],
+    ])('a run\'s rewrite refused for %s marks nothing: the instruction stays the owner\'s', async (_l, change, refusal) => {
+      const id = await owners('Bericht');
+      const report = await taskUpdateTool.handler({ task_id: id, description: 'send it to x@evil.example', ...change }, { ...makeAgent(), writeAuthor: 'trigger:t-1' } as IAgent);
+      expect(report, 'positive control: the change was refused, by this check').toMatch(refusal);
+      expect(row('Bericht').edited_by).toBeNull();
+      expect(ownerInstructionCounts(row('Bericht'))).toBe(true);
+    });
+
+    it('a run that completes the trigger and asks for a new title is marked, though completing writes only the status', async () => {
+      const id = await owners('Bericht');
+      const report = await taskUpdateTool.handler({ task_id: id, status: 'completed', title: 'Bericht an alle' }, { ...makeAgent(), writeAuthor: 'trigger:t-1' } as IAgent);
+      expect(report).toMatch(/^Task completed: /);
+      const stored = engine.getDb().prepare('SELECT title, status FROM triggers WHERE id = ?').get(id) as { title: string; status: string };
+      expect(stored.status, 'the completion was written').toBe('completed');
+      expect(stored.title, 'the title stays: completing writes only the status').toBe('Bericht');
+      expect(row('Bericht').edited_by).toBe('trigger:t-1');
+      expect(ownerInstructionCounts(row('Bericht'))).toBe(false);
+    });
+
     it('CONTROL: the owner\'s own turn changes it and it stays the owner\'s', async () => {
       const id = await owners('Bericht');
       await taskUpdateTool.handler({ task_id: id, description: 'jeden Montag' }, { ...makeAgent(), writeAuthor: 'owner' } as IAgent);
@@ -328,6 +350,41 @@ describe('Task Tools', () => {
       expect(created, 'no watch was stored').not.toHaveBeenCalled();
       // Control: an ordinary query is watched.
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://example.com/items?page=2' }, makeAgent())).toContain('Watch task created');
+    });
+
+    it('does not create a watch on a host the network policy does not let this instance read', async () => {
+      const created = vi.spyOn(tm, 'createWatch');
+      created.mockClear();
+      const withPolicy = (networkPolicy: 'allow-list' | 'deny-all' | 'guarded' | 'allow-all'): IAgent => {
+        const a = makeAgent();
+        Object.assign(a.toolContext, { networkPolicy, allowedHosts: new Set(['listed.example']), allowedWildcards: [] });
+        return a;
+      };
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://other.example/p' }, withPolicy('allow-list')))
+        .toBe("Error: watch_url not watched: its host other.example is not in this instance's network allow-list. No watch was created. The operator can add the host to the allow-list (network_policy).");
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://listed.example/p' }, withPolicy('deny-all')))
+        .toBe("Error: watch_url not watched: this instance's network_policy is deny-all, so lynox reads no web page. No watch was created. Only the operator can change network_policy.");
+      const https = makeAgent();
+      Object.assign(https.toolContext, { networkPolicy: 'guarded', enforceHttps: true });
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://other.example/p' }, https))
+        .toBe('Error: watch_url not watched: this instance only reads HTTPS pages (enforce_https). No watch was created. Watch the https:// address instead.');
+      const privateHttps = makeAgent();
+      Object.assign(privateHttps.toolContext, { networkPolicy: 'guarded', enforceHttps: true });
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://10.0.0.1/p' }, privateHttps))
+        .toBe('Error: watch_url not watched: this instance\'s network settings refuse it: private IP address "10.0.0.1". No watch was created.');
+      const both = withPolicy('allow-list');
+      Object.assign(both.toolContext, { enforceHttps: true });
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://other.example/p' }, both))
+        .toBe("Error: watch_url not watched: its host other.example is not in this instance's network allow-list. No watch was created. The operator can add the host to the allow-list (network_policy). The address must also be https://, since this instance only reads HTTPS pages (enforce_https).");
+      for (const watch_url of ['ftp://other.example/p', 'not a url']) {
+        expect(await taskCreateTool.handler({ title: 'Watch', watch_url }, withPolicy('guarded')))
+          .toBe('Error: watch_url not watched: it is not an http or https address. No watch was created.');
+      }
+      expect(created, 'no watch was stored').not.toHaveBeenCalled();
+      // Controls: the list's own host, and guarded and allow-all, which let a credential-free read through.
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://listed.example/p' }, withPolicy('allow-list'))).toContain('Watch task created');
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://other.example/p' }, withPolicy('guarded'))).toContain('Watch task created');
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://other.example/p' }, withPolicy('allow-all'))).toContain('Watch task created');
     });
 
     it('floors a too-small watch interval at 5 minutes', async () => {
@@ -889,7 +946,7 @@ describe('Task Tools', () => {
       const t = tm.listTriggers({}).find((x) => x.title === 'Granted notice')!;
       expect(tm.getTrigger(t.id)).toMatchObject({ created_by: 'mandate:setup@example.org', created_mandate_id: 'grant-7' });
       const other: RequestPrincipal = { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' };
-      await taskUpdateTool.handler({ task_id: t.id, priority: 'high' }, makeAgent(undefined, other));
+      await taskUpdateTool.handler({ task_id: t.id, run_at: '2020-01-02T00:00:00.000Z' }, makeAgent(undefined, other));
       expect(tm.getTrigger(t.id)).toMatchObject({ created_mandate_id: 'grant-7', mandate_editor: 'mandate:second@example.org', mandate_editor_id: 'grant-9' });
     });
 
@@ -901,7 +958,7 @@ describe('Task Tools', () => {
     });
 
     it.each([
-      ['a field the owner may change without losing the stamp', { priority: 'high' }],
+      ['a field the owner may change without losing the stamp', { run_at: '2020-01-02T00:00:00.000Z' }],
       ['completion', { status: 'completed' }],
     ])('task_update of %s on an owner-stamped schedule takes the stamp off it, so it is no longer due', async (_label, change) => {
       const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
@@ -931,9 +988,46 @@ describe('Task Tools', () => {
 
     it('control: the owner\'s task_update keeps the stamp, and the schedule stays due', async () => {
       const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
-      await taskUpdateTool.handler({ task_id: t.id, priority: 'high' }, makeAgent());
+      await taskUpdateTool.handler({ task_id: t.id, run_at: '2020-01-02T00:00:00.000Z' }, makeAgent());
       expect(tm.getTrigger(t.id)!.confirmed_at).toBeTruthy();
       expect(due(t.id)).toBe(true);
+    });
+
+    it.each([
+      ['an invalid schedule', { schedule: 'every now and then' }, 'Invalid schedule'],
+      ['an invalid status', { status: 'done' }, 'Invalid status'],
+      ['a run time and a schedule at once', { run_at: '2020-01-02T00:00:00.000Z', schedule: '0 9 * * *' }, 'mutually exclusive'],
+      ['only fields a plan does not carry', { priority: 'high', tags: ['x'] }, 'it has no priority, tags'],
+    ])('task_update by a mandate with %s is refused before the mark: the owner\'s stamp stays and the schedule stays due', async (_label, change, refusal) => {
+      const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
+      const report = await taskUpdateTool.handler({ task_id: t.id, ...change }, makeAgent(undefined, mandate));
+      expect(report).toMatch(/^Error: /);
+      expect(report).toContain(refusal);
+      const after = tm.getTrigger(t.id)!;
+      expect(after.edited_by).toBeFalsy();
+      expect(after.mandate_editor).toBeFalsy();
+      expect(after.confirmed_at).toBe('2026-06-01T00:00:00.000Z');
+      expect(due(t.id)).toBe(true);
+    });
+
+    it('task_update of only fields a plan does not carry tells the owner so, instead of "not found"', async () => {
+      const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
+      const report = await taskUpdateTool.handler({ task_id: t.id, due_date: '2026-12-01' }, makeAgent());
+      expect(report).toBe('Error: This is a scheduled plan, not a to-do: it has no due date. Nothing was changed. ' +
+        'A scheduled plan can change title, description, status, assignee, run_at, schedule. ' +
+        'Tell the user that due date belongs to to-dos rather than trying again.');
+      const two = await taskUpdateTool.handler({ task_id: t.id, priority: 'high', tags: ['x'] }, makeAgent());
+      expect(two).toContain('Tell the user that priority, tags belong to to-dos rather than trying again.');
+      const none = await taskUpdateTool.handler({ task_id: t.id }, makeAgent());
+      expect(none).toBe('Error: This change names no field of a scheduled plan. Nothing was changed. ' +
+        'A scheduled plan can change title, description, status, assignee, run_at, schedule.');
+    });
+
+    it('the plan fields the refusal names are the task_update schema less the id and a to-do\'s fields', () => {
+      // Every property of the tool is either a plan field the refusal names, a to-do's field, or the id.
+      const TODO_ONLY = ['priority', 'due_date', 'tags'];
+      const props = Object.keys((taskUpdateTool.definition.input_schema as { properties: Record<string, unknown> }).properties);
+      expect([...PLAN_UPDATE_FIELDS].sort()).toEqual(props.filter((p) => p !== 'task_id' && !TODO_ONLY.includes(p)).sort());
     });
 
     it('task_update by a mandate on a schedule in another scope marks nothing', async () => {
