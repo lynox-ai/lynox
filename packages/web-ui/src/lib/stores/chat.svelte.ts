@@ -1679,11 +1679,6 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	}
 }
 
-/** Whether a saved or shown message is the one a turn put on screen: same text, same time. */
-function isTurnMessage(m: ChatMessage, msg: ChatMessage): boolean {
-	return m.role === 'user' && m.content === msg.content && m.createdAt === msg.createdAt;
-}
-
 /** Drop the empty answer bubble a turn put right after its message. */
 function dropEmptyAnswerAfter(list: ChatMessage[], i: number): void {
 	const next = list[i + 1];
@@ -1694,28 +1689,32 @@ function dropEmptyAnswerAfter(list: ChatMessage[], i: number): void {
  * The open review held a message after its thread was left or opened again: the message waits
  * in that thread, so it is back, waiting, when the thread is shown. Opened again, that is the list
  * on screen; left, it is the thread's saved copy (or, with none yet, the list the turn started
- * in), which a waiting message keeps over the server's transcript when the thread opens. A message with files cannot wait in the saved copy (its queue
- * keeps text only) and is marked failed there, for a tap to send again.
+ * in), which a waiting message keeps over the server's transcript when the thread opens. A copy
+ * from before the message gets it added, as {@link markFailedInSavedThread} does. A message still
+ * in its thread's queue waits already. A message with files cannot wait in the saved copy (its
+ * queue keeps text only) and is marked failed there, for a tap to send again.
  */
 function requeueHeldInThread(sid: string, turn: TurnStart, task: string, files: FileAttachment[] | undefined): void {
 	const msg = turn.userMsg;
 	if (!msg || _deletedOnServer.has(sid) || _droppedThreads.has(sid)) return;
 	const withFiles = files !== undefined && files.length > 0;
+	const place = (list: ChatMessage[]): number => {
+		const i = list.findIndex((m) => isSameTurn(m, msg));
+		if (i >= 0) return i;
+		list.push({ role: 'user', content: msg.content, ...(msg.createdAt ? { createdAt: msg.createdAt } : {}) });
+		return list.length - 1;
+	};
 	if (sessionId === sid) {
-		let i = messages.findIndex((m) => isTurnMessage(m, msg) && !m.queued);
-		// The opening showed the server's transcript, which never had the refused message.
-		if (i < 0) {
-			const { queued: _q, queueId: _id, failed: _f, ...copy } = msg;
-			messages.push(copy);
-			i = messages.length - 1;
-		}
+		const i = place(messages);
 		const shown = messages[i]!;
-		const id = shown.queueId ?? newQueueId();
-		shown.queueId = id;
-		shown.queued = true;
-		shown.failed = false;
-		if (!messageQueue.some((q) => q.id === id)) messageQueue.unshift({ id, task, ...(withFiles ? { files } : {}) });
 		dropEmptyAnswerAfter(messages, i);
+		if (!(shown.queued === true && shown.queueId !== undefined && messageQueue.some((q) => q.id === shown.queueId))) {
+			const id = newQueueId();
+			shown.queueId = id;
+			shown.queued = true;
+			shown.failed = false;
+			messageQueue.unshift({ id, task, ...(withFiles ? { files } : {}) });
+		}
 		persistChatNow();
 		// The card of the review that holds it, as `holdForReview` fetches it.
 		void fetchChangeset();
@@ -1726,18 +1725,20 @@ function requeueHeldInThread(sid: string, turn: TurnStart, task: string, files: 
 	// saved copy yet: the list the turn started in is that thread's.
 	const list = root.threads[sid] ?? (JSON.parse(JSON.stringify(turn.messages)) as ChatMessage[]);
 	root.threads[sid] = list;
-	const i = list.findIndex((m) => isTurnMessage(m, msg) && !m.queued);
-	if (i < 0) return;
+	const i = place(list);
 	const saved = list[i]!;
 	dropEmptyAnswerAfter(list, i);
-	if (withFiles) {
+	const savedQueue = root.queues?.[sid] ?? [];
+	const waitsAlready = saved.queued === true && saved.queueId !== undefined && savedQueue.some((q) => q.id === saved.queueId);
+	if (!waitsAlready && withFiles) {
+		saved.queued = false;
 		saved.failed = true;
-	} else {
+	} else if (!waitsAlready) {
 		const id = newQueueId();
 		saved.queueId = id;
 		saved.queued = true;
 		saved.failed = false;
-		root.queues = { ...(root.queues ?? {}), [sid]: [{ id, task }, ...(root.queues?.[sid] ?? [])] };
+		root.queues = { ...(root.queues ?? {}), [sid]: [{ id, task }, ...savedQueue] };
 	}
 	writePersistedRoot(root);
 }
@@ -3740,12 +3741,13 @@ async function loadChangeset(): Promise<boolean> {
 		// No time limit of its own: a slow answer that carries a review must still show it, and a
 		// queued turn waits for it. A fetch the network ends lands in the catch and frees the queue.
 		const res = await fetch(`${getApiBase()}/sessions/${sid}/changeset`);
-		if (stale()) return false;
+		// The same thread opened again: its review is read again, for that opening.
+		if (stale()) return sessionId === sid ? loadChangeset() : false;
 		// No session on the server (restarted, or dropped): it holds no review, which is an answer.
 		if (res.status === 404) return true;
 		if (!res.ok) return false;
 		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
-		if (stale()) return false;
+		if (stale()) return sessionId === sid ? loadChangeset() : false;
 		if (data.hasChanges && data.files.length > 0) {
 			pendingChangeset = data.files;
 			pendingChangesetRunId = data.runId ?? null;
@@ -4509,36 +4511,46 @@ function drainAfterReattach(gen: number): void {
 
 /** How long to wait between asks whether a run a re-attach lost hold of still runs. */
 const RUN_END_POLL_MS = 2000;
+/** How often it is asked, at most (six minutes, as the busy wait); then the turn waits for the user. */
+const RUN_END_MAX_ASKS = 180;
+/** The wait for a run's end in progress, by opening, stream and run: one at a time. */
+let _runEndWait: string | null = null;
 
 /**
  * A re-attach let go of its run before the run ended: the stream dropped, could not be reached,
  * or its reading was refused. The run may still go on on the server, so a turn queued in this
  * opening waits for its end: sent earlier, the server would answer busy. The registry is asked
- * until the run is no longer in it (or listed as interrupted by a restart), then the turns go as after a re-attach that found its run
+ * for six minutes at most, until the run is no longer in it (or no longer running), then the turns go as after a re-attach that found its run
  * ended (the review is asked for first). An unanswered ask is asked again. It stops when the
  * thread is left or opened again, a run of this chat starts (that run drains the queue), or
  * nothing waits any more.
  */
 function drainWhenRunEnds(runId: string, gen: number): void {
 	const epoch = streamEpoch;
-	const current = (): boolean => gen === _resumeGeneration && streamEpoch === epoch && !isStreaming && messageQueue.length > 0;
+	const key = `${gen}:${epoch}:${runId}`;
+	if (_runEndWait === key) return; // one wait per opening, stream and run
+	_runEndWait = key;
+	let asks = 0;
+	const current = (): boolean => _runEndWait === key && gen === _resumeGeneration && streamEpoch === epoch && !isStreaming && messageQueue.length > 0;
+	const stop = (): void => { if (_runEndWait === key) _runEndWait = null; };
 	const ask = async (): Promise<void> => {
-		if (!current()) return;
+		if (!current() || ++asks > RUN_END_MAX_ASKS) { stop(); return; }
 		let ended = false;
 		try {
 			const res = await fetch(`${getApiBase()}/runs/active`);
 			if (res.ok) {
 				const runs = ((await res.json()) as { runs?: unknown } | null)?.runs;
-				// A run a restart left `interrupted` stays listed but runs no more.
+				// Only a running or answer-awaiting run goes on: one a restart left `interrupted`
+				// stays listed but runs no more.
 				ended = Array.isArray(runs) && !runs.some((r) => {
 					if (typeof r !== 'object' || r === null) return false;
 					const { runId: id, status } = r as { runId?: unknown; status?: unknown };
-					return id === runId && status !== 'interrupted';
+					return id === runId && (status === 'running' || status === 'awaiting_input');
 				});
 			}
 		} catch { /* not answered: asked again */ }
-		if (!current()) return;
-		if (ended) { drainAfterReattach(gen); return; }
+		if (!current()) { stop(); return; }
+		if (ended) { stop(); drainAfterReattach(gen); return; }
 		setTimeout(() => { void ask(); }, RUN_END_POLL_MS);
 	};
 	void ask();

@@ -407,6 +407,43 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		expect(runTasks, 'nothing sent past the review').toEqual([]);
 	});
 
+	it('a message the open review holds, refused after another thread opened, waits there too when the thread had a saved copy from before it', async () => {
+		await store.resumeThread('t1'); // the thread was open before: it has a saved copy, without the message
+		await settle();
+		let refuse!: () => void;
+		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
+		void store.sendMessage('held by the review');
+		await settle();
+		await store.resumeThread('t9');
+		await settle();
+		refuse();
+		await settle();
+		const savedT1 = (JSON.parse(saved.get('lynox-chat') ?? '{}') as { threads?: Record<string, Array<{ content: string; queued?: boolean }>> }).threads?.t1;
+		expect(savedT1, 'positive control: the saved copy is there').toBeDefined();
+		changedIn.set('t1', notes);
+		await store.resumeThread('t1');
+		await settle();
+		const back = store.getMessages().find((m) => m.content === 'held by the review');
+		expect(back?.queued, 'it waits').toBe(true);
+		expect(runTasks, 'nothing sent past the review').toEqual([]);
+	});
+
+	it('the review of a run, answered after its thread was opened again, shows its card there', async () => {
+		changed = notes; // the run ends with a review (changeset_ready)
+		changedIn.set('t1', notes);
+		let answer!: () => void;
+		holdChangesetIn.set('t1', new Promise<void>((r) => { answer = r; }));
+		await store.sendMessage('edit the notes');
+		await settle();
+		expect(changesetGets, 'positive control: the thread asked for its review').toBeGreaterThan(0);
+		expect(store.getQueueLength(), 'nothing queued: the opening does not ask itself').toBe(0);
+		await store.resumeThread(store.getSessionId()!); // the same thread, opened again
+		await settle();
+		answer();
+		await settle();
+		expect(store.getPendingChangeset(), 'the card shows in the opening').not.toBeNull();
+	});
+
 	it('a message the open review holds, refused after its thread was opened again, waits there, not sent', async () => {
 		let refuse!: () => void;
 		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
