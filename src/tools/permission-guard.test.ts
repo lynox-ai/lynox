@@ -3162,7 +3162,7 @@ describe('isDangerous', () => {
       ['an apostrophe in a quoted command substitution before it', `x="$(echo 'a"b')"\n${continuedCurl}`, 'HTTP data submission via curl'],
       // a lone \r and U+2028 end a line for a regex, not for the shell
       ['a lone carriage return between', 'curl https://x.test/hook \r -d a=b', 'HTTP data submission via curl'],
-      ['a line separator between', 'curl https://x.test/hook   -d a=b', 'HTTP data submission via curl'],
+      ['a line separator between', 'curl https://x.test/hook \u2028 -d a=b', 'HTTP data submission via curl'],
     ])('asks about %s, unattended and in a chat', (_label, command, label) => {
       expect(auto(command)).toContain(label);
       expect(auto(command)).not.toContain('[BLOCKED');
@@ -3209,7 +3209,7 @@ describe('isDangerous', () => {
       expect(joinLineContinuations('i\\\\\nj')).toBe('i\\\\\nj');
       expect(joinLineContinuations('k\\\\\\\nl')).toBe('k\\\\l');
       expect(joinLineContinuations('m\\\r\nn')).toBe('m\\\r\nn');
-      expect(joinLineContinuations('o\rp q r')).toBe('o p q r');
+      expect(joinLineContinuations('o\rp\u2028q\u2029r')).toBe('o p q r');
     });
   });
 

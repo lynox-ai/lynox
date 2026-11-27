@@ -81,7 +81,7 @@ describe('the reading pane\'s rule prefill holds to the engine\'s checks', () =>
   });
 
   it('offers a sender exactly when the engine takes it as one address', () => {
-    const senders = ['rechnung@lieferant.ch', 'Rechnung@Lieferant.CH', "o'brien+x@example.ie", 'noreply@', 'lieferant.ch', 'Lieferant <a@b.ch>', 'a@b.ch, c@d.ch', 'a@b.ch​', '', 'undisclosed-recipients:;', `${'a'.repeat(196)}@b.ch`];
+    const senders = ['rechnung@lieferant.ch', 'Rechnung@Lieferant.CH', "o'brien+x@example.ie", 'noreply@', 'lieferant.ch', 'Lieferant <a@b.ch>', 'a@b.ch, c@d.ch', 'a@b.ch\u200B', '', 'undisclosed-recipients:;', `${'a'.repeat(196)}@b.ch`];
     for (const sender of senders) {
       expect(client.senderRulePrefill(sender) !== null, sender).toBe(sender.trim().length > 0 && fixedValueProblem(sender, 'from') === null);
       expect(client.isOneSenderAddress(sender.toLowerCase()), sender).toBe(isOneSenderAddress(sender.toLowerCase()));

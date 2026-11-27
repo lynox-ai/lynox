@@ -478,7 +478,7 @@ describe('W-Question: the owner is asked with what is stored, and only then does
 
   it('refuses the save, without asking where the name may go, when what it would show holds a character nobody can see', async () => {
     const store = boot(reports());
-    confirm('ZW_KEY', ['https://zw​.example']);
+    confirm('ZW_KEY', ['https://zw\u200B.example']);
     vault['ZW_KEY'] = value('zw');
     const asked: string[] = [];
     const p = { ...bearerOn('zw', 'new.example', 'ZW_KEY'), ...extra };

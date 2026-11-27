@@ -1370,7 +1370,7 @@ describe('what a verdict\'s text may not add (PRD shopify-preset §20.2 item 5)'
   it('holds a data-store run (no host, no list form) to hidden characters only: no plain-text markup rule there', () => {
     const store = { listForm: null, storeHost: null, startDomains: [] as string[] };
     expect(verdictTextRefusal({ note: 'a <b> c' }, { note: 'x' }, store)).toBeNull();
-    expect(verdictTextRefusal({ note: 'a​b' }, { note: 'x' }, store)).toBe('hidden_char');
+    expect(verdictTextRefusal({ note: 'a\u200Bb' }, { note: 'x' }, store)).toBe('hidden_char');
   });
 
   // An external run whose targets come from a file or a collection has no form that says which

@@ -155,14 +155,14 @@ describe('fail_step on the inline runtime, through the runner', () => {
   });
 
   it('the reason is sanitised and capped before it is stored', async () => {
-    const raw = `line one\nline two\u0007‮ hidden ${'x'.repeat(2_000)}`;
+    const raw = `line one\nline two\u0007\u202E hidden ${'x'.repeat(2_000)}`;
     mockProcess.mockResolvedValueOnce(callsFailStep(raw));
     const { rh, updates } = fakeHistory();
     const state = await runManifest(manifestOf(step), config, { source: { kind: 'adhoc' as const }, parentTools: [tool('http_request')], runHistory: rh });
     const stored = updates.find(u => u.status === 'failed')?.errorText ?? '';
     expect(stored).toBe(sanitizeFailStepReason(raw));
     expect(state.error).toBe(stored);
-    expect(stored).not.toMatch(/[\u0000-\u001f\u007f‮]/);
+    expect(stored).not.toMatch(/[\u0000-\u001f\u007f\u202E]/);
     expect(stored.startsWith('line one line two hidden x')).toBe(true);
     expect([...stored].length).toBe(FAIL_STEP_REASON_MAX + 1); // cut + ellipsis
   });
@@ -171,7 +171,7 @@ describe('fail_step on the inline runtime, through the runner', () => {
 describe('sanitizeFailStepReason', () => {
   it('collapses control characters, drops invisible ones, keeps short text, and fills an empty reason', () => {
     expect(sanitizeFailStepReason('  a\r\n\tb  ')).toBe('a b');
-    expect(sanitizeFailStepReason('a​b')).toBe('ab');
+    expect(sanitizeFailStepReason('a\u200Bb')).toBe('ab');
     // A control character separates words; it is not dropped so that two words run together.
     expect(sanitizeFailStepReason('host\u0007unreachable\u0085now')).toBe('host unreachable now');
     expect(sanitizeFailStepReason('short reason')).toBe('short reason');
@@ -557,7 +557,7 @@ describe('fix round 1 (refute-code-r1)', { timeout: 60_000 }, () => {
   });
 
   it('the notice names an old step id outside the shape by its position, as the stepId field does', () => {
-    const stepId = 'ab‌cd';
+    const stepId = 'ab\u200Ccd';
     const out = {
       stepId, result: '', startedAt: '', completedAt: '', durationMs: 0, tokensIn: 0, tokensOut: 0, costUsd: 0,
       skipped: false, error: 'reason', reportedFailure: true as const,
@@ -566,7 +566,7 @@ describe('fix round 1 (refute-code-r1)', { timeout: 60_000 }, () => {
     // A hidden character puts the id outside the shape: its position in the workflow stands in.
     const json = formatResult(state, 'm', undefined, ['first', stepId]);
     expect(json).toContain('"stepId": "#2 (lynox does not show its id)"');
-    expect(json).not.toContain('‌');
+    expect(json).not.toContain('\u200C');
     expect(json).not.toContain('abcd');
     const steps = (JSON.parse(json) as { steps: Array<{ stepId: string; error?: string }> }).steps;
     expect(steps[0]!.error).toBe('Step "#2 (lynox does not show its id)" reported that it could not complete its task. Its reason is not shown here; diagnose_workflow_run with this run\'s id shows it, quoted.');

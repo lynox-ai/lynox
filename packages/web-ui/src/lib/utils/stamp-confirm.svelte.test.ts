@@ -142,7 +142,7 @@ describe('what the preview shows', () => {
 
 	it('marks what could forge the sentence in names the mandate chose', () => {
 		setLocale('en');
-		const s = connectionsSentence(preview({ by: 'eva‮@x', connections: [{ id: 'a', profile: 'P', provider: 'a​b.example', account: 'x⁦y' }] }));
+		const s = connectionsSentence(preview({ by: 'eva\u202E@x', connections: [{ id: 'a', profile: 'P', provider: 'a\u200Bb.example', account: 'x\u2066y' }] }));
 		expect(s).toBe(`This plan uses connections that ${v('eva⟨U+202E⟩@x')} connected with their own login: ${v('a⟨U+200B⟩b.example')} (${v('x⟨U+2066⟩y')}).`);
 	});
 

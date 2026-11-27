@@ -430,7 +430,7 @@ describe('bodyFieldNames', () => {
   it('makes a name single-line and clips count and length', () => {
     const many = Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`k${i}`, i]));
     expect(bodyFieldNames(JSON.stringify(many))).toMatch(/"k11" and 3 more$/);
-    expect(bodyFieldNames(JSON.stringify({ 'a\nb‮c': 1 }))).toBe('fields "a bc"');
+    expect(bodyFieldNames(JSON.stringify({ 'a\nb\u202Ec': 1 }))).toBe('fields "a bc"');
     expect(bodyFieldNames(JSON.stringify({ ['x'.repeat(60)]: 1 }))).toBe(`fields "${'x'.repeat(40)}…"`);
   });
   it('describes any other body by its size', () => {
@@ -1215,7 +1215,7 @@ describe('a secret inside JSON text inside a value', () => {
       expect(bodyForQuestion(`say "hi\n{"t":"hunter\\\n2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
       expect('text' in bodyForQuestion(`say "hi\n{"t":"hunter\\\n2",}`, mask, 'text/plain')).toBe(true);
       // A raw CR, U+2028 or U+2029 inside a literal behind a stray quote, and a backslash before one.
-      for (const brk of ['\r', ' ', ' ']) {
+      for (const brk of ['\r', '\u2028', '\u2029']) {
         expect(bodyForQuestion(`k" v=w "\\u0068${rest}${brk}"`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
         expect(headersForQuestion({ 'X-Meta': `k" v=w "\\u0068${rest}${brk}"` }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
         expect(bodyForQuestion(`{"t":"hunter\\${brk}2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
@@ -1223,7 +1223,7 @@ describe('a secret inside JSON text inside a value', () => {
         expect('text' in bodyForQuestion(`{"t":"hunter\\${brk}2",}`, mask, 'text/plain')).toBe(true);
       }
       // A backslash before CR or U+2028 joins the lines into one literal, yet each line is still read.
-      for (const brk of ['\r', ' ', ' ']) {
+      for (const brk of ['\r', '\u2028', '\u2029']) {
         expect(bodyForQuestion(`"x\\${brk}y "\\u0068${rest}"`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
       }
       expect(bodyForQuestion(`{"t":"say \\"\\u0068${rest}",}`, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });

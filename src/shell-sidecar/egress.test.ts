@@ -96,7 +96,7 @@ describe('the denial lines', () => {
   it('shows only the host of a raw URL, and nothing that is not printable', () => {
     expect(denialLines(JSON.stringify([d({ host: 'http://plain.example/p?token=1', port: 0, reason: 'plain-http' })])))
       .toEqual(['- refused "plain.example": only HTTPS is allowed; use https://.']);
-    const [line] = denialLines(JSON.stringify([d({ host: 'a\nb‮c' })]));
+    const [line] = denialLines(JSON.stringify([d({ host: 'a\nb\u202Ec' })]));
     expect(line).toContain('"a?b?c"');
   });
 

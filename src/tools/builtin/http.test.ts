@@ -8272,7 +8272,7 @@ describe('write approvals for the write the question showed (270)', () => {
     await visible({ url: 'https://h.example/a?flag&&b=x%E2%80%AEy', method: 'POST', body: '{}' }, agent);
     const q = question(prompt, 0);
     expect(q).toContain('\nflag\nb = x⟨U+202E⟩y');
-    expect(q).not.toContain('‮');
+    expect(q).not.toContain('\u202E');
   });
 
   // What is shown is the query as it goes out: the URL serialized, as the request sends it.

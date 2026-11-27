@@ -63,8 +63,8 @@ describe('the prefill of a chat opened from one that only reads', () => {
 	});
 
 	it('takes out zero-width and bidi controls', () => {
-		expect(containedPrefill([typed('a​b')])).toEqual({ text: 'ab', removedHidden: true });
-		expect(containedPrefill([typed('price ‮01$')])).toEqual({ text: 'price 01$', removedHidden: true });
+		expect(containedPrefill([typed('a\u200Bb')])).toEqual({ text: 'ab', removedHidden: true });
+		expect(containedPrefill([typed('price \u202E01$')])).toEqual({ text: 'price 01$', removedHidden: true });
 	});
 
 	it('leaves emoji joiners and real scripts whole, and then says nothing', () => {
@@ -72,7 +72,7 @@ describe('the prefill of a chat opened from one that only reads', () => {
 			'Team 👨‍👩‍👧 und 👩🏽‍💻',
 			'مرحبا بالعالم',
 			'नमस्ते दुनिया',
-			'می‌خواهم',
+			'می\u200Cخواهم',
 			'Grüsse aus Zürich',
 		];
 		for (const text of texts) expect(containedPrefill([typed(text)]), text).toEqual({ text, removedHidden: false });

@@ -6747,7 +6747,7 @@ describe('spawn_agent tool', () => {
 
     it('refuses every name the dialog would clean away to nothing', async () => {
       // `clean()` in the web UI strips control and bidi characters, then trims.
-      for (const name of ['​', '﻿', ' ', ' ', '　', '   ']) {
+      for (const name of ['\u200B', '\uFEFF', ' ', ' ', '　', '   ']) {
         await expect(spawnAgentTool.handler(
           { agents: [{ name, task: 't' }] },
           makeAgent(),

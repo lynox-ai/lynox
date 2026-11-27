@@ -29,7 +29,7 @@ describe('the shape of a step id', () => {
   });
 
   it('refuses capitals, a space, an umlaut, a dot, a brace, a leading "#", a line break, a hidden character, the empty id and 41 characters', () => {
-    for (const id of ['Fetch', 'fetch orders', 'prüfung', 'a.b', '{a}', '#1', 'a\nb', 'a​b', '', 'x'.repeat(STEP_ID_MAX + 1)]) {
+    for (const id of ['Fetch', 'fetch orders', 'prüfung', 'a.b', '{a}', '#1', 'a\nb', 'a\u200Bb', '', 'x'.repeat(STEP_ID_MAX + 1)]) {
       expect(isStepIdShape(id), JSON.stringify(id)).toBe(false);
     }
     expect(isStepIdShape(undefined)).toBe(false);
