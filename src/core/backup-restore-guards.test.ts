@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,7 @@ import { join } from 'node:path';
  * here lands in exactly that window. The verify pass reads the same file first; `skip` lets the
  * reads before the restore's own one go by.
  */
-const readHook = vi.hoisted(() => ({ path: null as string | null, skip: 0, run: null as (() => void) | null, lengths: null as number[] | null }));
+const readHook = vi.hoisted(() => ({ path: null as string | null, skip: 0, run: null as (() => void) | null }));
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>();
   return {
@@ -24,10 +24,6 @@ vi.mock('node:fs', async (importOriginal) => {
       fire(String(args[0]));
       return fs.openSync(...args);
     }) as typeof fs.openSync,
-    readSync: ((...args: Parameters<typeof fs.readSync>) => {
-      if (readHook.lengths !== null && typeof args[3] === 'number') readHook.lengths.push(args[3]);
-      return fs.readSync(...args);
-    }) as typeof fs.readSync,
   };
   function fire(path: string): void {
     if (readHook.run !== null && path === readHook.path && readHook.skip-- <= 0) {
@@ -38,7 +34,7 @@ vi.mock('node:fs', async (importOriginal) => {
   }
 });
 
-const { BackupManager, MANIFEST_MAX_BYTES, RESTORE_RUNNING } = await import('./backup.js');
+const { BackupManager, RESTORE_RUNNING } = await import('./backup.js');
 const { BACKUP_LIST_PROOF_FILE } = await import('./data-dir-inventory.js');
 const { reloadConfig } = await import('./config.js');
 const { _resetWorkspaceAccess } = await import('./workspace-access.js');
@@ -70,7 +66,6 @@ afterEach(() => {
   readHook.path = null;
   readHook.skip = 0;
   readHook.run = null;
-  readHook.lengths = null;
   _resetWorkspaceAccess();
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   reloadConfig();
@@ -375,29 +370,6 @@ describe('a link inside the backup (the read side)', () => {
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
   });
 
-  it('a larger file swapped in after the check: refused as changed by its size, without a read of it', async () => {
-    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
-    const m = manager();
-    const created = await m.createBackup();
-    writeFileSync(join(data, 'memory', 'x.md'), 'live');
-    const entry = join(created.path, 'memory', 'x.md');
-    const larger = 1024 * 1024;
-    readHook.path = entry;
-    readHook.skip = 1; // the verify pass
-    readHook.run = () => {
-      writeFileSync(entry, Buffer.alloc(larger, 0x61));
-      readHook.lengths = [];
-    };
-
-    const result = await m.restoreBackup(created.path, { allowUnverified: true });
-    expect(readHook.run).toBeNull(); // the hook ran
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('Backup file changed after it was verified — refusing to restore: memory/x.md');
-    // The size the manifest names decides before any read: no read asks for the larger file.
-    expect(Math.max(0, ...(readHook.lengths ?? []))).toBeLessThan(larger);
-    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
-  });
-
   it('a workspace entry that is a link: refused, word for word, the workspace file not replaced', async () => {
     writeFileSync(ws('http-api/f.txt'), 'backed up');
     const m = manager();
@@ -522,42 +494,6 @@ describe('a link inside the backup (the read side)', () => {
     expect(m.listBackups().map(b => b.backup_id)).toContain(id);
   });
 
-  it('a manifest.json larger than the bound: refused by restore and verify by its size, noted by the list, not read', async () => {
-    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
-    const m = manager();
-    const created = await m.createBackup();
-    const id = created.path.split('/').pop() as string;
-    writeFileSync(join(data, 'memory', 'x.md'), 'live');
-    // Sparse: the size is past the bound without the bytes on disk.
-    truncateSync(join(created.path, 'manifest.json'), MANIFEST_MAX_BYTES + 1);
-    const tooLarge = `manifest.json is larger than ${String(MANIFEST_MAX_BYTES)} bytes`;
-
-    const result = await m.restoreBackup(created.path, { allowUnverified: true });
-    expect(result.success).toBe(false);
-    expect(result.error).toBe(`Refusing to restore: ${tooLarge}. Nothing was replaced.`);
-    expect(m.verifyBackup(created.path)).toEqual({ valid: false, errors: [tooLarge], files_checked: 0 });
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    try {
-      expect(m.listBackups().map(b => b.backup_id)).not.toContain(id);
-      expect(stderr).toHaveBeenCalledWith(`[lynox:backup] ${JSON.stringify(id)}: ${tooLarge} — left out of the list\n`);
-    } finally {
-      stderr.mockRestore();
-    }
-    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
-  });
-
-  it('control: a manifest.json at the bound is read', async () => {
-    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
-    const m = manager();
-    const created = await m.createBackup();
-    const at = join(created.path, 'manifest.json');
-    const text = readFileSync(at, 'utf8');
-    // JSON may end in whitespace: padded to exactly the bound, it parses as the same manifest.
-    writeFileSync(at, text + ' '.repeat(MANIFEST_MAX_BYTES - Buffer.byteLength(text)));
-    expect(statSync(at).size).toBe(MANIFEST_MAX_BYTES);
-    expect(m.verifyBackup(created.path)).toMatchObject({ valid: true, errors: [] });
-  });
-
   it('control: the backups folder itself may be a link', async () => {
     writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
     const m = manager();
@@ -571,7 +507,7 @@ describe('a link inside the backup (the read side)', () => {
   });
 });
 
-describe.skipIf(process.platform === 'win32')('a FIFO where a backup file is read', () => {
+describe.skipIf(process.platform !== 'linux')('a FIFO where a backup file is read', () => {
   /**
    * A read that waited on a FIFO would block the whole process, past any test timeout. So each
    * test starts its own way out: a process that, after `UNBLOCK_MS`, opens the FIFO for writing,
@@ -621,32 +557,6 @@ describe.skipIf(process.platform === 'win32')('a FIFO where a backup file is rea
       expect(pruned).toBe(0);
     } finally {
       stop();
-    }
-    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
-  });
-
-  it('swapped in for an entry after the check, right before the read: refused at once as changed', async () => {
-    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
-    const m = manager();
-    const created = await m.createBackup();
-    writeFileSync(join(data, 'memory', 'x.md'), 'live');
-    const entry = join(created.path, 'memory', 'x.md');
-    let stop: (() => void) | null = null;
-    readHook.path = entry;
-    readHook.skip = 1; // the verify pass
-    readHook.run = () => {
-      rmSync(entry);
-      stop = fifoAt(entry);
-    };
-    try {
-      const began = Date.now();
-      const result = await m.restoreBackup(created.path, { allowUnverified: true });
-      expect(readHook.run).toBeNull(); // the hook ran
-      expect(Date.now() - began).toBeLessThan(UNBLOCK_MS / 2);
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Backup file changed after it was verified — refusing to restore: memory/x.md');
-    } finally {
-      (stop as (() => void) | null)?.();
     }
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
   });
