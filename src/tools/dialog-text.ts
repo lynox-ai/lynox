@@ -983,9 +983,9 @@ export interface SheetsNoteDialog {
   readonly formulaFetches: PromptText;
   readonly formulaMore: (n: number) => PromptText;
   /**
-   * Why the button that writes formulas is not offered. Where it names the button, it uses the
-   * button's label in that language (web-ui `chat.consent.write_formulas`). The number is written
-   * out, as the question's own words.
+   * Why the button that writes formulas is not offered. Where it names the button, it says the
+   * button's label in that language (`CONSENT_LABELS`, web-ui `chat.consent.write_formulas`) as the
+   * question's own words, not as a value; a test holds the two equal. The number is written out too.
    */
   readonly formulaOnlyShown: PromptText;
   /** A cell named by its place in the values given, when the range names no first cell. */
@@ -1020,7 +1020,7 @@ export const SHEETS_NOTE_DIALOG: Readonly<Record<DialogLanguage, SheetsNoteDialo
       : pv`Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. ${n} dieser Zellen beginnen wie eine Formel, und Google führt eine Formel beim Schreiben aus.`,
     formulaFetches: pv`Eine Formel kann Google eine Adresse abrufen lassen und dabei Daten aus der Tabelle mitschicken. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE und IMAGE sind Beispiele; andere Funktionen können das auch. Die Adresse muss nicht ausgeschrieben sein: Eine Formel kann sie aus anderen Zellen zusammensetzen.`,
     formulaMore: (n) => pv`und ${n} weitere`,
-    formulaOnlyShown: pv`„${CONSENT_LABELS.de['as-formulas']}“ steht nur zur Wahl, wenn hier jede Formel gezeigt wird. Willst du sie als Formeln schreiben, bitte im Chat darum, höchstens 5 auf einmal zu schreiben.`,
+    formulaOnlyShown: pv`„Als Formeln schreiben“ steht nur zur Wahl, wenn hier jede Formel gezeigt wird. Willst du sie als Formeln schreiben, bitte im Chat darum, höchstens 5 auf einmal zu schreiben.`,
     cellPlace: (row, value, appended) => `${row}. ${appended ? 'neue Zeile' : 'Zeile'}, ${value}. Wert`,
     formatHead: (n) => n === 1
       ? pv`Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. 1 dieser Anfragen kann Zellinhalt oder eine Regel schreiben oder ändern, was jemand in einer Zelle oder einem Blatt sieht, etwa ein Zahlenformat, einen Link, die Schreibrichtung oder ausgeblendete Zeilen. Inhalt und Regeln können eine Formel enthalten, die Google bei sich ausführt.`

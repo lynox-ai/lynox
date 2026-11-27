@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { CONSENT_LABELS, SHEETS_NOTE_DIALOG, type SheetsNoteDialog } from './dialog-text.js';
-import { flattenPrompt, isPromptText } from '../core/prompt-value.js';
+import { flattenPrompt, isPromptText, promptSegments } from '../core/prompt-value.js';
 
 /** Each entry said with the same arguments, so the two languages can be compared. */
 function said(d: SheetsNoteDialog): Record<string, string> {
@@ -17,6 +17,8 @@ function said(d: SheetsNoteDialog): Record<string, string> {
 describe('the sheets notes in German', () => {
   it('names the button it leaves out by that button\'s German label', () => {
     expect(flattenPrompt(SHEETS_NOTE_DIALOG.de.formulaOnlyShown)).toContain(`„${CONSENT_LABELS.de['as-formulas']}“`);
+    // Our own words, not a value set apart: the button's name reads as part of the sentence.
+    expect(promptSegments(SHEETS_NOTE_DIALOG.de.formulaOnlyShown).every((s) => s.kind !== 'value')).toBe(true);
     expect(CONSENT_LABELS.de['as-formulas']).toBe('Als Formeln schreiben');
   });
 

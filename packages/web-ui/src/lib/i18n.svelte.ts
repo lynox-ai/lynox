@@ -1883,7 +1883,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.consent.merge': { de: 'Zusammenführen', en: 'Merge' },
 	'chat.consent.apply': { de: 'Übernehmen', en: 'Apply' },
 	'chat.consent.retire': { de: 'Zurückziehen', en: 'Retire' },
-	// The Sheets formula question; 'Als Formeln schreiben' / 'Write as formulas' is also named in the question's text.
+	// The Sheets formula question; the German 'Als Formeln schreiben' is also named in the question's text (engine dialog-text formulaOnlyShown).
 	'chat.consent.write_text': { de: 'Als Text schreiben', en: 'Write as text' },
 	'chat.consent.write_formulas': { de: 'Als Formeln schreiben', en: 'Write as formulas' },
 	'chat.consent.dont_write': { de: 'Nicht schreiben', en: "Don't write" },
