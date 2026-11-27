@@ -6,11 +6,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addedLines, findingsIn, formatCharsIn, isBinaryFile, wayFor } from '../scripts/added-lines-guard.mjs';
+import { addedLines, findingsIn, formatCharsIn, wayFor } from '../scripts/added-lines-guard.mjs';
 
 const GUARD = fileURLToPath(new URL('../scripts/added-lines-guard.mjs', import.meta.url));
 const ENTRY = fileURLToPath(new URL('../scripts/public-repo-guard.sh', import.meta.url));
@@ -377,14 +377,7 @@ describe('a raw invisible character in an added line', () => {
     expect(r.out).toContain('U+202E');
   });
 
-  it('skips a data file only when its extension is on the list and it holds a NUL byte', () => {
-    const data = Buffer.from(`x${NUL}y${RLO}z\n`, 'utf8');
-    const base = git('rev-parse', 'HEAD');
-    commitBytes('img/a.png', data, 'png with a NUL');
-    expect(guard(base, 'HEAD').code).toBe(0);
-  });
-
-  it('reads a file with a NUL byte but a text extension as text, and refuses the NUL and the control', () => {
+  it('refuses a NUL byte and the control in a source file, and in a file without an extension', () => {
     const base = git('rev-parse', 'HEAD');
     commitBytes('src/a.ts', Buffer.from(`const s = 'x${NUL}y${RLO}z';\n`, 'utf8'), 'ts with a NUL');
     const r = guard(base, 'HEAD');
@@ -398,7 +391,7 @@ describe('a raw invisible character in an added line', () => {
     expect(r2.out).toContain('U+0000');
   });
 
-  it('reads a file with a data extension but no NUL byte as text', () => {
+  it('reads a file named as an image like any other', () => {
     const base = git('rev-parse', 'HEAD');
     commitBytes('img/b.png', Buffer.from(`x${RLO}y\n`, 'utf8'), 'png without a NUL');
     const r = guard(base, 'HEAD');
@@ -406,52 +399,55 @@ describe('a raw invisible character in an added line', () => {
     expect(r.out).toContain('img/b.png:1: raw invisible character U+202E');
   });
 
-  it('reads a data file renamed to a text name in full, and its rename message says so', () => {
+  it('refuses a binary file whose bytes hold one, by chance or not, and says how to go on', () => {
+    // Bytes as an image or a font holds them, among them a NUL and, by chance, the UTF-8 of U+061C.
     const base = git('rev-parse', 'HEAD');
-    commitBytes('img/evil.png', Buffer.from(`${NUL}\nconst s = 'a${RLO}b';\n`, 'utf8'), 'data');
-    git('mv', 'img/evil.png', 'img/evil.ts');
-    writeFileSync(join(dir, 'img/evil.ts'), `const s = 'a${RLO}b';\n`);
-    git('add', '-A');
-    git('commit', '-qm', 'rename and drop the NUL');
-    expect(git('show', '--stat', '-M', '--format=', 'HEAD')).toContain('=>');
+    commitBytes('img/a.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x1a, 0xd8, 0x9c, 0xff, 0x0a]), 'image bytes');
     const r = guard(base, 'HEAD');
     expect(r.code).toBe(1);
-    expect(r.out).toContain('img/evil.ts:1: raw invisible character U+202E in a renamed file, which is read in full');
+    expect(r.out).toContain('img/a.png:1: raw invisible character U+0000');
+    expect(r.out).toContain('U+061C');
+    expect(r.out).toContain('an approval by hash comes first');
   });
 
-  it('reads a copy of a data file under a text name as added', () => {
+  it('refuses code hidden behind a NUL in a file named as an image, which a symlink can load as source', () => {
     const base = git('rev-parse', 'HEAD');
-    commitBytes('img/c.png', Buffer.from(`${NUL}\nx${RLO}y\n`, 'utf8'), 'data');
-    writeFileSync(join(dir, 'img/c.ts'), `x${RLO}y\n`);
+    commitBytes('x.png', Buffer.from(`//${NUL}\nmodule.exports = 'a${RLO}b';\n`, 'utf8'), 'image name, code inside');
+    symlinkSync('x.png', join(dir, 'x.ts'));
     git('add', '-A');
-    git('commit', '-qm', 'copy without the NUL');
+    git('commit', '-qm', 'link a source name to it');
     const r = guard(base, 'HEAD');
     expect(r.code).toBe(1);
-    expect(r.out).toContain('img/c.ts:1: raw invisible character U+202E');
+    expect(r.out).toContain('x.png:2: raw invisible character U+202E');
   });
 
-  it('reads a rename in two steps over a name in between', () => {
+  it('refuses the same file when it is meant for require, which loads an unknown extension as JavaScript', () => {
     const base = git('rev-parse', 'HEAD');
-    commitBytes('img/s.png', Buffer.from(`${NUL}\nl1\nl2\nl3\nx${RLO}y\n`, 'utf8'), 'data');
-    git('mv', 'img/s.png', 'img/s.gz');
-    git('commit', '-qm', 'still data');
-    git('mv', 'img/s.gz', 'img/s.ts');
-    writeFileSync(join(dir, 'img/s.ts'), `l1\nl2\nl3\nx${RLO}y\n`);
-    git('add', '-A');
-    git('commit', '-qm', 'now text');
+    commitBytes('lib/x.png', Buffer.from(`// \xFF\nmodule.exports = 'a${RLO}b';\n`.replace('\xFF', '\uFFFD'), 'utf8'), 'image name');
+    commit('lib/use.js', "module.exports = require('./x.png');\n", 'load it');
     const r = guard(base, 'HEAD');
     expect(r.code).toBe(1);
-    expect(r.out).toContain('img/s.ts:4: raw invisible character U+202E in a renamed file');
+    expect(r.out).toContain('lib/x.png:2: raw invisible character U+202E');
   });
 
-  it('refuses a renamed text file that already carried one, so the rename is the point to escape it', () => {
-    commit('old.ts', `const s = 'a${RLO}b';\nmore\nlines\nhere\n`, 'legacy');
+  it('refuses it in the commit that added it, so dropping the NUL in place later does not help', () => {
     const base = git('rev-parse', 'HEAD');
-    git('mv', 'old.ts', 'new.ts');
-    git('commit', '-qm', 'rename only');
+    const adding = commitBytes('y.png', Buffer.from(`${NUL}\nconst s = 'a${RLO}b';\n`, 'utf8'), 'with a NUL');
+    commitBytes('y.png', Buffer.from(`const s = 'a${RLO}b';\n`, 'utf8'), 'NUL dropped in place');
     const r = guard(base, 'HEAD');
     expect(r.code).toBe(1);
-    expect(r.out).toContain('new.ts:1: raw invisible character U+202E in a renamed file');
+    expect(r.out).toContain(`commit ${adding.slice(0, 9)} y.png:2: raw invisible character U+202E`);
+  });
+
+  it('reads a copy of a file as added', () => {
+    const base = git('rev-parse', 'HEAD');
+    commit('c.md', 'plain\n', 'plain');
+    writeFileSync(join(dir, 'c.ts'), `x${RLO}y\n`);
+    git('add', '-A');
+    git('commit', '-qm', 'copy, changed');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('c.ts:1: raw invisible character U+202E');
   });
 
   it('refuses a line break anywhere in a file name, also at its end', () => {
@@ -464,16 +460,6 @@ describe('a raw invisible character in an added line', () => {
       expect(r.code, JSON.stringify(name)).toBe(1);
       expect(r.out).toContain('in the file name');
     }
-  });
-
-  it('reads a data extension case-blind and only as the last extension of the file itself', () => {
-    const nul = Buffer.from([1, 0, 2]);
-    expect(isBinaryFile('a.PNG', nul)).toBe(true);
-    expect(isBinaryFile('a.png.ts', nul)).toBe(false);
-    expect(isBinaryFile('dir.png/x', nul)).toBe(false);
-    expect(isBinaryFile('a.png.', nul)).toBe(false);
-    expect(isBinaryFile('Makefile', nul)).toBe(false);
-    expect(isBinaryFile('a.png', Buffer.from([1, 2]))).toBe(false);
   });
 
   it('does not check removed lines: a commit taking one out is not refused', () => {

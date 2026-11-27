@@ -54,9 +54,11 @@
  *     one it runs in, invisible letters can make two names that read the same, and
  *     U+2028 ends a JavaScript line that git shows as one. A test, a comment or copy
  *     that needs one writes its escape (`\u202E`), the same string at runtime. The
- *     exceptions are by position inside an emoji (see emojiParts) and by file for
- *     data (isBinaryFile: an extension on a fixed list AND a NUL byte, never one
- *     alone). The pragma does not let one pass: a direction control can rearrange
+ *     only exceptions are by position inside an emoji (see emojiParts). There is
+ *     none by file, also not for an image or a font: a `.png` can be loaded as code
+ *     (a symlink, or `require`, which reads an unknown extension as JavaScript), so a
+ *     binary file is read like any other, and its bytes are refused when they hold
+ *     one. The pragma does not let one pass: a direction control can rearrange
  *     how the pragma's own line reads. A file NAME is read for them too, and printed
  *     with them escaped. Only added lines are read, so a file that already carries
  *     one is not refused until a commit adds such a line.
@@ -146,25 +148,6 @@ export function normalise(text) {
  */
 export const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/u;
 
-/**
- * File extensions whose content is data. A file counts as binary only when its
- * extension is on this list AND its blob holds a NUL byte in the first 8000 bytes
- * (git's own test): its "lines" in a `--text` diff are bytes, which reach these ranges
- * by chance. Neither alone is enough: a NUL in a source file does not make it data,
- * and a file named `.png` without one is read as text.
- */
-export const BINARY_EXTENSIONS = new Set([
-  'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'bmp', 'woff', 'woff2', 'ttf', 'otf', 'eot',
-  'gz', 'tgz', 'zip', 'pdf', 'wasm', 'mp3', 'mp4', 'webm', 'ogg', 'wav', 'sqlite', 'db',
-]);
-
-/** Whether a file is data, by its extension and its bytes together (BINARY_EXTENSIONS). */
-export function isBinaryFile(path, bytes) {
-  const dot = path.lastIndexOf('.');
-  const ext = dot > path.lastIndexOf('/') ? path.slice(dot + 1).toLowerCase() : '';
-  return BINARY_EXTENSIONS.has(ext) && bytes.subarray(0, 8000).includes(0);
-}
-
 /** A code point as `U+XXXX`. */
 const named = (cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
 
@@ -238,7 +221,7 @@ export function formatCharsIn(line) {
 /** How to write a code point instead, for the message. */
 export function wayFor(name) {
   const cp = parseInt(name.slice(2), 16);
-  if (cp === 0) return 'a text file carries no NUL byte: write \\0 in a string (a text file saved as UTF-16 carries them too: save it as UTF-8)';
+  if (cp === 0) return 'a text file carries no NUL byte: write \\0 in a string; a text file saved as UTF-16 carries them too (save it as UTF-8); a binary file is not exempt here, since its bytes can be loaded as code (an approval by hash comes first, in a pull request of its own)';
   if (cp === 0x0d) return 'write \\r in a string';
   if (cp === 0xad) return `write ${escaped(cp)} in a string, &shy; in markup`;
   return `write ${escaped(cp)}`;
@@ -321,22 +304,15 @@ function git(args) {
 }
 
 /**
- * Every commit's patch in base..head, a merge as its remerge diff. Pinned against
- * config that would hide or reshape added lines: binary detection (`--text`), copy
- * detection (`-M`, renames only), blank context lines, a root commit shown without
- * its patch (`log.showRoot`), textconv and external diff drivers, paths relative to
- * a subdirectory, quoted names, colour, prefixes, replace refs.
- */
-/**
- * The paths each commit in base..head adds, copies or renames to, as { commit, path,
- * renamed }: a name is read for invisible characters too, also of a file that adds no
+ * The paths each commit in base..head adds, copies or renames to, as { commit, path }:
+ * a name is read for invisible characters too, also of a file that adds no
  * line. Read NUL-separated, so a name holding a line break or `commit <sha>` stays one
  * name.
  */
 function pathsOf(base, head) {
   const out = [];
   let commit = null;
-  const parts = git(['--no-replace-objects', '-c', 'core.quotePath=false', 'log', '-z', '--format=commit %H',
+  const parts = git(['--no-replace-objects', '-c', 'core.quotePath=false', '-c', 'log.showRoot=true', 'log', '-z', '--format=commit %H',
     '--name-status', '--diff-filter=ACR', '-M', '--diff-merges=remerge', '--no-relative', `${base}..${head}`]).split('\0');
   for (let i = 0; i < parts.length; i++) {
     const token = parts[i].replace(/^\n/, '');
@@ -347,28 +323,14 @@ function pathsOf(base, head) {
     }
     if (token === '' || commit === null) continue;
     if (/^[RC]\d*$/.test(token)) {
-      out.push({ commit, path: parts[i + 2], renamed: token.startsWith('R') });
+      out.push({ commit, path: parts[i + 2] });
       i += 2;
     } else {
-      out.push({ commit, path: parts[i + 1], renamed: false });
+      out.push({ commit, path: parts[i + 1] });
       i += 1;
     }
   }
   return out.filter((p) => p.path !== undefined);
-}
-
-/**
- * A renamed file shows only the lines its rename changed, so a file that was data under
- * its old name (and skipped) could become text with no line read. The target of every
- * rename that is text at its commit is therefore read in full for invisible characters.
- */
-function blobOf(commit, path) {
-  try {
-    return execFileSync('git', ['--no-replace-objects', 'cat-file', 'blob', `${commit}:${path}`], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
-  } catch {
-    // Not readable as a blob at that commit (a submodule, a path git cannot address): read as text, empty.
-    return Buffer.alloc(0);
-  }
 }
 
 /** The invisible characters in a file name: those of a line, and a line break anywhere in it. */
@@ -378,6 +340,13 @@ export function nameCharsIn(path) {
   return found;
 }
 
+/**
+ * Every commit's patch in base..head, a merge as its remerge diff. Pinned against
+ * config that would hide or reshape added lines: binary detection (`--text`), copy
+ * detection (`-M`, renames only), blank context lines, a root commit shown without
+ * its patch (`log.showRoot`), textconv and external diff drivers, paths relative to
+ * a subdirectory, quoted names, colour, prefixes, replace refs.
+ */
 function patchesOf(base, head) {
   return git(['--no-replace-objects', '-c', 'diff.suppressBlankEmpty=false', '-c', 'core.quotePath=false',
     '-c', 'log.showRoot=true',
@@ -456,37 +425,19 @@ export function main(argv) {
   }
   let total = 0;
   let formats = 0;
-  const binary = new Map();
-  const isBinaryAt = (commit, path) => {
-    const key = `${commit}\0${path}`;
-    if (!binary.has(key)) {
-      binary.set(key, isBinaryFile(path, blobOf(commit, path)));
-    }
-    return binary.get(key);
-  };
   const report = (where, what) => {
     console.log(`${where}: ${what}`);
     total++;
   };
-  const readWhole = new Set(pathsAdded.filter((p) => p.renamed && !isBinaryAt(p.commit, p.path)).map((p) => `${p.commit}\0${p.path}`));
   for (const a of added) {
     const where = `commit ${a.commit.slice(0, 9)} ${shown(a.path)}:${a.line}`;
     for (const kind of findingsIn(a.text)) report(where, kind);
-    if (isBinaryAt(a.commit, a.path) || readWhole.has(`${a.commit}\0${a.path}`)) continue;
     for (const name of formatCharsIn(a.text)) {
       report(where, `raw invisible character ${name}, ${wayFor(name)}`);
       formats++;
     }
   }
-  for (const { commit, path, renamed } of pathsAdded) {
-    if (renamed && readWhole.has(`${commit}\0${path}`)) {
-      blobOf(commit, path).toString('utf8').split('\n').forEach((line, i) => {
-        for (const name of formatCharsIn(line)) {
-          report(`commit ${commit.slice(0, 9)} ${shown(path)}:${i + 1}`, `raw invisible character ${name} in a renamed file, which is read in full, ${wayFor(name)}`);
-          formats++;
-        }
-      });
-    }
+  for (const { commit, path } of pathsAdded) {
     for (const name of nameCharsIn(path)) {
       report(`commit ${commit.slice(0, 9)} ${shown(path)}`, `raw invisible character ${name} in the file name`);
       formats++;
