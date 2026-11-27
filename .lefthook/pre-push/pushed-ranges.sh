@@ -16,6 +16,14 @@
 # ref (field 3), which git restricts to a real ref name.
 #   · a deleted ref (local sha all zeros) adds nothing and yields no line;
 #   · a ref whose remote sha this clone has is measured from it: exactly what this push adds;
+#     unless the push brings main in (a merge of origin/main above that sha). Then it is measured
+#     like a new ref, from where it leaves origin/main: the commits main already carries are not
+#     this push's to answer for, and without this a first main merge put hundreds of them in the
+#     scan. Every commit not on origin/main stays in the range, since nothing under a commit of
+#     origin/main can be off it; the branch's own commits that were pushed before are scanned
+#     again, so it is more than exact, never less. An origin/main older than the merged main
+#     leaves the commits in between in the range (refused, with a fetch hint); no origin/main
+#     measures from the remote sha as before;
 #   · a new ref is measured from where it leaves origin/main;
 #   · a ref the remote has at a sha this clone LACKS (someone else pushed it) is measured like a new
 #     ref — more than this push adds, never less.
@@ -84,6 +92,12 @@ for pair in "${pairs[@]}"; do
   read -r tip remote remote_ref <<<"$pair"
   if ! is_zero "$remote" && git cat-file -e "${remote}^{commit}" 2>/dev/null; then
     base="$remote"
+    # A merge base that is not under the remote sha means the push brings main in: measure from it.
+    if git rev-parse -q --verify refs/remotes/origin/main >/dev/null &&
+      mb="$(git merge-base origin/main "$tip" 2>/dev/null)" &&
+      ! git merge-base --is-ancestor "$mb" "$remote"; then
+      base="$mb"
+    fi
   elif ! git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
     if ! is_zero "$remote"; then
       echo "$label: the remote has ${remote_ref:-this ref} at ${remote:0:9}, which this clone does not have," >&2
@@ -98,6 +112,18 @@ for pair in "${pairs[@]}"; do
     echo "$label: ${tip:0:9} shares no history with origin/main, so the commits it" >&2
     echo "  adds cannot be told apart. Branch it from main." >&2
     exit 2
+  fi
+  # A range with a merge in it is where a stale origin/main shows: main's commits between it and the
+  # merged main are scanned as if they were this push's. Say so once per ref, on stderr.
+  if [ -n "$(git rev-list --merges -n 1 "$base..$tip" 2>/dev/null)" ]; then
+    if git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
+      echo "$label: ${remote_ref:-the pushed ref} contains a merge; commits already on origin/main are not scanned." >&2
+      echo "  If a commit of main is refused here, origin/main is older than what was merged:" >&2
+    else
+      echo "$label: ${remote_ref:-the pushed ref} contains a merge, and without origin/main the commits it" >&2
+      echo "  brings in are scanned as well. If a commit of main is refused here:" >&2
+    fi
+    echo "  git fetch origin main:refs/remotes/origin/main, then push again." >&2
   fi
   printf '%s %s\n' "$base" "$tip"
 done

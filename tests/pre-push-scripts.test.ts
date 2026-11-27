@@ -514,3 +514,132 @@ describe('a new branch with no origin/main is refused, and the remedy the refusa
     expect(second.landed, second.out).toBe(true);
   }, T);
 });
+
+/**
+ * A push that merges main must not answer for main's commits. pushed-ranges.sh used to measure an
+ * already-pushed branch from its remote sha, so a first main merge put every main commit since then
+ * into the scan, and the commit guard refused the push over lines main itself carries (core#2437,
+ * 27.11.2026: ~340 main commits, three refused). Now a push that brings main in is measured from
+ * where it leaves origin/main. Each case pairs a push that must land with one that must not, so
+ * neither a guard that blocks everything nor one that scans nothing passes.
+ *
+ * "Dirty" is a line with an invented register id: the commit guard refuses it in any added line.
+ * Main's commits are made in a second clone that never ran `lefthook install`, so they reach main
+ * the way a merged PR does, without this clone's hooks.
+ */
+describe('a push that merges main scans what main does not carry, and all of it', () => {
+  const DIRTY = `see ${ID}\n`;
+  const remote = (c: ReturnType<typeof setup>) => join(c.work, '..', 'remote.git');
+  /** A commit on main, made elsewhere; then this clone fetches it into origin/main. */
+  const onMain = (c: ReturnType<typeof setup>, file: string, text: string) => {
+    const other = mkdtempSync(join(tmp, 'main-'));
+    const g = (...a: string[]) => {
+      const r = spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: other, encoding: 'utf8', env: c.env });
+      if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+    };
+    g('clone', '-q', remote(c), '.');
+    expect(existsSync(join(other, '.git/hooks/pre-push'))).toBe(false);
+    writeFileSync(join(other, file), text);
+    g('add', file);
+    g('commit', '-q', '-m', `Add ${file} on main`);
+    g('push', '-q', 'origin', 'HEAD:refs/heads/main');
+    c.git('fetch', '-q', 'origin');
+    return c.git('rev-parse', 'origin/main').stdout.trim();
+  };
+  const own = (c: ReturnType<typeof setup>, file: string, text: string) => {
+    writeFileSync(join(c.work, file), text);
+    c.git('add', file);
+    c.git('commit', '-q', '-m', `Add ${file}`);
+  };
+  const merge = (c: ReturnType<typeof setup>) => c.git('merge', '-q', '--no-edit', 'origin/main');
+  /** Whether the remote's feat/x is now this clone's HEAD: `landed` alone stays true after the first push. */
+  const pushHead = (c: ReturnType<typeof setup>) => {
+    const r = c.push();
+    const at = spawnSync('git', ['ls-remote', remote(c), 'refs/heads/feat/x'], { encoding: 'utf8', env: c.env }).stdout.slice(0, 40);
+    return { ...r, head: at === c.git('rev-parse', 'HEAD').stdout.trim() };
+  };
+  const pushedOnce = () => {
+    const c = setup();
+    own(c, 'a.md', 'neutral\n');
+    expect(c.push().landed).toBe(true);
+    return c;
+  };
+
+  it('a main merge whose main commit is dirty lands', () => {
+    const c = pushedOnce();
+    onMain(c, 'm.md', DIRTY);
+    merge(c);
+    const r = pushHead(c);
+    expect(r.head, r.out).toBe(true);
+    expect(r.out).toContain('contains a merge; commits already on origin/main are not scanned');
+  }, T);
+
+  it('an own dirty commit behind a main merge is refused', () => {
+    const c = pushedOnce();
+    onMain(c, 'm.md', DIRTY);
+    merge(c);
+    own(c, 'b.md', DIRTY);
+    const r = pushHead(c);
+    expect(r.head, r.out).toBe(false);
+  }, T);
+
+  it('CONTROL: the own dirty commit without a merge is refused, and its clean twin lands', () => {
+    const dirty = pushedOnce();
+    own(dirty, 'b.md', DIRTY);
+    expect(pushHead(dirty).head).toBe(false);
+    const clean = pushedOnce();
+    own(clean, 'b.md', 'neutral\n');
+    expect(pushHead(clean).head).toBe(true);
+  }, 2 * T);
+
+  it('an own dirty commit BETWEEN two main merges is refused (the new base swallows none of the branch)', () => {
+    const c = pushedOnce();
+    onMain(c, 'm1.md', DIRTY);
+    merge(c);
+    own(c, 'b.md', DIRTY);
+    onMain(c, 'm2.md', 'neutral\n');
+    merge(c);
+    const r = pushHead(c);
+    expect(r.head, r.out).toBe(false);
+    // Twin: the same shape with a clean own commit lands, so the refusal above is the own commit's.
+    const t = pushedOnce();
+    onMain(t, 'm1.md', DIRTY);
+    merge(t);
+    own(t, 'b.md', 'neutral\n');
+    onMain(t, 'm2.md', 'neutral\n');
+    merge(t);
+    expect(pushHead(t).head).toBe(true);
+  }, 2 * T);
+
+  it('an origin/main older than the merged main fails closed and names the fetch', () => {
+    const c = pushedOnce();
+    const old = c.git('rev-parse', 'origin/main').stdout.trim();
+    onMain(c, 'm.md', DIRTY);
+    merge(c);
+    c.git('update-ref', 'refs/remotes/origin/main', old);
+    const r = pushHead(c);
+    expect(r.head, r.out).toBe(false);
+    expect(r.out).toContain(FETCH);
+    // Run what it names, push again: main is current, and the same push lands.
+    c.git('fetch', '-q', 'origin', 'main:refs/remotes/origin/main');
+    expect(pushHead(c).head).toBe(true);
+  }, T);
+
+  it('without origin/main the range starts at the remote sha as before: main\'s dirty commit is scanned', () => {
+    const c = pushedOnce();
+    onMain(c, 'm.md', DIRTY);
+    merge(c);
+    c.git('remote', 'set-head', 'origin', '--delete');
+    c.git('update-ref', '-d', 'refs/remotes/origin/main');
+    const r = pushHead(c);
+    expect(r.head, r.out).toBe(false);
+    expect(r.out).toContain('without origin/main the commits it');
+    // Control: the same with a clean main commit lands, so the refusal is the scan, not the setup.
+    const t = pushedOnce();
+    onMain(t, 'm.md', 'neutral\n');
+    merge(t);
+    t.git('remote', 'set-head', 'origin', '--delete');
+    t.git('update-ref', '-d', 'refs/remotes/origin/main');
+    expect(pushHead(t).head).toBe(true);
+  }, 2 * T);
+});
