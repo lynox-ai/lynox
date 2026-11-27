@@ -16,7 +16,8 @@ export type InboxChannel = 'email';
  * - `draft_ready`:   visible in "Drafted for You" — draft generated lazily on click
  * - `auto_handled`:  collapsed "Handled Today" — archived/marked-read; UNDO available
  *
- * `noise` is dropped at the prefilter stage and never persisted as an item.
+ * There is no `noise` bucket: a newsletter domain's mail is filed as
+ * `auto_handled` without an LLM call, and nothing is dropped unseen.
  */
 export type InboxBucket = 'requires_user' | 'draft_ready' | 'auto_handled';
 

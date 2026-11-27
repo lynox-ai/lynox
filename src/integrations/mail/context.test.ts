@@ -1304,7 +1304,7 @@ describe('MailContext — a deferring inbound hook keeps the mail unseen', () =>
     const ctx2 = new MailContext(stateDb, backend, userHandler, { onInboundMail: onInbound });
     const provider = new EmittingProvider();
     try {
-      await ctx2.watcher.attach(provider as unknown as MailProvider, { applyPrefilter: false });
+      await ctx2.watcher.attach(provider as unknown as MailProvider);
       await provider.emit({ type: 'new', envelopes: [mail(1)] });
       expect(stateDb.countForAccount('acct-defer'), 'deferred mail marked seen').toBe(0);
       expect(userHandler).not.toHaveBeenCalled();
@@ -1323,7 +1323,7 @@ describe('MailContext — a deferring inbound hook keeps the mail unseen', () =>
     const ctx2 = new MailContext(stateDb, backend, undefined, { onInboundMail: onInbound });
     const provider = new EmittingProvider();
     try {
-      await ctx2.watcher.attach(provider as unknown as MailProvider, { applyPrefilter: false });
+      await ctx2.watcher.attach(provider as unknown as MailProvider);
       await provider.emit({ type: 'new', envelopes: [mail(2)] });
       expect(onInbound).toHaveBeenCalledTimes(1);
       expect(stateDb.countForAccount('acct-defer')).toBe(1);
