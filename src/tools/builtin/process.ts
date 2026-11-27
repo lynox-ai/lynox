@@ -396,11 +396,11 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // the fail-closed contract validator and throws on a bad contract, so the
     // volatile in-memory store is only populated after the durable write
     // succeeded. Then the ProcessRecord for lineage/audit (D11 — internal,
-    // never agent-facing); stamping the promotion link last keeps the
-    // ProcessRecord consistent with the pipeline that exists.
-    // Once the workflow is stored it is saved: a failure of the lineage record after that point is
-    // not a failed save. Answering "not saved" there sent the model to save the same workflow
-    // again, and a second copy was stored. Errors before that point still answer "not saved".
+    // never agent-facing), written last.
+    // A failure of that last write is not a failed save: the workflow is stored and runs.
+    // Answering "not saved" there sent the model to save the same workflow again, and a second
+    // copy was stored. Only `insertProcess` is caught; an error from any write before it,
+    // `storePipeline` included, still answers "not saved".
     return withInstanceWrite(agent, { site: 'save_workflow#session', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]], main: ['pipeline'] }, (w) => {
       w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, agent.principal), ifReturned);
       w.created('pipeline', pipelineId);
@@ -439,7 +439,8 @@ const LINEAGE_FAILURE_CLASSES: ReadonlySet<string> = new Set(['SqliteError', 'Ty
  * the message, and never a class name the list does not hold (a class can be named by any code).
  */
 export function lineageFailureClass(err: unknown): string {
-  const name = err instanceof Error ? err.constructor.name : '';
+  let name = '';
+  try { name = err instanceof Error ? String(err.constructor?.name ?? '') : ''; } catch { /* a getter that throws names nothing */ }
   return LINEAGE_FAILURE_CLASSES.has(name) ? name : 'Error';
 }
 

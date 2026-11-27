@@ -828,6 +828,24 @@ describe('save_workflow — the lineage record fails after the workflow is store
     const outcome = trail.rows().filter((r) => r.action.includes('save_workflow') && r.phase === 'returned');
     expect(outcome).toHaveLength(1);
     expect(outcome[0]!.target).toContain('lineage=lost');
+    // The loss is noted on a save that still counts as written.
+    expect(outcome[0]!.target).toContain('wrote=all');
+  });
+
+  it('control: a mandate\'s save whose lineage record is written warns nothing and notes no loss on the trail', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const trail = testAuditLog();
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    const agent = makeAgent({ currentThreadId: 'thread-1', principal: eva }, mockHistory);
+    agent.toolContext.auditLog = trail.log;
+    const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, agent);
+    const id = (JSON.parse(result) as { workflow_id: string }).workflow_id;
+    expect(mockHistory.insertProcess).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('[lynox:workflow]');
+    const outcome = trail.rows().filter((r) => r.action.includes('save_workflow') && r.phase === 'returned');
+    expect(outcome).toHaveLength(1);
+    expect(outcome[0]!.target).not.toContain('lineage=');
+    expect(outcome[0]!.target).toContain(`wrote=all created=${id}`);
   });
 
   it('control: when the workflow itself is not stored, the answer is not saved and nothing is warned', async () => {
@@ -855,5 +873,8 @@ describe('lineageFailureClass', () => {
     expect(lineageFailureClass(new Error('x'))).toBe('Error');
     expect(lineageFailureClass('a string')).toBe('Error');
     expect(lineageFailureClass(undefined)).toBe('Error');
+    const noConstructor = new Error('x');
+    Object.defineProperty(noConstructor, 'constructor', { get() { throw new Error('getter'); } });
+    expect(lineageFailureClass(noConstructor)).toBe('Error');
   });
 });
