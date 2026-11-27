@@ -448,7 +448,7 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		expect(store.getPendingChangeset(), 'the card shows in the opening').not.toBeNull();
 	});
 
-	it('a message with a file the open review holds, refused after another thread opened, is back as not sent yet, for a tap', async () => {
+	it('a message with a file the open review holds, refused after another thread opened, is back failed, not held', async () => {
 		let refuse!: () => void;
 		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
 		void store.sendMessage('held with a file', [{ name: 'a.txt', type: 'text/plain', data: 'YQ==' }]);
@@ -463,8 +463,9 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		await settle();
 		const back = store.getMessages().filter((m) => m.content.includes('held with a file'));
 		expect(back, 'one bubble').toHaveLength(1);
-		expect(back[0]?.held, 'not sent yet, a tap sends it').toBe(true);
-		expect(back[0]?.failed, 'not a failure').toBeFalsy();
+		expect(back[0]?.failed, 'failed: its file cannot be sent again').toBe(true);
+		expect(back[0]?.held, 'not held: a tap would send it without its file').toBeFalsy();
+		expect(back[0]?.queued, 'not waiting either').toBeFalsy();
 		expect(runTasks, 'nothing sent past the review').toEqual([]);
 	});
 

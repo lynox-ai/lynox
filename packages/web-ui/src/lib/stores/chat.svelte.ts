@@ -1692,7 +1692,8 @@ function dropEmptyAnswerAfter(list: ChatMessage[], i: number): void {
  * in), which a waiting message keeps over the server's transcript when the thread opens. A copy
  * from before the message gets it added, as {@link markFailedInSavedThread} does. A message still
  * in its thread's queue waits already. A message with files cannot wait in the saved copy (its
- * queue keeps text only) and is held there: not sent yet, a tap sends it.
+ * queue keeps text only) and is marked failed there: a tap sends its text again, without the
+ * files, and failed says something went wrong. Held would promise the message as shown.
  */
 function requeueHeldInThread(sid: string, turn: TurnStart, task: string, files: FileAttachment[] | undefined): void {
 	const msg = turn.userMsg;
@@ -1732,9 +1733,7 @@ function requeueHeldInThread(sid: string, turn: TurnStart, task: string, files: 
 	const waitsAlready = saved.queued === true && saved.queueId !== undefined && savedQueue.some((q) => q.id === saved.queueId);
 	if (!waitsAlready && withFiles) {
 		saved.queued = false;
-		saved.failed = false;
-		saved.held = true;
-		if (task !== saved.content) saved.heldTask = task;
+		saved.failed = true;
 	} else if (!waitsAlready) {
 		const id = newQueueId();
 		saved.queueId = id;
