@@ -878,7 +878,8 @@
 			{:else if workingLine !== null}
 				<p class="text-sm text-text-muted" data-testid="bulk-working">{tf(workingLine.key, { provider, ...workingLine.params })}</p>
 			{/if}
-			{#if bulkWaitsForStart(run)}
+			{#if bulkWaitsForStart(run) && !(run.haltKey === 'listed' && ownerActs)}
+				<!-- An owner's read list says the same and more in its own sentence below; a mandate does not get that sentence. -->
 				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
 			{/if}
 			{#if run.phase === 'planned' && run.haltKey === 'listed'}
@@ -1024,10 +1025,10 @@
 													{/each}
 												{/if}
 											{/if}
-											{#if takesOut && (target.deselected || writes(target))}
+											{#if target.deselected || (takesOut && writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
 													{#if target.deselected}<span class="text-text-subtle">{view.t('bulk.deselect.taken_out')}</span>{/if}
-													{#if ownerActs}
+													{#if takesOut && ownerActs}
 														<button type="button" class="{btnPlain} text-xs" disabled={busy} onclick={() => toggleSelected(target)}>{t(target.deselected ? 'bulk.deselect.on' : 'bulk.deselect.off')}</button>
 													{/if}
 												</div>
