@@ -1695,7 +1695,7 @@ describe('mail_reply — smart reply-from', () => {
     });
     business.send.mockResolvedValue({ messageId: '<r47@x>', accepted: [], rejected: [] });
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { ...OWNER_AGENT, promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
 
     await createMailReplyTool(reg, ctx).handler({ account: 'business', uid: 47, body: 'Reply' }, agent);
 
