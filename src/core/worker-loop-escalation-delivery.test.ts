@@ -225,6 +225,7 @@ describe('a failed scheduled workflow records whether its escalation reached any
     history.insertTrigger({ id: 'trg-4', title: 'x', source: 'cron', effect: 'run_workflow', scheduleCron: '0 9 * * *', nextRunAt: DUE, pipelineId: 'wf-1' });
     const first = '2026-01-01T09:00:00.000Z';
     const second = '2026-01-01T09:05:00.000Z';
+    const storedCase = (): unknown => (engineDb.getDb().prepare("SELECT last_escalation_case AS c FROM triggers WHERE id = 'trg-4'").get() as { c: unknown }).c;
     // A question's chat is known at the start, and stands while no answer has come.
     expect(manager.startEscalation('trg-4', first, false, { threadId: 'session-1', kind: 'question' })).toBe(true);
     expect(history.getTrigger('trg-4')).toMatchObject({ last_escalation_outcome: 'unconfirmed', last_escalation_chat: { threadId: 'session-1', kind: 'question' } });
@@ -234,11 +235,17 @@ describe('a failed scheduled workflow records whether its escalation reached any
     // An alert's chat is named only with the answer; the start had none.
     expect(manager.startEscalation('trg-4', second)).toBe(true);
     expect(history.getTrigger('trg-4')?.last_escalation_case).toBeUndefined();
+    // Forgotten in the row too, not only hidden by the read beside `unconfirmed`.
+    expect(storedCase()).toBeNull();
     expect(history.getTrigger('trg-4')?.last_escalation_chat).toBeUndefined();
     expect(manager.recordEscalationOutcome('trg-4', 'not_delivered', second, { case: 'send_failed', chat: { threadId: 'escalation-trg-4', kind: 'alert' } })).toBe(true);
     expect(history.getTrigger('trg-4')).toMatchObject({ last_escalation_case: 'send_failed', last_escalation_chat: { threadId: 'escalation-trg-4', kind: 'alert' } });
     // A case belongs to not_delivered only: a delivered answer keeps none, whatever it is handed.
     expect(manager.recordEscalationOutcome('trg-4', 'delivered', second, { case: 'send_failed' })).toBe(true);
+    expect(history.getTrigger('trg-4')?.last_escalation_case).toBeUndefined();
+    expect(storedCase()).toBeNull();
+    // And a row that holds one beside another outcome, written by no writer here, reads as none.
+    engineDb.getDb().prepare("UPDATE triggers SET last_escalation_outcome = 'delivered', last_escalation_case = 'send_failed' WHERE id = 'trg-4'").run();
     expect(history.getTrigger('trg-4')?.last_escalation_case).toBeUndefined();
     expect(history.getTrigger('trg-4')?.last_escalation_chat).toEqual({ threadId: 'escalation-trg-4', kind: 'alert' });
     // A value no writer produces reads as none rather than a guess.
