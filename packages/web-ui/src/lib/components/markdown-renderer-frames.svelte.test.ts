@@ -231,3 +231,44 @@ describe('the artifact frames of a message', () => {
 		expect(target.textContent).toContain('const x = 1;');
 	});
 });
+
+describe('an html artifact card the chat marks as lost', () => {
+	// Spelled in two parts: a module parser reads the comment opener as an HTML-like comment.
+	const open = '<!' + '--';
+	const body = '<p>[evicted after successful save]</p>';
+	const card = (lost: boolean, title = 'Report'): string =>
+		'```artifact\n' + (lost ? open + ' lynox-artifact-lost -->\n' : '') + open + ' type: html -->\n' + open + ' title: ' + title + ' -->\n' + body + '\n```';
+	const BADGE = /^(Content missing|Inhalt fehlt)$/;
+
+	it('keeps its frame: the badge leaves the slot the frame is put in', async () => {
+		await render({ content: card(true) });
+		const badge = target.querySelector('.artifact-container [data-testid="artifact-inline-lost-badge"]');
+		expect(badge, 'positive control: the card carries the badge').not.toBeNull();
+		expect(frames(), 'the card still gets its frame').toHaveLength(1);
+		expect(documentOf(frames()[0]!), 'and the frame its document').toContain('[evicted after successful save]');
+	});
+
+	it('shows only the fixed badge text, nothing from the fence', async () => {
+		await render({ content: card(true, 'Q3 <b>bold</b> " onmouseover="x') });
+		const badges = target.querySelectorAll('[data-testid="artifact-inline-lost-badge"]');
+		expect(badges, 'one badge').toHaveLength(1);
+		const badge = badges[0]!;
+		expect(badge.textContent, 'its text is the fixed label').toMatch(BADGE);
+		expect(badge.getAttribute('title'), 'and so is its title').toMatch(BADGE);
+		expect(badge.children, 'no markup inside it').toHaveLength(0);
+		expect(Array.from(badge.attributes).map((a) => a.name).sort(), 'no attribute but its own').toEqual(['class', 'data-testid', 'title']);
+	});
+
+	it('gets the same frame document as the card without the badge: the policy and the frame path are the frame builder\'s', async () => {
+		await render({ content: card(false) });
+		const without = documentOf(frames()[0]!);
+		if (component) unmount(component);
+		component = undefined;
+		target.replaceChildren();
+		await render({ content: card(true) });
+		expect(target.querySelector('[data-testid="artifact-inline-lost-badge"]'), 'positive control: now with the badge').not.toBeNull();
+		const withBadge = documentOf(frames()[0]!);
+		expect(withBadge).toBe(without);
+		expect(withBadge, 'and that document carries the artifact policy').toMatch(/<meta http-equiv="Content-Security-Policy"/);
+	});
+});
