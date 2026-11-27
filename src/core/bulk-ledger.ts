@@ -403,17 +403,17 @@ export type BulkProbeStep = 'write_one' | 'confirm' | 'too_many' | 'already_firs
 /** Why a run may not go past one target, and where it stands. */
 export interface BulkProbeBlock { missing: BulkProbeMissing[]; step: BulkProbeStep | null }
 
-/**
- * Why a run stopped short. FIXED texts: `halt_reason` reaches the model through
- * `bulk_status`, and anything else written there — an error message, a file's content
- * — would carry a target's strings into the model's context.
- */
 /** What an undo is refused with when it would put back a run taken back before its earlier
  *  phase was stored ({@link BulkLedger} `phaseNotKept`). Read by whoever calls the HTTP API. */
 export const BULK_PHASE_NOT_KEPT =
   'This run was undone before lynox kept the phase a run had before its undo, so it cannot be reapplied. Nothing was written. ' +
   'To write its values again, plan a new bulk run with the same targets and values; it needs its own approval.';
 
+/**
+ * Why a run stopped short. FIXED texts: `halt_reason` reaches the model through
+ * `bulk_status`, and anything else written there — an error message, a file's content
+ * — would carry a target's strings into the model's context.
+ */
 export const BULK_HALT_REASONS = {
   awaitingStart: 'waiting for the owner to start reading the targets',
   failureRate: 'more than 5 % of the targets failed',
