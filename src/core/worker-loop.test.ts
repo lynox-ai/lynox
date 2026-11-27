@@ -10,7 +10,7 @@ import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp } from './prompt-store.js';
+import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp, consentOfPayload, consentActionOfPayload } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { AuditLog, TRAIL_FORM, newCorrelationId } from './audit-log.js';
@@ -3338,6 +3338,36 @@ describe('WorkerLoop', () => {
       // The marker, not a sentence: a cancellation must not be mistakable for
       // an answer by the model that receives it.
       expect(answer).toBe('__dismissed__');
+    } finally {
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a tool consent asked from a task goes out with its buttons in the owner\'s words, and keeps its action', async () => {
+    vi.useRealTimers();
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-consent-action-'));
+    const history = new RunHistory(join(dir, 'history.db'));
+    vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
+    const store = new PromptStore(history.getDb());
+    try {
+      const session = {
+        sessionId: 'thread-consent-action',
+        _recreateAgent: vi.fn(),
+        promptUser: undefined as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>) | undefined,
+        run: vi.fn(async () => { await session.promptUser!('Delete event e1', ['confirm', 'cancel'], { consent: 'google', consentAction: 'delete' }); return 'Done.'; }),
+      };
+      const task = makeTask();
+      const engine = makeEngine({ taskManager: makeTaskManager([task]), session: session as unknown as Session, promptStore: store });
+      const router = makeNotificationRouter();
+      const loop = new WorkerLoop(engine, router, 60_000);
+      await loop.tick();
+      for (let i = 0; i < 200 && !store.getPending('thread-consent-action'); i++) await new Promise((r) => setTimeout(r, 5));
+      expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ inquiry: { question: 'Delete event e1', options: ['Delete', 'Cancel'] } }));
+      const row = store.getPending('thread-consent-action')!;
+      expect(consentOfPayload(row.payload_json)).toBe('google');
+      expect(consentActionOfPayload(row.payload_json)).toBe('delete');
+      loop.stop();
     } finally {
       history.close();
       rmSync(dir, { recursive: true, force: true });

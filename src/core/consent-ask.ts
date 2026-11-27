@@ -1,4 +1,4 @@
-import { CONSENT_KEYS, consentAnswer, type ConsentKey, type ConsentKind } from '../contract/prompt.js';
+import { CONSENT_KEYS, consentAnswer, consentTakesText, type ConsentAction, type ConsentKey, type ConsentKind } from '../contract/prompt.js';
 import type { PromptMeta } from '../types/index.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 
@@ -17,22 +17,26 @@ export function consentOptions(kind: ConsentKind): string[] {
   return [...CONSENT_KEYS[kind]];
 }
 
-/** The question's meta, marked as the engine's own confirmation of `kind`. */
-export function consentMeta(kind: ConsentKind, meta?: PromptMeta): PromptMeta {
-  return { ...meta, consent: kind };
+/**
+ * The question's meta, marked as the engine's own confirmation of `kind`, and for a kind whose
+ * button names what it does (a Google write), with that `action`.
+ */
+export function consentMeta(kind: ConsentKind, meta?: PromptMeta, action?: ConsentAction): PromptMeta {
+  return action === undefined ? { ...meta, consent: kind } : { ...meta, consent: kind, consentAction: action };
 }
 
 /**
  * What the answer decided: one of the kind's keys, `dismissed` when nobody answered (closed,
- * timed out, withdrawn, refused unattended), or `unrecognised` for any other text.
+ * timed out, withdrawn, refused unattended), `text` for words typed to a kind that takes them
+ * (a plan: the change asked for — never an approval), or `unrecognised` for any other text.
  */
-export type ConsentOutcome = ConsentKey | 'dismissed' | 'unrecognised';
+export type ConsentOutcome = ConsentKey | 'dismissed' | 'text' | 'unrecognised';
 
 export function decideConsent(kind: ConsentKind, answer: string): ConsentOutcome {
   const key = consentAnswer(kind, answer);
   if (key !== undefined) return key;
   if (answer === '' || answer === '__dismissed__' || answer === UNATTENDED_BLOCK_ANSWER) return 'dismissed';
-  return 'unrecognised';
+  return consentTakesText(kind) ? 'text' : 'unrecognised';
 }
 
 /** Said to the model after a refusal, so it can tell the person why nothing happened. */
