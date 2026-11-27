@@ -627,9 +627,6 @@
 									<p class="text-[11px] text-text-subtle mt-1">
 										→ {t(ruleDisplayLabelKey(rule))}
 									</p>
-									{#if rule.matcherKind === 'list_id'}
-										<p class="text-[11px] text-text-muted mt-1" data-testid="rules-list-id-inactive">{t('inbox.rules_list_id_inactive')}</p>
-									{/if}
 									<a
 										href={ruleItemsHref(rule)}
 										class="inline-block mt-1 text-[11px] text-accent-text hover:underline py-1"

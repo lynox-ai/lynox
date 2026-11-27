@@ -1002,8 +1002,8 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
       return bad(`at most ${String(MAX_DESCRIPTION_RULES)} description rules per account`);
     }
   } else {
-    // The watcher does not pass a mail's List-ID to the rule match yet, so a new list id rule would
-    // never apply. Stored ones still list and can be deleted.
+    // The watcher passes a mail's List-ID to the rule match, so a stored list id rule applies. A new
+    // one is not offered here (the form has no such kind); whether it should be is a separate call.
     if (body.matcherKind === 'list_id') return bad('list_id rules do not apply yet');
     // A fixed value is checked with the same rules as the agent's proposals (`rule-text.ts`: what a
     // reader does not see, one line, the length, one sender address, the subject minimum): the owner
