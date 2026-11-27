@@ -113,7 +113,7 @@ export function localSchedule(cron: string, offsetMinutes?: number, yearOffsets?
 		const offset = offsetMinutes ?? -new Date().getTimezoneOffset();
 		// Plainly "every hour" only where the runs fall on the full local hour; in a zone off the
 		// whole hour (India, +5:30) they do not, and the times say where they fall.
-		if (n === 1) return minute === 0 && offset % 60 === 0 ? { kind: 'hourly' } : { kind: 'hourly_at', times: firstTwo(minute, 1, offset) };
+		if (n === 1) return (((minute + offset) % 60) + 60) % 60 === 0 ? { kind: 'hourly' } : { kind: 'hourly_at', times: firstTwo(minute, 1, offset) };
 		return { kind: 'every_hours', n, times: firstTwo(minute, n, offset) };
 	}
 	const m = /^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/.exec(cron);

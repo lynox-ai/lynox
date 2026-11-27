@@ -151,7 +151,9 @@ describe('the edges of a worded schedule', () => {
 	it('says the times of an hourly schedule in a zone off the whole hour, also on the full UTC hour', () => {
 		expect(localSchedule('0 * * * *', 330)).toEqual({ kind: 'hourly_at', times: ['00:30', '01:30'] });
 		expect(localSchedule('0 */1 * * *', 330)).toEqual({ kind: 'hourly_at', times: ['00:30', '01:30'] });
-		expect(localSchedule('30 * * * *', 330)).toEqual({ kind: 'hourly_at', times: ['00:00', '01:00'] });
+		// On the full local hour there: plainly every hour.
+		expect(localSchedule('30 * * * *', 330)).toEqual({ kind: 'hourly' });
+		expect(localSchedule('30 * * * *', -570)).toEqual({ kind: 'hourly' });
 	});
 
 	it('moves the first times back in a zone behind UTC', () => {

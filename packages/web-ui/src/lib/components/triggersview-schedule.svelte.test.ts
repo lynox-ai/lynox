@@ -240,3 +240,15 @@ describe('the dates on a card write their time as the schedule line does', () =>
 		expect(nextRunOf('Täglich')).toMatch(/\d\d\.\d\d\.2099, \d\d:\d\d$/);
 	});
 });
+
+describe('a date the list cannot read', () => {
+	it('is said as no date, never as a made-up time', async () => {
+		setLocale('en');
+		rows = [{ ...BASE, id: 'x1', title: 'Kaputt', schedule_cron: '0 7 * * *', next_run_at: '2099-03-04T07:00:00.000Z', last_run_at: 'not a date', last_run_status: 'success' }];
+		await render();
+		const card = [...target.querySelectorAll('[data-trigger-title]')].find((e) => e.textContent?.trim() === 'Kaputt')?.closest('.group');
+		const last = card?.querySelector('[data-run-status]')?.textContent ?? '';
+		expect(last).toContain('Invalid Date');
+		expect(last).not.toMatch(/NaN/);
+	});
+});
