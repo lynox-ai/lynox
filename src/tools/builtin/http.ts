@@ -357,6 +357,11 @@ function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: st
     case 'escaped-secret':
       return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Write the value plainly.`);
+    case 'unreadable':
+      // Refused for the owner too, unlike an unreadable body: a header the question cannot show was
+      // always refused, and enough headers before it would otherwise turn that refusal into a
+      // question that shows none of them.
+      return `Blocked: the headers of this ${write} to ${service} are too many or too heavily encoded for the approval question to check them for a stored secret. Nothing was sent. Send fewer headers, with plain values. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in ${service}.`;
     case 'secret-name':
       return `Blocked: this ${write} to ${service} sets a header whose name holds a stored secret. A header name is shown in the approval question as it is. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Put the secret in the value, as secret:NAME.`);
@@ -2191,7 +2196,10 @@ function storePassPrecheck(url: string, headers: Record<string, string>, toolCon
     if (QUERY_CREDENTIAL.test(name)) return 'a request to a Shopify store may not carry a credential in its address. Remove it; the engine attaches the store connection itself.';
   }
   for (const name of Object.keys(headers)) {
-    if (STORE_CREDENTIAL_HEADERS.has(name.toLowerCase())) return `a request to a Shopify store may not carry a credential header of its own (${shapedForLog(name, DERIVED_NAME_SHAPE, 60)}). Remove it; the engine attaches the store connection itself.`;
+    // The name printed is the entry of the fixed set it matched, never the model's own spelling:
+    // a header name the set does not hold never reaches this text.
+    const known = name.toLowerCase();
+    if (STORE_CREDENTIAL_HEADERS.has(known)) return `a request to a Shopify store may not carry a credential header of its own (${known}). Remove it; the engine attaches the store connection itself.`;
   }
   return storeClearanceHeld(toolContext!);
 }

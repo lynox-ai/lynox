@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { createSheetsTool, FORMULAS_SHOWN, FORMAT_REQUESTS_SHOWN, FORMAT_LINE_MAX } from './google-sheets.js';
+import { createSheetsTool, formulaConsentKind, FORMULAS_SHOWN, FORMAT_REQUESTS_SHOWN, FORMAT_LINE_MAX } from './google-sheets.js';
+import { CONSENT_UNRECOGNISED_SENTENCE } from '../../core/consent-ask.js';
 import { startsLikeFormula, formulaCells, formulasAsText } from './sheets-formula.js';
 import type { IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
@@ -39,10 +40,13 @@ function agent(taint: Taint, answer?: string): IAgent {
   } as unknown as IAgent;
 }
 
-function asked(a: IAgent): { prompt: PromptText; options: string[] } {
+function asked(a: IAgent): { prompt: PromptText; options: string[]; consent: unknown } {
   const call = (a.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]!;
-  return { prompt: call[0] as PromptText, options: call[1] as string[] };
+  return { prompt: call[0] as PromptText, options: call[1] as string[], consent: (call[2] as { consent?: unknown } | undefined)?.consent };
 }
+
+/** Said to the model after an answer that is none of the question's keys. */
+const UNRECOGNISED = `Action cancelled by user. ${CONSENT_UNRECOGNISED_SENTENCE}`;
 
 function sentValues(): unknown[][] {
   return (JSON.parse((mockFetch.mock.calls[0]![1] as { body: string }).body) as { values: unknown[][] }).values;
@@ -112,11 +116,11 @@ describe('google_sheets after content from outside the chat', () => {
   const write = { action: 'write' as const, spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING], ['=B2', 'Bob']] };
 
   it('shows each formula cell with its whole formula, and offers text first', async () => {
-    const a = agent('sawUntrustedData', 'Write as text');
+    const a = agent('sawUntrustedData', 'as-text');
     mockFetch.mockResolvedValueOnce(WRITTEN);
     await createSheetsTool(auth).handler(write, a);
     const { prompt, options } = asked(a);
-    expect(options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
+    expect(options).toEqual(['as-text', 'as-formulas', 'cancel']);
     expect(flattenPrompt(prompt)).toBe([
       PLAIN_WRITE_QUESTION,
       '',
@@ -132,40 +136,46 @@ describe('google_sheets after content from outside the chat', () => {
 
   it('writes the formula cells as text when the owner chooses text, and every other cell as given', async () => {
     mockFetch.mockResolvedValueOnce(WRITTEN);
-    const result = await createSheetsTool(auth).handler(write, agent('sawUntrustedData', 'Write as text'));
+    const result = await createSheetsTool(auth).handler(write, agent('sawUntrustedData', 'as-text'));
     expect(result).toContain('Data written successfully');
     expect(sentValues()).toEqual([['Name', `'${FETCHING}`], ["'=B2", 'Bob']]);
   });
 
-  it('takes the answer by its number too', async () => {
-    mockFetch.mockResolvedValueOnce(WRITTEN);
-    await createSheetsTool(auth).handler(write, agent('sawUntrustedData', '1'));
-    expect(sentValues()).toEqual([['Name', `'${FETCHING}`], ["'=B2", 'Bob']]);
+  it.each(['1', '2', 'Write as text', 'Write as formulas', 'Als Formeln schreiben', 'as-formulas ', 'AS-TEXT', 'text', 'formulas'])('writes nothing for %j, which is no key, and says it was not recognised', async (answer) => {
+    const result = await createSheetsTool(auth).handler(write, agent('sawUntrustedData', answer));
+    expect(result).toBe(UNRECOGNISED);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('marks the question as the formula consent, with every formula shown', async () => {
+    const a = agent('sawUntrustedData', 'cancel');
+    await createSheetsTool(auth).handler(write, a);
+    expect(asked(a).consent).toBe('formula');
   });
 
   it('writes the formulas when the owner chooses formulas', async () => {
     mockFetch.mockResolvedValueOnce(WRITTEN);
-    await createSheetsTool(auth).handler(write, agent('sawUntrustedData', 'Write as formulas'));
+    await createSheetsTool(auth).handler(write, agent('sawUntrustedData', 'as-formulas'));
     expect(sentValues()).toEqual(write.values);
   });
 
   it('writes nothing when the owner chooses not to write', async () => {
-    const result = await createSheetsTool(auth).handler(write, agent('sawUntrustedData', 'Don’t write'));
+    const result = await createSheetsTool(auth).handler(write, agent('sawUntrustedData', 'cancel'));
     expect(result).toBe('Action cancelled by user.');
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('writes nothing for an answer that is no option', async () => {
     const result = await createSheetsTool(auth).handler(write, agent('sawUntrustedData', 'Yes'));
-    expect(result).toBe('Action cancelled by user.');
+    expect(result).toBe(UNRECOGNISED);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it.each(['sawExternalContentTool', 'conversationSawUntrusted'] as const)('counts content from outside by %s as well', async (taint) => {
-    const a = agent(taint, 'Write as text');
+    const a = agent(taint, 'as-text');
     mockFetch.mockResolvedValueOnce(WRITTEN);
     await createSheetsTool(auth).handler(write, a);
-    expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
+    expect(asked(a).options).toEqual(['as-text', 'as-formulas', 'cancel']);
     expect(sentValues()).toEqual([['Name', `'${FETCHING}`], ["'=B2", 'Bob']]);
   });
 
@@ -194,32 +204,48 @@ describe('google_sheets after content from outside the chat', () => {
   });
 
   it('says "1 of these cells starts" for one cell', async () => {
-    const a = agent('sawUntrustedData', 'Don’t write');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ ...write, values: [['=B2']] }, a);
     expect(flattenPrompt(asked(a).prompt)).toContain('a file. 1 of these cells starts like a formula, and Google');
   });
 
   it('shows five formulas, counts the rest, and then does not offer to write formulas the owner was not shown, saying why', async () => {
-    const a = agent('sawUntrustedData', 'Don’t write');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=6', '=7']] }, a);
     const lines = flattenPrompt(asked(a).prompt).split('\n');
     expect(lines.slice(-7)).toEqual(['A1: =1', 'B1: =2', 'C1: =3', 'D1: =4', 'E1: =5', 'and 2 more',
       HIDDEN]);
     expect(lines[2]).toContain('7 of these cells start like a formula');
-    expect(asked(a).options).toEqual(['Write as text', 'Don’t write']);
+    expect(asked(a).consent).toBe('formula-text');
+    expect(asked(a).options).toEqual(['as-text', 'cancel']);
   });
 
-  it('writes nothing when "Write as formulas" is answered though it was not offered', async () => {
-    const result = await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=IMAGE("https://x.example")']] }, agent('sawUntrustedData', 'Write as formulas'));
-    expect(result).toBe('Action cancelled by user.');
+  it('writes nothing when "as-formulas" is answered though it was not offered', async () => {
+    const a = agent('sawUntrustedData', 'as-formulas');
+    const result = await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=IMAGE("https://x.example")']] }, a);
+    expect(asked(a).consent).toBe('formula-text');
+    expect(result).toBe(UNRECOGNISED);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it('asks with every formula shown up to the number it shows, and without the key that writes formulas from one more', () => {
+    expect(formulaConsentKind(1)).toBe('formula');
+    expect(formulaConsentKind(FORMULAS_SHOWN)).toBe('formula');
+    expect(formulaConsentKind(FORMULAS_SHOWN + 1)).toBe('formula-text');
+  });
+
+  it('writes as text on "as-text" though some formulas are only counted', async () => {
+    mockFetch.mockResolvedValueOnce(WRITTEN);
+    const values = [['=1', '=2', '=3', '=4', '=5', '=6']];
+    await createSheetsTool(auth).handler({ ...write, range: 'A1', values }, agent('sawUntrustedData', 'as-text'));
+    expect(sentValues()).toEqual([["'=1", "'=2", "'=3", "'=4", "'=5", "'=6"]]);
+  });
+
   it('says why and offers two choices from the sixth formula on', async () => {
-    const a = agent('sawUntrustedData', 'Don’t write');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=6']] }, a);
     expect(flattenPrompt(asked(a).prompt).split('\n').slice(-2)).toEqual(['and 1 more', HIDDEN]);
-    expect(asked(a).options).toEqual(['Write as text', 'Don’t write']);
+    expect(asked(a).options).toEqual(['as-text', 'cancel']);
     // The sentence is the question's own words, not a value set apart.
     expect(promptSegments(asked(a).prompt).filter((s) => s.kind === 'value').map((s) => s.text))
       .toEqual(['A1', 'sid', '6', 'A1', '=1', 'B1', '=2', 'C1', '=3', 'D1', '=4', 'E1', '=5', '1']);
@@ -230,15 +256,16 @@ describe('google_sheets after content from outside the chat', () => {
   });
 
   it('offers to write formulas when exactly five are shown and none is hidden', async () => {
-    const a = agent('sawUntrustedData', 'Don’t write');
+    const a = agent('sawUntrustedData', 'cancel');
     await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5']] }, a);
-    expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
+    expect(asked(a).options).toEqual(['as-text', 'as-formulas', 'cancel']);
+    expect(asked(a).consent).toBe('formula');
     expect(flattenPrompt(asked(a).prompt)).not.toContain('more');
     expect(flattenPrompt(asked(a).prompt)).not.toContain(HIDDEN);
   });
 
   it('keeps a formula whole but on one line, so it cannot draw another cell', async () => {
-    const a = agent('sawUntrustedData', 'Don’t write');
+    const a = agent('sawUntrustedData', 'cancel');
     const long = `=IMPORTXML("https://collect.example/${'p'.repeat(300)}", "//a")`;
     await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [[`${long}\nB1: =harmless`]] }, a);
     const values = promptSegments(asked(a).prompt).filter((s) => s.kind === 'value').map((s) => s.text);
@@ -247,11 +274,11 @@ describe('google_sheets after content from outside the chat', () => {
   });
 
   it('asks the same for an append, naming the cells by their place among the new rows', async () => {
-    const a = agent('sawUntrustedData', 'Write as text');
+    const a = agent('sawUntrustedData', 'as-text');
     mockFetch.mockResolvedValueOnce(APPENDED);
     const result = await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
     expect(result).toContain('Data appended');
-    expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
+    expect(asked(a).options).toEqual(['as-text', 'as-formulas', 'cancel']);
     expect(flattenPrompt(asked(a).prompt).split('\n')[0]).toBe('Add rows to range “Sheet1!A:B” in spreadsheet sid? Nothing is overwritten.');
     expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(`1st new row, 2nd value: ${FETCHING}`);
     expect(sentValues()).toEqual([['x', `'${FETCHING}`]]);
@@ -486,5 +513,109 @@ describe('google_sheets format after content from outside the chat', () => {
     const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [FORMULA_CELLS] }, agent('sawUntrustedData'));
     expect(result).toContain('requires user confirmation');
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('google_sheets after content from outside the chat, asked in German', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  /** As `agent`, on an instance whose questions are German. */
+  function agentDe(answer: string): IAgent {
+    return { ...agent('sawUntrustedData', answer), dialogLanguage: 'de' } as IAgent;
+  }
+
+  const HEAD_DE = (n: string): string => `Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. ${n}, und Google führt eine Formel beim Schreiben aus.`;
+  const FETCHES_DE = 'Eine Formel kann Google eine Adresse abrufen lassen und dabei Daten aus der Tabelle mitschicken. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE und IMAGE sind Beispiele; andere Funktionen können das auch. Die Adresse muss nicht ausgeschrieben sein: Eine Formel kann sie aus anderen Zellen zusammensetzen.';
+  const HIDDEN_DE = '„Als Formeln schreiben“ steht nur zur Wahl, wenn hier jede Formel gezeigt wird. Willst du sie als Formeln schreiben, bitte im Chat darum, höchstens 5 auf einmal zu schreiben.';
+
+  it('asks about formulas in German, the formulas and their cells as they are', async () => {
+    const a = agentDe('cancel');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING], ['=B2', 'Bob']] }, a);
+    expect(flattenPrompt(asked(a).prompt)).toBe([
+      'Bereich „Sheet1!B2:C3“ in Tabelle sid überschreiben? Die Daten dort werden ersetzt.',
+      '',
+      `${HEAD_DE('2 dieser Zellen beginnen wie eine Formel')} ${FETCHES_DE}`,
+      `C2: ${FETCHING}`,
+      'B3: =B2',
+    ].join('\n'));
+  });
+
+  it('says "1 dieser Zellen beginnt" for one cell', async () => {
+    const a = agentDe('cancel');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'A1', values: [['=B2']] }, a);
+    expect(flattenPrompt(asked(a).prompt).split('\n')[2]).toBe(`${HEAD_DE('1 dieser Zellen beginnt wie eine Formel')} ${FETCHES_DE}`);
+  });
+
+  it('counts the rest in German and names the button it leaves out by its German label', async () => {
+    const a = agentDe('cancel');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=6', '=7']] }, a);
+    expect(flattenPrompt(asked(a).prompt).split('\n').slice(-2)).toEqual(['und 2 weitere', HIDDEN_DE]);
+    // The options are the keys, in every language; the page words them.
+    expect(asked(a).options).toEqual(['as-text', 'cancel']);
+    expect(HIDDEN_DE).toContain(`höchstens ${FORMULAS_SHOWN} auf einmal`);
+  });
+
+  it('names a cell by its place in German when the range names no first cell', async () => {
+    const a = agentDe('cancel');
+    await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1', values: [['x', '=B2']] }, a);
+    expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe('1. neue Zeile, 2. Wert: =B2');
+    const b = agentDe('cancel');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1', values: [['=B2']] }, b);
+    expect(flattenPrompt(asked(b).prompt).split('\n').at(-1)).toBe('1. Zeile, 1. Wert: =B2');
+  });
+
+  it('writes as text on the same key as in English', async () => {
+    mockFetch.mockResolvedValueOnce(WRITTEN);
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING]] }, agentDe('as-text'));
+    expect(sentValues()).toEqual([['Name', `'${FETCHING}`]]);
+  });
+
+  it('writes the formulas as they are on "as-formulas", as in English', async () => {
+    mockFetch.mockResolvedValueOnce(WRITTEN);
+    const a = agentDe('as-formulas');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING]] }, a);
+    // Asked, with the option offered: the formula went out because of the answer.
+    expect(asked(a).options).toEqual(['as-text', 'as-formulas', 'cancel']);
+    expect(sentValues()).toEqual([['Name', FETCHING]]);
+  });
+
+  it('refuses a format batch too large to show in English, the same words as for an English question', async () => {
+    const range = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
+    const cells = { updateCells: { range, rows: [{ values: [{ userEnteredValue: { formulaValue: FETCHING } }] }], fields: 'userEnteredValue' } };
+    const batch = { action: 'format' as const, spreadsheet_id: 'sid', format_requests: Array.from({ length: FORMAT_REQUESTS_SHOWN + 1 }, () => cells) };
+    const de = await createSheetsTool(auth).handler(batch, agentDe('confirm'));
+    const en = await createSheetsTool(auth).handler(batch, agent('sawUntrustedData', 'confirm'));
+    expect(de).toBe(en);
+    expect(de).toMatch(/^Error: this chat has read content from outside lynox, so a "format" call must show the owner/);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('asks about a format batch in German, the requests as they are', async () => {
+    const a = agentDe('cancel');
+    const range = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
+    const borders = { updateBorders: { range, top: { style: 'SOLID' } } };
+    const cells = { updateCells: { range, rows: [{ values: [{ userEnteredValue: { formulaValue: FETCHING } }] }], fields: 'userEnteredValue' } };
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [borders, cells, 'odd'] }, a);
+    expect(flattenPrompt(asked(a).prompt)).toBe([
+      'Tabelle sid formatieren? Formatierungen können Zellen und Blätter löschen oder überschreiben.',
+      '',
+      `Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. 2 dieser Anfragen können Zellinhalt oder eine Regel schreiben oder ändern, was jemand in einer Zelle oder einem Blatt sieht, etwa ein Zahlenformat, einen Link, die Schreibrichtung oder ausgeblendete Zeilen. Inhalt und Regeln können eine Formel enthalten, die Google bei sich ausführt. ${FETCHES_DE} Diese 2 Anfragen stehen hier vollständig:`,
+      `updateCells: ${JSON.stringify(cells.updateCells)}`,
+      'Anfrage: "odd"',
+      'und 1 Formatierungsanfrage, die keinen Zellinhalt schreibt',
+    ].join('\n'));
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('says the one-request forms in German', async () => {
+    const a = agentDe('cancel');
+    const range = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
+    const b1 = { updateBorders: { range, top: { style: 'SOLID' } } };
+    const b2 = { mergeCells: { range, mergeType: 'MERGE_ALL' } };
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [b1, b2, 'odd'] }, a);
+    const text = flattenPrompt(asked(a).prompt);
+    expect(text).toContain('1 dieser Anfragen kann Zellinhalt oder eine Regel schreiben');
+    expect(text).toContain('Die Anfrage steht hier vollständig:');
+    expect(text.split('\n').at(-1)).toBe('und 2 Formatierungsanfragen, die keinen Zellinhalt schreiben');
   });
 });

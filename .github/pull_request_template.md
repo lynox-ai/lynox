@@ -123,6 +123,17 @@ held to it; rebasing onto main brings it under the rule.
 
 No private path in it: this record is public.
 
+**`agent-awareness:` is asked for when the diff adds a tool, a route or a UI page**: a
+new `definition: { name: … }` under `src/`, a new route in `src/server/`, or a new
+`+page.svelte` in the web UI. It says whether the agent was told about the new
+capability:
+- `agent-awareness: updated <briefing|catalog|tool-text>` (more than one: `briefing, tool-text`);
+- `agent-awareness: not needed: <reason>`. Telling the agent widens what an injected
+  instruction can reach, so "not needed" is a real answer, with its reason.
+
+Add it as one more line in the block above, only on such a diff. For now a missing or
+malformed line is a warning, not a failure.
+
 **`security:` is only due when the diff touches the security path map**, and its
 first half says WHERE the round came from, not what it asked. Three origins,
 and the third is a full answer rather than an admission:

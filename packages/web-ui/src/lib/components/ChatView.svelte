@@ -78,7 +78,7 @@
 		type ChatMessage,
 	} from '../stores/chat.svelte.js';
 	import type { PromptOrigin } from '../utils/prompt-origin.js';
-	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
+	import { getArtifacts, getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
 	import { footerChipSeparator, footerStatParts } from '../stores/chat-usage.js';
@@ -635,11 +635,18 @@
 						// the id in its result string. Thread it into the fence so the
 						// inline card LINKS to that existing entry instead of re-saving on
 						// pin/open — the re-save added a duplicate gallery row per click.
+						const id = parseArtifactIdFromResult(tc.result);
 						const header = artifactFenceHeader({
 							title,
 							type: artifactType,
-							id: parseArtifactIdFromResult(tc.result),
+							id,
 							typed: TYPED_ARTIFACT_FENCE.has(artifactType),
+							// The store's flag, as the gallery and the chips show it. Not the call's
+							// content: an older thread can hold the placeholder there while the file
+							// holds the document. The flag is the artifact's, read from its current
+							// file, so every card of that artifact carries it, as the file its open
+							// button opens does.
+							lost: id !== '' && getArtifacts().some((a) => a.id === id && a.lostOnSave === true),
 						});
 						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 					}
@@ -3662,7 +3669,7 @@
 						     under it say how many lines, as the engine's own confirmation does. -->
 						<div class="flex flex-1 min-w-0 flex-col">
 						<div class="relative flex min-w-0 flex-col">
-						<div data-prompt-question data-prompt-markdown onscroll={measureQuestion} class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
+						<div data-prompt-question data-prompt-markdown onscroll={measureQuestion} class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:[white-space:break-spaces] [&_table]:w-full [&_table]:table-fixed [&_tr]:border-b [&_tr]:border-border [&_th]:text-left [&_th]:align-top [&_th]:px-1 [&_th]:py-0.5 [&_td]:align-top [&_td]:px-1 [&_td]:py-0.5">
 							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list; segment values are spliced in afterwards, HTML-escaped -->
 							{@html pendingPermission.segments
 								? renderPromptSegments(pendingPermission.segments, { box: toolConsent !== undefined })

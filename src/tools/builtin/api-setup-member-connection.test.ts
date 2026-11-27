@@ -152,6 +152,25 @@ describe('the owner saving over a member\'s connection (P3)', () => {
     expect(reply).toContain('was not set up in this session\'s name');
     expect(store.get('crm-api')?.created_by).toBe(TAG);
   });
+
+  it('inside a run, the refusal is noted for the run\'s end, with the owner\'s own note, and the reply is the same', async () => {
+    const store = storeWith();
+    const { notes, said, done } = runCollectingMemberNotes(() => run(agentWith(store, OWNER_PRINCIPAL, ['M-1']), { action: 'update', profile: crmProfile({ description: 'edited', created_by: undefined }) }));
+    const reply = await done;
+
+    expect(reply).toBe(`Error: API profile "crm-api" was not saved. ${LEAD}, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this connection under Settings → API connections and connect it yourself (that disconnects setup@example.org).`);
+    expect([...notes]).toEqual([expect.stringMatching(/^Connection not used: setup@example\.org set up this connection/)]);
+    const line = [...notes][0]!;
+    expect(said.get(line), 'the owner reads a note of their own, in German').toBe('setup@example.org hat diese Verbindung (api.crm.example, "CRM" (id crm-api)) mit eigenem Login eingerichtet, deshalb nutzt lynox sie nicht für dich. Übernimm sie im Chat, sobald der Zugang von setup@example.org beendet ist, oder lösche diese Verbindung unter Einstellungen → API-Verbindungen und verbinde den Dienst selbst (das trennt setup@example.org).');
+    expect(said.get(line), 'not the model\'s line').not.toBe(line);
+    expect(store.get('crm-api')?.description).toBe('CRM API');
+  });
+
+  it('control: a save that goes through notes nothing for the run', async () => {
+    const { notes, done } = runCollectingMemberNotes(() => run(agentWith(storeWith(), OWNER_PRINCIPAL, []), { action: 'update', profile: crmProfile({ description: 'edited' }) }));
+    expect(await done).toContain('Profile saved');
+    expect([...notes]).toEqual([]);
+  });
 });
 
 describe('the owner refining a member\'s connection (F6)', () => {
