@@ -1127,6 +1127,51 @@ describe('a header name longer than the question shows', () => {
   });
 });
 
+// Each header is bounded on its own, their number is not: all of them are read under one budget
+// (READING_BUDGET_CHARS, 600 000). A plain ASCII text has one reading, which costs its length and
+// 64 more; a header is read twice, its name and its masked value. 2000 headers with a name of 10
+// and a value of 162 characters cost 2000 × (10 + 64 + 162 + 64) = 600 000: exactly the budget.
+describe('the headers of a write, read together under one budget', () => {
+  const many = (extra: number): Record<string, string> => Object.fromEntries(
+    Array.from({ length: 2000 }, (_, i) => [`x-hdr-${String(i).padStart(4, '0')}`, 'v'.repeat(162 + (i === 0 ? extra : 0))]));
+
+  it('reads them at the budget, and counts them unreadable one character past it', () => {
+    const at = headersForQuestion(many(0), (t) => t, () => 'show');
+    expect('lines' in at && at.lines.length).toBe(2000);
+    const past = headersForQuestion(many(1), (t) => t, () => 'show');
+    expect('unshowable' in past && past.unshowable).toEqual({ reason: 'unreadable' });
+  });
+
+  // A refusal of one header comes before the budget runs out, and is kept as it is.
+  it('names a header that holds a secret in an encoded form, though the budget would run out after it', () => {
+    const headers = { 'x-a': '%73ecret', ...many(1) };
+    expect(headersForQuestion(headers, (t) => t.replaceAll('secret', '***'), () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'x-a' } });
+  });
+
+  // JSON text in a header value is read on the budget of its own (2 M), and all headers of one
+  // question share it: one such header fits it alone, many together do not, while the same
+  // number of plain values of the same length stays well inside the reading budget (600 K).
+  describe('with JSON text in their values', () => {
+    const piece = '%2541%u0041%E9%2525%41+';
+    // The escapes are written as JSON escapes: only reading the JSON text in the value finds them.
+    const json = (i: number): string => `["${`t${i}${piece.repeat(2)}`.replace(/%/g, '\\u0025')}"]`;
+    const headers = (n: number, value: (i: number) => string): Record<string, string> =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`x-h-${String(i).padStart(4, '0')}`, value(i)]));
+
+    it('reads one such header, and many of them together past that budget count as holding a secret', () => {
+      const one = headersForQuestion(headers(1, json), (t) => t, () => 'show');
+      expect('lines' in one && one.lines.length).toBe(1);
+      const some = headersForQuestion(headers(400, json), (t) => t, () => 'show');
+      expect('lines' in some && some.lines.length).toBe(400);
+      const many = headersForQuestion(headers(800, json), (t) => t, () => 'show');
+      expect('unshowable' in many && many.unshowable.reason).toBe('escaped-secret');
+      // Control: as many plain values, each as long, are read: the reading budget is not what ran out.
+      const plainValues = headersForQuestion(headers(800, (i) => 'v'.repeat(json(i).length)), (t) => t, () => 'show');
+      expect('lines' in plainValues && plainValues.lines.length).toBe(800);
+    });
+  });
+});
+
 // The gate reads one call's body about ten times; the reading is kept by a digest of body and headers.
 describe('the body read once per body and headers', () => {
   it('reads the same body under other headers anew', () => {

@@ -9572,6 +9572,22 @@ describe('write approvals for the write the question showed (270)', () => {
         expect(question(prompt, 0)).toContain(' The body has too many percent-encoded characters to check for a stored secret, so it is not shown here. If you do not know what this write sends, decline it.');
       });
 
+      // The headers are read under one budget, each bounded, their number not: past it they are
+      // refused for everyone, the owner included (here 2000 plain headers one character past it).
+      const slowHeaders = (): Record<string, string> => Object.fromEntries(
+        Array.from({ length: 2000 }, (_, i) => [`x-hdr-${String(i).padStart(4, '0')}`, 'v'.repeat(i === 0 ? 163 : 162)]));
+      const headersRefusal = 'Blocked: the headers of this POST to h.example are too many or too heavily encoded for the approval question to check them for a stored secret. Nothing was sent. Send fewer headers, with plain values. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in h.example.';
+
+      it.each([['a mandate', true], ['the owner', false]] as const)('refuses headers too costly to read for %s, without asking', async (_who, isMandate) => {
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        const { agent, prompt } = isMandate ? agent270({ principal: MANDATE, mask: (t) => t }) : agent270({ answer: 'Allow' });
+        const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: slowHeaders(), body: '{}' }, agent);
+        expect(out).toBe(headersRefusal);
+        expect(prompt).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
       describe('a query or a path the question cannot read', () => {
         afterEach(() => { unreadable.query = false; unreadable.path = false; });
         it.each(['query', 'path'] as const)('refuses an unreadable %s in a mandate\'s session, and asks the owner', async (part) => {
