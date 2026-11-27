@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { saveWorkflowTool, processToSteps, SESSION_PARAM_NAME_REFUSAL } from './process.js';
+import { saveWorkflowTool, processToSteps, SESSION_PARAM_NAME_REFUSAL, saveWorkflowFailure } from './process.js';
 import { _resetPipelineStore, getPipeline, getPipelineStore, storePipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
@@ -105,6 +105,7 @@ describe('save_workflow — session source', () => {
     const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, agent);
 
     const parsed = JSON.parse(result) as { workflow_id: string; steps: number; source: string; parameters: string[] };
+    expect(saveWorkflowFailure(result)).toBeNull();
     expect(parsed.workflow_id).toBeDefined();
     expect(parsed.steps).toBe(2);
     expect(parsed.source).toBe('session');
@@ -204,6 +205,8 @@ describe('save_workflow — session source', () => {
     expect(result).toBe('Error: The analysis of this session named a parameter in a form lynox does not accept (1 to 40 characters: ASCII letters, digits, _ or -). No workflow was saved. Call save_workflow once more to analyse the session again; if it is refused again, plan the steps yourself with plan_task and save that plan with save_workflow and its workflow_id. A workflow saved that way takes no parameters; tell the user so.');
     expect(result).toBe(SESSION_PARAM_NAME_REFUSAL);
     expect(result).not.toContain(SENT);
+    // Recorded as a failed call, with a reason that does not carry the name either.
+    expect(saveWorkflowFailure(result)).toBe('not saved: a parameter name outside the accepted form');
     expect(mockHistory.insertPlannedPipeline).not.toHaveBeenCalled();
     expect(mockHistory.insertProcess).not.toHaveBeenCalled();
     // Nor the in-memory store a run reads first.
@@ -290,12 +293,14 @@ describe('save_workflow — session source', () => {
     const agent = makeAgent({ currentRunId: undefined }, mockHistory);
     const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
     expect(result).toContain('No active run');
+    expect(saveWorkflowFailure(result)).toBe('not saved: an error stopped the save');
   });
 
   it('errors without run history', async () => {
     const agent = makeAgent({}, null);
     const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
     expect(result).toContain('not available');
+    expect(saveWorkflowFailure(result)).toBe('not saved: an error stopped the save');
   });
 
   it('errors when no tool calls are found', async () => {
@@ -304,6 +309,7 @@ describe('save_workflow — session source', () => {
     const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
     const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
     expect(result).toContain('Nothing to save');
+    expect(saveWorkflowFailure(result)).toBe('not saved: nothing in this session to save');
   });
 
   it('reports nothing-to-save when extraction yields zero steps', async () => {
@@ -311,6 +317,7 @@ describe('save_workflow — session source', () => {
     const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
     const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
     expect(result).toContain('No actionable steps');
+    expect(saveWorkflowFailure(result)).toBe('not saved: nothing in this session to save');
     // No partial state written.
     expect(mockHistory.insertProcess).not.toHaveBeenCalled();
   });
@@ -338,6 +345,7 @@ describe('save_workflow — retryable extraction failure', () => {
     const result = await saveWorkflowTool.handler({ name: 'Flaky Workflow' }, makeAgent({ currentThreadId: 'thread-1' }, mockHistory));
     expect(result).toBe('Error: The analysis of this session failed: the extraction call failed (UnprocessableEntityError HTTP 422). No workflow was saved. Call save_workflow once more to retry; if it fails again, tell the user that lynox could not analyse the session and name the cause in brackets, and offer to plan the steps with plan_task instead (a workflow saved that way takes no parameters).');
     expect(result).not.toContain(MARK);
+    expect(saveWorkflowFailure(result)).toBe('not saved: the session analysis failed');
     // The OpenAI-compatible adapter's prefix gives the status; the body after it is not read.
     captureProcessMock.mockRejectedValue(new Error(`OpenAI-compatible API error 400: {"input":"${MARK}"}`));
     const compat = await saveWorkflowTool.handler({ name: 'Flaky Workflow' }, makeAgent({ currentThreadId: 'thread-1' }, mockHistory));
@@ -564,6 +572,8 @@ describe('save_workflow — workflow_id source', () => {
     );
 
     const parsed = JSON.parse(result) as { workflow_id: string; source: string; steps: number };
+    // A promoted copy is a done call.
+    expect(saveWorkflowFailure(result)).toBeNull();
     expect(parsed.source).toBe('workflow_id');
     expect(parsed.steps).toBe(2);
     // A new id — the original plan is untouched.
@@ -628,6 +638,8 @@ describe('save_workflow — workflow_id source', () => {
 
     const parsed = JSON.parse(result) as { workflow_id: string; already_reusable: boolean };
     expect(parsed.already_reusable).toBe(true);
+    // An already reusable workflow is a done call, not a refusal.
+    expect(saveWorkflowFailure(result)).toBeNull();
     expect(parsed.workflow_id).toBe('tmpl-1');
     // The stored name is left out: it can be text a prior turn brought in from outside.
     expect(Object.keys(parsed).sort()).toEqual(['already_reusable', 'next', 'steps', 'workflow_id']);
@@ -640,6 +652,7 @@ describe('save_workflow — workflow_id source', () => {
       agent,
     );
     expect(result).toContain('not found');
+    expect(saveWorkflowFailure(result)).toBe('not saved: an error stopped the save');
   });
 });
 
