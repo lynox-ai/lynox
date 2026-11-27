@@ -173,6 +173,23 @@ describe('the webhook drain', () => {
     expect(eventOf(t, id).runId).toBe('run-1');
   });
 
+  it('gives the budget reservation back once the event\'s run settled', async () => {
+    const { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } = await import('./session-budget.js');
+    configurePersistentBudget({ costProvider: { getCostByDay: () => [] }, dailyCapUSD: 100, monthlyCapUSD: 1000 });
+    try {
+      let heldWhileRunning = 0;
+      runner.run.mockImplementationOnce(() => { heldWhileRunning = getReservedInFlight(); return Promise.resolve({ ok: true, status: 'completed', runId: 'run-1' }); });
+      const t = sharedTrigger();
+      const id = deliver(t);
+      await loop.tick();
+      await settled(t, id, 'done');
+      expect(heldWhileRunning, 'positive control: the run was held').toBeGreaterThan(0);
+      await vi.waitFor(() => { expect(getReservedInFlight(), 'the hold is back').toBe(0); });
+    } finally {
+      resetPersistentBudget();
+    }
+  });
+
   // The run is held as an event's start, so a workflow its steps start never says it was
   // started by hand or by a schedule.
   it("holds the run as an event's start for everything it does", async () => {
