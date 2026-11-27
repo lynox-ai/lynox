@@ -105,6 +105,7 @@ describe('setup probe — flow B (invoices) check', () => {
 
   it('denies an engine permission prompt and carries on after a model question', () => {
     expect(flowB.answer({ promptId: 'p', question: '⚠ Table deletion — destroys stored data', options: ['Allow', 'Deny', '\x00'] })).toBe('Deny');
+    expect(flowB.answer({ promptId: 'p', question: '⚠ Table deletion — destroys stored data', options: ['allow', 'deny'] })).toBe('deny');
     expect(flowB.answer({ promptId: 'p', question: 'Soll ich weitermachen?', options: ['Ja', 'Nein'] })).toBe(policy.CARRY_ON);
   });
 });
@@ -652,8 +653,19 @@ describe('setup probe — operator permission policy', () => {
     expect(() => policy.permissionAnswer({ question: '⚠ API request: send to 203.0.113.40 — Allow?' }, ['203.0.113.40'])).toThrow(/^instrument:/);
   });
 
+  it('answers with the key when the engine offers the guard\'s keys', () => {
+    const keys = ['allow', 'deny'];
+    expect(policy.permissionAnswer({ question: '⚠ API request: POST to 203.0.113.40 — Allow outbound data?', options: keys }, ['203.0.113.40'])).toBe('allow');
+    expect(policy.permissionAnswer({ question: '⚠ API request: POST to 198.51.100.7 — Allow outbound data?', options: keys }, ['203.0.113.40'])).toBe('deny');
+    expect(policy.permissionAnswer({ question: '⚠ API request: GET to 203.0.113.40 (possible data exfiltration) — Allow?', options: keys }, ['203.0.113.40'])).toBe('deny');
+    expect(policy.permissionAnswer({ question: '⚠ Command — runs a command', options: keys }, [])).toBe('deny');
+  });
+
   it('tells an engine permission prompt from a question of the model', () => {
     expect(policy.isPermissionPrompt({ options: ['Allow', 'Deny', '\x00'] })).toBe(true);
+    expect(policy.isPermissionPrompt({ options: ['allow', 'deny'] })).toBe(true);
+    expect(policy.isPermissionPrompt({ options: ['allow'] })).toBe(false);
+    expect(policy.isPermissionPrompt({ options: ['deep', 'balanced', 'cancel'] })).toBe(false);
     expect(policy.isPermissionPrompt({ options: ['Ja', 'Nein'] })).toBe(false);
   });
 });

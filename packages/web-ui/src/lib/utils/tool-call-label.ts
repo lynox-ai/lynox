@@ -72,11 +72,50 @@ function graphemes(text: string): string[] {
 }
 
 /**
+ * How much of a text is looked at before it is cut: a few code units per character the line can
+ * show. A model can write a subject of megabytes (a heredoc, a stored note); splitting all of it
+ * into characters on every render would stall the chat.
+ */
+const SUBJECT_UNITS_MAX = SUBJECT_MAX * 4;
+
+/**
+ * The longest one character may be, in code units. Longer is a base with a pile of combining
+ * marks, which draws over the rows around it; it keeps its base. The longest emoji sequences
+ * (a family, a couple with skin tones) stay below it.
+ */
+const CHAR_UNITS_MAX = 24;
+
+/** `text` as characters, each at most {@link CHAR_UNITS_MAX} code units (else its base alone). */
+function boundedChars(text: string): string[] {
+  return graphemes(text).map((char) => (char.length > CHAR_UNITS_MAX ? String.fromCodePoint(char.codePointAt(0) ?? 0x20) : char));
+}
+
+/**
+ * A file name as the line shows it: whole, as long as a line could ever show it. A longer one (a
+ * name of megabytes is still one) keeps its end, so the extension stays, after „…“.
+ */
+function boundName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length <= SUBJECT_UNITS_MAX) return boundedChars(trimmed).join('');
+  // Clipped from the front by code units, the first character may be a piece of one: it goes.
+  return `…${boundedChars(trimmed.slice(-SUBJECT_UNITS_MAX)).slice(1).join('')}`;
+}
+
+/** The file name at the end of `path`, bounded as {@link boundName} does. */
+function fileName(path: string): string {
+  return boundName(lastPathSegment(path));
+}
+
+/**
  * `text` trimmed, at most {@link SUBJECT_MAX} characters, ending in „…“ when it was cut.
  * Counted by what a reader sees as one character, so a cut does not split an emoji or a flag.
  */
 function cut(text: string): string {
-  const chars = graphemes(text.trim());
+  const trimmed = text.trim();
+  const clipped = trimmed.length > SUBJECT_UNITS_MAX;
+  const chars = boundedChars(clipped ? trimmed.slice(0, SUBJECT_UNITS_MAX) : trimmed);
+  // Clipped by code units, the last character may be a piece of one: it goes, and the cut shows.
+  if (clipped) return `${chars.slice(0, Math.min(chars.length - 1, SUBJECT_MAX - 1)).join('')}…`;
   return chars.length > SUBJECT_MAX ? `${chars.slice(0, SUBJECT_MAX - 1).join('')}…` : chars.join('');
 }
 
@@ -107,8 +146,9 @@ const INBOX_ZONE_KEYS: Readonly<Record<string, string>> = {
 
 function inboxReadSubject(input: Record<string, unknown> | undefined, t: Translator): string {
   if (input?.['action'] === 'item') return '';
-  const key = INBOX_ZONE_KEYS[strOrEmpty(input?.['bucket'])];
-  return key ? t(key) : '';
+  const bucket = strOrEmpty(input?.['bucket']);
+  // Own keys only: a bucket named `constructor` or `__proto__` is no zone.
+  return Object.hasOwn(INBOX_ZONE_KEYS, bucket) ? t(INBOX_ZONE_KEYS[bucket] ?? '') : '';
 }
 
 /** Where a bulk run works: the API host, the collection, or the file it reads its list from. */
@@ -116,7 +156,7 @@ function bulkPlanSubject(input: Record<string, unknown> | undefined): string {
   switch (input?.['target_system']) {
     case 'http':       return firstOf(input, 'target_host');
     case 'data_store': return firstOf(input, 'target_collection');
-    case 'workspace':  return lastPathSegment(strOrEmpty(input?.['source_file']));
+    case 'workspace':  return fileName(strOrEmpty(input?.['source_file']));
     default:           return '';
   }
 }
@@ -133,7 +173,7 @@ function batchFilesAction(input: Record<string, unknown> | undefined): string {
 function googleDriveSubject(input: Record<string, unknown> | undefined): string {
   switch (input?.['action']) {
     case 'search':     return firstOf(input, 'query');
-    case 'upload':     return strOrEmpty(input?.['file_name']).trim();
+    case 'upload':     return boundName(strOrEmpty(input?.['file_name']));
     case 'create_doc': return firstOf(input, 'file_name');
     default:           return '';
   }
@@ -176,8 +216,8 @@ export function toolCallLabel(
     case 'memory_store':      return { action: t('tool.remembered'),      subject: cut(strOrEmpty(inp?.['content'])) };
     case 'memory_recall':     return memoryRecallLabel(inp, t);
     case 'memory_update':     return { action: t('tool.knowledge_updated'), subject: '' };
-    case 'write_file':        return { action: t('tool.file_written'),    subject: lastPathSegment(strOrEmpty(inp?.['path'])) };
-    case 'read_file':         return { action: t('tool.file_read'),       subject: lastPathSegment(strOrEmpty(inp?.['path'])) };
+    case 'write_file':        return { action: t('tool.file_written'),    subject: fileName(strOrEmpty(inp?.['path'])) };
+    case 'read_file':         return { action: t('tool.file_read'),       subject: fileName(strOrEmpty(inp?.['path'])) };
     case 'bash':              return { action: t('tool.command'),         subject: cut(strOrEmpty(inp?.['command'])) };
     case 'http_request':      return { action: t('tool.api_request'),     subject: cut(`${strOrEmpty(inp?.['method']) || 'GET'} ${strOrEmpty(inp?.['url'])}`) };
     case 'web_research':      return { action: t('tool.web_search'),      subject: cut(strOrEmpty(inp?.['query'])) };
@@ -231,9 +271,9 @@ export function toolCallLabel(
     case 'artifact_restore':   return { action: t('tool.version_restored'),    subject: '' };
     case 'data_store_delete':  return { action: t('tool.rows_deletion'),       subject: firstOf(inp, 'collection') };
     case 'data_store_drop':    return { action: t('tool.table_deletion'),      subject: firstOf(inp, 'collection') };
-    case 'edit_file':          return { action: t('tool.file_edited'),         subject: lastPathSegment(strOrEmpty(inp?.['path'])) };
+    case 'edit_file':          return { action: t('tool.file_edited'),         subject: fileName(strOrEmpty(inp?.['path'])) };
     case 'batch_files':        return { action: t(batchFilesAction(inp)),      subject: firstOf(inp, 'pattern') };
-    case 'media_process':      return { action: t('tool.media_processed'),     subject: lastPathSegment(strOrEmpty(inp?.['input'])) };
+    case 'media_process':      return { action: t('tool.media_processed'),     subject: fileName(strOrEmpty(inp?.['input'])) };
     case 'recall_tool_result': return { action: t('tool.earlier_result_fetched'), subject: '' };
 
     // Contacts, calendar, credentials.

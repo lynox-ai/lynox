@@ -2,11 +2,11 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 import type { PromptMeta, PromptText, PromptUserFn } from '../types/index.js';
 import type { AbortScope } from '../types/config.js';
 import type { PromptStore } from './prompt-store.js';
-import { promptOriginOf } from './prompt-store.js';
+import { promptOriginOf, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ThreadStore } from './thread-store.js';
-import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
-import { inquiryOptions, summarizeDelivery } from './notification-router.js';
+import type { NotificationMessage, NotifyReport, DeliveryDetail, DeliverySummary } from './notification-router.js';
+import { deliveryCase, inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { stripHidden } from './hidden-text.js';
 
@@ -49,7 +49,7 @@ export interface WorkflowQuestionDeps {
   maskOffBox: (text: string) => string;
   notify: (msg: NotificationMessage) => Promise<NotifyReport>;
   /** Starts the delivery record on the schedule and returns the writer of its outcome. */
-  recordDelivery: () => (delivery: DeliverySummary) => void;
+  recordDelivery: () => (delivery: DeliverySummary, detail?: DeliveryDetail) => void;
   /** The owner's stop. */
   ownerStop: AbortSignal;
   /** The task controller: aborted at teardown, and by the owner's stop too. */
@@ -144,6 +144,15 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
         handRun: deps.handRun,
       }, meta?.consent, meta?.consentAction);
     } catch (err: unknown) {
+      // A blocked question (where a send target comes from, a guard's hard block) is refused before
+      // it is stored. The run ends there, visibly, as a question it could not ask: a step that
+      // went on without the answer could end the run succeeded with the owner told nothing. The
+      // asker still gets the unattended answer, so a send check reports where its target came
+      // from (`onOriginRefused`), which the run's result then names.
+      if (err instanceof UnattendedBlockError) {
+        this.#endUnanswered('not_asked');
+        return UNATTENDED_BLOCK_ANSWER;
+      }
       // A database the engine already closed is the teardown, as after the wait.
       if (!store.isOpen()) return neverSettles();
       // Otherwise the question could not be put to the owner — e.g. a question of the owner's
@@ -273,7 +282,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       data: { threadId: deps.runId, promptId },
       // The options leave the box too (the mail channel lists them), so they are masked like the body.
       inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => deps.maskOffBox(o)) },
-    }).then((report) => { record(summarizeDelivery(report)); }).catch((err: unknown) => {
+    }).then((report) => { record(summarizeDelivery(report), { case: deliveryCase(report) }); }).catch((err: unknown) => {
       process.stderr.write(`[lynox:worker] recording a workflow question's delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
     });
   }

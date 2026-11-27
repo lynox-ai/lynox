@@ -28,7 +28,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { isModelProfile } from '../src/contract/shapes.js';
-import { readLoginPrincipal, readMandateRevocation, readRenewedPrincipal, MANDATE_REVOCATION_MAX, LOGIN_PRINCIPAL_ID_MAX } from '../src/contract/http.js';
+import { readLoginPrincipal, readMandateRevocation, readRenewedPrincipal, readOverrunHold, MANDATE_REVOCATION_MAX, LOGIN_PRINCIPAL_ID_MAX } from '../src/contract/http.js';
+import { MIGRATED } from '../src/contract/migrated.js';
 import type { UsageSummaryResponse } from '../src/contract/http.js';
 // The typed mirrors live INSIDE the contract (src/contract/fixtures/mirrors.ts)
 // so their `satisfies` welds are checked by root tsc — this test dir is outside
@@ -225,5 +226,29 @@ describe('the principal a renewal answers with (readRenewedPrincipal)', () => {
       expect(readRenewedPrincipal({ valid, principal }, expect_), String(valid)).toBeNull();
     }
     expect(readRenewedPrincipal({ principal }, expect_)).toBeNull();
+  });
+});
+
+describe('readOverrunHold', () => {
+  it('reads both booleans as statements', () => {
+    // Kills: a reader that maps `false` to null (a flush could then never lift a hold).
+    expect(readOverrunHold({ overrun_hold: true })).toBe(true);
+    expect(readOverrunHold({ overrun_hold: false })).toBe(false);
+    expect(readOverrunHold(JSON.parse('{"overrun_hold":true}'))).toBe(true);
+  });
+
+  it('reads an absent, non-boolean or inherited field as no statement', () => {
+    // Kills: a truthiness reader (`'false'` or `1` would hold) and one that follows the prototype.
+    for (const body of [
+      {}, { overrun_hold: 'true' }, { overrun_hold: 'false' }, { overrun_hold: 1 }, { overrun_hold: null },
+      null, undefined, 'overrun_hold', Object.create({ overrun_hold: true }) as object,
+      Object.assign([], { overrun_hold: true }),
+    ]) {
+      expect(readOverrunHold(body)).toBeNull();
+    }
+  });
+
+  it('is registered as migrated, so a private twin downstream fails the drift sweep', () => {
+    expect(MIGRATED.filter((m) => m.contractFile === 'http.ts').map((m) => m.name)).toContain('readOverrunHold');
   });
 });

@@ -389,7 +389,7 @@ describe('the store tells its listener', () => {
     }
     for (const grant of ['grant-a', 'grant-b', 'grant-c']) {
       const pushed = router.sent.filter((m) => m.audience === 'mandates' && m.mandateId === grant).length;
-      const listed = store.list({ view: 'open', scope: listScopeOf({ viewer: 'mandate', mandateId: grant }) }).length;
+      const listed = store.list({ view: 'open', scope: listScopeOf({ viewer: 'mandate', mandateId: grant, tag: `mandate:${grant}@example.com` }) }).length;
       expect(pushed, grant).toBe(listed);
     }
     // Control: the owner hears of every entry and lists every one.

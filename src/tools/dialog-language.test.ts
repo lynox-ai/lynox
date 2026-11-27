@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDangerousDetailed, type DangerSignal } from './permission-guard.js';
 import { flattenPrompt } from '../core/prompt-value.js';
-import { ACTION_WORDS, GUARD_TEXT, RULE_LABELS_DE, SECRET_DIALOG, SPAWN_DIALOG, exfilWarning, type DialogLanguage } from './dialog-text.js';
+import { ACTION_WORDS, API_SETUP_DIALOG, CONSENT_LABELS, GUARD_TEXT, RULE_LABELS_DE, SECRET_DIALOG, SPAWN_DIALOG, endsSentence, exfilWarning, type DialogLanguage } from './dialog-text.js';
 import { DIALOG_ONLY_WORDS, DIALOG_ONLY_WORDS_DE, TOOL_LINE_WORDS, TOOL_LINE_WORDS_DE, dialogToolHead } from './tool-words.js';
 import type { ToolEntry } from '../types/index.js';
 
@@ -56,22 +56,26 @@ describe('a confirmation question in the instance\'s language', () => {
     expect(flattenPrompt(de.prompt)).not.toBe(flattenPrompt(en.prompt));
     const values = (s: DangerSignal): string[] => s.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text);
     expect(values(de)).toEqual(values(en));
-    expect(flattenPrompt(en.prompt)).toBe(en.warning.replace(/"([^"]*)"/g, (_m, v: string) => `"${v.replace(/[\\"]/g, (ch) => `\\${ch}`)}"`));
+    // The warning quotes with `"`; the English prompt with “ ” around the same value, escaped.
+    expect(flattenPrompt(en.prompt)).toBe(en.warning.replace(/"([^"]*)"/g, (_m, v: string) => `“${v.replace(/[\\"“”„]/g, (ch) => `\\${ch}`)}”`));
   });
 
-  it('keeps [BLOCKED in the German text wherever the English has it', () => {
+  it('marks [GESPERRT in the German text wherever the English has [BLOCKED; the warning that decides stays English', () => {
     for (const c of CASES) {
       const en = ask(c, 'en');
-      expect(flattenPrompt(ask(c, 'de').prompt).includes('[BLOCKED'), `${c[0]} ${JSON.stringify(c[1])}`).toBe(en.warning.includes('[BLOCKED'));
+      const de = ask(c, 'de');
+      expect(flattenPrompt(de.prompt).includes('[GESPERRT'), `${c[0]} ${JSON.stringify(c[1])}`).toBe(en.warning.includes('[BLOCKED'));
+      expect(flattenPrompt(de.prompt).includes('[BLOCKED'), `${c[0]}`).toBe(false);
+      expect(de.warning, `${c[0]}`).toBe(en.warning);
     }
   });
 
   it('reads as German: the tool\'s German word and the German sentence', () => {
-    expect(flattenPrompt(ask(CASES[1]!, 'de').prompt)).toBe('⚠ Befehl: git push (nur auf ausdrücklichen Wunsch) — "git push origin main"');
-    expect(flattenPrompt(ask(CASES[3]!, 'de').prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive} — "/etc/shadow" — ${GUARD_TEXT.de.systemFiles}`);
+    expect(flattenPrompt(ask(CASES[1]!, 'de').prompt)).toBe('⚠ Befehl: git push (nur auf ausdrücklichen Wunsch) — „git push origin main“');
+    expect(flattenPrompt(ask(CASES[3]!, 'de').prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive} — „/etc/shadow“ — ${GUARD_TEXT.de.systemFiles}`);
     expect(flattenPrompt(ask(CASES[11]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen — ändert Daten ausserhalb von lynox');
-    expect(flattenPrompt(ask(CASES[12]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen [BLOCKED — dafür brauche ich dein OK]');
-    expect(flattenPrompt(ask(CASES[14]!, 'de').prompt)).toBe('⚠ Externes Werkzeug "Merge": "drop" [BLOCKED — das Löschen gespeicherter Daten braucht dein OK]');
+    expect(flattenPrompt(ask(CASES[12]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen [GESPERRT — dafür brauche ich dein OK]');
+    expect(flattenPrompt(ask(CASES[14]!, 'de').prompt)).toBe('⚠ Externes Werkzeug „Merge“: „drop“ [GESPERRT — das Löschen gespeicherter Daten braucht dein OK]');
   });
 
   it('names a built-in tool\'s action in words in both languages, and an action without words as a value', () => {
@@ -85,7 +89,7 @@ describe('the German delegation sentence puts its verb last', () => {
   it('for one child on a model of unknown band', () => {
     const d = SPAWN_DIALOG.de;
     expect(d.sentence('Delegation', d.children(1), d.tierUnknownBand, '0.40', 'Anthropic', d.tailDowngrade))
-      .toBe(`⚠ Delegation: Eine Teilaufgabe würde auf ${d.tierUnknownBand} laufen. Geschätzte Kosten ~$0.40 für diese Sitzung. Anbieter: Anthropic. ${d.tailDowngrade}`);
+      .toBe(`⚠ Delegation: Eine Teilaufgabe würde auf ${d.tierUnknownBand} laufen. Geschätzte Modellkosten für diese Sitzung: etwa $0.40. Anbieter: Anthropic. ${d.tailDowngrade}`);
   });
 });
 
@@ -148,7 +152,7 @@ describe('the German texts are complete', () => {
   it('asks about a secret naming the tool by its word, an external one as a value', () => {
     const q = flattenPrompt(SECRET_DIALOG.de.plain(dialogToolHead('bash', 'de'), 'TOKEN'));
     expect(q).toBe('Befehl möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
-    expect(flattenPrompt(SECRET_DIALOG.de.plain(dialogToolHead('Merge', 'de'), 'TOKEN'))).toBe('Externes Werkzeug "Merge" möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
+    expect(flattenPrompt(SECRET_DIALOG.de.plain(dialogToolHead('Merge', 'de'), 'TOKEN'))).toBe('Externes Werkzeug „Merge“ möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
     expect(flattenPrompt(SECRET_DIALOG.de.inInput(dialogToolHead('bash', 'de'), 'TOKEN', 'curl'))).toBe('Befehl möchte diese Geheimnisse verwenden: TOKEN, in: curl — Erlauben?');
     const ext = SECRET_DIALOG.en.plain(dialogToolHead('Merge', 'en'), 'TOKEN');
     expect(ext.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual(['Merge', 'TOKEN']);
@@ -190,6 +194,138 @@ describe('every place a question is posed hands it the language', () => {
     expect(warnings.length).toBeGreaterThanOrEqual(2);
     for (const w of warnings) expect(exfilWarning(w, 'de'), w).not.toBe(w);
     expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(2), SPAWN_DIALOG.de.tierDeep, '1.20', 'Anthropic', SPAWN_DIALOG.de.tailPinned))
-      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer) laufen. Geschätzte Kosten ~$1.20 für diese Sitzung. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
+      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe „Tief“ (einem stärkeren Modell, gründlicher, aber teurer) laufen. Geschätzte Modellkosten für diese Sitzung: etwa $1.20. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
+  });
+});
+
+describe('a value in a confirmation is quoted as its language quotes', () => {
+  const longPath = `/etc/ssl/private/${"keys/".repeat(14)}server.pem`;
+
+  it('puts a short value between the language\'s marks', () => {
+    expect(flattenPrompt(ask(CASES[1]!, 'en').prompt)).toBe('⚠ Command: git push (requires explicit user request) — “git push origin main”');
+    expect(flattenPrompt(ask(CASES[1]!, 'de').prompt)).toBe('⚠ Befehl: git push (nur auf ausdrücklichen Wunsch) — „git push origin main“');
+    expect(flattenPrompt(dialogToolHead('Merge', 'de'))).toBe('Externes Werkzeug „Merge“');
+    expect(flattenPrompt(dialogToolHead('Merge', 'en'))).toBe('External tool “Merge”');
+  });
+
+  it('ends the sentence with a colon before a long value, which follows between its marks on its own line', () => {
+    const asked = ['read_file', { path: longPath }, 'autonomous'] as const;
+    const en = ask(asked as unknown as (typeof CASES)[number], 'en');
+    expect(flattenPrompt(en.prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive}:\n“${longPath}”\n[BLOCKED — ${GUARD_TEXT.en.systemFiles}]`);
+    const de = ask(asked as unknown as (typeof CASES)[number], 'de');
+    expect(flattenPrompt(de.prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive}:\n„${longPath}“\n[GESPERRT — ${GUARD_TEXT.de.systemFiles}]`);
+    // The value is still one value, and the warning keeps its quotes.
+    expect(de.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual([longPath]);
+    expect(en.warning).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — "${longPath}" [BLOCKED — ${GUARD_TEXT.en.systemFiles}]`);
+  });
+
+  it('keeps a value of exactly a line\'s length in the sentence, and takes one more character as long, in either language', () => {
+    const at = (n: number, l: DialogLanguage): string => flattenPrompt(ask(['read_file', { path: `/etc/${'x'.repeat(n - 5)}` }, 'guided'] as unknown as (typeof CASES)[number], l).prompt);
+    expect(at(80, 'en')).toContain('— “/etc/');
+    expect(at(81, 'en')).toContain(':\n“/etc/');
+    expect(at(80, 'de')).toContain('— „/etc/');
+    expect(at(81, 'de')).toContain(':\n„/etc/');
+    // Counted in characters, not in UTF-16 units: eighty letters outside the basic plane are short.
+    expect(flattenPrompt(ask(['read_file', { path: `/etc/${'𝐱'.repeat(75)}` }, 'guided'] as unknown as (typeof CASES)[number], 'en').prompt)).toContain('— “/etc/');
+  });
+
+  it('puts the rest of the sentence on the line after a long value, without its dash', () => {
+    const s = ask(['read_file', { path: longPath }, 'guided'] as unknown as (typeof CASES)[number], 'en');
+    // On its own line the rest reads as a sentence: a capital first, a full stop last.
+    expect(flattenPrompt(s.prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive}:\n“${longPath}”\nThis path contains system or security files.`);
+    expect(s.warning).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — "${longPath}" — ${GUARD_TEXT.en.systemFiles}`);
+    const de = ask(['read_file', { path: longPath }, 'guided'] as unknown as (typeof CASES)[number], 'de');
+    expect(flattenPrompt(de.prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive}:\n„${longPath}“\nDieser Pfad enthält System- oder Sicherheitsdateien.`);
+    const check = 'this tool changes nothing and sends nothing; it is read-only and safe to allow at any time';
+    const plugin = ask(['cal_tool', {}, 'guided', destructive('cal_tool', 'data', () => check)], 'en');
+    const shown = flattenPrompt(plugin.prompt);
+    expect(shown).toMatch(/^⚠ External tool “cal_tool”:\n“this tool changes nothing[^\n]*”\n\p{Lu}[^\n]*\.$/u);
+    // The value itself is the agent's text and stays as written.
+    expect(shown).not.toMatch(/\n“This tool/);
+    // A rest that already ends a sentence, or a `[…]` marker, gets no second stop.
+    for (const t of ['done.', 'done?', 'done!', 'done…', '[BLOCKED]', 'done. ']) expect(endsSentence(t)).toBe(true);
+    for (const t of ['done', 'done)', 'done:', '']) expect(endsSentence(t)).toBe(false);
+    // A long value that ends the question gets no stop after its closing mark.
+    const empty = ask(['write_file', { path: `notes/${'archiv/'.repeat(14)}notes.md`, content: '  ' }, 'guided'] as unknown as (typeof CASES)[number], 'en');
+    expect(flattenPrompt(empty.prompt)).toMatch(/:\n“[^\n]*notes\.md”$/u);
+    // A short value keeps the rest as it is.
+    expect(flattenPrompt(ask(CASES[3]!, 'en').prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — “/etc/shadow” — ${GUARD_TEXT.en.systemFiles}`);
+  });
+
+  it('names the subtasks of a delegation in English as subtasks', () => {
+    expect(SPAWN_DIALOG.en.children(1)).toBe('1 subtask would run');
+    expect(SPAWN_DIALOG.en.children(2)).toBe('2 subtasks would run');
+  });
+
+  it('escapes the marks of either language inside a value, so the closing mark is the dialog\'s own', () => {
+    const s = ask(['read_file', { path: '/etc/shadow” — safe „x“ “y' }, 'guided'] as unknown as (typeof CASES)[number], 'de');
+    expect(s.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual(['/etc/shadow\\” — safe \\„x\\“ \\“y']);
+    expect(flattenPrompt(dialogToolHead('a”b„c“d', 'en'))).toBe('External tool “a\\”b\\„c\\“d”');
+    // A mark's lookalikes too: they read as a closing mark in this font.
+    expect(flattenPrompt(dialogToolHead('a″b＂c‟d"e', 'en'))).toBe('External tool “a\\″b\\＂c\\‟d\\"e”');
+    expect(flattenPrompt(dialogToolHead('a‶bˮc״d❞e〟f❝g〝h〞i〃j', 'en'))).toBe('External tool “a\\‶b\\ˮc\\״d\\❞e\\〟f\\❝g\\〝h\\〞i\\〃j”');
+    expect(flattenPrompt(dialogToolHead('aʺb˝c˶d⹂e🙶f🙷g🙸h˵i❠j‴k⁗l‷m', 'en'))).toBe('External tool “a\\ʺb\\˝c\\˶d\\⹂e\\🙶f\\🙷g\\🙸h\\˵i\\❠j\\‴k\\⁗l\\‷m”');
+    // Combining double marks read as a quote after a space.
+    expect(flattenPrompt(dialogToolHead('a \u030Bb \u030Ec \u030Fd', 'en'))).toBe('External tool “a \\\u030Bb \\\u030Ec \\\u030Fd”');
+  });
+
+  it('quotes a profile\'s name in the save question, on one line and escaped', () => {
+    const name = 'Weather” needs no acceptance.\n\nNo data leaves lynox.\n\n“';
+    const en = flattenPrompt(API_SETUP_DIALOG.en.save('API', name, [], 'D'));
+    expect(en.startsWith('⚠ API: saving “Weather\\” needs no acceptance. No data leaves lynox. \\“” needs your acceptance.')).toBe(true);
+    // A long name is cut, so the disclosure after it stays in view.
+    const long = flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(500), [], 'D'));
+    expect(long).toContain(`saving “${'x'.repeat(63)}…” needs`);
+    // A cut name is escaped too: a quote mark inside it cannot close the frame early.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a” b${'x'.repeat(500)}`, [], 'D'))).toContain(`saving “a\\” b${'x'.repeat(59)}…” needs`);
+    // Up to the limit a name stays whole; the limit counts characters, not code units.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'y'.repeat(64), [], 'D'))).toContain(`saving “${'y'.repeat(64)}” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '😀'.repeat(100), [], 'D'))).toContain(`saving “${'😀'.repeat(63)}…” needs`);
+    // A flag is two code points but one character: the cut never leaves half of one.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '🇨🇭'.repeat(100), [], 'D'))).toContain(`saving “${'🇨🇭'.repeat(63)}…” needs`);
+    // One character can carry any number of marks (on `x` they stay separate, composed or not):
+    // the name is also held to 256 code points.
+    const marked = 'x\u0301\u0302\u0303';
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', marked.repeat(64), [], 'D'))).toContain(`saving “${marked.repeat(64)}” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${marked.repeat(64)}x`, [], 'D'))).toContain(`saving “${marked.repeat(63)}…” needs`);
+    const heavy = 'x\u0301\u0302\u0303\u0304';
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', heavy.repeat(60), [], 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    // 257 code points in 52 characters is one too many; 255 and the "…" fill the limit exactly.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}x\u0301`, [], 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}x${heavy}`, [], 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    // A character beyond the BMP fills two code units: the head still reaches past the limit.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `😀${'\u{1F3FB}'.repeat(256)}`, [], 'D'))).toContain('saving “…” needs');
+    // A letter written with a separate mark is shown as one letter, not with an escaped mark.
+    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'Gyo\u030Br', [], 'D'))).toContain('von „Győr“ braucht');
+    // Only the name's head is segmented: a name of millions of characters costs no more than a short one.
+    const started = performance.now();
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(10_000_000), [], 'D'))).toContain(`saving “${'x'.repeat(63)}…” needs`);
+    expect(performance.now() - started).toBeLessThan(2000);
+    // Nor does a long run of marks that composing would have to reorder. A leading space (any run
+    // of them is one by then) is dropped before the head is taken.
+    const marks = performance.now();
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301'.repeat(100_000)}${'\u0316'.repeat(100_000)}`, [], 'D'))).toContain('saving “…” needs');
+    expect(performance.now() - marks).toBeLessThan(2000);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', ' Wetter', [], 'D'))).toContain('saving “Wetter” needs');
+    const huge = flattenPrompt(API_SETUP_DIALOG.en.save('API', `क${'ा'.repeat(200_000)}`, [], 'D'));
+    expect(huge.length).toBeLessThan(400);
+    expect(huge).toContain('saving “…” needs');
+    const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', '  Wetter  ', [], 'D'));
+    expect(de.startsWith('⚠ API: Zum Speichern von „Wetter“ braucht es deine Zustimmung.')).toBe(true);
+    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'x'.repeat(500), [], 'D'))).toContain(`von „${'x'.repeat(63)}…“ braucht`);
+    // A name that is not a string still gets its question, shown as its text.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 42 as unknown as string, [], 'D'))).toContain('saving “42” needs');
+    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 42 as unknown as string, [], 'D'))).toContain('von „42“ braucht');
+  });
+
+  it('names the tiers as the settings do, in the sentence and on the buttons', () => {
+    expect(SPAWN_DIALOG.en.tierDeep).toContain('the Deep tier');
+    expect(SPAWN_DIALOG.de.tierDeep).toContain('der Stufe „Tief“');
+    expect(SPAWN_DIALOG.en.tailDowngrade).toContain('“Run on Balanced”');
+    expect(SPAWN_DIALOG.de.tailDowngrade).toContain('„Mit Ausgewogen ausführen“');
+    for (const t of [SPAWN_DIALOG.en, SPAWN_DIALOG.de]) expect(`${t.tierDeep} ${t.tierUnknownBand} ${t.tailDowngrade}`).not.toMatch(/DEEP|balanced|Denkmodell|gated as/);
+    expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(1), SPAWN_DIALOG.de.tierUnknownBand, '1.20', 'X', '')).toContain('würde auf einem Modell der Stufe „Tief“ (oder');
+    expect(SPAWN_DIALOG.en.sentence('Delegation', SPAWN_DIALOG.en.children(1), SPAWN_DIALOG.en.tierUnknownBand, '1.20', 'X', '')).toContain('would run on a model in the Deep tier (or');
+    expect([CONSENT_LABELS.en.deep, CONSENT_LABELS.en.balanced, CONSENT_LABELS.de.deep, CONSENT_LABELS.de.balanced]).toEqual(['Allow Deep', 'Run on Balanced', 'Stufe Tief erlauben', 'Mit Ausgewogen ausführen']);
   });
 });

@@ -5,8 +5,8 @@
  * language (`noticeLanguage`, the rule the engine's other owner-facing texts follow), and
  * frozen into the text that is shown, stored and pushed. Only the shown text is translated:
  * the warning the audit and the `[BLOCKED` checks read stays English, so its readers do not
- * depend on the language. `[BLOCKED` itself is the same in every language; the reason after
- * it is translated.
+ * depend on the language. The shown marker is said in the language too (`[GESPERRT` in German);
+ * nothing reads it from the shown text.
  *
  * Values (paths, commands, hosts, names) are never translated: they are what the agent or
  * the person wrote.
@@ -14,14 +14,70 @@
 
 import type { ConsentAction, ConsentKey } from '../contract/prompt.js';
 import type { NoticeLanguage } from '../core/notice-language.js';
-import { pv } from '../core/prompt-value.js';
+import type { SendRoleKind, SendSlot } from '../core/profile-secret-view.js';
+import { pv, singleLine } from '../core/prompt-value.js';
 import type { PromptText } from '../types/agent.js';
 
 /** The language a confirmation dialog is asked in. */
 export type DialogLanguage = NoticeLanguage;
 
+/** The quotation marks of each dialog language, opening and closing: a value is quoted as its
+ *  readers write it. */
+export const QUOTE_MARKS: Readonly<Record<DialogLanguage, readonly [open: string, close: string]>> = { en: ['“', '”'], de: ['„', '“'] };
+
+/** `\` and every character that reads as a double quotation mark (the straight one, both
+ *  languages' marks, and their lookalikes), so a value cannot close the marks around it. */
+const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞❠ʺ˝˵˶⹂🙶🙷🙸‴‷⁗\u{030B}\u{030E}\u{030F}]/gu;
+
+/** `text` as it stands between a dialog's quotation marks: each quote-like character escaped. */
+export function escapeQuoted(text: string): string {
+  return text.replace(QUOTE_LIKE, (c) => `\\${c}`);
+}
+
+/** Whether `text` already ends a sentence (or a `[…]` marker), so no full stop is added after it. */
+export function endsSentence(text: string): boolean {
+  return /[.!?…\]]$/u.test(text.trimEnd());
+}
+
+/** The longest a profile's name is shown in a question, "…" included and before escaping: a long
+ *  name cannot push the disclosure after it out of view. Counted as a reader counts characters (a
+ *  flag or an emoji with its modifier is one), and in code points too, since one such character
+ *  can carry any number of marks. */
+const PROFILE_NAME_MAX = 64;
+const PROFILE_NAME_CODE_POINTS_MAX = 256;
+
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+const codePoints = (text: string): number => Array.from(text).length;
+
+/** A profile's name as a question quotes it: on one line, composed (so a letter written with a
+ *  separate mark is one letter, not a letter and an escaped mark), within both limits, then
+ *  escaped. Only a bounded head of the name is segmented, however long the name is. A name that
+ *  is not a string (a tool's input is not checked for its type) is shown as its text, so the
+ *  question is still asked. */
+function shownName(name: string): string {
+  // Composing costs more than linear time on a long run of marks, so only a raw head is composed.
+  // Composing joins at most four code units into one code point, so three times the head below
+  // (1542 units) still holds more than the limit once composed, or the whole name.
+  const raw = singleLine(String(name)).trimStart();
+  const text = raw.slice(0, 3 * (2 * PROFILE_NAME_CODE_POINTS_MAX + 2)).normalize('NFC').trimEnd();
+  // Twice the limit in code units holds more than the limit in code points, or the whole name.
+  const head = text.slice(0, 2 * PROFILE_NAME_CODE_POINTS_MAX + 2);
+  const chars = Array.from(GRAPHEMES.segment(head), (g) => g.segment);
+  // A head shorter than the name holds more code points than the limit, so the name is cut.
+  if (chars.length <= PROFILE_NAME_MAX && codePoints(head) <= PROFILE_NAME_CODE_POINTS_MAX) return escapeQuoted(text);
+  let shown = '';
+  for (const c of chars.slice(0, PROFILE_NAME_MAX - 1)) {
+    if (codePoints(shown + c) > PROFILE_NAME_CODE_POINTS_MAX - 1) break;
+    shown += c;
+  }
+  return escapeQuoted(`${shown}…`);
+}
+
 /** The guard's fixed sentence parts (`_detectDanger`). */
 export interface GuardText {
+  /** The marker of an action lynox does not run: it stays in square brackets in every language. */
+  readonly blocked: string;
   readonly runManually: string;
   readonly systemFiles: string;
   readonly readSensitive: string;
@@ -48,6 +104,7 @@ export interface GuardText {
 
 export const GUARD_TEXT: Readonly<Record<DialogLanguage, GuardText>> = {
   en: {
+    blocked: 'BLOCKED',
     runManually: 'this action needs to be run manually for safety',
     systemFiles: 'this path contains system or security files',
     readSensitive: 'read sensitive path',
@@ -72,6 +129,7 @@ export const GUARD_TEXT: Readonly<Record<DialogLanguage, GuardText>> = {
     suspiciousSpawn: (patterns) => `spawn task contains suspicious patterns (${patterns}). Review needed.`,
   },
   de: {
+    blocked: 'GESPERRT',
     runManually: 'diese Aktion musst du aus Sicherheitsgründen selbst ausführen',
     systemFiles: 'dieser Pfad enthält System- oder Sicherheitsdateien',
     readSensitive: 'geschützten Pfad lesen',
@@ -261,7 +319,7 @@ export const ACTION_WORDS: Readonly<Record<string, Readonly<Record<string, Reado
     format: { en: 'format cells', de: 'Zellen formatieren' },
   },
   api_setup: {
-    delete: { en: 'delete profile', de: 'Profil löschen' },
+    delete: { en: 'delete connection', de: 'Verbindung löschen' },
   },
 };
 
@@ -352,20 +410,20 @@ export interface SpawnDialog {
 
 export const SPAWN_DIALOG: Readonly<Record<DialogLanguage, SpawnDialog>> = {
   en: {
-    children: (count) => count === 1 ? 'One child would run' : `${count} children would run`,
-    tierUnknownBand: 'a model gated as DEEP (or an unregistered custom model whose cost band the engine cannot prove)',
-    tierDeep: 'the DEEP tier (a stronger reasoning model, more capable but more expensive)',
-    tailDowngrade: 'Allow only if the work genuinely needs deep; otherwise choose "Run on balanced".',
+    children: (count) => count === 1 ? '1 subtask would run' : `${count} subtasks would run`,
+    tierUnknownBand: 'a model in the Deep tier (or an unregistered custom model whose cost band the engine cannot prove)',
+    tierDeep: 'the Deep tier (a stronger model, more thorough but more expensive)',
+    tailDowngrade: 'Allow this only if the task really needs the Deep tier. Otherwise choose “Run on Balanced”.',
     tailPinned: 'A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.',
-    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} on ${tier}. Estimated cost ~$${costUsd} against this session. Provider: ${providers}. ${tail}`,
+    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} on ${tier}. Estimated model cost for this session: about $${costUsd}. Provider: ${providers}. ${tail}`,
   },
   de: {
     children: (count) => count === 1 ? 'Eine Teilaufgabe würde' : `${count} Teilaufgaben würden`,
-    tierUnknownBand: 'einem Modell der Stufe DEEP (oder einem nicht registrierten eigenen Modell, dessen Kostenrahmen lynox nicht belegen kann)',
-    tierDeep: 'der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer)',
-    tailDowngrade: 'Erlaube das nur, wenn die Arbeit wirklich DEEP braucht; sonst wähle „Auf balanced ausführen“.',
+    tierUnknownBand: 'einem Modell der Stufe „Tief“ (oder einem nicht registrierten eigenen Modell, dessen Kostenrahmen lynox nicht belegen kann)',
+    tierDeep: 'der Stufe „Tief“ (einem stärkeren Modell, gründlicher, aber teurer)',
+    tailDowngrade: 'Erlaube das nur, wenn die Aufgabe die Stufe „Tief“ wirklich braucht. Sonst wähle „Mit Ausgewogen ausführen“.',
     tailPinned: 'Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.',
-    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} auf ${tier} laufen. Geschätzte Kosten ~$${costUsd} für diese Sitzung. Anbieter: ${providers}. ${tail}`,
+    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} auf ${tier} laufen. Geschätzte Modellkosten für diese Sitzung: etwa $${costUsd}. Anbieter: ${providers}. ${tail}`,
   },
 };
 
@@ -386,6 +444,28 @@ export const SECRET_DIALOG: Readonly<Record<DialogLanguage, SecretDialog>> = {
   },
 };
 
+/**
+ * The question before a vault secret may go to more addresses than it is bound to. `name`, `bound`
+ * and `added` are values (the vault name and the addresses); `bound` empty: the secret is bound to
+ * no address yet. Customer-visible copy; the English is the text the business owner approved.
+ */
+export interface BindingDialog {
+  readonly question: (name: string, bound: readonly string[], added: readonly string[]) => PromptText;
+}
+
+export const BINDING_DIALOG: Readonly<Record<DialogLanguage, BindingDialog>> = {
+  en: {
+    question: (name, bound, added) => bound.length === 0
+      ? pv`${name} is stored in your vault and is not yet limited to any address.\n\nThis connection would send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there? From then on it goes only to the addresses you have allowed.`
+      : pv`${name} is sent only to: ${bound.join(', ')}.\n\nThis connection would also send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there as well?`,
+  },
+  de: {
+    question: (name, bound, added) => bound.length === 0
+      ? pv`${name} liegt in deinem Vault und ist noch an keine Adresse gebunden.\n\nDiese Verbindung würde den Wert senden an: ${added.join(', ')}.\n\nDarf ${name} dorthin gesendet werden? Danach geht der Wert nur noch an die Adressen, die du erlaubt hast.`
+      : pv`${name} wird nur gesendet an: ${bound.join(', ')}.\n\nDiese Verbindung würde den Wert auch senden an: ${added.join(', ')}.\n\nDarf ${name} auch dorthin gesendet werden?`,
+  },
+};
+
 /** Why `api_setup` could not name a provider's sign-in address, in each language. */
 export interface PresetNote {
   readonly unknownProvider: (known: string) => string;
@@ -397,24 +477,24 @@ export interface PresetNote {
 
 export const PRESET_NOTE: Readonly<Record<DialogLanguage, PresetNote>> = {
   en: {
-    unknownProvider: (known) => `No authorization address could be derived: this profile names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known}.`,
+    unknownProvider: (known) => `No authorization address could be derived: this connection names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known}.`,
     noProviders: 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.',
-    badPreset: (id, detail) => `No authorization address could be derived: the built-in provider "${id}" is defined wrongly in this engine — ${detail}. Nothing on this profile fixes that; report it.`,
-    missingParam: (id, describe, name) => `No authorization address could be derived: the provider "${id}" needs ${describe} (auth.oauth.preset_params.${name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`,
-    refusedParam: (id, describe, name) => `No authorization address could be derived: the value this profile supplies for ${describe} (auth.oauth.preset_params.${name}) is not one the provider "${id}" accepts. Correct it with api_setup update — the host is disclosed then.`,
+    badPreset: (id, detail) => `No authorization address could be derived: the built-in provider “${id}” is defined wrongly in this engine — ${detail}. Nothing on this connection fixes that; report it.`,
+    missingParam: (id, describe, name) => `No authorization address could be derived: the provider “${id}” needs ${describe} (auth.oauth.preset_params.${name}), which this connection does not supply. Set it with api_setup update — the host is disclosed then.`,
+    refusedParam: (id, describe, name) => `No authorization address could be derived: the value this connection supplies for ${describe} (auth.oauth.preset_params.${name}) is not one the provider “${id}” accepts. Correct it with api_setup update — the host is disclosed then.`,
   },
   de: {
-    unknownProvider: (known) => `Es liess sich keine Anmeldeadresse ableiten: Dieses Profil nennt einen Anbieter, den lynox nicht eingebaut hat, daher gibt es hier nichts offenzulegen oder anzunehmen. Eingebaut sind: ${known}.`,
+    unknownProvider: (known) => `Es liess sich keine Anmeldeadresse ableiten: Diese Verbindung nennt einen Anbieter, den lynox nicht eingebaut hat, daher gibt es hier nichts offenzulegen oder anzunehmen. Eingebaut sind: ${known}.`,
     noProviders: 'Es liess sich keine Anmeldeadresse ableiten: lynox hat noch keine eingebauten Anbieter, daher gibt es hier nichts offenzulegen oder anzunehmen.',
-    badPreset: (id, detail) => `Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter "${id}" ist in lynox falsch definiert — ${detail}. An diesem Profil lässt sich das nicht beheben; melde es.`,
-    missingParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Anbieter "${id}" braucht ${describe} (auth.oauth.preset_params.${name}), und dieses Profil gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.`,
-    refusedParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Wert, den dieses Profil für ${describe} (auth.oauth.preset_params.${name}) angibt, ist keiner, den der Anbieter "${id}" annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.`,
+    badPreset: (id, detail) => `Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter „${id}“ ist in lynox falsch definiert — ${detail}. An dieser Verbindung lässt sich das nicht beheben; melde es.`,
+    missingParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Anbieter „${id}“ braucht ${describe} (auth.oauth.preset_params.${name}), und diese Verbindung gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.`,
+    refusedParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Wert, den diese Verbindung für ${describe} (auth.oauth.preset_params.${name}) angibt, ist keiner, den der Anbieter „${id}“ annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.`,
   },
 };
 
 /** The German for a provider parameter's description (`OAuthPresetParam.describe`), keyed by the English. */
 const PRESET_PARAM_DESCRIBE_DE: Readonly<Record<string, string>> = {
-  'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case': 'die myshopify.com-Subdomain des Stores in Kleinbuchstaben, z. B. "my-store" für my-store.myshopify.com',
+  'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case': 'die myshopify.com-Subdomain des Stores in Kleinbuchstaben, z. B. „my-store“ für my-store.myshopify.com',
 };
 
 /** A provider parameter's description in `language`; English as written. */
@@ -425,47 +505,249 @@ export function presetParamDescribe(describe: string, language: DialogLanguage):
 
 /** `api_setup`'s own questions. Every `${…}` is a value, as in any `pv`. */
 export interface ApiSetupDialog {
-  readonly save: (word: PromptText, name: string, disclosure: string) => PromptText;
+  /** `changes`: what the save changes, one line each (`securityChanges`, in this language); `disclosure` may be empty. */
+  /** `listsAll`: a new profile whose secrets may already go to its addresses; `changes` is then everything it may do. */
+  readonly save: (word: PromptText, name: string, changes: readonly PromptText[], disclosure: string, listsAll?: boolean) => PromptText;
   readonly redirect: (hosts: string[]) => string;
+  /** The sentence before the acceptance of each host outside the listed sub-processors; `disclosures` (the acceptances, English, binding text) as given. */
+  readonly outsideSubProcessors: (oauth: boolean, hosts: readonly string[], disclosures: string) => string;
   readonly deleteUnreadable: (word: PromptText, id: string, source: string) => PromptText;
   readonly deleteProfile: (word: PromptText, name: string, id: string, host: string | undefined, loses: PromptText) => PromptText;
   readonly losesTokens: (tokens: number) => PromptText;
   readonly losesSettings: PromptText;
-  readonly release: (word: PromptText, p: { name: string; id: string; author: string; role: string; hosts: string[]; authority: string; clientId: boolean; held: boolean }) => PromptText;
+  /**
+   * `trailId`: the profile's opaque id; `more`: the settings that are part of the release but not
+   * printed; `viewed`: when the owner last read the settings in a chat (`clock`) and whether they are
+   * unchanged since, absent when never read; `version`: the short settings version; `slots`: what the
+   * value is sent as, shown in words with the slot names in brackets as the release stores them.
+   */
+  readonly release: (word: PromptText, p: { name: string; trailId: string; author: string; slots: readonly SendSlot[]; hosts: string[]; more: number; viewed: { clock: string; unchanged: boolean } | undefined; version: string; clientId: boolean; held: boolean }) => PromptText;
   readonly adopt: (word: PromptText, p: { name: string; id: string; by: string; known: boolean; hosts: string[]; names: string[] }) => PromptText;
 }
 
 /** At most this many vault names are listed in an adoption question; the rest are counted. */
 const ADOPT_NAMES_SHOWN = 30;
 
+/**
+ * The words for each slot a vault key is released for: the release question is the consent, so it
+ * says what the value becomes, not only the field that holds it. Every kind has a word in each
+ * language; the slot names follow in brackets as the release stores them.
+ */
+const ROLE_WORDS: Readonly<Record<DialogLanguage, Readonly<Record<SendRoleKind, string>>>> = {
+  en: {
+    'client-id': 'the client ID',
+    'client-secret': 'the client secret',
+    'basic-username': 'the user name for the Basic sign-in',
+    'basic-password': 'the password for the Basic sign-in',
+    'bearer-token': 'the bearer token',
+    'header-key': 'the API key in a request header',
+  },
+  de: {
+    'client-id': 'Client-ID',
+    'client-secret': 'Client-Secret',
+    'basic-username': 'Benutzername für die Basic-Anmeldung',
+    'basic-password': 'Passwort für die Basic-Anmeldung',
+    'bearer-token': 'Bearer-Token',
+    'header-key': 'API-Schlüssel in einem Request-Header',
+  },
+};
+
+/** The role as the owner reads it: the words for each slot, then the slot names in brackets, one value. */
+function roleText(language: DialogLanguage, slots: readonly SendSlot[]): string {
+  const words = slots.map((s) => ROLE_WORDS[language][s.kind]).join(language === 'de' ? ' und ' : ' and ');
+  return `${words} (${slots.map((s) => s.slot).join('+')})`;
+}
+
 export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> = {
   en: {
-    save: (word, name, disclosure) => pv`⚠ ${word}: saving "${name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
-    redirect: (hosts) => `You will be sent to ${hosts.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`,
-    deleteUnreadable: (word, id, source) => pv`⚠ ${word}: delete the stored API profile ${id}, which could not be read (${source})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
-    deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: delete the API profile ${name} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
-    losesTokens: (tokens) => pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again.`,
+    save: (word, name, changes, disclosure, listsAll = false) => {
+      const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
+      const changeBlock = changeList === undefined ? pv``
+        : listsAll ? pv`This connection is new, but its secrets may already be sent to these addresses. That is why everything it may do with them is listed:${changeList}\n\n`
+        : pv`This save changes:${changeList}\n\n`;
+      const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
+      return pv`⚠ ${word}: saving “${shownName(name)}” needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this connection?`;
+    },
+    outsideSubProcessors: (oauth, _hosts, disclosures) => `This engine will send data${oauth ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${disclosures}`,
+    redirect: (hosts) => `You will be sent to ${hosts.join(' and ')} in your own browser to authorize this connection. You sign in there, to that provider — not to lynox — and what comes back is stored here for this connection.`,
+    deleteUnreadable: (word, id, source) => pv`⚠ ${word}: delete the stored API connection ${id}, which could not be read (${source})? Every vault name it carries is free for other connections once it is gone. Delete it?`,
+    deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: delete the API connection ${name} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
+    losesTokens: (tokens) => pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it, also where another connection reads them, which then has to be authorized again.`,
     losesSettings: pv` Its settings (endpoints, guidelines, sign-in method) are removed.`,
-    release: (word, p) => pv`⚠ ${word}: release the vault name ${p.name} to API profile ${p.id}, set up in the session of ${p.author}? The engine then sends its value, as ${p.role}, to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}${p.authority ? ` (${p.authority})` : ''}, for every request and run through this profile, the user's own and bulk runs included, until that mandate ends or the user withdraws it.${p.clientId ? ' A client id also goes into the sign-in link, to the browser of whoever opens it.' : ''} The vault ${p.held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where it goes ends the release. Release it?`,
+    release: (word, p) => {
+      const moreSentence = p.more === 0 ? ''
+        : p.more === 1
+          ? pv` 1 more setting of this connection (such as its auth type, scopes, path or query) is part of the release too; a change to it ends it. To see it first, deny, ask here to view API connection ${p.trailId}, then ask to release ${p.name} again.`
+          : pv` ${String(p.more)} more settings of this connection (such as its auth type, scopes, path or query) are part of the release too; a change to any of them ends it. To see them first, deny, ask here to view API connection ${p.trailId}, then ask to release ${p.name} again.`;
+      const versionSentence = p.viewed === undefined ? ''
+        : p.viewed.unchanged
+          ? pv` These settings were last read in one of your chats at ${p.viewed.clock} and have not changed since (version ${p.version}).`
+          : pv` These settings changed after they were last read in one of your chats at ${p.viewed.clock}; deny and view the connection again before you allow it (version ${p.version}).`;
+      const clientIdSentence = p.clientId ? pv` A client ID also goes into the sign-in link, to the browser of whoever opens it.` : '';
+      return pv`⚠ ${word}: release the vault key ${p.name} to API connection ${p.trailId}? It was set up in the session of ${p.author}. If you allow it, lynox sends the value of ${p.name}, as ${roleText('en', p.slots)}, to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}, with every request and run through this connection, your own and bulk runs included, until that mandate ends or you withdraw the release.${moreSentence}${versionSentence}${clientIdSentence} The vault ${p.held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where the value goes ends the release. Release it?`;
+    },
     adopt: (word, p) => {
       const shown = p.names.slice(0, ADOPT_NAMES_SHOWN).join(', ') + (p.names.length > ADOPT_NAMES_SHOWN ? ` and ${String(p.names.length - ADOPT_NAMES_SHOWN)} more` : '');
-      return pv`⚠ ${word}: adopt the connection of API profile ${p.name} (id ${p.id})? It was authorized at the provider in the session of ${p.by}, ${p.known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the profile is yours. The engine then sends to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}, for your requests and runs, the connection's tokens and the vault names this profile names, read like any of your profiles, values from the environment included: ${shown.length > 0 ? shown : 'none'}. Adopt it?`;
+      return pv`⚠ ${word}: adopt the sign-in of API connection ${p.name} (id ${p.id})? It was authorized at the provider in the session of ${p.by}, ${p.known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the connection is yours. The engine then sends to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}, for your requests and runs, the sign-in's tokens and the vault names this connection names, read like any of your connections, values from the environment included: ${shown.length > 0 ? shown : 'none'}. Adopt it?`;
     },
   },
   de: {
-    save: (word, name, disclosure) => pv`⚠ ${word}: Zum Speichern von "${name}" braucht es deine Zustimmung.\n\n${disclosure}\n\nDieses Profil annehmen und speichern?`,
-    redirect: (hosts) => `Zur Freigabe dieses Profils öffnet sich ${hosts.join(' und ')} in deinem eigenen Browser. Du meldest dich dort beim Anbieter an, nicht bei lynox, und was zurückkommt, wird hier für dieses Profil gespeichert.`,
-    deleteUnreadable: (word, id, source) => pv`⚠ ${word}: das gespeicherte API-Profil ${id} löschen, das sich nicht lesen liess (${source})? Jeder Vault-Name darin ist danach für andere Profile frei. Löschen?`,
-    deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: das API-Profil ${name} löschen (Id ${id}${host ? pv`, Host ${host}` : pv``})?${loses} Löschen?`,
+    save: (word, name, changes, disclosure, listsAll = false) => {
+      const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
+      const changeBlock = changeList === undefined ? pv``
+        : listsAll ? pv`Die Verbindung ist neu, aber ihre Secrets dürfen schon an diese Adressen gehen. Darum steht hier alles, was sie damit tun darf:${changeList}\n\n`
+        : pv`Das Speichern ändert:${changeList}\n\n`;
+      const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
+      return pv`⚠ ${word}: Zum Speichern von „${shownName(name)}“ braucht es deine Zustimmung.\n\n${changeBlock}${disclosureBlock}Diese Verbindung annehmen und speichern?`;
+    },
+    outsideSubProcessors: (oauth, hosts, disclosures) => `lynox sendet Daten${oauth ? ' – und für das OAuth-Token das verwaltete access_token –' : ''} an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox: ${hosts.join(', ')}.\n\n${disclosures}`,
+    redirect: (hosts) => `Zur Freigabe dieser Verbindung öffnet sich ${hosts.join(' und ')} in deinem eigenen Browser. Du meldest dich dort beim Anbieter an, nicht bei lynox, und was zurückkommt, wird hier für diese Verbindung gespeichert.`,
+    deleteUnreadable: (word, id, source) => pv`⚠ ${word}: die gespeicherte API-Verbindung ${id} löschen, die sich nicht lesen liess (${source})? Jeder Vault-Name darin ist danach für andere Verbindungen frei. Löschen?`,
+    deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: die API-Verbindung ${name} löschen (Id ${id}${host ? pv`, Host ${host}` : pv``})?${loses} Löschen?`,
     losesTokens: (tokens) => tokens === 1
-      ? pv` Das Token, das seine Anmeldung gespeichert hat, wird mit ihm aus dem Vault entfernt, auch dort, wo ein anderes Profil es liest; die Verbindung muss dann neu autorisiert werden.`
-      : pv` Die ${tokens} Tokens, die seine Anmeldung gespeichert hat, werden mit ihm aus dem Vault entfernt, auch dort, wo ein anderes Profil sie liest; die Verbindung muss dann neu autorisiert werden.`,
-    losesSettings: pv` Seine Einstellungen (Endpunkte, Richtlinien, Anmeldeart) werden entfernt.`,
-    release: (word, p) => pv`⚠ ${word}: den Vault-Namen ${p.name} für das API-Profil ${p.id} freigeben, eingerichtet in der Sitzung von ${p.author}? lynox sendet seinen Wert dann als ${p.role} an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'}${p.authority ? ` (${p.authority})` : ''}, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen und bei Massenläufen, bis der Zugang dieser Person endet oder du die Freigabe zurückziehst.${p.clientId ? ' Eine Client-ID steht ausserdem im Anmeldelink und geht an den Browser dessen, der ihn öffnet.' : ''} Unter diesem Namen ${p.held ? 'liegt im Vault ein Wert' : 'liegt im Vault noch kein Wert'}. Jede Änderung daran, wohin er geht, beendet die Freigabe. Freigeben?`,
+      ? pv` Das Token, das ihre Anmeldung gespeichert hat, wird mit ihr aus dem Vault entfernt, auch dort, wo eine andere Verbindung es liest; diese muss dann neu autorisiert werden.`
+      : pv` Die ${tokens} Tokens, die ihre Anmeldung gespeichert hat, werden mit ihr aus dem Vault entfernt, auch dort, wo eine andere Verbindung sie liest; diese muss dann neu autorisiert werden.`,
+    losesSettings: pv` Die Einstellungen der Verbindung (Endpunkte, Richtlinien, Anmeldeart) werden entfernt.`,
+    release: (word, p) => {
+      const moreSentence = p.more === 0 ? ''
+        : p.more === 1
+          ? pv` 1 weitere Einstellung dieser Verbindung (etwa Anmeldeart, Scopes, Pfad oder Query) gehört ebenfalls zur Freigabe; eine Änderung daran beendet sie. Um sie zuerst anzusehen, lehne ab, bitte hier darum, die API-Verbindung ${p.trailId} anzuzeigen, und bitte dann erneut darum, ${p.name} freizugeben.`
+          : pv` ${String(p.more)} weitere Einstellungen dieser Verbindung (etwa Anmeldeart, Scopes, Pfad oder Query) gehören ebenfalls zur Freigabe; eine Änderung an einer davon beendet sie. Um sie zuerst anzusehen, lehne ab, bitte hier darum, die API-Verbindung ${p.trailId} anzuzeigen, und bitte dann erneut darum, ${p.name} freizugeben.`;
+      const versionSentence = p.viewed === undefined ? ''
+        : p.viewed.unchanged
+          ? pv` Diese Einstellungen wurden zuletzt um ${p.viewed.clock} in einem deiner Chats gelesen und haben sich seither nicht geändert (Version ${p.version}).`
+          : pv` Diese Einstellungen haben sich geändert, nachdem sie zuletzt um ${p.viewed.clock} in einem deiner Chats gelesen wurden; lehne ab und sieh dir die Verbindung erneut an, bevor du zustimmst (Version ${p.version}).`;
+      const clientIdSentence = p.clientId ? pv` Eine Client-ID steht ausserdem im Anmeldelink und geht an den Browser dessen, der ihn öffnet.` : '';
+      return pv`⚠ ${word}: Den Vault-Schlüssel ${p.name} für die API-Verbindung ${p.trailId} freigeben? Sie wurde in der Sitzung von ${p.author} eingerichtet. Wenn du zustimmst, sendet lynox den Wert von ${p.name} als ${roleText('de', p.slots)} an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'}, bei jeder Anfrage und jedem Lauf über diese Verbindung, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst.${moreSentence}${versionSentence}${clientIdSentence} Unter diesem Namen ${p.held ? 'liegt im Vault ein Wert' : 'liegt im Vault noch kein Wert'}. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?`;
+    },
     adopt: (word, p) => {
       const shown = p.names.slice(0, ADOPT_NAMES_SHOWN).join(', ') + (p.names.length > ADOPT_NAMES_SHOWN ? ` und ${String(p.names.length - ADOPT_NAMES_SHOWN)} weitere` : '');
-      return pv`⚠ ${word}: die Verbindung des API-Profils ${p.name} (Id ${p.id}) übernehmen? Sie wurde beim Anbieter in der Sitzung von ${p.by} autorisiert, ${p.known ? 'deren Zugang beendet ist' : 'und lynox kann nicht feststellen, ob der Zugang dieser Person noch besteht'}. Nach der Übernahme gehört das Profil dir. lynox sendet dann bei deinen Anfragen und Läufen an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'} die Tokens der Verbindung und die Vault-Namen, die dieses Profil nennt. Sie werden gelesen wie bei jedem deiner Profile, Werte aus der Umgebung eingeschlossen: ${shown.length > 0 ? shown : 'keine'}. Übernehmen?`;
+      return pv`⚠ ${word}: Die Anmeldung der API-Verbindung ${p.name} (Id ${p.id}) übernehmen? Sie wurde beim Anbieter in der Sitzung von ${p.by} autorisiert, ${p.known ? 'deren Zugang nicht mehr aktiv ist' : 'und lynox kann nicht feststellen, ob dieser Zugang noch aktiv ist'}. Nach der Übernahme gehört die Verbindung dir. lynox sendet dann bei deinen Anfragen und Läufen an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'} die Tokens der Anmeldung und die Vault-Namen, die diese Verbindung nennt. Sie werden gelesen wie bei jeder deiner Verbindungen, Werte aus der Umgebung eingeschlossen: ${shown.length > 0 ? shown : 'keine'}. Übernehmen?`;
     },
+  },
+};
+
+/**
+ * The words of the save question's list of changes (`securityChanges` in api-setup.ts). Every
+ * `${…}` in a line is a value, as in any `pv`: a label, a profile's value, a scope. The engine
+ * picks the language; nothing the model or a profile writes chooses it.
+ */
+export interface SecurityChangeWords {
+  readonly address: string;
+  readonly tokenAddress: string;
+  readonly authType: string;
+  readonly headerName: string;
+  readonly queryParam: string;
+  readonly basicFormat: string;
+  readonly tokenBody: string;
+  readonly secretRead: string;
+  readonly secretReadNth: (n: number) => string;
+  readonly secretUsername: string;
+  readonly secretPassword: string;
+  readonly secretBasicUsername: string;
+  readonly secretBasicPassword: string;
+  readonly secretClientId: string;
+  readonly secretClientSecret: string;
+  readonly secretRefreshToken: string;
+  readonly grantType: string;
+  readonly audience: string;
+  readonly none: string;
+  /** A value withheld because it has the shape of a credential. */
+  readonly credentialShaped: string;
+  readonly notAnAddress: (shown: string) => string;
+  readonly originOnly: (origin: string) => string;
+  readonly sendsToNoHost: (shown: string) => string;
+  readonly sendsTo: (shown: string, host: string) => string;
+  /** `held` scope tokens withheld, after the `shown` ones (which may be empty). */
+  readonly scopesWithheld: (shown: readonly string[], held: number) => string;
+  readonly line: (label: string, was: string, now: string) => PromptText;
+  readonly scopesAdded: (scopes: string) => PromptText;
+  readonly scopesRemoved: (scopes: string, noneLeft: boolean) => PromptText;
+  readonly providerParameter: (key: string, was: string, now: string) => PromptText;
+  /** A field of a new profile listed as it is, with nothing to compare it with (no arrow). */
+  readonly held: (label: string, now: string) => PromptText;
+  readonly scopesHeld: (scopes: string) => PromptText;
+  readonly providerParameterHeld: (key: string, now: string) => PromptText;
+}
+
+export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChangeWords>> = {
+  en: {
+    address: 'address (base_url)',
+    tokenAddress: 'token address (token_url)',
+    authType: 'how the secret is attached (auth.type)',
+    headerName: 'header it is sent in (auth.header_name)',
+    queryParam: 'query parameter it is sent in (auth.query_param)',
+    basicFormat: 'basic auth form (auth.basic_format)',
+    tokenBody: 'token request body (auth.oauth.body_format)',
+    secretRead: 'secret read',
+    secretReadNth: (n) => `secret read (${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'})`,
+    secretUsername: 'secret read for the user name (username_key)',
+    secretPassword: 'secret read for the password (password_key)',
+    secretBasicUsername: 'secret read for the user name sent (basic auth)',
+    secretBasicPassword: 'secret read for the password sent (basic auth)',
+    secretClientId: 'secret read for the OAuth client id (oauth.client_id_key)',
+    secretClientSecret: 'secret read for the OAuth client secret (oauth.client_secret_key)',
+    secretRefreshToken: 'secret read for the OAuth refresh token (oauth.refresh_token_key)',
+    grantType: 'grant type',
+    audience: 'audience',
+    none: '(none)',
+    credentialShaped: '(a value shaped like a credential, not shown)',
+    notAnAddress: (shown) => `${shown} (not an address a request can use)`,
+    originOnly: (origin) => `${origin} (the rest is shaped like a credential, not shown)`,
+    sendsToNoHost: (shown) => `${shown} (sends to no host)`,
+    sendsTo: (shown, host) => `${shown} (sends to ${host})`,
+    scopesWithheld: (shown, held) => {
+      const count = `${String(held)} ${held === 1 ? 'value shaped like a credential' : 'values shaped like credentials'} (not shown)`;
+      return shown.length === 0 ? count : `${shown.join(' ')}; plus ${count}`;
+    },
+    line: (label, was, now) => pv`${label}: ${was} → ${now}`,
+    scopesAdded: (scopes) => pv`scopes added: ${scopes}`,
+    scopesRemoved: (scopes, noneLeft) => noneLeft
+      ? pv`scopes removed: ${scopes} (none left: the provider decides which it grants)`
+      : pv`scopes removed: ${scopes}`,
+    providerParameter: (key, was, now) => pv`provider parameter ${key}: ${was} → ${now}`,
+    held: (label, now) => pv`${label}: ${now}`,
+    scopesHeld: (scopes) => pv`scopes: ${scopes}`,
+    providerParameterHeld: (key, now) => pv`provider parameter ${key}: ${now}`,
+  },
+  de: {
+    address: 'Adresse (base_url)',
+    tokenAddress: 'Token-Adresse (token_url)',
+    authType: 'wie das Secret mitgesendet wird (auth.type)',
+    headerName: 'Header, in dem es gesendet wird (auth.header_name)',
+    queryParam: 'Query-Parameter, in dem es gesendet wird (auth.query_param)',
+    basicFormat: 'Form der Basic-Anmeldung (auth.basic_format)',
+    tokenBody: 'Inhalt der Token-Anfrage (auth.oauth.body_format)',
+    secretRead: 'gelesenes Secret',
+    secretReadNth: (n) => `gelesenes Secret (${String(n)}.)`,
+    secretUsername: 'gelesenes Secret für den Benutzernamen (username_key)',
+    secretPassword: 'gelesenes Secret für das Passwort (password_key)',
+    secretBasicUsername: 'gelesenes Secret für den gesendeten Benutzernamen (Basic-Anmeldung)',
+    secretBasicPassword: 'gelesenes Secret für das gesendete Passwort (Basic-Anmeldung)',
+    secretClientId: 'gelesenes Secret für die OAuth-Client-ID (oauth.client_id_key)',
+    secretClientSecret: 'gelesenes Secret für das OAuth-Client-Secret (oauth.client_secret_key)',
+    secretRefreshToken: 'gelesenes Secret für das OAuth-Refresh-Token (oauth.refresh_token_key)',
+    grantType: 'Grant-Typ',
+    audience: 'Audience',
+    none: '(keiner)',
+    credentialShaped: '(ein Wert in der Form von Zugangsdaten, nicht angezeigt)',
+    notAnAddress: (shown) => `${shown} (keine Adresse, die eine Anfrage nutzen kann)`,
+    originOnly: (origin) => `${origin} (der Rest hat die Form von Zugangsdaten, nicht angezeigt)`,
+    sendsToNoHost: (shown) => `${shown} (sendet an keinen Host)`,
+    sendsTo: (shown, host) => `${shown} (sendet an ${host})`,
+    scopesWithheld: (shown, held) => {
+      const count = `${String(held)} ${held === 1 ? 'Wert in der Form von Zugangsdaten' : 'Werte in der Form von Zugangsdaten'} (nicht angezeigt)`;
+      return shown.length === 0 ? count : `${shown.join(' ')}; dazu ${count}`;
+    },
+    line: (label, was, now) => pv`${label}: ${was} → ${now}`,
+    scopesAdded: (scopes) => pv`Scopes hinzugefügt: ${scopes}`,
+    scopesRemoved: (scopes, noneLeft) => noneLeft
+      ? pv`Scopes entfernt: ${scopes} (keiner mehr: der Anbieter entscheidet, welche er gewährt)`
+      : pv`Scopes entfernt: ${scopes}`,
+    providerParameter: (key, was, now) => pv`Anbieter-Parameter ${key}: ${was} → ${now}`,
+    held: (label, now) => pv`${label}: ${now}`,
+    scopesHeld: (scopes) => pv`Scopes: ${scopes}`,
+    providerParameterHeld: (key, now) => pv`Anbieter-Parameter ${key}: ${now}`,
   },
 };
 
@@ -475,8 +757,8 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
  * equal. The keys themselves are the wire (`src/contract/prompt.ts`).
  */
 export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentKey, string>>>> = {
-  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow deep', balanced: 'Run on balanced', cancel: 'Cancel', send: 'Send', confirm: 'Confirm', merge: 'Merge', apply: 'Apply', retire: 'Retire', proceed: 'Run', adjust: 'Adjust' },
-  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Deep erlauben', balanced: 'Auf balanced ausführen', cancel: 'Abbrechen', send: 'Senden', confirm: 'Bestätigen', merge: 'Zusammenführen', apply: 'Übernehmen', retire: 'Zurückziehen', proceed: 'Ausführen', adjust: 'Anpassen' },
+  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow Deep', balanced: 'Run on Balanced', cancel: 'Cancel', send: 'Send', confirm: 'Confirm', merge: 'Merge', apply: 'Apply', retire: 'Retire', proceed: 'Run', adjust: 'Adjust' },
+  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Stufe Tief erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen', send: 'Senden', confirm: 'Bestätigen', merge: 'Zusammenführen', apply: 'Übernehmen', retire: 'Zurückziehen', proceed: 'Ausführen', adjust: 'Anpassen' },
 };
 
 /** The confirming key of a consent that names its action (a Google write), in the owner's words. */
@@ -613,7 +895,7 @@ export const GOOGLE_DIALOG: Readonly<Record<DialogLanguage, GoogleDialog>> = {
     move: (file, folder) => pv`Move file ${file} to folder ${folder}?`,
     share: (file, email, role) => pv`Share file ${file} with ${email} as ${role}?`,
     overwrite: (range, sheet) => pv`Overwrite range "${range}" in spreadsheet ${sheet}? This will replace existing data.`,
-    append: (range, sheet) => pv`Append rows to "${range}" in spreadsheet ${sheet}? Existing data stays as it is.`,
+    append: (range, sheet) => pv`Add rows to range "${range}" in spreadsheet ${sheet}? Nothing is overwritten.`,
     format: (sheet) => pv`Apply batch changes to spreadsheet ${sheet}? Formatting requests can delete or overwrite cells and sheets.`,
     createEvent: (summary, calendar) => pv`Create event "${summary}"${calendar}`,
     time: (start, end) => pv`Time: ${start} – ${end}`,
@@ -641,7 +923,7 @@ export const GOOGLE_DIALOG: Readonly<Record<DialogLanguage, GoogleDialog>> = {
     move: (file, folder) => pv`Datei ${file} in den Ordner ${folder} verschieben?`,
     share: (file, email, role) => pv`Datei ${file} für ${email} freigeben, als ${role}?`,
     overwrite: (range, sheet) => pv`Bereich „${range}“ in Tabelle ${sheet} überschreiben? Die Daten dort werden ersetzt.`,
-    append: (range, sheet) => pv`Zeilen an „${range}“ in Tabelle ${sheet} anhängen? Die Daten dort bleiben, wie sie sind.`,
+    append: (range, sheet) => pv`Zeilen zum Bereich „${range}“ in Tabelle ${sheet} hinzufügen? Es wird nichts überschrieben.`,
     format: (sheet) => pv`Tabelle ${sheet} formatieren? Formatierungen können Zellen und Blätter löschen oder überschreiben.`,
     createEvent: (summary, calendar) => pv`Termin „${summary}“ anlegen${calendar}`,
     time: (start, end) => pv`Zeit: ${start} – ${end}`,

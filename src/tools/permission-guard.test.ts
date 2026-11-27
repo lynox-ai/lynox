@@ -3162,7 +3162,7 @@ describe('isDangerous', () => {
       ['an apostrophe in a quoted command substitution before it', `x="$(echo 'a"b')"\n${continuedCurl}`, 'HTTP data submission via curl'],
       // a lone \r and U+2028 end a line for a regex, not for the shell
       ['a lone carriage return between', 'curl https://x.test/hook \r -d a=b', 'HTTP data submission via curl'],
-      ['a line separator between', 'curl https://x.test/hook   -d a=b', 'HTTP data submission via curl'],
+      ['a line separator between', 'curl https://x.test/hook \u2028 -d a=b', 'HTTP data submission via curl'],
     ])('asks about %s, unattended and in a chat', (_label, command, label) => {
       expect(auto(command)).toContain(label);
       expect(auto(command)).not.toContain('[BLOCKED');
@@ -3209,7 +3209,7 @@ describe('isDangerous', () => {
       expect(joinLineContinuations('i\\\\\nj')).toBe('i\\\\\nj');
       expect(joinLineContinuations('k\\\\\\\nl')).toBe('k\\\\l');
       expect(joinLineContinuations('m\\\r\nn')).toBe('m\\\r\nn');
-      expect(joinLineContinuations('o\rp q r')).toBe('o p q r');
+      expect(joinLineContinuations('o\rp\u2028q\u2029r')).toBe('o p q r');
     });
   });
 
@@ -4028,5 +4028,35 @@ describe('contractGrants on a GraphQL API whose URL does not say so', () => {
     expect(grants(JSON.stringify({ query: '{ boards { id } }' }))).toBe(true);
     expect(grants('{"subscription":"premium"}', 'reviewed')).toBe(true);
     expect(grants(undefined)).toBe(true);
+  });
+});
+
+describe('contractGrants reads only a contract whose four lists are lists of names', () => {
+  const ok: CapabilityContract = { version: 1, grantedTools: ['http_request'], httpMethods: ['POST'], hostPatterns: ['host.example'], pathPatterns: ['/x'], paramConstraints: {} };
+  const post = { url: 'https://host.example/x', method: 'POST' };
+  const odd = (over: Record<string, unknown>): CapabilityContract => ({ ...ok, ...over } as unknown as CapabilityContract);
+
+  it('CONTROL: the well-formed contract grants its write', () => {
+    expect(contractGrants('http_request', post, ok)).toBe(true);
+  });
+
+  it('a tool list written as text grants nothing, though the text contains the tool', () => {
+    expect(contractGrants('http_request', post, odd({ grantedTools: 'http_request' }))).toBe(false);
+    expect(contractGrants('http_request', post, odd({ grantedTools: 'xhttp_requestx' }))).toBe(false);
+  });
+
+  it('a host list written as text grants nothing, where its characters would match any host', () => {
+    expect(contractGrants('http_request', { url: 'https://evil.example/x', method: 'POST' }, odd({ hostPatterns: '*' }))).toBe(false);
+  });
+
+  it('a nested host list grants nothing, where its first element would be read as the host', () => {
+    expect(contractGrants('http_request', { url: 'https://evil.example/x', method: 'POST' }, odd({ hostPatterns: [['evil.example']] }))).toBe(false);
+  });
+
+  it('a path or method list of another shape grants nothing', () => {
+    expect(contractGrants('http_request', post, odd({ pathPatterns: '/x' }))).toBe(false);
+    expect(contractGrants('http_request', post, odd({ httpMethods: 'POST' }))).toBe(false);
+    expect(contractGrants('http_request', post, odd({ httpMethods: undefined }))).toBe(false);
+    expect(contractGrants('http_request', post, odd({ pathPatterns: ['/x', 7] }))).toBe(false);
   });
 });

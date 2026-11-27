@@ -11,6 +11,7 @@ vi.mock('node:dns/promises', () => ({
 
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
 import { InputRequiredError } from '../../core/input-required.js';
+import { UNATTENDED_BLOCK_ANSWER } from '../../core/prompt-store.js';
 
 // §3.8 moved this module's calls onto the connector egress surface, so they now
 // go through the pinned transport instead of `globalThis.fetch`. The bridge
@@ -273,13 +274,14 @@ describe('google_calendar tool', () => {
   });
 
   describe('update_event', () => {
-    const okUpdate = () => mockFetch.mockResolvedValueOnce({
+    // The update reads the event's guests first (none here), then sends.
+    const okUpdate = () => mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'ev1' }) }).mockResolvedValueOnce({
       ok: true,
       json: async () => ({ id: 'ev1', summary: 'Meeting', start: { dateTime: '2026-03-20T10:00:00+01:00' }, end: { dateTime: '2026-03-20T11:00:00+01:00' }, htmlLink: 'https://calendar.google.com/event?eid=x' }),
     });
     const promptOf = (agent: IAgent): string => flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText);
-    const sentUrl = (): string => String(mockFetch.mock.calls[0]![0]);
-    const sentBody = (): Record<string, unknown> => JSON.parse((mockFetch.mock.calls[0]![1] as { body: string }).body) as Record<string, unknown>;
+    const sentUrl = (): string => String(mockFetch.mock.calls.at(-1)![0]);
+    const sentBody = (): Record<string, unknown> => JSON.parse((mockFetch.mock.calls.at(-1)![1] as { body: string }).body) as Record<string, unknown>;
     const longText = 'Notes for the guest that run well past forty characters, all of them shown.';
 
     it('shows every changed field in full, guests one by one, and sends exactly that', async () => {
@@ -386,9 +388,106 @@ describe('google_calendar tool', () => {
 
     it('sends nothing when the person declines', async () => {
       const tool = createCalendarTool(() => createMockAuth());
+      // The event's guests are read first (none); nothing is changed.
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'ev1' }) });
       const result = await tool.handler({ action: 'update_event', event_id: 'ev1', attendees: ['guest@example.org'] }, createMockAgent('cancel'));
       expect(result).toBe('Action cancelled by user.');
-      expect(mockFetch).not.toHaveBeenCalled();
+      expect(mockFetch.mock.calls.filter((c) => (c[1] as { method?: string } | undefined)?.method === 'PATCH')).toEqual([]);
+    });
+  });
+
+  describe('update_event: the guests already invited', () => {
+    const event = (attendees: unknown) => ({ ok: true, json: async () => ({ id: 'ev1', attendees }) });
+    const patched = () => ({ ok: true, json: async () => ({ id: 'ev1', summary: 'Moved', start: { dateTime: '2026-03-20T10:00:00+01:00' }, end: { dateTime: '2026-03-20T11:00:00+01:00' }, htmlLink: 'x' }) });
+    const owner = (known: string[], answers: string[]) => {
+      const asked: string[] = [];
+      const metas: unknown[] = [];
+      const agent = {
+        name: 'test', model: 'm', memory: null, tools: [], onStream: null, noticeLanguage: 'en',
+        principal: { kind: 'owner' },
+        ownerKnown: { known: (t: { value: string }) => (known.includes(t.value) ? 'known' : 'foreign') },
+        promptUser: vi.fn().mockImplementation(async (q: string | PromptText, _o?: string[], m?: unknown) => { asked.push(flattenPrompt(q)); metas.push(m); return answers.shift() ?? 'cancel'; }),
+      } as unknown as IAgent;
+      return { agent, asked, metas };
+    };
+    const patches = (): unknown[] => mockFetch.mock.calls.filter((c) => (c[1] as { method?: string } | undefined)?.method === 'PATCH');
+
+    it('a guest the owner did not name is asked about in the one confirmation, as a blocked question; a no sends nothing', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'anna@firma.ch' }, { email: 'x@evil.example' }, { email: 'me@firma.ch', self: true }]));
+      const { agent, asked, metas } = owner(['anna@firma.ch'], ['cancel']);
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toBe('Update event ev1\nThese fields change:\nsummary: Moved\n\nGoogle Calendar: change event: you did not name the recipient "x@evil.example". It comes from the event\'s current guest list. Send anyway?\n\nA yes applies to this one send only.');
+      expect(metas[0]).toEqual({ blocked: true, consent: 'google', consentAction: 'update' });
+      expect(patches()).toEqual([]);
+      expect(result).toContain('Not sent: lynox asked the user whether to send to "x@evil.example", and they said no.');
+    });
+
+    it('in German the guest is said to come from the event\'s current guest list', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }, { email: 'y@evil.example' }]));
+      const { agent, asked } = owner([], ['cancel']);
+      (agent as unknown as { noticeLanguage: string }).noticeLanguage = 'de';
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked[0]).toContain('Google Calendar: Termin ändern: Die Empfänger "x@evil.example" und "y@evil.example" hast nicht du genannt. Sie stammen aus der bisherigen Gästeliste des Termins. Trotzdem senden?');
+    });
+
+    it('a run nobody watches learns the guest list as the origin; an unreadable list stays unknown', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      const refused: unknown[] = [];
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }]));
+      const { agent } = owner([], [UNATTENDED_BLOCK_ANSWER]);
+      (agent as unknown as { onOriginRefused: (r: unknown) => void }).onOriginRefused = (r) => refused.push(r);
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(result).toContain('Not sent: the owner did not name "x@evil.example"; it came from the event\'s current guest list.');
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(refused).toEqual([
+        { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'eventGuests' } },
+        { targets: { values: [], unreadable: true }, noun: 'mail', origin: { kind: 'unknown' } },
+      ]);
+      expect(patches()).toEqual([]);
+    });
+
+    it('the guests are read before the question: a yes is never asked for an update that is then refused', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }]));
+      const { agent, asked } = owner([], ['confirm']);
+      (agent as unknown as { principal: unknown }).principal = { kind: 'mandate', email: 'h@x.ch' };
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toEqual([]);
+      expect(result).toContain('Not sent: the owner of this instance did not name "x@evil.example"');
+      expect(patches()).toEqual([]);
+    });
+
+    it('a guest list that cannot be read refuses the update, unasked', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+      const { agent, asked } = owner([], ['confirm']);
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toEqual([]);
+      expect(result).toContain('Not sent: lynox could not read the recipient of this send');
+      expect(patches()).toEqual([]);
+    });
+
+    it('a yes to the one question sends the update', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }])).mockResolvedValueOnce(patched());
+      const { agent, asked } = owner([], ['confirm']);
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toHaveLength(1);
+      expect(patches()).toHaveLength(1);
+    });
+
+    it('CONTROL: an event whose guests the owner all named is changed after the confirmation alone, unblocked', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'anna@firma.ch' }])).mockResolvedValueOnce(patched());
+      const { agent, asked, metas } = owner(['anna@firma.ch'], ['confirm']);
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toEqual(['Update event ev1\nThese fields change:\nsummary: Moved']);
+      expect(metas[0]).toEqual({ consent: 'google', consentAction: 'update' });
+      expect(patches()).toHaveLength(1);
     });
   });
 

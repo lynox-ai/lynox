@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { createDriveTool } from './google-drive.js';
 import { createCalendarTool } from './google-calendar.js';
 import { createSheetsTool } from './google-sheets.js';
@@ -6,6 +6,19 @@ import type { GoogleAuth } from './google-auth.js';
 import type { IAgent, PromptMeta, PromptText } from '../../types/index.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { CONSENT_UNRECOGNISED_SENTENCE } from '../../core/consent-ask.js';
+
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: vi.fn(async () => dnsLookupStub()) },
+}));
+
+import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+
+// A calendar update reads the event's current guests before it asks (none here), so that one read
+// is answered; nothing else reaches Google, because no case gets past its question.
+let restorePinnedFetchBridge: (() => void) | undefined;
+beforeAll(() => { restorePinnedFetchBridge = installPinnedFetchBridge(); });
+afterAll(() => { restorePinnedFetchBridge?.(); });
+vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ id: 'e1' }) })));
 
 /**
  * A Google write goes ahead on the `confirm` key only. Its button names the action (`meta.consentAction`),
@@ -27,6 +40,7 @@ interface Seen { question?: string; options?: string[]; meta?: PromptMeta }
 function agent(answer: string, seen: Seen = {}, dialogLanguage?: 'de' | 'en'): IAgent {
   return {
     name: 'test', model: 'm', memory: null, tools: [], onStream: null, dialogLanguage,
+    principal: { kind: 'owner' }, ownerKnown: { known: () => 'known' },
     promptUser: vi.fn().mockImplementation((q: string | PromptText, options?: string[], meta?: PromptMeta) => {
       seen.question = flattenPrompt(q); seen.options = options; seen.meta = meta;
       return Promise.resolve(answer);
@@ -75,8 +89,9 @@ describe('Google writes go ahead on the `confirm` key only', () => {
   it('an append is asked as an append: nothing it says is an overwrite', async () => {
     const seen: Seen = {};
     await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 's1', range: 'A1', values: [['1']] } as never, agent('cancel', seen));
-    expect(seen.question).toContain('Append rows to "A1"');
-    expect(seen.question).not.toMatch(/overwrite|replace/i);
+    expect(seen.question).toContain('Add rows to range "A1"');
+    // "Nothing is overwritten" is the one mention, and it says the opposite of an overwrite.
+    expect(seen.question).not.toMatch(/^Overwrite|replace/i);
   });
 
   it('asks in German on a German instance, values as they are', async () => {
@@ -86,6 +101,6 @@ describe('Google writes go ahead on the `confirm` key only', () => {
     await createDriveTool(auth).handler({ action: 'share', file_id: 'f1', email: 'bob@example.com', role: 'writer' } as never, agent('cancel', seen, 'de'));
     expect(seen.question).toBe('Datei f1 für bob@example.com freigeben, als writer?');
     await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 's1', range: 'A1', values: [['1']] } as never, agent('cancel', seen, 'de'));
-    expect(seen.question).toBe('Zeilen an „A1“ in Tabelle s1 anhängen? Die Daten dort bleiben, wie sie sind.');
+    expect(seen.question).toBe('Zeilen zum Bereich „A1“ in Tabelle s1 hinzufügen? Es wird nichts überschrieben.');
   });
 });

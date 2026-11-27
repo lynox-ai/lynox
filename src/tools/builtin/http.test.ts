@@ -18,7 +18,7 @@ import dns from 'node:dns/promises';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, httpStoppedMessage, isWriteMethod, undoClassFor, HTTP_RATE_UNCOUNTED, OVERRIDE_REDIRECT_REFUSAL } from './http.js';
+import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, httpStoppedMessage, isWriteMethod, undoClassFor, HTTP_RATE_UNCOUNTED, OVERRIDE_REDIRECT_REFUSAL, HTTP_WALL_GRACE_MS } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -28,6 +28,7 @@ import type { RequestPrincipal } from '../../core/request-principal.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { currentCallSignal, runInCallSlot, type CallSlot } from '../../core/call-connection.js';
+import { CROSS_HOST_REFUSAL } from '../../core/read-hops.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
 import { approvalOrigin, writeApprovalKey } from '../../core/untrusted-epoch.js';
 
@@ -1448,7 +1449,7 @@ describe('httpRequestTool', () => {
             };
             const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => { throw new Error('store unavailable'); } };
             const headers: Record<string, string> = {};
-            const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, {
+            const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
               apiStore: store as never, secretStore: { resolve: () => 'shop-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store as never),
             }, { bulkRunId: 'run-1' });
             if (outcome === 'rejects') await expect(attach).rejects.toThrow(/store unavailable/);
@@ -1827,6 +1828,43 @@ describe('httpRequestTool', () => {
           fetchMock.mock.calls.map(([u, init]) => `${(init as RequestInit | undefined)?.method ?? 'GET'} ${new URL(String(u)).pathname}`);
         const cancel = { url: 'https://api.bexio.com/2.0/kb_invoice/7/cancel', method: 'POST', body: '{}' };
 
+        // Decided, not overlooked: the readings are requests the engine makes for its question, and
+        // the call counts the one request it was asked to send. That holds while the only provider
+        // with a write context bears no rate of its own; a rate the owner sets on such a profile is
+        // the way it can stop holding (`PRESET_WRITE_CONTEXT`).
+        it('counts the write on its call, and nothing for the readings when the person refuses it, on a profile with a rate', async () => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'bexio-api', name: 'bexio', base_url: 'https://api.bexio.com', description: 'bexio API',
+            cost: { model: 'per_call', rate_usd: 0.002 } as never,
+            auth: {
+              type: 'oauth2', vault_keys: ['BEXIO_CLIENT_ID', 'BEXIO_CLIENT_SECRET'],
+              oauth: { grant_type: 'refresh_token', client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: 'BEXIO_CLIENT_SECRET', preset_id: 'bexio', scope: 'contact_show kb_invoice_edit' },
+            },
+          });
+          testCtx.apiStore = store;
+          mockDnsPublic();
+          const fetchMock = account({
+            '/2.0/kb_invoice/7': createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          const slot: CallSlot = {};
+          await runInCallSlot(slot, () => handler(cancel, makeAgent({ promptUser: vi.fn().mockResolvedValue('allow') })));
+          expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1', 'POST /2.0/kb_invoice/7/cancel']);
+          expect(slot.apiCost).toEqual({ usd: 0.002, source: 'profile' });
+
+          // The person says no: the readings went out, the write did not, and nothing is counted.
+          const denied = account({
+            '/2.0/kb_invoice/7': createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          const refused: CallSlot = {};
+          await runInCallSlot(refused, () => handler(cancel, makeAgent({ promptUser: vi.fn().mockResolvedValue('deny') })).then(String, (e: unknown) => String(e)));
+          expect(sent(denied)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1']);
+          expect(refused.apiCost).toBeUndefined();
+        });
+
         it('cancelling an invoice: reads it, and the question names number, recipient and amount, on the instance only', async () => {
           await withBexio();
           mockDnsPublic();
@@ -2046,6 +2084,34 @@ describe('httpRequestTool', () => {
           const res = await runInCallSlot(slot, () => visible({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: reviewed })));
           expect(res).toMatch(/^Write possibly landed: POST/);
           expect(slot.apiCost).toEqual({ usd: 0.002, source: 'profile' });
+        });
+
+        it('counts an approved write sent on through a host without a profile at the priced API that answered it, before a later hop is refused', async () => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          testCtx.apiStore = new ApiStore();
+          testCtx.apiStore.register({ id: 'reports', name: 'Reports', base_url: 'https://api.reports.example.org/v1', description: 'Reports API', cost: { model: 'per_call', rate_usd: 0.002 } });
+          mockDnsPublic();
+          const fetchMock = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://api.reports.example.org/v1/report' } }))
+            .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.reports.example.org/v1/report?_method=DELETE' } }));
+          vi.stubGlobal('fetch', fetchMock);
+          const slot: CallSlot = {};
+          const res = await runInCallSlot(slot, () => visible({ url: 'https://hooks.example.net/in', method: 'POST', body: '{}' }, makeAgent({ promptUser: vi.fn().mockResolvedValue('allow') })));
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+          expect(res).toMatch(/^Write possibly landed: POST/);
+          expect(slot.apiCost).toEqual({ usd: 0.002, source: 'profile' });
+
+          // The next hop fails on the network instead: the priced API still answered first.
+          const failing = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://api.reports.example.org/v1/report' } }))
+            .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.net/file' } }))
+            .mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+          vi.stubGlobal('fetch', failing);
+          const failed: CallSlot = {};
+          const out = await runInCallSlot(failed, () => visible({ url: 'https://hooks.example.net/in', method: 'POST', body: '{}' }, makeAgent({ promptUser: vi.fn().mockResolvedValue('allow') })));
+          expect(failing).toHaveBeenCalledTimes(3);
+          expect(out).toMatch(/^Write possibly landed: POST/);
+          expect(failed.apiCost).toEqual({ usd: 0.002, source: 'profile' });
         });
 
         it('a write refused for its header names the header, never its value', async () => {
@@ -2311,6 +2377,88 @@ describe('httpRequestTool', () => {
     });
   });
 
+  // A GET the origin check held after foreign content (the read declares its host only once
+  // latched) follows no redirect to another host, like a page read, owner-named hosts included: the
+  // hop would carry the address on to a host nobody named.
+  describe('a GET the origin check held, and its redirects', () => {
+    const held = { known: [], allKnown: false } as const;
+    const named = { known: ['api.example.test'], allKnown: true } as const;
+    const outcome = (p: Promise<unknown>): Promise<string> => p.then((r) => String(r), (e: unknown) => String(e instanceof Error ? e.message : e));
+
+    it('a held GET does not follow a redirect to another host, and fetches nothing there', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://collect.other.test/d' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: held }, () => handler({ url: 'https://api.example.test/start' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(1);
+      expect(out).toContain('forwards this read to another host');
+    });
+
+    it('a GET of a host the owner named, without a query, is held too', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://files.other.test/1' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: named }, () => handler({ url: 'https://api.example.test/download/1' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(1);
+      expect(out).toContain('forwards this read to another host');
+    });
+
+    it('CONTROL: a GET the origin check did not stop at follows a redirect to another host, as before', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://files.other.test/1' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      await outcome(handler({ url: 'https://api.example.test/download/1' }, makeAgent()));
+      expect(lastPinnedInputs.length).toBe(2);
+    });
+
+    it('a GET of a named host WITH a query is held, as a page read with a query is', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://collect.other.test/d' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: named }, () => handler({ url: 'https://api.example.test/r?to=x' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(1);
+      expect(out).toContain('forwards this read to another host');
+    });
+    it('a write in a held call keeps its own redirect rules: the read hold does not apply to it', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://collect.other.test/d' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: held }, () => handler({ url: 'https://api.example.test/items', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, makeAgent({ promptUser: vi.fn().mockResolvedValue('allow') }))));
+      // The write went out: the read hold did not stop it before its first request.
+      expect(lastPinnedInputs[0]?.method).toBe('POST');
+      expect(out).not.toContain('forwards this read to another host');
+    });
+  });
+
+  describe('what a GET declares for the origin check', () => {
+    it('a read declares its host only once latched; a write declares it always, and never twice', () => {
+      expect(httpRequestTool.sendTargets?.({ url: 'https://a.test/p' })).toBeNull();
+      expect(httpRequestTool.sendTargetsWhenLatched?.({ url: 'https://a.test/p' })).toEqual([{ kind: 'host', value: 'a.test' }]);
+      expect(httpRequestTool.sendTargetsWhenLatched?.({ url: 'https://a.test/p', method: 'HEAD' })).toEqual([{ kind: 'host', value: 'a.test' }]);
+      expect(httpRequestTool.sendTargets?.({ url: 'https://a.test/p', method: 'POST', body: '{}' })).toEqual([{ kind: 'host', value: 'a.test' }]);
+      expect(httpRequestTool.sendTargetsWhenLatched?.({ url: 'https://a.test/p', method: 'POST', body: '{}' })).toBeNull();
+    });
+
+    it('names its address for the search check only when nothing else of it can carry data', () => {
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p' })).toBe('https://a.test/p');
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', headers: { 'X-D': 'x' } })).toBeNull();
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', body: 'x' })).toBeNull();
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', method: 'POST', body: '' })).toBeNull();
+      // CONTROL: an empty headers object is no header.
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', headers: {} })).toBe('https://a.test/p');
+    });
+  });
+
   // fetchWithValidatedRedirects must NOT replay credential headers across a
   // cross-origin redirect (mirror fetch()). Uses an opaque token that does NOT
   // match SECRET_PATTERNS, so the pre-flight egress header scan lets it through
@@ -2423,6 +2571,109 @@ describe('httpRequestTool', () => {
       // Next should be blocked (counter is at 100, >= MAX)
       const result = await visible({ url: 'http://example.com' }, makeAgent());
       expect(result).toBe(U010_REQUEST_LIMIT);
+    });
+
+    it('two calls of one turn at 99 send one request between them; the other gets the limit text', async () => {
+      // Started side by side, both calls pass the check at the top before either counts: the
+      // handler awaits between them (the engine-managed auth, the questions), and only then counts.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(async () => createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
+
+      const results = await Promise.allSettled([
+        handler({ url: 'http://example.com/a' }, makeAgent()),
+        handler({ url: 'http://example.com/b' }, makeAgent()),
+      ]);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(testCounters.httpRequests).toBe(MAX_REQUESTS_PER_SESSION);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      expect(refused).toHaveLength(1);
+      expect(refused[0]!.reason).toBeInstanceOf(ToolSoftFailure);
+      expect((refused[0]!.reason as ToolSoftFailure).agentVisibleResult).toBe(U010_REQUEST_LIMIT);
+    });
+
+    it('at the limit a request the person would be asked about asks no one and sends nothing', async () => {
+      // The check at the top refuses before the question: the one before sending would refuse too,
+      // but only after the person was asked to allow a request that never goes out. A long query
+      // is one such request (the GET exfiltration question).
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(async () => createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const promptUser = vi.fn().mockResolvedValue('allow');
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
+
+      const url = `http://example.com/api?data=${'a'.repeat(600)}`;
+
+      const result = await visible({ url }, makeAgent({ promptUser }));
+
+      expect(result).toBe(U010_REQUEST_LIMIT);
+      expect(promptUser).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(testCounters.httpRequests).toBe(MAX_REQUESTS_PER_SESSION);
+
+      // One below the limit, the same request is asked about and sent.
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
+      await handler({ url }, makeAgent({ promptUser }));
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('a call refused before sending leaves no timer of its own running', async () => {
+      // The refused call of two at 99 starts no timeout: one it started would run on, and the wall
+      // clock's rejection would fire with no one awaiting it.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(async () => createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
+      const timeout = 54_321;
+      const started = new Set<unknown>();
+      const cleared = new Set<unknown>();
+      const realSet = globalThis.setTimeout;
+      const realClear = globalThis.clearTimeout;
+      const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+        const id = realSet(fn, ms);
+        if (ms === timeout || ms === timeout + HTTP_WALL_GRACE_MS) started.add(id);
+        return id;
+      }) as typeof setTimeout);
+      const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((id?: Parameters<typeof clearTimeout>[0]) => {
+        cleared.add(id);
+        realClear(id);
+      }) as typeof clearTimeout);
+      try {
+        const results = await Promise.allSettled([
+          handler({ url: 'http://example.com/a', timeout_ms: timeout }, makeAgent()),
+          handler({ url: 'http://example.com/b', timeout_ms: timeout }, makeAgent()),
+        ]);
+        const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+        expect(refused).toHaveLength(1);
+        expect((refused[0]!.reason as ToolSoftFailure).agentVisibleResult).toBe(U010_REQUEST_LIMIT);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        // The call that sent started its two timers and cleared both; the refused one started none.
+        expect(started.size).toBe(2);
+        expect([...started].filter((id) => !cleared.has(id))).toEqual([]);
+      } finally {
+        setSpy.mockRestore();
+        clearSpy.mockRestore();
+      }
+    });
+
+    it('two calls of one turn at 98 both send: the check before sending refuses only past the limit', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(async () => createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 2;
+
+      const results = await Promise.allSettled([
+        handler({ url: 'http://example.com/a' }, makeAgent()),
+        handler({ url: 'http://example.com/b' }, makeAgent()),
+      ]);
+
+      expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(testCounters.httpRequests).toBe(MAX_REQUESTS_PER_SESSION);
     });
 
     it('fresh Session counter object → counter starts at 0', async () => {
@@ -4028,6 +4279,97 @@ describe('httpRequestTool', () => {
       const slot: CallSlot = {};
       await runInCallSlot(slot, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])));
       expect(slot.apiCost).toEqual({ usd: 0.09, source: 'response' });
+    });
+
+    it('counts a read sent on through a host without a profile at the priced API that answered, when a later hop is refused', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      const override = { status: 307, headers: { location: 'https://cdn.example.org/x?_method=DELETE' } };
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.dataforseo.com/v3/keywords' } }))
+        .mockResolvedValueOnce(createMockResponse(override));
+      vi.stubGlobal('fetch', fetchMock);
+      const slot: CallSlot = {};
+      const out = await runInCallSlot(slot, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(out).toContain(OVERRIDE_REDIRECT_REFUSAL);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // A host without a profile after the priced API changes nothing: the priced API still answered.
+      const later = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.dataforseo.com/v3/keywords' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/y' } }))
+        .mockResolvedValueOnce(createMockResponse(override));
+      vi.stubGlobal('fetch', later);
+      const second: CallSlot = {};
+      await runInCallSlot(second, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(later).toHaveBeenCalledTimes(3);
+      expect(second.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // Control: nothing priced answered, nothing is counted.
+      const none = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/y' } }))
+        .mockResolvedValueOnce(createMockResponse(override));
+      vi.stubGlobal('fetch', none);
+      const third: CallSlot = {};
+      await runInCallSlot(third, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(third.apiCost).toBeUndefined();
+    });
+
+    it('counts the priced API that answered a guarded read before its hop to another host was refused, and nothing when no priced API answered', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      // A read after outside content: its redirects stay on its own host.
+      const held = { known: [], allKnown: false } as const;
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/x' } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const slot: CallSlot = { targetOrigin: held };
+      const out = await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(out).toContain(CROSS_HOST_REFUSAL);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // The override hop of such a read goes to another host: the same refusal, and the answer still counts.
+      const override = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://cdn.example.org/x?_method=DELETE' } }));
+      vi.stubGlobal('fetch', override);
+      const second: CallSlot = { targetOrigin: held };
+      const again = await runInCallSlot(second, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(override).toHaveBeenCalledTimes(1);
+      expect(again).toContain(CROSS_HOST_REFUSAL);
+      expect(second.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // Control: a host without a profile answered, nothing is counted.
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/y' } })));
+      const third: CallSlot = { targetOrigin: held };
+      const none = await runInCallSlot(third, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(none).toContain(CROSS_HOST_REFUSAL);
+      expect(third.apiCost).toBeUndefined();
+    });
+
+    it('counts a request the priced API sent on to a host without a profile, after a host without one sent it there', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.dataforseo.com/v3/keywords' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/signed' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { cost: 0.09 } })));
+      const slot: CallSlot = {};
+      await runInCallSlot(slot, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])));
+      // The rate, not the figure in another party's answer.
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // Two priced APIs on the way: the one reached last counts.
+      store.register({ id: 'serp', name: 'Serp', base_url: 'https://serp.example.com', description: 'second priced API', cost: { model: 'per_call', rate_usd: 0.005 } as never });
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://serp.example.com/q' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/signed' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { ok: true } })));
+      const both: CallSlot = {};
+      await runInCallSlot(both, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])));
+      expect(both.apiCost).toEqual({ usd: 0.005, source: 'profile' });
     });
 
     it('records nothing for a host whose profile has no cost', async () => {
@@ -7930,7 +8272,7 @@ describe('write approvals for the write the question showed (270)', () => {
     await visible({ url: 'https://h.example/a?flag&&b=x%E2%80%AEy', method: 'POST', body: '{}' }, agent);
     const q = question(prompt, 0);
     expect(q).toContain('\nflag\nb = x⟨U+202E⟩y');
-    expect(q).not.toContain('‮');
+    expect(q).not.toContain('\u202E');
   });
 
   // What is shown is the query as it goes out: the URL serialized, as the request sends it.
@@ -9173,6 +9515,28 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(escaped.prompt).not.toHaveBeenCalled();
     });
 
+    it('a secret written escaped inside JSON text inside a value is refused for a mandate and never shown to the owner', async () => {
+      const stored = 'hunter2secret';
+      const mask = (t: string) => t.replaceAll(stored, '[stored]');
+      const body = JSON.stringify({ value: `{"token":"\\u0068${stored.slice(1)}"}` });
+
+      const mandate = agent270({ principal: MANDATE, mask });
+      const out = await visible({ url: 'https://h.example/a', method: 'POST', body }, mandate.agent);
+      expect(out).toContain('Blocked: the body of this POST to h.example sends a stored secret. Nothing was sent.');
+      expect(mandate.prompt).not.toHaveBeenCalled();
+
+      const owner = agent270({ mask });
+      await visible({ url: 'https://h.example/a', method: 'POST', body }, owner.agent);
+      const q = question(owner.prompt, 0);
+      expect(q).not.toContain('unter2secret');
+      expect(q).toContain('"value"');
+
+      // Control: the same JSON text holding a value that is no secret is asked in a mandate's session.
+      const control = agent270({ principal: MANDATE, mask });
+      await visible({ url: 'https://h.example/a', method: 'POST', body: JSON.stringify({ value: '{"token":"\\u0068unter2other"}' }) }, control.agent);
+      expect(control.prompt).toHaveBeenCalledTimes(1);
+    });
+
     // The query by the body's rule: shown whole up to the same limit on the bytes sent; over it a
     // mandate is refused and the owner asked with the keys.
     const queryOfBytes = (bytes: number): string => `x=${'a'.repeat(bytes - 2)}`;
@@ -9306,6 +9670,23 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(out.toLowerCase()).not.toContain('sk-live-canary');
       expect(out).toContain('Not granted for an unattended run: POST https://(host not shown: its address holds a stored secret)/a.');
       expect(await visible({ url: 'https://harmless-value.h.example/a', method: 'POST', body: '{}' }, headless(MANDATE))).toContain('to harmless-value.h.example requires user consent');
+    });
+
+    // A value the host holds only in part — it starts in the userinfo, or the host starts with
+    // `https:` and no `//` — or holds tab-split is in no host the checks above read whole.
+    it('the refusal for want of a person to ask does not name a host that holds a stored value in part or in another form', async () => {
+      const cases = [
+        ['https://tok@Acme-Tenant7.h.example/a', 'tok@Acme-Tenant7'],
+        ['https:tok@Acme-Tenant7.h.example/a', 'tok@Acme-Tenant7'],
+        ['https://Acme\tTenant7.h.example/a', 'Acme\tTenant7'],
+      ] as const;
+      for (const [url, value] of cases) {
+        const mask = (t: string) => t.replaceAll(value, `***${value.slice(-4)}`);
+        const { agent } = agent270({ principal: MANDATE, mask, values: [value] });
+        const out = await visible({ url, method: 'POST', body: '{}' }, { ...(agent as object), promptUser: undefined } as never);
+        expect(out).toContain('to this service requires user consent but no interactive prompt is available');
+        expect(out.toLowerCase()).not.toContain('acme');
+      }
     });
 
     // A host is sent lower-cased, so a stored secret with capitals is no longer one the mask knows
@@ -10112,7 +10493,7 @@ describe('requests to a Shopify store are refused', () => {
       };
       const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile };
       const headers: Record<string, string> = {};
-      const attached = await attachStoredCredential(url, headers, false, {
+      const attached = await attachStoredCredential(url, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
         apiStore: store as never, secretStore: { resolve: () => 'store-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store as never),
       }, { bulkRunId: 'run-1' });
       return { attached, headers };

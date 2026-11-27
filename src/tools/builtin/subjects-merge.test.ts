@@ -227,12 +227,15 @@ describe('subjects_merge tool (PR-C3)', () => {
   it('merges on the `merge` key only: the label in either language or a typed word merges nothing', async () => {
     for (const answer of ['Merge', 'merge ', 'MERGE', 'Zusammenführen', 'yes', 'ja', 'y', '1', 'ok', 'allow', 'confirm']) {
       const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, makeAgent(answer));
-      expect(res, answer).toMatch(/^Cancelled — "Ada" and "Dr\. Ada Lovelace" were left as separate entries\. The answer was not one of the offered choices/);
+      // The sentence says why nothing merged; the stored names follow in their own marked blocks.
+      expect(res, answer).toMatch(/^Cancelled — the two entries were left as separate entries\. The answer was not one of the offered choices, so nothing was allowed\.[^\n]*\nDuplicate \(not merged\): <untrusted_data/);
+      expect(res.split('<untrusted_data')[0], answer).not.toContain('Ada');
       expect(subjects.getSubject(dupId)!.merged_into, answer).toBeNull();
     }
     for (const answer of ['cancel', '', '__dismissed__']) {
       const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, makeAgent(answer));
-      expect(res, JSON.stringify(answer)).toBe('Cancelled — "Ada" and "Dr. Ada Lovelace" were left as separate entries.');
+      expect(res, JSON.stringify(answer)).toMatch(/^Cancelled — the two entries were left as separate entries\. Their stored names:\nDuplicate \(not merged\): <untrusted_data/);
+      expect(res, JSON.stringify(answer)).not.toContain('The answer was not one of the offered choices');
     }
     expect(subjects.getSubject(dupId)!.merged_into).toBeNull();
   });
@@ -477,6 +480,32 @@ describe('subjects_merge tool (PR-C3)', () => {
     const agent = { principal: OWNER_PRINCIPAL, toolContext: ctx, promptUser: vi.fn() } as unknown as IAgent;
     const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
     expect(res).toContain('subject graph disabled');
+  });
+
+  // The stored names can be text extracted from outside content. Each comes back in its own
+  // marked block after a label in lynox's own words; what stands outside the blocks is pinned
+  // whole, so a field added to the answer without a block turns this red.
+  const outsideBlocks = (text: string): string => text.replace(/<untrusted_data[^>]*>[\s\S]*?<\/untrusted_data>/g, '[block]');
+  const blocks = (text: string): string[] => [...text.matchAll(/<untrusted_data[^>]*>\n([\s\S]*?)\n<\/untrusted_data>/g)].map(m => m[1]!);
+
+  it('a merge returns each stored name in its own marked block, after its label, and nothing stored outside them', async () => {
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, makeAgent('merge'));
+    expect(blocks(res)).toEqual(['Ada', 'Dr. Ada Lovelace']);
+    const outside = outsideBlocks(res);
+    // Whole, the ledger path generalised: it is lynox's own file, under the data dir.
+    expect(outside.replace(/from \S+ — that needs/, 'from <ledger> — that needs')).toMatch(new RegExp('^' + [
+      'Merged the duplicate subject into the kept one — one entry now. Their stored names:',
+      'Duplicate \\(merged away\\): \\[block\\]',
+      'Kept: \\[block\\]',
+      'An operator can reverse this from <ledger> — that needs shell access to this machine, not chat. The file is kept in backups and carried across migrations, and is removed after \\d+ days\\.',
+    ].join('\n') + '$'));
+    expect(outside).not.toContain('Ada');
+  });
+
+  it('a cancelled merge returns the stored names the same way', async () => {
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, makeAgent('cancel'));
+    expect(blocks(res)).toEqual(['Ada', 'Dr. Ada Lovelace']);
+    expect(outsideBlocks(res)).toBe('Cancelled — the two entries were left as separate entries. Their stored names:\nDuplicate (not merged): [block]\nWould have been kept: [block]');
   });
 
   it('declares requiresConfirmation (so the permission guard defers to its own prompt)', () => {

@@ -16,7 +16,7 @@ import {
   type MailSendResult,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, parseAddressList, previewAddressList, recipientFieldTargets, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../../core/consent-ask.js';
@@ -30,7 +30,12 @@ import {
 } from './rate-limit.js';
 import { isInputRequired } from '../../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
-import { currentCallFiling } from '../../../core/call-connection.js';
+import { currentCallFiling, currentCallOwnerKnownFor, currentCallTargetOrigin } from '../../../core/call-connection.js';
+import { UNATTENDED_BLOCK_ANSWER } from '../../../core/prompt-store.js';
+import { noticeLanguage } from '../../../core/notice-language.js';
+import { wrapUntrustedData } from '../../../core/data-boundary.js';
+import { originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originUnreadable, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
+import { normalizeMailTarget } from '../../../core/send-target.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import type { MailReplyPayload, StoredAddress } from '../../../core/approval-store.js';
 
@@ -47,6 +52,14 @@ export interface MailReplyToolInput {
 }
 
 /**
+ * An error whose text the mail provider (or a server behind it) wrote: the sentence is lynox's,
+ * the text follows in one marked block.
+ */
+function errorWithText(head: string, text: string): string {
+  return `${head} The error text:\n${wrapUntrustedData(text, 'mail_reply')}`;
+}
+
+/**
  * mail_reply needs more than a bare MailRegistry — it looks up account types
  * (to enforce the receive-only hard block) and derives the sending account
  * from the original recipient. The MailContext bundles everything.
@@ -56,6 +69,10 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
     outwardWrite: () => 'reply',
     // A reply reads the mail it answers before it writes: that read is a row of its own.
     outwardRead: (input) => namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)], ['uid', input.uid]]),
+    // Only the recipients the call names: the `to` and `cc` overrides, parsed with the same
+    // parser the send uses. The default recipients (the original sender, and everyone on reply_all) come
+    // from the mail being answered, which the input does not hold.
+    sendTargets: (input) => recipientFieldTargets([input.to, input.cc], parseAddressList),
     definition: {
       name: 'mail_reply',
       description:
@@ -97,6 +114,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         if (!prepared.ok) return prepared.message;
 
         if (filing) {
+          // The card names where a recipient the owner did not name comes from (`Agent.fileApproval`).
           if (!agent.fileApproval) return NOT_MARKED_MESSAGE;
           return agent.fileApproval({ kind: 'mail_reply', payload: prepared.filing }).message;
         }
@@ -104,19 +122,93 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           return 'mail_reply error: sending requires interactive user confirmation, which is not available in this mode.';
         }
 
+        // The recipients the dispatcher did not check: a reply's default recipients come from the
+        // mail it answers, which the input does not name. One the owner did not name is said in the
+        // confirmation, which is then a blocked question: a run nobody watches refuses it, and a
+        // session of someone else the owner let in does not send to it at all.
+        const recipients = [...prepared.commit.to, ...prepared.commit.cc].map((a) => a.address);
+        const origin: SendOrigin = { kind: 'readMail', sender: prepared.filing.original.from };
+        // A recipient of the mail being answered that does not read as an address refuses the
+        // whole reply, unasked, as the dispatcher does for one the input names.
+        if (recipients.some((r) => normalizeMailTarget(r) === null)) {
+          try { agent.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: 'mail', origin }); } catch { /* the refusal stands */ }
+          return originUnreadable('mail');
+        }
+        const unnamed = replyRecipientsNotOwnerKnown(agent, recipients);
+        const targets: OriginTargets = { values: unnamed, unreadable: false };
+        const refused = (text: string): string => {
+          try { agent.onOriginRefused?.({ targets, noun: 'mail', origin }); } catch { /* the refusal stands */ }
+          return text;
+        };
+        // What the model reads: the sender of the mail being answered is that sender's own text, so
+        // the sentence says only that it came from content lynox read, and the sender follows in a
+        // marked block. The owner's question above still names the sender (`originAsk`).
+        const shownOrigin: SendOrigin = { kind: 'readContent' };
+        const withSender = (text: string): string =>
+          `${text}\n\nThat content is the mail being answered. Its sender, as the mail gives it:\n${wrapUntrustedData(prepared.filing.original.from, 'mail_reply')}`;
+        if (unnamed.length > 0 && agent.principal.kind !== 'owner') {
+          return refused(withSender(originRefusedMandate(targets, shownOrigin, 'mail')));
+        }
+        const lang = agent.noticeLanguage ?? noticeLanguage(undefined);
+        // A reply whose one unnamed recipient is the address it goes to by default says so in its
+        // own words, and only where those words are true:
+        //  - that address is the mail's sender: the sender's sentence;
+        //  - it is a Reply-To, the mail has one readable sender, and the sender gets no copy: the
+        //    question names both, the reply does not go to the person who wrote;
+        //  - otherwise (the sender gets a copy, or the sender cannot be read as one address): the
+        //    general question, which lists the recipient with where it came from.
+        const defaultTo = input.to ? undefined : normalizeMailTarget(prepared.commit.to[0]?.address ?? '')?.value;
+        const fromAddresses = prepared.filing.original.from.split(',')
+          .map((a) => normalizeMailTarget(a.trim())?.value).filter((a): a is string => a !== undefined);
+        const normalizedRecipients = new Set(recipients.map((r) => normalizeMailTarget(r)?.value));
+        const onlyDefault = unnamed.length === 1 && defaultTo !== undefined && unnamed[0] === defaultTo;
+        const sender = fromAddresses.length === 1 ? fromAddresses[0] : undefined;
+        const ask = onlyDefault && fromAddresses.includes(defaultTo)
+          ? originReplyAsk(defaultTo, lang)
+          : onlyDefault && sender !== undefined && !normalizedRecipients.has(sender)
+            ? originReplyToAsk(defaultTo, sender, lang)
+            : originAsk('mail_reply', input, 'mail', targets, origin, lang);
+        const question = unnamed.length > 0 ? pv`${prepared.preview}\n\n${ask}` : prepared.preview;
+        const answer = await agent.promptUser(question, consentOptions('send'), consentMeta('send', unnamed.length > 0 ? { blocked: true } : undefined));
+        // Before the key is read: a run nobody watches refuses the blocked question as such.
+        if (answer === UNATTENDED_BLOCK_ANSWER) return refused(withSender(originRefusedUnattended(targets, shownOrigin)));
         // Only the `send` key sends; a label, a typed "ja" or any other text does not.
-        const consent = decideConsent('send', await agent.promptUser(prepared.preview, consentOptions('send'), consentMeta('send')));
-        if (consent !== 'send') return consentRefusal(consent, 'mail_reply cancelled by user.');
+        const consent = decideConsent('send', answer);
+        if (consent !== 'send') {
+          // A no to the question where a recipient comes from is said as such, so the model does
+          // not try another recipient.
+          return unnamed.length > 0 ? withSender(consentRefusal(consent, originDenied(targets, shownOrigin, 'mail'))) : consentRefusal(consent, 'mail_reply cancelled by user.');
+        }
 
-        return await commitReply(prepared.sendProvider, prepared.commit, ctx);
+        // Owner-named in the log only when the dispatcher checked every recipient and found it
+        // named before any question; a reply's default recipients never are.
+        return await commitReply(prepared.sendProvider, prepared.commit, ctx, { originOwnerKnown: currentCallOwnerKnownFor(recipients) });
       } catch (err: unknown) {
         // A confirmation nobody can answer ends the run; as text, the model would work around it.
         if (isInputRequired(err)) throw err;
-        if (err instanceof MailError) return `mail_reply error (${err.code}): ${err.message}`;
-        return `mail_reply error: ${getErrorMessage(err)}`;
+        if (err instanceof MailError) return errorWithText(`mail_reply error (${err.code}).`, err.message);
+        return errorWithText('mail_reply error.', getErrorMessage(err));
       }
     },
   };
+}
+
+/**
+ * The recipients of a reply that are neither among the targets the dispatcher checked for this
+ * call (the `to`/`cc` overrides, asked about there when foreign) nor owner-known now. The caller
+ * refuses a reply with a recipient that does not read as an address before this.
+ */
+function replyRecipientsNotOwnerKnown(agent: IAgent, recipients: readonly string[]): string[] {
+  const checked = currentCallTargetOrigin();
+  const seen = new Set<string>([...(checked?.known ?? []), ...(checked?.unnamed?.targets ?? [])]);
+  const unnamed: string[] = [];
+  for (const r of recipients) {
+    const target = normalizeMailTarget(r);
+    if (target === null) continue;
+    if (seen.has(target.value)) continue;
+    if ((agent.ownerKnown?.known(target) ?? 'foreign') !== 'known') unnamed.push(target.value);
+  }
+  return unnamed;
 }
 
 /**
@@ -180,9 +272,11 @@ export async function prepareReply(
   // RFC 3834 says: "Automatic responses SHOULD NOT be issued in response
   // to any message which contains an Auto-Submitted header field, where
   // that field has any value other than 'no'." We enforce this as a
-  // hard block — no confirmation can override it. Prevents mail loops.
+  // hard block — no confirmation can override it. Prevents mail loops. The same holds for the
+  // autoresponder headers and delivery reports `automaticMail` reads (automatic-mail.ts).
   if (original.envelope.isAutoReply) {
-    return { ok: false, message: `mail_reply blocked: original message has Auto-Submitted header (auto-generated/auto-replied). ` +
+    return { ok: false, message: `mail_reply blocked: original message was sent automatically ` +
+      `(an Auto-Submitted, autoresponder or Precedence header, or a delivery report). ` +
       `RFC 3834 forbids automatic replies to automated messages to prevent mail loops. ` +
       `If this is a real message that needs a response, use mail_send instead.` };
   }
@@ -235,7 +329,14 @@ export async function prepareReply(
     const sender = original.envelope.replyTo[0] ?? original.envelope.from[0];
     toAddrs = sender ? [sender] : [];
   }
-  if (toAddrs.length === 0) return { ok: false, message: 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.' };
+  if (toAddrs.length === 0) {
+    return {
+      ok: false,
+      message: input.to
+        ? 'mail_reply error: the "to" override holds no valid address (each needs an @; a value with a line break or control character is dropped). Nothing was sent.'
+        : 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.',
+    };
+  }
 
   // The address the reply goes out from, read from the same source the
   // provider sends from — not from the stored account row, which can lag
@@ -245,7 +346,7 @@ export async function prepareReply(
   try {
     sendingAddress = await resolveSendingAddress(sendProvider);
   } catch (err) {
-    return { ok: false, message: `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, message: errorWithText('mail_reply error: could not read the sending address. Nothing was sent.', err instanceof Error ? err.message : String(err)) };
   }
 
   // Reply-all: union with original To + Cc, minus our own address and
@@ -363,9 +464,14 @@ export async function prepareReply(
 
 /**
  * The reply's last step, after consent: send exactly what {@link prepareReply} fixed, count
- * it, and reconcile the inbox.
+ * it, write it to the sent log, and reconcile the inbox.
  */
-export async function commitReply(sendProvider: MailProvider, c: ReplyCommit, ctx: MailContext | undefined): Promise<string> {
+export async function commitReply(
+  sendProvider: MailProvider,
+  c: ReplyCommit,
+  ctx: MailContext | undefined,
+  opts: { originOwnerKnown?: boolean | undefined } = {},
+): Promise<string> {
   const sendInput: MailSendInput = {
     to: c.to,
     subject: c.subject,
@@ -382,6 +488,20 @@ export async function commitReply(sendProvider: MailProvider, c: ReplyCommit, ct
 
   const result: MailSendResult = await sendProvider.send(sendInput);
   recordMailSend([...c.to, ...c.cc], c.subject);
+  // The sent log, as `sendMail` writes it: the outbound history and the export list replies too.
+  // A reply's default recipients come from the original mail, not from the owner, so the row counts
+  // them as owner-named only when the caller checked every recipient and says so (`originOwnerKnown`,
+  // default false). An approval on a card is not that check.
+  writeSentLog(ctx, {
+    accountId: sendProvider.accountId,
+    messageId: result.messageId || `local-${String(Date.now())}`,
+    to: c.to,
+    ...(c.cc.length > 0 ? { cc: c.cc } : {}),
+    subject: c.subject,
+    bodyChars: sendInput.text.length,
+    ...(c.inReplyTo ? { inReplyTo: c.inReplyTo } : {}),
+    originOwnerKnown: opts.originOwnerKnown === true,
+  });
   // The reply HAS been sent. Reconcile the inbox (mark the open item
   // answered — its own source of truth) as a best-effort, fully isolated
   // step: an absent hook method (a minimal ctx) or a throwing reconcile
@@ -399,28 +519,6 @@ export async function commitReply(sendProvider: MailProvider, c: ReplyCommit, ct
     });
   } catch { /* reconcile is best-effort — never fail an already-sent reply */ }
   return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;
-}
-
-function parseAddressList(input: string | undefined): MailAddress[] {
-  if (!input) return [];
-  return input
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0)
-    .map(parseAddress)
-    .filter((a): a is MailAddress => a !== null);
-}
-
-function parseAddress(raw: string): MailAddress | null {
-  const angle = raw.match(/^\s*(?:"?([^"<]*?)"?\s*)?<([^>]+)>\s*$/);
-  if (angle) {
-    const name = angle[1]?.trim();
-    const address = angle[2]?.trim();
-    if (!address || !address.includes('@')) return null;
-    return name ? { name, address } : { address };
-  }
-  if (raw.includes('@')) return { address: raw };
-  return null;
 }
 
 function truncate(s: string, max: number): string {

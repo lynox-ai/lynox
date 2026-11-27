@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { BulkSourceError } from './bulk-plan.js';
 import { validateAgainstSchema } from './llm-helper.js';
 import {
-  JUDGE_MAX_AFTER_BYTES, judgeAfterBound, judgeFields, judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRule,
+  JUDGE_HTML_OUTPUT_CAP, JUDGE_MAX_AFTER_BYTES, JUDGE_MAX_HTML, JUDGE_MAX_STRING, judgeAfterBound, judgeCallSchema, judgeFields,
+  judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRule,
 } from './bulk-judge-rule.js';
+import { htmlFieldsOfFormName } from './bulk-html.js';
 
 const TITLE = { type: 'string', maxLength: 70 };
 
@@ -149,5 +151,69 @@ describe('judgeAfterBound — an upper bound in bytes, not a count of characters
     const r = normalizeJudgeRule({ rule: 'x', schema: { t: { type: 'string', maxLength: 500 } } });
     expect(judgeMaxOutputTokens(r.schema)).toBeGreaterThanOrEqual(judgeAfterBound(r.schema));
     expect(JUDGE_MAX_AFTER_BYTES).toBeGreaterThan(judgeAfterBound(r.schema));
+  });
+});
+
+// PRD shopify-preset §21.4 item 10: a description runs to 20,822 characters on the one measured shop.
+describe('normalizeJudgeRule — an HTML field of the run\'s list form takes up to JUDGE_MAX_HTML', () => {
+  const text = (maxLength: number) => ({ type: 'string', maxLength });
+  const plan = (schema: Record<string, unknown>, form: unknown) =>
+    normalizeJudgeRule({ rule: 'r', schema }, { idField: 'id', htmlFields: htmlFieldsOfFormName(form) });
+
+  it('takes an HTML field up to the bound on a list form that declares it, and refuses one character more', () => {
+    expect(JUDGE_MAX_HTML).toBe(32_000);
+    for (const [form, field] of [['shopify', 'descriptionHtml'], ['shopify_filtered', 'descriptionHtml'], ['woocommerce', 'description'], ['woocommerce', 'short_description']] as const) {
+      expect(plan({ [field]: text(JUDGE_MAX_HTML) }, form).schema.properties[field], `${form} ${field}`).toEqual(text(JUDGE_MAX_HTML));
+      expect(() => plan({ [field]: text(JUDGE_MAX_HTML + 1) }, form), `${form} ${field}`).toThrow(`text field ${field} needs maxLength (1–32000) or enum.`);
+    }
+  });
+
+  it('keeps 2,000 for every other field, for a form that declares none, and for a data-store run', () => {
+    expect(() => plan({ title: text(JUDGE_MAX_STRING + 1) }, 'shopify')).toThrow('text field title needs maxLength (1–2000) or enum.');
+    expect(() => plan({ alt: text(JUDGE_MAX_STRING + 1) }, 'shopify_media')).toThrow(/needs maxLength \(1–2000\)/);
+    expect(() => plan({ descriptionHtml: text(JUDGE_MAX_STRING + 1) }, undefined)).toThrow(/needs maxLength \(1–2000\)/);
+    expect(() => normalizeJudgeRule({ rule: 'r', schema: { description: text(JUDGE_MAX_STRING + 1) } })).toThrow(/needs maxLength \(1–2000\)/);
+    // A name that is no form, a key of every plain object among them, declares nothing.
+    expect(() => plan({ constructor_: text(JUDGE_MAX_STRING + 1) }, 'constructor')).toThrow(/needs maxLength \(1–2000\)/);
+    expect(htmlFieldsOfFormName('constructor')).toEqual([]);
+    expect(plan({ title: text(JUDGE_MAX_STRING) }, 'shopify').schema.properties['title']).toEqual(text(JUDGE_MAX_STRING));
+  });
+
+  it('bounds the other fields together by JUDGE_MAX_AFTER_BYTES beside an HTML field, as without one', () => {
+    // Two fields of 2,000 characters fit 32 KiB as a bound (6 bytes each), three do not.
+    const two = { title: text(2_000), seo_title: text(2_000) };
+    const three = { ...two, seo_description: text(2_000) };
+    expect(judgeAfterBound({ type: 'object', properties: three as never })).toBeGreaterThan(JUDGE_MAX_AFTER_BYTES);
+    expect(() => plan(two, 'shopify')).not.toThrow();
+    expect(() => plan(three, 'shopify')).toThrow(/larger than a bulk target may hold/);
+    expect(() => plan({ ...two, descriptionHtml: text(JUDGE_MAX_HTML) }, 'shopify')).not.toThrow();
+    expect(() => plan({ ...three, descriptionHtml: text(JUDGE_MAX_HTML) }, 'shopify')).toThrow(/larger than a bulk target may hold/);
+  });
+
+  // One call's output cap is measured for one description of the longest length: two HTML fields
+  // (WooCommerce) share JUDGE_MAX_HTML between them.
+  it('bounds the HTML fields together by JUDGE_MAX_HTML', () => {
+    expect(() => plan({ description: text(20_000), short_description: text(12_000) }, 'woocommerce')).not.toThrow();
+    expect(() => plan({ description: text(20_000), short_description: text(12_001) }, 'woocommerce'))
+      .toThrow('judge.schema: the HTML fields together may ask for at most 32000 characters; lower their maxLength values or shorten their choices.');
+    // An HTML field given as choices counts its longest one.
+    const choices = { type: 'string', enum: ['kurz', 'x'.repeat(200)] };
+    expect(() => plan({ description: text(31_800), short_description: choices }, 'woocommerce')).not.toThrow();
+    expect(() => plan({ description: text(31_801), short_description: choices }, 'woocommerce')).toThrow(/HTML fields together/);
+    // In code points, as the schema counts a value: 100 emoji are 100, though 200 UTF-16 units.
+    const emoji = { type: 'string', enum: ['🙂'.repeat(100)] };
+    expect(() => plan({ description: text(31_900), short_description: emoji }, 'woocommerce')).not.toThrow();
+    expect(() => plan({ description: text(31_901), short_description: emoji }, 'woocommerce')).toThrow(/HTML fields together/);
+  });
+
+  it('gives a verdict call with an HTML field 16,000 output tokens, and 8,000 without one', () => {
+    expect(JUDGE_HTML_OUTPUT_CAP).toBe(16_000);
+    const html = plan({ descriptionHtml: text(JUDGE_MAX_HTML) }, 'shopify');
+    expect(judgeMaxOutputTokens(html.schema)).toBe(16_000);
+    // The call goes out as the envelope `{ keep, after }`: its HTML field is one level down.
+    expect(judgeMaxOutputTokens(judgeCallSchema(html))).toBe(16_000);
+    expect(judgeMaxOutputTokens(judgeCallSchema(plan({ title: text(2_000) }, 'shopify')))).toBe(8_000);
+    // Below the cap the bound decides, as before.
+    expect(judgeMaxOutputTokens(plan({ descriptionHtml: text(100) }, 'shopify').schema)).toBe(Math.max(256, judgeAfterBound(plan({ descriptionHtml: text(100) }, 'shopify').schema) + 128));
   });
 });

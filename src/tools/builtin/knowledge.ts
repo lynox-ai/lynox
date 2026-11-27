@@ -89,7 +89,7 @@ export const rememberTool: ToolEntry<RememberInput> = {
     input_schema: {
       type: 'object' as const,
       properties: {
-        text: { type: 'string', description: 'The durable fact / decision / preference, in one clear sentence.' },
+        text: { type: 'string', description: 'The durable fact / decision / preference, in one clear sentence, written in the language the operator writes in, also when it comes from a mail, page or file in another language. State the rule itself or name the business; do not call the person "the operator" or "the user".' },
         subject: {
           type: 'string',
           description: 'The client, company, or project this is about, by name. Links the entry to that subject. Omit only for a global preference about the operator themselves.',

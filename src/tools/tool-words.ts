@@ -17,14 +17,14 @@
  */
 
 import { singleLine } from '../core/prompt-value.js';
-import type { DialogLanguage } from './dialog-text.js';
+import { QUOTE_MARKS, escapeQuoted, type DialogLanguage } from './dialog-text.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 
 /** Tools whose dialog word is the chat's tool-line word, word for word. */
 export const TOOL_LINE_WORDS = {
   bash: 'Command',
   http_request: 'API request',
-  api_setup: 'API profiles',
+  api_setup: 'API connections',
   mail_send: 'New email',
   mail_reply: 'Reply to email',
   mail_connect: 'Mailbox connection',
@@ -59,7 +59,7 @@ export const DIALOG_ONLY_WORDS = {
 export const TOOL_LINE_WORDS_DE = {
   bash: 'Befehl',
   http_request: 'API-Anfrage',
-  api_setup: 'API-Profile',
+  api_setup: 'API-Verbindungen',
   mail_send: 'Neue Mail',
   mail_reply: 'Antwort auf Mail',
   mail_connect: 'Postfach-Verbindung',
@@ -98,13 +98,13 @@ const EXTERNAL_NAME_MAX = 64;
 
 /**
  * A foreign tool's name as a dialog shows it: on one line, without control or bidi
- * characters, at most 64 characters with "…", and with `\` and `"` escaped, so the quotes
- * around it are the dialog's own.
+ * characters, at most 64 characters with "…", and with `\` and every quote-like character
+ * escaped, so the marks around it are the dialog's own.
  */
 function externalToolName(toolName: string): string {
   const chars = Array.from(singleLine(toolName).trim());
   const shown = chars.length > EXTERNAL_NAME_MAX ? `${chars.slice(0, EXTERNAL_NAME_MAX - 1).join('')}…` : chars.join('');
-  return shown.replace(/[\\"]/g, (c) => `\\${c}`);
+  return escapeQuoted(shown);
 }
 
 /**
@@ -136,9 +136,9 @@ export function dialogToolHead(toolName: string, language: DialogLanguage = 'en'
   return {
     [PROMPT_TEXT_BRAND]: true,
     segments: [
-      { kind: 'frame', text: `${EXTERNAL_TOOL[language]} "` },
+      { kind: 'frame', text: `${EXTERNAL_TOOL[language]} ${QUOTE_MARKS[language][0]}` },
       { kind: 'value', text: externalToolName(toolName) },
-      { kind: 'frame', text: '"' },
+      { kind: 'frame', text: QUOTE_MARKS[language][1] },
     ],
   };
 }

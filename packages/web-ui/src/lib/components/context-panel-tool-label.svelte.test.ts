@@ -37,8 +37,8 @@ afterEach(() => {
 
 describe('ContextPanel header for an api_setup call', () => {
 	it.each([
-		['de', 'API-Profile'],
-		['en', 'API profiles'],
+		['de', 'API-Verbindungen'],
+		['en', 'API connections'],
 	] as const)('reads %s: %s', async (locale, label) => {
 		setLocale(locale);
 		setContext({ type: 'tool', toolName: 'api_setup', toolInput: { action: 'list' }, title: 'api_setup' });

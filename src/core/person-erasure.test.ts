@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import BetterSqlite3 from 'better-sqlite3';
@@ -12,7 +12,7 @@ import { SelfSubjectErasureError, SubjectStore } from './subject-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
 import { DATA_DIR_INVENTORY } from './data-dir-inventory.js';
 import {
-  PERSON_ERASURE_NOT_COVERED, PERSON_ERASURE_REACH, erasePerson, personMatcher, previewPersonErasure,
+  PERSON_ERASURE_NOT_COVERED, PERSON_ERASURE_REACH, erasePerson, personErasureSetAsideCopies, personMatcher, previewPersonErasure,
   type PersonErasureDeps, type PersonErasurePreview, type PersonErasureResult,
 } from './person-erasure.js';
 
@@ -630,5 +630,19 @@ describe('PERSON_ERASURE_REACH', () => {
     const used = new Set<string>();
     for (const v of Object.values(PERSON_ERASURE_REACH)) if (Array.isArray(v)) for (const k of v) used.add(k);
     expect(PERSON_ERASURE_NOT_COVERED.filter(k => !used.has(k))).toEqual(['exports']);
+  });
+});
+
+describe('personErasureSetAsideCopies', () => {
+  it('throws when the data directory cannot be listed, whoever runs it (a file in its place)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-erasure-set-aside-'));
+    try {
+      const notADir = join(dir, 'data');
+      writeFileSync(notADir, '');
+      expect(() => personErasureSetAsideCopies(notADir)).toThrow();
+      expect(personErasureSetAsideCopies(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
