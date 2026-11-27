@@ -6908,3 +6908,81 @@ describe('spawn_agent tool', () => {
     });
   });
 });
+
+describe('spawn_agent holds a batch against the daily and monthly caps', () => {
+  /** Recorded spend of `usd` today, as the run history reports it. */
+  const spentToday = (usd: number): import('../../core/session-budget.js').CostQueryProvider => ({
+    getCostByDay: () => [{ day: new Date().toISOString().slice(0, 10), cost_usd: usd, run_count: 1 }],
+  });
+  const batch = { agents: [{ name: 'a', task: 'A', max_budget_usd: 1 }, { name: 'b', task: 'B', max_budget_usd: 2 }] };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSend.mockResolvedValue('sub-agent result');
+    mockGetRole.mockReturnValue(undefined);
+    mockCostSnapshot = null;
+    mockCostSnapshotQueue = null;
+    testCounters = { httpRequests: 0, writeBytes: 0, costUSD: 0 };
+    resetSessionSpawnCost(testCounters);
+  });
+
+  afterEach(async () => {
+    const { resetPersistentBudget } = await import('../../core/session-budget.js');
+    resetPersistentBudget();
+  });
+
+  it('refuses a batch on a reached daily cap before the first child, and runs the same batch under it', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(10), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(/^Not delegated: Daily spending cap \(\$10\) would be exceeded/);
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(testCounters.costUSD, 'the session counter is not charged for a refused batch').toBe(0);
+    expect(getReservedInFlight()).toBe(0);
+
+    configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    await spawnAgentTool.handler(batch, makeAgent());
+    expect(mockSend).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses a batch whose children fit one by one but not together, and on a reached monthly cap', async () => {
+    const { configurePersistentBudget } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(8), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(/Daily spending cap/);
+    configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 100, monthlyCapUSD: 3.5 });
+    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(/Monthly spending cap \(\$3\.5\)/);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('holds each child\'s cap while the batch runs and gives it all back once it settled', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    const during: number[] = [];
+    mockSend.mockImplementation(async () => { during.push(getReservedInFlight()); return 'ok'; });
+    await spawnAgentTool.handler(batch, makeAgent());
+    expect(during).toHaveLength(2);
+    // While the first child runs, at most both caps are held, and at least the other child's.
+    for (const held of during) expect(held).toBeGreaterThanOrEqual(1);
+    expect(Math.max(...during)).toBe(3);
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('gives the hold back when a child throws, when it is stopped, and when dispatch throws', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+
+    mockSend.mockRejectedValue(new Error('child failed'));
+    await spawnAgentTool.handler(batch, makeAgent()).catch(() => undefined);
+    expect(mockSend, 'positive control: the children ran').toHaveBeenCalledTimes(2);
+    expect(getReservedInFlight(), 'after a child threw').toBe(0);
+
+    mockSend.mockRejectedValue(new RunAbortedError('stopped'));
+    await spawnAgentTool.handler(batch, makeAgent()).catch(() => undefined);
+    expect(getReservedInFlight(), 'after a child was stopped').toBe(0);
+
+    mockSend.mockClear();
+    const onStream = vi.fn().mockRejectedValue(new Error('stream closed'));
+    await expect(spawnAgentTool.handler(batch, makeAgent({ onStream }))).rejects.toThrow('stream closed');
+    expect(mockSend, 'dispatch threw before any child').not.toHaveBeenCalled();
+    expect(getReservedInFlight(), 'after dispatch threw').toBe(0);
+  });
+});

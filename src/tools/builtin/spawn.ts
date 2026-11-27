@@ -23,7 +23,7 @@ import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, getActiveRou
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../../core/llm/provider-keys.js';
 import { resolveTools } from '../resolve-tools.js';
 
-import { adjustSessionCost, checkSessionBudget } from '../../core/session-budget.js';
+import { adjustSessionCost, checkSessionBudget, releasePersistentBudget, reservePersistentBudget } from '../../core/session-budget.js';
 import { compose, engineText, escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
 import { childFilingContext } from '../../core/approval-filing.js';
@@ -2379,6 +2379,10 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
      * `finally` below gives it back.
      */
     let heldForBatch = 0;
+    /** Each child's hard cap, as held against the instance's daily and monthly caps. */
+    let capHolds: number[] = [];
+    /** What of that hold is still taken; given back like `heldForBatch`. */
+    let capHeld = 0;
     if (remainingRunUSD !== null) {
       const asked = requested.reduce((sum, usd) => sum + usd, 0);
       // SCALED proportionally rather than refused outright. Refusing reads as the
@@ -2506,6 +2510,23 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // cost, until the session refused all further work for money it never spent. Inside
     // the `try`, so its own refusal gives the run's hold back through the `finally`.
     // No `await` lies between the run's reservation and this line.
+    //
+    // ⛔ The instance's daily and monthly caps, for the whole batch and before the first child.
+    // The session checks them once per turn, and the background loop's admission covers the
+    // delegating run's own turns only, so without this a turn that passed the cap just below it
+    // could fan out batch after batch on top. Held is each child's hard cap (its share, or what
+    // it asked for), not the turn-based estimate: that is the most a child can spend. Before
+    // `checkSessionBudget`, which reserves on the session counter and gives nothing back.
+    capHolds = specs.map((_, i) => shares?.[i] ?? requested[i]!);
+    const capReservation = reservePersistentBudget(capHolds.reduce((sum, usd) => sum + usd, 0));
+    if (!capReservation.allowed) {
+      throw new Error(
+        `Not delegated: ${capReservation.reason ?? 'the spending cap would be exceeded.'} `
+        + 'The sub-agents of this batch could together spend more than the cap leaves. '
+        + 'Tell the user that the spending cap stops this work.',
+      );
+    }
+    capHeld = capReservation.reservedUSD;
     checkSessionBudget(agent.sessionCounters, totalEstimate);
 
     channels.spawnStart.publish({ agents: names, parent: agent.name, parentRunId, depth: childDepth });
@@ -2611,6 +2632,13 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           if (shares !== null) {
             agent.releaseExternalCost?.(shares[i]!);
             heldForBatch -= shares[i]!;
+          }
+          // The child's cap hold against the daily and monthly caps, on the same exits. Its
+          // run row, written before this, carries what it really spent.
+          if (capHeld > 0) {
+            const back = Math.min(capHolds[i] ?? 0, capHeld);
+            releasePersistentBudget(back);
+            capHeld -= back;
           }
           // ⛔ The child's ACTUAL cost, onto the delegating run's own ceiling. Without
           // it the run keeps counting only its own turns while the tenant's daily total
@@ -2928,6 +2956,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       // is a no-op; `releaseExternalCost` floors at 0 either way, so a miscount cannot
       // mint budget.
       if (heldForBatch > 0) agent.releaseExternalCost?.(heldForBatch);
+      if (capHeld > 0) releasePersistentBudget(capHeld);
     }
   },
   // Spawning writes nothing outside; each call the child makes is classified on its own.
