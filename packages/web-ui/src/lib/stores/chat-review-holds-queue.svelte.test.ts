@@ -565,6 +565,24 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		expect(runTasks, 'the queued turn waits for the new chat\'s own run').toEqual(['edit the notes', 'in the new chat']);
 	});
 
+	it('a run that ends after a new chat was started leaves the new chat\'s run streaming, and a message typed there waits behind it', async () => {
+		let release!: () => void;
+		holdFirstRun = new Promise<void>((r) => { release = r; });
+		void store.sendMessage('edit the notes'); // t1's run streams on
+		await settle();
+		store.newChat();
+		holdLaterRuns = new Promise<void>(() => {}); // the new chat's run streams on
+		void store.sendMessage('in the new chat');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: the new chat\'s run streams').toBe(true);
+		release(); // t1's run ends now
+		await settle();
+		expect(store.getIsStreaming(), 'the new chat\'s run still streams').toBe(true);
+		await store.sendMessage('typed in the new chat');
+		expect(store.getMessages().find((m) => m.content === 'typed in the new chat')?.queued, 'the message waits behind that run').toBe(true);
+		expect(runTasks, 'and is not sent past it').toEqual(['edit the notes', 'in the new chat']);
+	});
+
 	describe('a turn queued behind a run, when its thread is opened again and the run had ended by the re-attach', () => {
 		const reopenWhileRunning = async (stream: 'gone'): Promise<() => void> => {
 			const release = await queueBehindRun(); // t1's run streams on, a turn queued behind it

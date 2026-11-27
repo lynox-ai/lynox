@@ -2382,13 +2382,17 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		}
 	}
 
-	endStreaming(turn.assistantMsg);
-	streamingActivity = 'idle';
-	streamingToolName = null;
-	streamingToolPhase = null;
-	pendingPermission = null;
-	pendingTabsPrompt = null;
-	retryStatus = null;
+	// The streaming state is the open chat's. A run started since (in a new chat, or in this one
+	// opened again) owns it now, and this run's end leaves it as that run has it.
+	if (streamEpoch === turn.epoch) {
+		endStreaming(turn.assistantMsg);
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		pendingPermission = null;
+		pendingTabsPrompt = null;
+		retryStatus = null;
+	}
 
 	// Parse follow-up suggestions from assistant response. FALLBACK only: if the
 	// agent used the suggest_follow_ups tool, the tool_call handler already set
