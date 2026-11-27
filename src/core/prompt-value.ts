@@ -98,16 +98,20 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  *    over the text around a value. Vietnamese needs two, Indic scripts one or
  *    two; Tibetan stacks, Hebrew with cantillation and Quranic Arabic can carry
  *    more than four and are cut too, accepted. Spacing marks
- *    (`\p{Mc}`) are visible and stay uncapped.
+ *    (`\p{Mc}`) are visible and stay uncapped. The C1 controls other than NEL
+ *    are removed before the cap: inert as line ends (point 1), they still sit
+ *    between two mark runs as a base of no width, so runs of four on each would
+ *    stack on one place.
  * All of this runs before any cut a caller makes, so characters past a cut
  * cannot shorten what the cut keeps.
  */
 export function singleLine(value: string): string {
-  // Format and default-ignorable characters removed outright, long mark runs cut,
-  // every break-ish or blank character collapsed to one space. `\s` misses most
-  // of C0 and all of C1, so both are named, as are the two blanks above.
+  // Format, default-ignorable and C1 control characters (NEL aside) removed
+  // outright, long mark runs cut, every break-ish or blank character collapsed
+  // to one space. `\s` misses most of C0 and all of C1, so both are named, as
+  // are the two blanks above.
   return value
-    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '')
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u0080-\u0084\u0086-\u009f]/gu, '')
     .replace(/([\p{Mn}\p{Me}]{4})[\p{Mn}\p{Me}]+/gu, '$1')
     .replace(/[\s\u0000-\u001f\u0085\u2800\u{1D159}]+/gu, ' ');
 }
