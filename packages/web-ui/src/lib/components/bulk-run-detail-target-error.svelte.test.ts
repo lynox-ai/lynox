@@ -249,7 +249,7 @@ describe('the error of a target, in the preview', () => {
 	}
 
 	for (const lang of ['de', 'en'] as const) {
-		it(`says a failed write on a local run as open in ${lang}, pointing to the target, not to a provider`, async () => {
+		it(`says a failed write on a local run as open in ${lang}, pointing to the target, not to a provider, also with no unclear send`, async () => {
 			setLocale(lang);
 			run = { ...writeRun([
 				{ ...unread(0, 'write_failed'), sendUnclear: true },
@@ -258,7 +258,9 @@ describe('the error of a target, in the preview', () => {
 				unread(3, 'path_changed'),
 			]), targetSystem: 'data_store' };
 			await render();
-			expect(errorTexts()).toEqual([LOCAL_WRITE_FAILED[lang], LOCAL_WRITE_FAILED[lang], NOT_ARRIVED['write_failed']![lang], SENTENCES['path_changed']![lang]]);
+			// A local writer may throw after it wrote, and that send is counted as refused: no unclear
+			// send does not mean the change did not arrive there.
+			expect(errorTexts()).toEqual([LOCAL_WRITE_FAILED[lang], LOCAL_WRITE_FAILED[lang], LOCAL_WRITE_FAILED[lang], SENTENCES['path_changed']![lang]]);
 		});
 	}
 
