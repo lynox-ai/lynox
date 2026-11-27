@@ -14,13 +14,40 @@ function heldHeight(part: HTMLElement | null): number {
 }
 
 /**
- * Brings a marked part of the review into sight below the status line and above the foot, so
- * neither covers it. What stays in sight is read from the dialog as rendered now.
+ * Keeps what scrolls into view in the frame clear of the parts that stay in sight: the frame's
+ * scroll padding is their height, read from the frame as rendered now. Browsers apply it when
+ * focus moves (Tab) and to `scrollIntoView`.
  */
-export function bringIntoReview(dialog: HTMLElement, el: HTMLElement): void {
-	const top = heldHeight(dialog.querySelector<HTMLElement>('[data-dialog-status]'));
-	const foot = heldHeight(dialog.querySelector<HTMLElement>('[data-dialog-foot]'));
-	el.style.scrollMarginTop = `${top + 8}px`;
-	el.style.scrollMarginBottom = `${foot + 8}px`;
+export function syncScrollPadding(frame: HTMLElement): void {
+	const top = heldHeight(frame.querySelector<HTMLElement>(':scope > [data-dialog-status]'));
+	const foot = heldHeight(frame.querySelector<HTMLElement>(':scope > [data-dialog-foot]'));
+	frame.style.scrollPaddingTop = top > 0 ? `${top + 8}px` : '';
+	frame.style.scrollPaddingBottom = foot > 0 ? `${foot + 8}px` : '';
+}
+
+/**
+ * Holds the frame's scroll padding while the dialog is open: again when the frame or one of its
+ * parts changes size (the window, a status line opened), and when the status line comes or goes.
+ * Returns the cleanup.
+ */
+export function holdScrollPadding(frame: HTMLElement): () => void {
+	const sync = (): void => syncScrollPadding(frame);
+	const sizes = typeof ResizeObserver === 'function' ? new ResizeObserver(sync) : null;
+	const watchParts = (): void => {
+		if (sizes === null) return;
+		sizes.disconnect();
+		sizes.observe(frame);
+		for (const part of frame.querySelectorAll<HTMLElement>(':scope > [data-dialog-status], :scope > [data-dialog-foot]')) sizes.observe(part);
+	};
+	watchParts();
+	sync();
+	const parts = typeof MutationObserver === 'function' ? new MutationObserver(() => { watchParts(); sync(); }) : null;
+	parts?.observe(frame, { childList: true });
+	return () => { sizes?.disconnect(); parts?.disconnect(); };
+}
+
+/** Brings a marked part of the review into sight below the status line and above the foot. */
+export function bringIntoReview(frame: HTMLElement, el: HTMLElement): void {
+	syncScrollPadding(frame);
 	el.scrollIntoView?.({ block: 'nearest' });
 }

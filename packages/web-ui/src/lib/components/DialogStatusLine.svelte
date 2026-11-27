@@ -33,10 +33,14 @@
 		if (line === null) return;
 		const measure = (): void => { clipped = folded && line.scrollHeight > line.clientHeight + 1; };
 		measure();
-		if (typeof ResizeObserver !== 'function') return;
-		const watch = new ResizeObserver(measure);
-		watch.observe(line);
-		return () => watch.disconnect();
+		// Once more after the next paint: a new reason folds in the same pass, before its class is on.
+		const later = typeof requestAnimationFrame === 'function' ? requestAnimationFrame(measure) : null;
+		const watch = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+		watch?.observe(line);
+		return () => {
+			if (later !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(later);
+			watch?.disconnect();
+		};
 	});
 </script>
 

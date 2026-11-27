@@ -414,7 +414,7 @@ describe('the dialog', () => {
 		expect(document.activeElement).toBe(stepEls[1]);
 	});
 
-	it('after a change, the line stays in sight, the buttons too, and the changed step goes below the line', async () => {
+	it('after a change, the line stays in sight, the buttons too, and the changed step is brought into view clear of both', async () => {
 		const moved = FULL();
 		moved['expect'] = 'digest-2';
 		(moved['steps'] as Array<Record<string, unknown>>)[1]!['inputTemplate'] = { url: 'https://evil.example.invalid/post' };
@@ -424,6 +424,9 @@ describe('the dialog', () => {
 		// a browser with a high enough frame reports it.
 		const realStyle = window.getComputedStyle;
 		const realRect = Element.prototype.getBoundingClientRect;
+		const realScroll = Element.prototype.scrollIntoView;
+		const scrolled: Element[] = [];
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this); };
 		const held = (el: Element): number | null =>
 			el.hasAttribute('data-dialog-status') ? 64 : el.hasAttribute('data-dialog-foot') ? 52 : null;
 		window.getComputedStyle = ((el: Element) => {
@@ -440,6 +443,7 @@ describe('the dialog', () => {
 		} finally {
 			window.getComputedStyle = realStyle;
 			Element.prototype.getBoundingClientRect = realRect;
+			Element.prototype.scrollIntoView = realScroll;
 		}
 		const status = d.querySelector<HTMLElement>('[data-dialog-status]');
 		expect(status?.contains(d.querySelector('[data-testid="takeover-changed"]'))).toBe(true);
@@ -449,8 +453,11 @@ describe('the dialog', () => {
 		expect(foot!.className.split(/\s+/)).toEqual(expect.arrayContaining(['[@media(min-height:30rem)]:sticky', 'bg-bg', '[@media(min-height:30rem)]:border-t']));
 		const mark = d.querySelector<HTMLElement>('[data-stamp-changed]')!;
 		expect(document.activeElement).toBe(mark);
-		expect(mark.style.scrollMarginTop).toBe('72px');
-		expect(mark.style.scrollMarginBottom).toBe('60px');
+		// The frame's scroll padding is what the browser keeps clear, for this and for every Tab.
+		const frame = d.firstElementChild as HTMLElement;
+		expect(frame.style.scrollPaddingTop).toBe('72px');
+		expect(frame.style.scrollPaddingBottom).toBe('60px');
+		expect(scrolled).toContain(mark);
 	});
 
 	it('a later refusal of another kind puts the focus back at the head, not on the old mark', async () => {

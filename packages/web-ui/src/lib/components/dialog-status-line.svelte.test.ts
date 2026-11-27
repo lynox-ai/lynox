@@ -55,8 +55,9 @@ afterEach(() => {
 	if (component) unmount(component);
 	component = undefined;
 	target.remove();
-	if (realScroll) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', realScroll);
-	if (realClient) Object.defineProperty(HTMLElement.prototype, 'clientHeight', realClient);
+	// jsdom defines both on Element.prototype: removing the stubs from HTMLElement.prototype restores them.
+	if (realScroll) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', realScroll); else Reflect.deleteProperty(HTMLElement.prototype, 'scrollHeight');
+	if (realClient) Object.defineProperty(HTMLElement.prototype, 'clientHeight', realClient); else Reflect.deleteProperty(HTMLElement.prototype, 'clientHeight');
 });
 
 describe('the status line of a review dialog', () => {

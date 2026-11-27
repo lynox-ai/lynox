@@ -7,7 +7,7 @@
 	import DialogStatusLine from './DialogStatusLine.svelte';
 	import { FoldGroup } from '../utils/fold-group.svelte.js';
 	import { shownValue } from '../utils/plan-takeover.js';
-	import { DIALOG_FOOT_CLASS, bringIntoReview } from '../utils/dialog-sticky.js';
+	import { DIALOG_FOOT_CLASS, bringIntoReview, holdScrollPadding } from '../utils/dialog-sticky.js';
 	import { stampChanges, type StampChanges } from '../utils/workflow-stamp.js';
 	import {
 		markLine, parseWorkflowTakeoverPreview, refusalNamesSupport, stepConnectionNote, takeoverOutcome, takeoverRefusalText, workflowTakeoverLines,
@@ -37,6 +37,12 @@
 	let changes = $state<StampChanges | null>(null);
 	let generation = 0;
 	let dialog = $state<HTMLElement | null>(null);
+	// The scrolling frame: what scrolls into view in it stays clear of the parts that stay in sight.
+	let frame = $state<HTMLElement | null>(null);
+	$effect(() => {
+		if (frame === null) return;
+		return holdScrollPadding(frame);
+	});
 	let heading = $state<HTMLElement | null>(null);
 	let errorLine = $state<HTMLElement | null>(null);
 	let changedEl = $state<HTMLElement | null>(null);
@@ -173,7 +179,7 @@
 			if (dialog?.isConnected === true && keyIsOurs()) {
 				const mark = toMark ? dialog.querySelector<HTMLElement>('[data-stamp-changed]') : null;
 				(mark ?? heading)?.focus({ preventScroll: mark !== null });
-				if (mark) bringIntoReview(dialog, mark);
+				if (mark && frame) bringIntoReview(frame, mark);
 			}
 		}
 	}
@@ -190,7 +196,7 @@
 	tabindex="-1"
 	data-testid="takeover-dialog"
 >
-	<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
+	<div bind:this={frame} class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words"><MarkedLine text={tf('workflow_library.takeover.title', { name: shownValue(preview?.workflow.name ?? workflow.name) })} mono={false} /></h2>
 		{#if changedLine}
 			<DialogStatusLine text={changedLine} testid="takeover-changed" bind:el={changedEl} />

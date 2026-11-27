@@ -10,7 +10,7 @@
 	import WorkflowTakeoverDialog from './WorkflowTakeoverDialog.svelte';
 	import MarkedLine from './MarkedLine.svelte';
 	import DialogStatusLine from './DialogStatusLine.svelte';
-	import { DIALOG_FOOT_CLASS, bringIntoReview } from '../utils/dialog-sticky.js';
+	import { DIALOG_FOOT_CLASS, bringIntoReview, holdScrollPadding } from '../utils/dialog-sticky.js';
 	import { shownValue, shownWhole } from '../utils/plan-takeover.js';
 	import { contractLines } from '../utils/stamp-contract.js';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
@@ -457,6 +457,15 @@
 	$effect(() => {
 		stampHeading?.focus();
 	});
+	// The scrolling frame of the view: what scrolls into view in it stays clear of the parts that
+	// stay in sight.
+	let stampFrame = $state<HTMLElement | null>(null);
+	$effect(() => {
+		if (stampFrame === null) return;
+		return holdScrollPadding(stampFrame);
+	});
+	// What opened the view, so Cancel and Escape give the focus back to it.
+	let stampOpener: HTMLElement | null = null;
 
 	/** Loads the preview; true only when this load's preview is now the one on screen. */
 	async function loadStampPreview(wf: SavedWorkflow): Promise<boolean> {
@@ -487,10 +496,22 @@
 		stampOnceLine = '';
 		stampLine = line;
 		stampWf = wf;
+		const at = typeof document === 'undefined' ? null : document.activeElement;
+		stampOpener = at instanceof HTMLElement && at !== document.body ? at : null;
 		void loadStampPreview(wf);
 	}
 
+	// Cancel and Escape: the view closes and the focus goes back to what opened it, if it is still
+	// on the page. A stamp that went through closes with closeStamp alone: what comes next (the
+	// schedule dialog, the list) takes the focus.
+	function cancelStamp(): void {
+		const back = stampOpener;
+		closeStamp();
+		void tick().then(() => { if (back?.isConnected === true) back.focus(); });
+	}
+
 	function closeStamp(): void {
+		stampOpener = null;
 		stampOpening++;
 		stampGeneration++;
 		error = '';
@@ -528,8 +549,10 @@
 					// the frame is high enough (DialogStatusLine).
 					await tick();
 					const mark = stampDialog?.querySelector<HTMLElement>('[data-stamp-changed]');
-					mark?.focus({ preventScroll: true });
-					if (stampDialog && mark) bringIntoReview(stampDialog, mark);
+					// No marked part: the focus goes to the heading, not left where the disabled confirm
+					// dropped it, so the next Enter does not confirm the new version unread.
+					(mark ?? stampHeading)?.focus({ preventScroll: mark !== null });
+					if (stampFrame && mark) bringIntoReview(stampFrame, mark);
 				}
 				return;
 			}
@@ -1182,6 +1205,9 @@
 	</div>
 {/if}
 
+<!-- Escape once the focus fell to the page (a confirm that was turned off): the view is the only
+	 dialog open then, and the key is its. -->
+<svelte:window onkeydown={(e) => { if (stampWf && e.key === 'Escape' && (document.activeElement === null || document.activeElement === document.body)) cancelStamp(); }} />
 {#if stampWf}
 	<div
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
@@ -1191,9 +1217,9 @@
 		tabindex="-1"
 		data-testid="stamp-dialog"
 		bind:this={stampDialog}
-		onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); closeStamp(); } }}
+		onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); cancelStamp(); } }}
 	>
-		<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
+		<div bind:this={stampFrame} class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 			<!-- Where the owner approves the steps: a name a person with access gave is set apart, whole. -->
 			<h2 id="workflow-stamp-title" bind:this={stampHeading} tabindex="-1" class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
 			{#if stampLine === 'steps_changed'}
@@ -1222,7 +1248,7 @@
 
 			<div data-dialog-foot class={DIALOG_FOOT_CLASS}>
 				<button
-					onclick={closeStamp}
+					onclick={cancelStamp}
 					class="min-h-11 md:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg-muted px-3 py-1 text-xs text-text-muted hover:bg-bg transition-colors"
 				>{t('workflow_library.cancel')}</button>
 				<button

@@ -926,15 +926,15 @@ describe('the stamp says who else may answer its questions when it runs on a sch
 
 describe('the review keeps its reason and its buttons in sight', () => {
 	// jsdom lays nothing out: what stays in sight is read the way the view reads it, from the
-	// computed position, set here as a browser with a high enough frame reports it.
-	function holdInSight(statusHeight: number, footHeight: number): () => void {
+	// computed position and the box, set here as a browser reports them.
+	function layOut(statusHeight: number, footHeight: number, sticky: boolean): () => void {
 		const realStyle = window.getComputedStyle;
 		const realRect = Element.prototype.getBoundingClientRect;
 		const held = (el: Element): number | null =>
 			el.hasAttribute('data-dialog-status') ? statusHeight : el.hasAttribute('data-dialog-foot') ? footHeight : null;
 		window.getComputedStyle = ((el: Element) => {
 			const style = realStyle(el);
-			return held(el) === null ? style : ({ ...style, position: 'sticky' } as CSSStyleDeclaration);
+			return held(el) === null || !sticky ? style : ({ ...style, position: 'sticky' } as CSSStyleDeclaration);
 		}) as typeof window.getComputedStyle;
 		Element.prototype.getBoundingClientRect = function (this: Element) {
 			const h = held(this);
@@ -942,14 +942,44 @@ describe('the review keeps its reason and its buttons in sight', () => {
 		};
 		return () => { window.getComputedStyle = realStyle; Element.prototype.getBoundingClientRect = realRect; };
 	}
+	const frame = (): HTMLElement => q('stamp-dialog')!.firstElementChild as HTMLElement;
+	const changedTwice = (task = 'Send it somewhere else'): Record<string, Answer[]> => ({
+		'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }, { status: 200, body: preview('d2', task) }],
+		'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+	});
 
-	it('opening the view puts the focus on its heading, which names the dialog, and Escape closes it', async () => {
+	it('opening the view puts the focus on its heading, which names the dialog, and Escape closes it and gives the focus back', async () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
+		q('stamp-review')!.focus();
 		await click(q('stamp-review'));
 		const heading = target.querySelector<HTMLElement>('[data-stamp-review-title]');
 		expect(document.activeElement).toBe(heading);
 		expect(q('stamp-dialog')?.getAttribute('aria-labelledby')).toBe(heading?.id);
 		heading!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+		await settle();
+		expect(q('stamp-dialog')).toBeNull();
+		expect(document.activeElement).toBe(q('stamp-review'));
+	});
+
+	it('Cancel closes the view and gives the focus back to what opened it', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
+		q('stamp-review')!.focus();
+		await click(q('stamp-review'));
+		await click(byText('Abbrechen'));
+		expect(q('stamp-dialog')).toBeNull();
+		expect(document.activeElement).toBe(q('stamp-review'));
+	});
+
+	it('Escape still closes the view once the focus fell to the page', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 400, body: { code: 'expect_required' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		(document.activeElement as HTMLElement | null)?.blur();
+		expect(document.activeElement).toBe(document.body);
+		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
 		await settle();
 		expect(q('stamp-dialog')).toBeNull();
 	});
@@ -963,13 +993,10 @@ describe('the review keeps its reason and its buttons in sight', () => {
 		expect(cls).toEqual(expect.arrayContaining(['[@media(min-height:30rem)]:sticky', '[@media(min-height:30rem)]:-bottom-5', 'bg-bg', '[@media(min-height:30rem)]:border-t']));
 	});
 
-	it('after steps changed, the line stays in sight and the changed step is brought into view below it, focused', async () => {
-		await open('owner', WF, {
-			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }, { status: 200, body: preview('d2', 'Send it somewhere else') }],
-			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
-		});
+	it('after steps changed, the line stays in sight and the changed step is focused and brought into view clear of the line and the foot', async () => {
+		await open('owner', WF, changedTwice());
 		await click(q('stamp-review'));
-		const restore = holdInSight(64, 52);
+		const restore = layOut(64, 52, true);
 		try {
 			await click(q('stamp-confirm'));
 		} finally {
@@ -981,23 +1008,34 @@ describe('the review keeps its reason and its buttons in sight', () => {
 		const mark = q('stamp-dialog')!.querySelector<HTMLElement>('[data-stamp-changed]');
 		expect(mark).not.toBeNull();
 		expect(document.activeElement).toBe(mark);
-		// Below the line and above the foot, so neither covers it.
-		expect(mark!.style.scrollMarginTop).toBe('72px');
-		expect(mark!.style.scrollMarginBottom).toBe('60px');
+		// The frame's scroll padding is what the browser keeps clear, for this and for every Tab.
+		expect(frame().style.scrollPaddingTop).toBe('72px');
+		expect(frame().style.scrollPaddingBottom).toBe('60px');
 		expect(scrolled).toContain(mark);
 	});
 
-	it('where nothing stays in sight, the changed step is brought into view without a margin for it', async () => {
-		await open('owner', WF, {
-			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }, { status: 200, body: preview('d2', 'Send it somewhere else') }],
-			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
-		});
+	it('parts that scroll with the frame keep nothing clear, however high they are', async () => {
+		await open('owner', WF, changedTwice());
+		await click(q('stamp-review'));
+		const restore = layOut(64, 52, false);
+		try {
+			await click(q('stamp-confirm'));
+		} finally {
+			restore();
+		}
+		const mark = q('stamp-dialog')!.querySelector<HTMLElement>('[data-stamp-changed]');
+		expect(frame().style.scrollPaddingTop).toBe('');
+		expect(frame().style.scrollPaddingBottom).toBe('');
+		expect(scrolled).toContain(mark);
+	});
+
+	it('a reload that marks nothing puts the focus on the heading, not on the confirm', async () => {
+		await open('owner', WF, changedTwice('Send the report'));
 		await click(q('stamp-review'));
 		await click(q('stamp-confirm'));
-		const mark = q('stamp-dialog')!.querySelector<HTMLElement>('[data-stamp-changed]');
-		expect(mark!.style.scrollMarginTop).toBe('8px');
-		expect(mark!.style.scrollMarginBottom).toBe('8px');
-		expect(scrolled).toContain(mark);
+		expect(q('stamp-line')).not.toBeNull();
+		expect(q('stamp-dialog')!.querySelector('[data-stamp-changed]')).toBeNull();
+		expect(document.activeElement).toBe(target.querySelector('[data-stamp-review-title]'));
 	});
 
 	it('an error in the view carries no role: the error state is the library\'s, and may be another run\'s', async () => {
