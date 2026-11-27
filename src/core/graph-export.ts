@@ -217,11 +217,17 @@ export const MEMORY_TEXTS_RELATIONSHIPS_NOTE = 'source_deleted: 1 when the memor
 type ExportRow = Record<string, unknown>;
 
 export interface HeldMemoryTexts {
-  /** The legacy store: each remembered text, and which entity it mentions. */
-  'agent-memory.db': { memories: ExportRow[]; mentions: ExportRow[] };
-  /** The subject-graph store: each remembered text, which subject it is about, and every
-   * relation between subjects, those of a kind the graph block does not list included. */
-  'engine.db': { memories: ExportRow[]; memory_subjects: ExportRow[]; relationships: ExportRow[]; relationships_note: string };
+  /** The legacy store: each remembered text, which entity it mentions, which text replaced which
+   * (with its reason), which entities appear together, and the counters kept per text. */
+  'agent-memory.db': { memories: ExportRow[]; mentions: ExportRow[]; supersedes: ExportRow[]; cooccurrences: ExportRow[]; metrics: ExportRow[] };
+  /** The subject-graph store: each remembered text, which subject it is about, every relation
+   * between subjects (those of a kind the graph block does not list included), which text
+   * replaced which, which subjects appear together, and in which conversation each subject was
+   * first made. */
+  'engine.db': {
+    memories: ExportRow[]; memory_subjects: ExportRow[]; relationships: ExportRow[]; relationships_note: string;
+    supersedes: ExportRow[]; subject_cooccurrences: ExportRow[]; subject_mints: ExportRow[];
+  };
   /** Not the whole of what is held: a read failed or was cut at the cap, a text could not be
    * decrypted, agent-memory.db has a newer schema than this build, or engine.db is not open. */
   mayBeIncomplete: boolean;
@@ -232,7 +238,8 @@ export interface HeldMemoryTexts {
  * Active or not: a text that was replaced or retired is still stored, and Art. 15 asks what is
  * held. Each row carries its stored columns except the embedding (numbers, no content of their
  * own), which is not even read. Every text, and a relationship's free-text description and
- * notes, goes through `mask`, as the other blocks do; engine.db texts are decrypted first, and
+ * notes, and the reason one text replaced another, goes through `mask`, as the other blocks do;
+ * engine.db texts are decrypted first, and
  * one that cannot be, or is not stored as text at all, is written as
  * {@link UNREADABLE_MEMORY_TEXT}, never as what is stored.
  *
@@ -282,7 +289,7 @@ export function readMemoryTextsForExport(opts: {
     return { ...row, text: UNREADABLE_MEMORY_TEXT };
   };
 
-  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [] };
+  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [] };
   let legacy: Database.Database | null = null;
   try {
     if (existsSync(opts.agentMemoryFile)) {
@@ -293,6 +300,10 @@ export function readMemoryTextsForExport(opts: {
         legacyHalf.memories = read(legacy, 'memories', '', 't.created_at, t.id', 'agent-memory.db memories')
           .map(row => typeof row['text'] === 'string' ? maskField(row, 'text') : unreadable(row));
         legacyHalf.mentions = read(legacy, 'mentions', '', 't.created_at, t.memory_id, t.entity_id', 'agent-memory.db mentions');
+        legacyHalf.supersedes = read(legacy, 'supersedes', '', 't.created_at, t.new_memory_id, t.old_memory_id', 'agent-memory.db supersedes')
+          .map(row => maskField(row, 'reason'));
+        legacyHalf.cooccurrences = read(legacy, 'cooccurrences', '', 't.last_seen_at, t.entity_a_id, t.entity_b_id', 'agent-memory.db cooccurrences');
+        legacyHalf.metrics = read(legacy, 'metrics', '', 't.computed_at, t.id', 'agent-memory.db metrics');
       }
     }
   } catch {
@@ -302,7 +313,10 @@ export function readMemoryTextsForExport(opts: {
     try { legacy?.close(); } catch { /* ignore */ }
   }
 
-  const engineHalf: HeldMemoryTexts['engine.db'] = { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE };
+  const engineHalf: HeldMemoryTexts['engine.db'] = {
+    memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE,
+    supersedes: [], subject_cooccurrences: [], subject_mints: [],
+  };
   if (opts.engineDb) {
     const engineDb = opts.engineDb;
     const db = engineDb.getDb();
@@ -317,6 +331,10 @@ export function readMemoryTextsForExport(opts: {
     engineHalf.memory_subjects = read(db, 'memory_subjects', '', 't.created_at, t.memory_id, t.subject_id', 'engine.db memory_subjects');
     engineHalf.relationships = read(db, 'relationships', `, CASE WHEN ${sourceDeletedSql('t')} THEN 1 ELSE 0 END AS source_deleted`, 't.created_at, t.id', 'engine.db relationships')
       .map(row => maskField(maskField(row, 'description'), 'notes'));
+    engineHalf.supersedes = read(db, 'supersedes', '', 't.created_at, t.new_memory_id, t.old_memory_id', 'engine.db supersedes')
+      .map(row => maskField(row, 'reason'));
+    engineHalf.subject_cooccurrences = read(db, 'subject_cooccurrences', '', 't.last_seen_at, t.subject_a_id, t.subject_b_id', 'engine.db subject_cooccurrences');
+    engineHalf.subject_mints = read(db, 'subject_mints', '', 't.minted_at, t.subject_id', 'engine.db subject_mints');
   } else {
     // No engine.db: what it holds was not read, and cannot be shown to be nothing.
     incomplete = true;
@@ -330,8 +348,6 @@ export function readMemoryTextsForExport(opts: {
  *  - engine.db subjects the graph block does not list: with the subject graph on, archived ones
  *    and those of a kind it maps to no entity; with it off, every subject, since the block is
  *    then read from agent-memory.db;
- *  - engine.db `supersedes`, `subject_cooccurrences` and `subject_mints`, and agent-memory.db
- *    `supersedes` and `cooccurrences`, which no block carries on either setting;
  *  - with the subject graph on, agent-memory.db entities and relations, since the block is then
  *    read from engine.db; with it off, relations neither of whose entities is stored, since the
  *    block collects relations through their entities.
@@ -350,10 +366,6 @@ export function graphHoldsRowsNotExported(opts: {
     const all = subjects.count({ includeArchived: true });
     const listed = opts.subjectGraph ? subjects.count({ kinds: ENTITY_MAPPABLE_SUBJECT_KINDS }) : 0;
     if (all > listed) return true;
-    const engineRows = opts.engineDb.getDb().prepare(
-      'SELECT (SELECT COUNT(*) FROM supersedes) + (SELECT COUNT(*) FROM subject_cooccurrences) + (SELECT COUNT(*) FROM subject_mints) AS n',
-    ).get() as { n: number };
-    if (engineRows.n > 0) return true;
   } catch {
     return true;
   }
@@ -365,9 +377,7 @@ export function graphHoldsRowsNotExported(opts: {
     const graphRows = opts.subjectGraph
       ? '(SELECT COUNT(*) FROM entities) + (SELECT COUNT(*) FROM relations)'
       : '(SELECT COUNT(*) FROM relations r WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE e.id IN (r.from_entity_id, r.to_entity_id)))';
-    const rows = legacy.prepare(
-      `SELECT (SELECT COUNT(*) FROM supersedes) + (SELECT COUNT(*) FROM cooccurrences) + ${graphRows} AS n`,
-    ).get() as { n: number };
+    const rows = legacy.prepare(`SELECT ${graphRows} AS n`).get() as { n: number };
     return rows.n > 0;
   } catch {
     return true;

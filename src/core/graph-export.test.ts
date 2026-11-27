@@ -287,6 +287,40 @@ describe('readMemoryTextsForExport', () => {
     return { oldId, newId, entity };
   }
 
+  it('carries the link and history tables of both stores, row by row, the reason a text was replaced masked', () => {
+    const { oldId, newId, entity } = seedLegacy();
+    const legacy = new AgentMemoryDb(file);
+    const other = legacy.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'global' });
+    legacy.upsertMetric({ metricName: 'kg_extraction_refused', value: 2, sampleCount: 2, scopeType: 'memory', scopeId: oldId });
+    legacy.close();
+    const legacyRaw = new Database(file);
+    try {
+      legacyRaw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason, created_at) VALUES (?, ?, 'it said hunter2', '2026-01-01')").run(newId, oldId);
+      legacyRaw.prepare("INSERT INTO cooccurrences (entity_a_id, entity_b_id, count, last_seen_at) VALUES (?, ?, 3, '2026-01-01')").run(entity, other);
+    } finally {
+      legacyRaw.close();
+    }
+    const subjects = new SubjectStore(engineDb);
+    const a = subjects.createSubject({ kind: 'person', name: 'A' });
+    const b = subjects.createSubject({ kind: 'service', name: 'B' });
+    const raw = engineDb.getDb();
+    raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('o', ?, 'knowledge', 'global', 'global'), ('n', ?, 'knowledge', 'global', 'global')").run(engineDb.enc('old'), engineDb.enc('new'));
+    raw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason) VALUES ('n', 'o', 'was hunter2')").run();
+    raw.prepare('INSERT INTO subject_cooccurrences (subject_a_id, subject_b_id, count) VALUES (?, ?, 4)').run(a, b);
+    raw.prepare("INSERT INTO subject_mints (subject_id, thread_id) VALUES (?, 'thread-1')").run(a);
+
+    const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    const l = texts['agent-memory.db'];
+    expect(l.supersedes.map(r => [r['new_memory_id'], r['old_memory_id'], r['reason']]), 'agent-memory.db supersedes, masked').toEqual([[newId, oldId, 'it said [masked]']]);
+    expect(l.cooccurrences.map(r => [r['entity_a_id'], r['entity_b_id'], r['count']]), 'agent-memory.db cooccurrences').toEqual([[entity, other, 3]]);
+    expect(l.metrics.map(r => [r['metric_name'], r['scope_type'], r['scope_id'], r['value']]), 'agent-memory.db metrics').toEqual([['kg_extraction_refused', 'memory', oldId, 2]]);
+    const e = texts['engine.db'];
+    expect(e.supersedes.map(r => [r['new_memory_id'], r['old_memory_id'], r['reason']]), 'engine.db supersedes, masked').toEqual([['n', 'o', 'was [masked]']]);
+    expect(e.subject_cooccurrences.map(r => [r['subject_a_id'], r['subject_b_id'], r['count']]), 'engine.db subject_cooccurrences').toEqual([[a, b, 4]]);
+    expect(e.subject_mints.map(r => [r['subject_id'], r['thread_id']]), 'engine.db subject_mints').toEqual([[a, 'thread-1']]);
+    expect(texts.mayBeIncomplete, 'read in full').toBe(false);
+  });
+
   it('reads every remembered text and mention of agent-memory.db, a replaced one included, masked, without the embedding', () => {
     const { oldId, newId, entity } = seedLegacy();
     const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
@@ -333,7 +367,7 @@ describe('readMemoryTextsForExport', () => {
     const before = fileState(file);
 
     const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
-    expect(texts['agent-memory.db'], 'a newer schema is not guessed at').toEqual({ memories: [], mentions: [] });
+    expect(texts['agent-memory.db'], 'a newer schema is not guessed at').toEqual({ memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [] });
     expect(texts['engine.db'].memories.map(m => m['text'])).toEqual(['Bob is in Bern']);
     expect(texts.mayBeIncomplete).toBe(true);
     const after = fileState(file);
@@ -438,7 +472,7 @@ describe('readMemoryTextsForExport', () => {
     seedLegacy();
     const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb: null, mask });
     expect(texts['agent-memory.db'].memories).toHaveLength(2);
-    expect(texts['engine.db']).toEqual({ memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE });
+    expect(texts['engine.db']).toEqual({ memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE, supersedes: [], subject_cooccurrences: [], subject_mints: [] });
     expect(texts.mayBeIncomplete, 'what engine.db holds was not read').toBe(true);
   });
 
@@ -460,8 +494,8 @@ describe('readMemoryTextsForExport', () => {
   it('reads a fresh instance that holds no texts as complete, and creates no agent-memory.db', () => {
     const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
     expect(texts).toEqual({
-      'agent-memory.db': { memories: [], mentions: [] },
-      'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE },
+      'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [] },
+      'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE, supersedes: [], subject_cooccurrences: [], subject_mints: [] },
       mayBeIncomplete: false,
     });
     expect(existsSync(file)).toBe(false);
@@ -532,52 +566,39 @@ describe('graphHoldsRowsNotExported', () => {
     expect(held(false)).toBe(true);
   });
 
-  it('finds the engine.db tables no block carries, one at a time: supersedes, subject co-occurrences, subject mints', () => {
+  it('no longer counts the engine.db link and history tables, which the export now carries: supersedes, subject co-occurrences, subject mints', () => {
     const subjects = new SubjectStore(engineDb);
     const a = subjects.createSubject({ kind: 'person', name: 'A' });
     const b = subjects.createSubject({ kind: 'person', name: 'B' });
     const raw = engineDb.getDb();
-    expect(held(true), 'fixture: listed subjects only').toBe(false);
-
     raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('o', 't', 'knowledge', 'global', 'global'), ('n', 't', 'knowledge', 'global', 'global')").run();
-    expect(held(true), 'fixture: memories are carried').toBe(false);
     raw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason) VALUES ('n', 'o', 'newer')").run();
-    expect(held(true), 'supersedes').toBe(true);
-    raw.prepare('DELETE FROM supersedes').run();
-
+    expect(held(true), 'supersedes').toBe(false);
     raw.prepare('INSERT INTO subject_cooccurrences (subject_a_id, subject_b_id) VALUES (?, ?)').run(a, b);
-    expect(held(true), 'subject_cooccurrences').toBe(true);
-    raw.prepare('DELETE FROM subject_cooccurrences').run();
-
+    expect(held(true), 'subject_cooccurrences').toBe(false);
     raw.prepare("INSERT INTO subject_mints (subject_id, thread_id) VALUES (?, 't1')").run(a);
-    expect(held(true), 'subject_mints').toBe(true);
-    raw.prepare('DELETE FROM subject_mints').run();
-    expect(held(true), 'all removed again').toBe(false);
+    expect(held(true), 'subject_mints').toBe(false);
+    subjects.archiveSubject(b);
+    expect(held(true), 'control: an archived subject still counts').toBe(true);
   });
 
-  it('finds the agent-memory.db tables no block carries, with the subject graph off where nothing else counts: supersedes and co-occurrences', () => {
+  it('no longer counts the agent-memory.db link and history tables, which the export now carries: supersedes, co-occurrences, metrics', () => {
     const db = new AgentMemoryDb(file);
     db.setEmbeddingDimensions(3);
     const { alice, acme } = seedGraph(db);
     const o = db.createMemory({ text: 'old', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0] });
     const n = db.createMemory({ text: 'new', namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [0, 1, 0] });
+    db.upsertMetric({ metricName: 'kg_extraction_refused', value: 1, sampleCount: 1, scopeType: 'memory', scopeId: o });
     db.close();
-    expect(held(false), 'fixture: entities, relations and texts are carried with the subject graph off').toBe(false);
     const raw = new Database(file);
     try {
       raw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason, created_at) VALUES (?, ?, 'newer', '2026-01-01')").run(n, o);
-      // With the subject graph on the seeded entities count already; the table counts on either
-      // setting, so the setting where nothing else counts is the one that proves it.
-      expect(held(false), 'supersedes').toBe(true);
-      raw.prepare('DELETE FROM supersedes').run();
-
       raw.prepare("INSERT INTO cooccurrences (entity_a_id, entity_b_id, last_seen_at) VALUES (?, ?, '2026-01-01')").run(alice, acme);
-      expect(held(false), 'cooccurrences').toBe(true);
-      raw.prepare('DELETE FROM cooccurrences').run();
-      expect(held(false), 'all removed again').toBe(false);
+      expect(raw.prepare('SELECT (SELECT COUNT(*) FROM supersedes) + (SELECT COUNT(*) FROM cooccurrences) + (SELECT COUNT(*) FROM metrics) AS n').get(), 'fixture: a row in each').toEqual({ n: 3 });
     } finally {
       raw.close();
     }
+    expect(held(false), 'with the subject graph off, where nothing else counts').toBe(false);
   });
 
   it('with the subject graph off, finds a relation neither of whose entities is stored, and not one the block reaches', () => {
