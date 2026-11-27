@@ -628,6 +628,10 @@ export const APPROVING_KEY: { readonly [K in ConsentKind]: (typeof CONSENT_KEYS)
   apply: 'apply',
   retire: 'retire',
   plan: 'proceed',
+  // The widest approving answer, as `guard` approves with `allow`: formulas written after
+  // outside content are a way out, and writing them as text would not count it.
+  formula: 'as-formulas',
+  'formula-text': 'as-text',
 };
 
 /**

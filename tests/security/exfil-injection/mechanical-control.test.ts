@@ -285,6 +285,11 @@ describe('mechanical control — the owner who approves', () => {
     expect(approvingAnswer(undefined)).toBe('Yes');
   });
 
+  it('approves the Sheets formula question with formulas, the widest answer, and its text-only twin with text', () => {
+    expect(decideConsent('formula', approvingAnswer({ consent: 'formula' }))).toBe('as-formulas');
+    expect(decideConsent('formula-text', approvingAnswer({ consent: 'formula-text' }))).toBe('as-text');
+  });
+
   it('answers a blocked question in a worker run as the worker does, and approves it for someone watching the web UI', () => {
     expect(approvingAnswer({ consent: 'guard', blocked: true }, true)).toBe(UNATTENDED_BLOCK_ANSWER);
     expect(approvingAnswer({ consent: 'guard', blocked: true }, false)).toBe('allow');
