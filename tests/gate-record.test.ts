@@ -3813,3 +3813,74 @@ describe('gate-record CLI — `main` judges agent-awareness from git, and only w
     } finally { rmSync(r.dir, { recursive: true, force: true }); }
   });
 });
+
+describe('agent-awareness: every registration form the code uses (review round 1)', () => {
+  const B = 'b'.repeat(40);
+  const H = 'c'.repeat(40);
+  const SERVER = 'src/server/http-api.ts';
+  const reader = (tree: Record<string, Record<string, string>>) => (sha: string, path: string): string | null => tree[sha]?.[path] ?? null;
+  const adds = (base: string, head: string) => agentAwarenessOwed({ files: [SERVER], base: B, head: H, read: reader({ [B]: { [SERVER]: base }, [H]: { [SERVER]: head } }) }).adds;
+  const KNOWN = "this.addStatic('user', 'GET /api/threads', h);\n";
+
+  it('addStatic and addCpAdminRoute routes are additions', () => {
+    expect(adds(KNOWN, KNOWN + "this.addStatic('user', 'GET /api/approvals', h);\nthis.addCpAdminRoute('POST /api/auth/owner-sessions/end', h);\n")).toEqual([
+      `${SERVER} adds the route \`GET /api/approvals\``,
+      `${SERVER} adds the route \`POST /api/auth/owner-sessions/end\``,
+    ]);
+  });
+
+  it('a path in backticks is an addition, keyed by its literal text', () => {
+    expect(adds(KNOWN, KNOWN + 'this.dynamicRoutes.push(parseDynamicRoute(\'user\', \'POST\', `/api/bulk/runs/:id/${verb}`, h));\n'))
+      .toEqual([`${SERVER} adds the route \`POST /api/bulk/runs/:id/\${verb}\``]);
+  });
+
+  it('a route that only changes its registration style is not new', () => {
+    expect(adds("this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads', h));\n", KNOWN)).toEqual([]);
+  });
+
+  it('a tool whose name is a constant is an addition, keyed by the constant', () => {
+    const F = 'src/orchestrator/runtime-adapter.ts';
+    const r = agentAwarenessOwed({ files: [F], base: B, head: H, read: reader({
+      [B]: { [F]: 'const x = 1;\n' },
+      [H]: { [F]: 'const t = { definition: {\n  name: FAIL_STEP_TOOL_NAME,\n} };\n' },
+    }) });
+    expect(r.adds).toEqual([`${F} adds the tool \`FAIL_STEP_TOOL_NAME\``]);
+  });
+
+  it('a name git printed quoted is unjudged, never silently skipped', () => {
+    const r = agentAwarenessOwed({ files: ['"src/tools/builtin/\\303\\244.ts"'], base: B, head: H, read: reader({}) });
+    expect(r.adds).toEqual([]);
+    expect(r.unjudged).toContain('quoted');
+  });
+});
+
+describe('agent-awareness: the line, review round 1', () => {
+  const owed = { adds: ['src/server/http-api.ts adds the route `GET /api/approvals`'] };
+
+  it.each(['not needed — only the operator calls it', 'not needed - only the operator calls it', 'bewusst nicht — Betreiber'])('the dash the ux line teaches is a separator too: %s', (v) => {
+    expect(agentAwarenessWarnings(v, owed)).toEqual([]);
+  });
+
+  it('`updated` with only a separator says it names no kind', () => {
+    const w = agentAwarenessWarnings('updated ,', owed);
+    expect(w).toHaveLength(1);
+    expect(w[0]).toContain('names no kind');
+  });
+
+  const ux = { line: true, review: false, why: [] as string[] };
+  const files = ['src/server/http-api.ts'];
+  const SEC = { gates: 'code-review, delta, security', security: 'own round (opus), no findings', ux: 'not user-facing — a route' };
+
+  it('a MALFORMED line through evaluate: ok, with the warning, not an error', () => {
+    const v = evaluate({ body: record({ ...SEC, 'agent-awareness': 'the agent knows' }), head: HEAD, files, visibility: 'private', ux, agentAwareness: owed });
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    expect(v.warnings?.join('\n')).toContain('is not one of the two forms');
+  });
+
+  it('the warning stays when the record fails for another reason', () => {
+    const v = evaluate({ body: record({ ...SEC, ux: '' }), head: HEAD, files, visibility: 'private', ux, agentAwareness: owed });
+    expect(v.ok).toBe(false);
+    expect(v.warnings?.join('\n')).toContain('adds the route `GET /api/approvals`');
+    expect(v.errors?.join('\n')).not.toContain('agent-awareness');
+  });
+});

@@ -604,8 +604,8 @@ export function uxErrors(raw, ux, visibility) {
 /**
  * ── agent-awareness: does the agent know what this diff ships? ─────────────────
  *
- * A capability can reach a customer before the agent knows it: a bulk run shipped, the agent was
- * never told, and it sent the customer to look in the wrong place. So a diff that adds a TOOL, a
+ * A capability can reach a user before the agent knows it, and then the agent answers as if the
+ * capability did not exist or points to the wrong place. So a diff that adds a TOOL, a
  * ROUTE or a UI PAGE says, on an `agent-awareness:` line, whether the agent was told:
  *   · `agent-awareness: updated <briefing|catalog|tool-text>` (more than one: `briefing, tool-text`);
  *   · `agent-awareness: not needed: <reason>`. The reason carries the trade-off: telling the agent
@@ -629,14 +629,21 @@ const AA_TEST = [/\.(?:test|spec)\.[cm]?[jt]sx?$/, /^tests\//, /\/__tests__\//];
 const AA_TOOL_FILE = /^src\/.+\.ts$/;
 const AA_ROUTE_FILE = /^src\/server\/.+\.ts$/;
 const AA_PAGE_FILE = /^packages\/web-ui\/src\/routes\/(?:.+\/)?\+page\.svelte$/;
-const AA_TOOL = /definition:\s*\{\s*name:\s*['"]([A-Za-z0-9_-]+)['"]/g;
+const AA_TOOL = /definition:\s*\{\s*name:\s*(?:['"`]([A-Za-z0-9_-]+)['"`]|([A-Z][A-Z0-9_]*)\b)/g;
+// Every way http-api.ts registers a route, keyed `METHOD path` (or the bare path for a
+// `pathname ===` check), so a route that moves between styles stays quiet. Any quote: a path in
+// backticks is keyed by its literal text, `${…}` included.
+const AA_Q = '[\'"`]';
 const AA_ROUTES = [
-  /parseDynamicRoute\(\s*'[a-z]+'\s*,\s*'([A-Z]+)'\s*,\s*'([^']+)'/g,
-  /pathname\s*===\s*'(\/api\/[^']+)'/g,
+  new RegExp(`(?:parseDynamicRoute|addDynamic)\\(\\s*${AA_Q}[a-z]+${AA_Q}\\s*,\\s*${AA_Q}([A-Z]+)${AA_Q}\\s*,\\s*${AA_Q}([^'"\`]+)${AA_Q}`, 'g'),
+  new RegExp(`addStatic\\(\\s*${AA_Q}[a-z]+${AA_Q}\\s*,\\s*${AA_Q}([A-Z]+) ([^'"\`]+)${AA_Q}`, 'g'),
+  new RegExp(`addCpAdminRoute\\(\\s*${AA_Q}([A-Z]+) ([^'"\`]+)${AA_Q}`, 'g'),
+  new RegExp(`pathname\\s*===\\s*${AA_Q}(\\/api\\/[^'"\`]+)${AA_Q}`, 'g'),
 ];
 
 function aaToolNames(text) {
-  return new Set([...String(text ?? '').matchAll(AA_TOOL)].map((m) => m[1]));
+  // A literal name, or the constant that holds it (`name: FAIL_STEP_TOOL_NAME`), keyed by its text.
+  return new Set([...String(text ?? '').matchAll(AA_TOOL)].map((m) => m[1] ?? m[2]));
 }
 
 function aaRoutes(text) {
@@ -652,7 +659,9 @@ function aaRoutes(text) {
  *   naming its file; `unjudged`: why nothing could be judged (no base, a file that cannot be read).
  */
 export function agentAwarenessOwed({ files, base, head, read }) {
-  const code = files.filter((f) => !AA_TEST.some((p) => p.test(f)) && !isQuotedPath(f));
+  const quoted = files.find((f) => isQuotedPath(f));
+  if (quoted) return { adds: [], unjudged: `${quoted} is a name git printed quoted, so it could not be read` };
+  const code = files.filter((f) => !AA_TEST.some((p) => p.test(f)));
   const relevant = code.filter((f) => AA_TOOL_FILE.test(f) || AA_ROUTE_FILE.test(f) || AA_PAGE_FILE.test(f));
   if (relevant.length === 0) return { adds: [] };
   if (!base || !head) return { adds: [], unjudged: `without \`--base\` and \`--head\` nothing can tell what ${relevant[0]} adds` };
@@ -706,9 +715,10 @@ export function agentAwarenessWarnings(raw, owed) {
     const parts = updated[1].split(/\s*(?:,|\+|\band\b|\bund\b)\s*/i).filter(Boolean);
     const bad = parts.filter((p) => !AA_KINDS.has(p.toLowerCase()));
     if (parts.length > 0 && bad.length === 0) return out;
-    return [`\`agent-awareness: ${value}\` names ${bad.length ? `\`${bad.join(', ')}\`, which is` : 'nothing that is'} not one of briefing, catalog, tool-text. Write ${forms}.`];
+    return [`\`agent-awareness: ${value}\` names ${bad.length ? `\`${bad.join(', ')}\`, which is not one of briefing, catalog, tool-text` : 'no kind (briefing, catalog or tool-text)'}. Write ${forms}.`];
   }
-  const notNeeded = /^(?:not needed|bewusst nicht)\s*:\s*(.*)$/i.exec(value);
+  // `:`, or the dash the `ux:` line teaches (`not user-facing — <reason>`).
+  const notNeeded = /^(?:not needed|bewusst nicht)\s*(?::|—|–|-)\s*(.*)$/i.exec(value);
   if (notNeeded) {
     if (notNeeded[1].trim().length > 0) return out;
     return [`\`agent-awareness: ${value}\` names no reason. Write \`agent-awareness: not needed: <why the agent need not know>\`.`];
