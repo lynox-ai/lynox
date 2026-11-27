@@ -602,6 +602,121 @@ export function uxErrors(raw, ux, visibility) {
 }
 
 /**
+ * ── agent-awareness: does the agent know what this diff ships? ─────────────────
+ *
+ * A capability can reach a customer before the agent knows it: a bulk run shipped, the agent was
+ * never told, and it sent the customer to look in the wrong place. So a diff that adds a TOOL, a
+ * ROUTE or a UI PAGE says, on an `agent-awareness:` line, whether the agent was told:
+ *   · `agent-awareness: updated <briefing|catalog|tool-text>` (more than one: `briefing, tool-text`);
+ *   · `agent-awareness: not needed: <reason>`. The reason carries the trade-off: telling the agent
+ *     about a capability can widen what an injected instruction reaches.
+ * The German forms (`nachgeführt`, `Katalog`, `Tool-Text`, `bewusst nicht:`) are aliases.
+ *
+ * WARNING ONLY. A missing or malformed line prints a `::warning::` naming the trigger file, and
+ * the check still passes. It becomes required only after two weeks of warnings have been counted
+ * against false alarms, and only on the owner's word.
+ *
+ * What counts as "adds", each judged between the merge base and the head of the files the diff
+ * touches, tests left out:
+ *   · a TOOL: a tool name in `definition: { name: '<name>'` under src/ that none of the touched
+ *     files had at the base. A new tool in an existing file counts; a tool moved or a file renamed
+ *     does not, since the name was there before;
+ *   · a ROUTE: a new `parseDynamicRoute('<role>', '<METHOD>', '<path>'` or `pathname === '/api/…'`
+ *     under src/server/;
+ *   · a UI PAGE: a `+page.svelte` under packages/web-ui/src/routes/ that the base does not have.
+ */
+const AA_TEST = [/\.(?:test|spec)\.[cm]?[jt]sx?$/, /^tests\//, /\/__tests__\//];
+const AA_TOOL_FILE = /^src\/.+\.ts$/;
+const AA_ROUTE_FILE = /^src\/server\/.+\.ts$/;
+const AA_PAGE_FILE = /^packages\/web-ui\/src\/routes\/(?:.+\/)?\+page\.svelte$/;
+const AA_TOOL = /definition:\s*\{\s*name:\s*['"]([A-Za-z0-9_-]+)['"]/g;
+const AA_ROUTES = [
+  /parseDynamicRoute\(\s*'[a-z]+'\s*,\s*'([A-Z]+)'\s*,\s*'([^']+)'/g,
+  /pathname\s*===\s*'(\/api\/[^']+)'/g,
+];
+
+function aaToolNames(text) {
+  return new Set([...String(text ?? '').matchAll(AA_TOOL)].map((m) => m[1]));
+}
+
+function aaRoutes(text) {
+  const out = new Set();
+  for (const re of AA_ROUTES) for (const m of String(text ?? '').matchAll(re)) out.add(m.slice(1).join(' '));
+  return out;
+}
+
+/**
+ * What this diff adds that the agent may need to know. `read(sha, path)` as for `uxOwed`.
+ *
+ * @returns {{ adds: string[], unjudged?: string }} `adds`: one entry per tool, route or page, each
+ *   naming its file; `unjudged`: why nothing could be judged (no base, a file that cannot be read).
+ */
+export function agentAwarenessOwed({ files, base, head, read }) {
+  const code = files.filter((f) => !AA_TEST.some((p) => p.test(f)) && !isQuotedPath(f));
+  const relevant = code.filter((f) => AA_TOOL_FILE.test(f) || AA_ROUTE_FILE.test(f) || AA_PAGE_FILE.test(f));
+  if (relevant.length === 0) return { adds: [] };
+  if (!base || !head) return { adds: [], unjudged: `without \`--base\` and \`--head\` nothing can tell what ${relevant[0]} adds` };
+  const at = {};
+  for (const f of relevant) {
+    try {
+      at[f] = { base: read(base, f), head: read(head, f) };
+    } catch (e) {
+      return { adds: [], unjudged: `cannot read ${f}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+  const adds = [];
+  // Names are compared across ALL touched files, so a tool or route that only moved between
+  // files is not new.
+  for (const [kind, fileRe, names] of [['tool', AA_TOOL_FILE, aaToolNames], ['route', AA_ROUTE_FILE, aaRoutes]]) {
+    const files = relevant.filter((f) => fileRe.test(f));
+    const before = new Set(files.flatMap((f) => [...names(at[f].base)]));
+    for (const f of files) {
+      for (const n of names(at[f].head)) {
+        if (!before.has(n)) { adds.push(`${f} adds the ${kind} \`${n}\``); before.add(n); }
+      }
+    }
+  }
+  for (const f of relevant.filter((p) => AA_PAGE_FILE.test(p))) {
+    if (at[f].base === null && at[f].head !== null) adds.push(`${f} adds a UI page`);
+  }
+  return { adds };
+}
+
+const AA_KINDS = new Map([
+  ['briefing', 'briefing'], ['catalog', 'catalog'], ['katalog', 'catalog'], ['tool-text', 'tool-text'],
+]);
+
+/**
+ * What is wrong with the `agent-awareness:` line, as WARNINGS. Pure.
+ * @param {string | undefined} raw the field's value, `undefined` when the record has no such line
+ * @param {{ adds: string[], unjudged?: string }} owed
+ */
+export function agentAwarenessWarnings(raw, owed) {
+  const value = raw === undefined ? undefined : String(raw).trim();
+  const forms = '`agent-awareness: updated <briefing|catalog|tool-text>` or `agent-awareness: not needed: <reason>`';
+  const out = [];
+  if (value === undefined || value === '') {
+    if (owed.adds.length > 0) {
+      out.push(`agent-awareness: ${owed.adds.join('; ')}. Say whether the agent was told: ${forms} (a warning for now, not yet required).`);
+    }
+    return out;
+  }
+  const updated = /^(?:updated|nachgeführt|nachgefuehrt)\s+(.+)$/i.exec(value);
+  if (updated) {
+    const parts = updated[1].split(/\s*(?:,|\+|\band\b|\bund\b)\s*/i).filter(Boolean);
+    const bad = parts.filter((p) => !AA_KINDS.has(p.toLowerCase()));
+    if (parts.length > 0 && bad.length === 0) return out;
+    return [`\`agent-awareness: ${value}\` names ${bad.length ? `\`${bad.join(', ')}\`, which is` : 'nothing that is'} not one of briefing, catalog, tool-text. Write ${forms}.`];
+  }
+  const notNeeded = /^(?:not needed|bewusst nicht)\s*:\s*(.*)$/i.exec(value);
+  if (notNeeded) {
+    if (notNeeded[1].trim().length > 0) return out;
+    return [`\`agent-awareness: ${value}\` names no reason. Write \`agent-awareness: not needed: <why the agent need not know>\`.`];
+  }
+  return [`\`agent-awareness: ${value}\` is not one of the two forms. Write ${forms}.`];
+}
+
+/**
  * The ONE place the `review:` format is written down for a human.
  *
  * ⚠ Four copies of it once existed — these two messages, the PR template's skeleton and the
@@ -951,7 +1066,8 @@ export function evaluate(input) {
   const { body, title, commits = [], author, visibility = 'unknown' } = input;
   // Same scope as the field rule: public or unknown, never a bot's body.
   if (visibility === 'private' || (author && /\[bot\]$/.test(author))) return verdict;
-  const warnings = openWorkWarnings({ title, body, commits });
+  // The record's own warnings can quote a field value, so they are masked like the errors below.
+  const warnings = [...(verdict.warnings ?? []).map(withoutRegisterIds), ...openWorkWarnings({ title, body, commits })];
   const extra = [];
   if (registerIdLines(title).length > 0) {
     extra.push('the TITLE names a register row, and the title becomes the commit subject on the public main branch. Take it out.');
@@ -996,7 +1112,7 @@ export function evaluate(input) {
   };
 }
 
-function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux = null, delta = null, securityModel = null }) {
+function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux = null, delta = null, securityModel = null, agentAwareness = null }) {
   const errors = [];
   const notes = [];
 
@@ -1531,7 +1647,14 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
   for (const w of uxVerdict.review ? uxVerdict.why : []) notes.push(`ux review owed: ${w}`);
   errors.push(...uxErrors(f.ux, uxVerdict, visibility));
 
-return errors.length ? { ok: false, errors } : { ok: true, notes };
+  // `agent-awareness` warns, never fails; judged in `main` like `ux`, `null` when nobody judged it.
+  const aaOwed = agentAwareness ?? { adds: [] };
+  const aaWarnings = [
+    ...(aaOwed.unjudged ? [`agent-awareness: not judged — ${aaOwed.unjudged}`] : []),
+    ...agentAwarenessWarnings(f['agent-awareness'], aaOwed),
+  ];
+  const withAa = aaWarnings.length ? { warnings: aaWarnings } : {};
+  return errors.length ? { ok: false, errors, ...withAa } : { ok: true, notes, ...withAa };
 }
 
 /** The PR body and title from a GitHub event payload file; empty strings where absent. */
@@ -1861,12 +1984,13 @@ function main() {
     explicit: args['repo-visibility'],
   });
   const ux = uxOwed({ files, base: args.base || '', head: args.head || '', read: gitRead });
+  const agentAwareness = agentAwarenessOwed({ files, base: args.base || '', head: args.head || '', read: gitRead });
   const delta = {
     predates: deltaPredates({ base: args.base || '', read: gitRead }),
     check: (from, to) => deltaRangeErrors({ from, to, head: args.head || '', tip: args['base-tip'] || '', git: gitGraph() }),
   };
   const securityModel = { predates: securityModelPredates({ base: args.base || '', read: gitRead }) };
-  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux, delta, securityModel });
+  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux, delta, securityModel, agentAwareness });
 
   for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
   for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${w}`);

@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, securityModelPredates, securityModelErrors, SECURITY_MODEL_MARK, SECURITY_MODELS, SECURITY_LINE_MAX, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, securityModelPredates, securityModelErrors, SECURITY_MODEL_MARK, SECURITY_MODELS, SECURITY_LINE_MAX, wrongRunErrors, OTHER_REPO_MARKER, agentAwarenessOwed, agentAwarenessWarnings } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -3596,4 +3596,216 @@ describe('gate-record CLI — `main` hands the `security:` model transition to e
     expect(old.code, old.out).toBe(0);
     expect(old.out).toContain('security: the model is not owed');
   }, 60_000);
+});
+
+/**
+ * agent-awareness: a diff that adds a tool, a route or a UI page says whether the agent was told.
+ * Warning only — every case here also checks that the verdict stays ok.
+ */
+describe('agent-awareness: what the diff adds', () => {
+  const B = 'b'.repeat(40);
+  const H = 'c'.repeat(40);
+  const reader = (tree: Record<string, Record<string, string>>) => (sha: string, path: string): string | null => {
+    const at = tree[sha];
+    if (!at) throw new Error(`no commit ${sha}`);
+    return at[path] ?? null;
+  };
+  const tool = (name: string) => `export const t = {\n  definition: {\n    name: '${name}',\n    description: 'x',\n  },\n};\n`;
+  const TOOL_FILE = 'src/tools/builtin/bulk.ts';
+
+  it('TOOL, positive: a second tool in an EXISTING file is an addition', () => {
+    const r = agentAwarenessOwed({ files: [TOOL_FILE], base: B, head: H, read: reader({
+      [B]: { [TOOL_FILE]: tool('bulk_plan') },
+      [H]: { [TOOL_FILE]: tool('bulk_plan') + tool('bulk_status') },
+    }) });
+    expect(r.adds).toEqual([`${TOOL_FILE} adds the tool \`bulk_status\``]);
+  });
+
+  it('TOOL, negative: a tool moved to a new file under the same name is not', () => {
+    const r = agentAwarenessOwed({ files: [TOOL_FILE, 'src/tools/builtin/bulk-status.ts'], base: B, head: H, read: reader({
+      [B]: { [TOOL_FILE]: tool('bulk_plan') + tool('bulk_status') },
+      [H]: { [TOOL_FILE]: tool('bulk_plan'), 'src/tools/builtin/bulk-status.ts': tool('bulk_status') },
+    }) });
+    expect(r.adds).toEqual([]);
+  });
+
+  it('TOOL, negative: an edited description of a known tool is not', () => {
+    const r = agentAwarenessOwed({ files: [TOOL_FILE], base: B, head: H, read: reader({
+      [B]: { [TOOL_FILE]: tool('bulk_plan') },
+      [H]: { [TOOL_FILE]: tool('bulk_plan').replace("'x'", "'a clearer text'") },
+    }) });
+    expect(r.adds).toEqual([]);
+  });
+
+  const SERVER = 'src/server/http-api.ts';
+  const dyn = (m: string, p: string) => `this.dynamicRoutes.push(parseDynamicRoute('user', '${m}', '${p}', async () => {}));\n`;
+
+  it('ROUTE, positive: a new dynamic route and a new static /api/ path are additions', () => {
+    const r = agentAwarenessOwed({ files: [SERVER], base: B, head: H, read: reader({
+      [B]: { [SERVER]: dyn('GET', '/api/runs/active') },
+      [H]: { [SERVER]: dyn('GET', '/api/runs/active') + dyn('POST', '/api/bulk/:id/run') + "if (pathname === '/api/bulk/help') {}\n" },
+    }) });
+    expect(r.adds).toEqual([
+      `${SERVER} adds the route \`POST /api/bulk/:id/run\``,
+      `${SERVER} adds the route \`/api/bulk/help\``,
+    ]);
+  });
+
+  it('ROUTE, negative: a changed handler body of a known route is not', () => {
+    const r = agentAwarenessOwed({ files: [SERVER], base: B, head: H, read: reader({
+      [B]: { [SERVER]: dyn('GET', '/api/runs/active') },
+      [H]: { [SERVER]: dyn('GET', '/api/runs/active').replace('{}', '{ return 1; }') },
+    }) });
+    expect(r.adds).toEqual([]);
+  });
+
+  const PAGE = 'packages/web-ui/src/routes/app/bulk/+page.svelte';
+
+  it('UI PAGE, positive: a +page.svelte the base does not have', () => {
+    const r = agentAwarenessOwed({ files: [PAGE], base: B, head: H, read: reader({ [B]: {}, [H]: { [PAGE]: '<h1>Bulk</h1>' } }) });
+    expect(r.adds).toEqual([`${PAGE} adds a UI page`]);
+  });
+
+  it('UI PAGE, negative: an edited page and a new component are not', () => {
+    const COMP = 'packages/web-ui/src/lib/components/BulkCard.svelte';
+    const r = agentAwarenessOwed({ files: [PAGE, COMP], base: B, head: H, read: reader({
+      [B]: { [PAGE]: '<h1>Bulk</h1>' },
+      [H]: { [PAGE]: '<h1>Bulk runs</h1>', [COMP]: '<div />' },
+    }) });
+    expect(r.adds).toEqual([]);
+  });
+
+  it('tests are never a trigger, and a diff without a relevant file reads nothing', () => {
+    const boom = () => { throw new Error('read'); };
+    expect(agentAwarenessOwed({ files: ['src/tools/builtin/bulk.test.ts', 'tests/x.test.ts', 'docs/a.md'], base: B, head: H, read: boom })).toEqual({ adds: [] });
+  });
+
+  it('without a base it says it could not judge, and does not guess', () => {
+    const r = agentAwarenessOwed({ files: [TOOL_FILE], base: '', head: H, read: reader({}) });
+    expect(r.adds).toEqual([]);
+    expect(r.unjudged).toContain(TOOL_FILE);
+  });
+});
+
+describe('agent-awareness: the line', () => {
+  const owed = { adds: ['src/tools/builtin/bulk.ts adds the tool `bulk_status`'] };
+  const none = { adds: [] as string[] };
+
+  it('missing where something is added: a warning naming the trigger file', () => {
+    const w = agentAwarenessWarnings(undefined, owed);
+    expect(w).toHaveLength(1);
+    expect(w[0]).toContain('src/tools/builtin/bulk.ts adds the tool `bulk_status`');
+    expect(w[0]).toContain('agent-awareness: updated <briefing|catalog|tool-text>');
+  });
+
+  it('missing where nothing is added: silent', () => {
+    expect(agentAwarenessWarnings(undefined, none)).toEqual([]);
+  });
+
+  it.each([
+    'updated briefing', 'updated tool-text', 'updated briefing, tool-text', 'updated catalog + briefing',
+    'nachgeführt Katalog', 'nachgeführt Tool-Text', 'not needed: an internal route the agent never calls',
+    'bewusst nicht: eine Betreiber-Seite',
+  ])('both forms and their aliases parse: %s', (v) => {
+    expect(agentAwarenessWarnings(v, owed)).toEqual([]);
+  });
+
+  it.each([
+    ['the agent knows', 'not one of the two forms'],
+    ['updated the docs', 'not one of briefing, catalog, tool-text'],
+    ['not needed:', 'names no reason'],
+    ['updated', 'not one of the two forms'],
+  ])('free text warns: %s', (v, msg) => {
+    const w = agentAwarenessWarnings(v, owed);
+    expect(w).toHaveLength(1);
+    expect(w[0]).toContain(msg);
+  });
+
+  it('a malformed line warns even where nothing is added', () => {
+    expect(agentAwarenessWarnings('the agent knows', none)).toHaveLength(1);
+  });
+});
+
+describe('agent-awareness: through evaluate, warning only', () => {
+  const owed = { adds: ['src/tools/builtin/bulk.ts adds the tool `bulk_status`'] };
+  const ux = { line: true, review: false, why: [] as string[] };
+  const files = ['src/tools/builtin/bulk.ts'];
+  // A tool file owes the security gate; the record carries it so that only agent-awareness is judged here.
+  const body = (extra: Record<string, string> = {}) => record({ gates: 'code-review, delta, security', security: 'own round (opus), no findings', ux: 'not user-facing — tool only', ...extra });
+
+  it('a missing line on a diff that adds a tool: ok, with the warning', () => {
+    const v = evaluate({ body: body(), head: HEAD, files, visibility: 'private', ux, agentAwareness: owed });
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    expect(v.warnings?.join('\n')).toContain('adds the tool `bulk_status`');
+  });
+
+  it('the same diff with the line: ok, no warning', () => {
+    const v = evaluate({ body: body({ 'agent-awareness': 'updated tool-text' }), head: HEAD, files, visibility: 'private', ux, agentAwareness: owed });
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    expect(v.warnings ?? []).toEqual([]);
+  });
+
+  it('a public record keeps the warning next to its own warnings', () => {
+    const v = evaluate({ body: body(), head: HEAD, files, visibility: 'public', ux, agentAwareness: owed });
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    expect(v.warnings?.join('\n')).toContain('agent-awareness:');
+  });
+});
+
+describe('gate-record CLI — `main` judges agent-awareness from git, and only warns', () => {
+  const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+  const TOOL = 'src/tools/builtin/t.ts';
+  const tool = (name: string) => `export const t = { definition: { name: '${name}', description: 'x' } };\n`;
+  function repo() {
+    const dir = mkdtempSync(join(tmpdir(), 'gr-aa-'));
+    const g = (...a: string[]) => {
+      const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+      if (r.status !== 0) throw new Error(r.stderr);
+      return r.stdout.trim();
+    };
+    g('init', '-q');
+    g('config', 'user.email', 't@example.invalid');
+    g('config', 'user.name', 't');
+    g('config', 'commit.gpgsign', 'false');
+    mkdirSync(join(dir, 'src/tools/builtin'), { recursive: true });
+    writeFileSync(join(dir, TOOL), tool('a'));
+    g('add', '-A');
+    g('commit', '-q', '-m', 'base');
+    const base = g('rev-parse', 'HEAD');
+    writeFileSync(join(dir, TOOL), tool('a') + tool('b'));
+    g('commit', '-q', '-am', 'head');
+    return { dir, base, head: g('rev-parse', 'HEAD') };
+  }
+  function run(r: { dir: string; base: string; head: string }, aa: string | undefined) {
+    const ev = join(r.dir, 'event.json');
+    const files = join(r.dir, 'files.txt');
+    const rec = record({
+      head: r.head.slice(0, 12), gates: 'code-review, delta, security', security: 'own round (opus), no findings',
+      ux: 'not user-facing — a tool', ...(aa ? { 'agent-awareness': aa } : {}),
+    });
+    writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Add a tool', body: rec } }));
+    writeFileSync(files, `${TOOL}\n`);
+    const env = { ...process.env };
+    delete env.REPO_PRIVATE;
+    delete env.GITHUB_REPOSITORY;
+    return spawnSync(process.execPath, [script, '--event-file', ev, '--head', r.head, '--base', r.base, '--files-file', files, '--repo-visibility', 'private'], { cwd: r.dir, encoding: 'utf8', env });
+  }
+
+  it('a new tool without the line: exit 0 and a warning that names the file and the tool', () => {
+    const r = repo();
+    try {
+      const out = run(r, undefined);
+      expect(out.status, out.stdout).toBe(0);
+      expect(out.stdout).toContain('::warning::gate-record: agent-awareness: src/tools/builtin/t.ts adds the tool `b`');
+    } finally { rmSync(r.dir, { recursive: true, force: true }); }
+  });
+
+  it('the same with the line: exit 0, no agent-awareness warning', () => {
+    const r = repo();
+    try {
+      const out = run(r, 'updated tool-text');
+      expect(out.status, out.stdout).toBe(0);
+      expect(out.stdout).not.toContain('agent-awareness');
+    } finally { rmSync(r.dir, { recursive: true, force: true }); }
+  });
 });
