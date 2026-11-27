@@ -255,7 +255,8 @@ export function releaseReservation(r: PersistentBudgetReservation): void {
  * cost, then admits only if the projection stays within the caps — so a tick
  * that fires N due tasks at once can't collectively overshoot. On admission the
  * estimate is held in the module accumulator (visible to the next task in the
- * same synchronous tick); the caller MUST {@link releasePersistentBudget} it
+ * same synchronous tick); the caller MUST give it back — with {@link releaseReservation} when the
+ * object is handed on, else {@link releasePersistentBudget} —
  * once the run's actual cost has landed in the provider.
  *
  * Worst-case reservation is deliberate: it can defer a would-be-cheap task when

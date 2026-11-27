@@ -32,7 +32,7 @@ const runner = vi.hoisted(() => ({
   // The stamp was taken over other steps than the ones the workflow has now.
   staleStamp: { value: false },
 }));
-const budget = vi.hoisted(() => ({ refuse: false, released: 0 }));
+const budget = vi.hoisted(() => ({ refuse: false, released: 0, releasedUSD: 0 }));
 vi.mock('./session-budget.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('./session-budget.js')>();
   return {
@@ -40,7 +40,7 @@ vi.mock('./session-budget.js', async (importOriginal) => {
     reservePersistentBudget: (usd: number) => budget.refuse ? { allowed: false, reason: 'monthly cap reached', reservedUSD: 0 } : real.reservePersistentBudget(usd),
     releasePersistentBudget: (usd: number) => { budget.released++; real.releasePersistentBudget(usd); },
     // The worker gives an admission's reservation back by the object it was issued as.
-    releaseReservation: (r: Parameters<typeof real.releaseReservation>[0]) => { budget.released++; real.releaseReservation(r); },
+    releaseReservation: (r: Parameters<typeof real.releaseReservation>[0]) => { budget.released++; budget.releasedUSD += r.reservedUSD; real.releaseReservation(r); },
   };
 });
 vi.mock('./saved-workflow-runner.js', () => ({ runGuardedSavedWorkflow: (...args: unknown[]) => runner.run(...args) }));
@@ -81,6 +81,7 @@ describe('the webhook drain', () => {
     runner.staleStamp.value = false;
     budget.refuse = false;
     budget.released = 0;
+    budget.releasedUSD = 0;
     dir = mkdtempSync(join(tmpdir(), 'lynox-webhook-drain-'));
     history = new RunHistory(join(dir, 'history.db'));
     engineDb = new EngineDb(join(dir, 'engine.db'));
@@ -651,9 +652,18 @@ describe('the webhook drain', () => {
     const t = sharedTrigger();
     const id = deliver(t);
     const spy = vi.spyOn(WorkerLoop.prototype as unknown as { takeLease: (id: string) => string }, 'takeLease').mockImplementationOnce(() => { throw new Error('database is locked'); });
-    await loop.tick();
-    expect(spy).toHaveBeenCalled();
-    expect(budget.released).toBe(1);
+    // A real hold, so the release is measured in money and not only counted as a call.
+    const { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } = await import('./session-budget.js');
+    configurePersistentBudget({ costProvider: { getCostByDay: () => [] }, dailyCapUSD: 100, monthlyCapUSD: 1000 });
+    try {
+      await loop.tick();
+      expect(spy).toHaveBeenCalled();
+      expect(budget.released).toBe(1);
+      expect(budget.releasedUSD, 'positive control: a real hold was taken').toBeGreaterThan(0);
+      expect(getReservedInFlight(), 'the hold is back').toBe(0);
+    } finally {
+      resetPersistentBudget();
+    }
     expect(eventOf(t, id).state).toBe('received');
   });
 
