@@ -6,7 +6,7 @@ import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, bulkLabelParts, bulkUndoApproveText, bulkUndoExplainText,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
-	bulkSentenceParts, bulkSecretInContextKey,
+	bulkSentenceParts, bulkSecretInContextKey, bulkListUnread,
 	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
 	bulkRefusalText, bulkRefusalSentence, BULK_REFUSAL_KINDS,
 } from './bulk-runs.js';
@@ -22,6 +22,8 @@ const TABLE: Record<string, string> = {
 	'bulk.label_undo_one': 'Rücknahme · 1 Ziel · {target}',
 	'bulk.system.data_store': 'Datenspeicher',
 	'bulk.head.counts_pending': '–',
+	'bulk.label_list_unread': 'Liste noch nicht gelesen · {target}',
+	'bulk.label_list_not_read': 'Liste nicht gelesen · {target}',
 };
 const i18n: BulkI18n = {
 	t: (k) => TABLE[k] ?? k,
@@ -46,7 +48,48 @@ describe('bulk run helpers', () => {
 		expect(bulkLabel({ kind: 'apply', total: 3, targetSystem: 'data_store' }, i18n, true)).toBe('– Ziele · Datenspeicher');
 		expect(bulkLabel({ kind: 'undo', total: 1, targetSystem: 'data_store' }, i18n, true)).toBe('Rücknahme · – Ziele · Datenspeicher');
 		expect(bulkLabelParts({ kind: 'apply', total: 1, targetSystem: 'data_store' }, i18n, true)).toEqual([{ text: '– Ziele · Datenspeicher' }]);
+		// A run whose list was not read says so, whatever its size, as text and in parts with the host as the slot:
+		// not read yet where it can still read it, not read where it has to be planned again.
+		expect(bulkLabel({ kind: 'apply', total: 0, targetSystem: 'http:shop.example.invalid' }, i18n, false, 'later')).toBe('Liste noch nicht gelesen · shop.example.invalid');
+		expect(bulkLabelParts({ kind: 'apply', total: 0, targetSystem: 'http:shop.example.invalid' }, i18n, false, 'later')).toEqual([{ text: 'Liste noch nicht gelesen · ' }, { slot: true }]);
+		expect(bulkLabelParts({ kind: 'apply', total: 0, targetSystem: 'data_store' }, i18n, false, 'later')).toEqual([{ text: 'Liste noch nicht gelesen · Datenspeicher' }]);
+		expect(bulkLabel({ kind: 'apply', total: 0, targetSystem: 'http:shop.example.invalid' }, i18n, false, 'never')).toBe('Liste nicht gelesen · shop.example.invalid');
+		expect(bulkLabelParts({ kind: 'apply', total: 0, targetSystem: 'http:shop.example.invalid' }, i18n, false, 'never')).toEqual([{ text: 'Liste nicht gelesen · ' }, { slot: true }]);
 		expect(bulkLabelParts({ kind: 'apply', total: 1, targetSystem: 'http:shop.example.invalid' }, i18n, true)[0]).toEqual({ text: '– Ziele · ' });
+	});
+
+	it('takes a list as not read only while a planned run knows no target and the engine is not reading it', () => {
+		const run = { phase: 'planned', total: 0, list: { state: 'pending' }, haltKey: 'awaitingStart', haltReason: 'awaitingStart' } as const;
+		expect(bulkListUnread(run)).toBe('later');
+		expect(bulkListUnread({ ...run, haltKey: 'unavailable', haltReason: 'engine English' })).toBe('later');
+		expect(bulkListUnread({ ...run, haltKey: 'listTooLarge', haltReason: 'engine English' })).toBe('never');
+		// The engine reads it now: that is the dash, not this.
+		expect(bulkListUnread({ ...run, haltKey: null, haltReason: null })).toBeNull();
+		// A read that halted part-way has targets to count.
+		expect(bulkListUnread({ ...run, total: 40 })).toBeNull();
+		expect(bulkListUnread({ ...run, total: 40, haltKey: 'listTooLarge', haltReason: 'engine English' })).toBeNull();
+		// The list is read, the run has none, or an older engine sends no list state.
+		expect(bulkListUnread({ ...run, list: { state: 'done' } })).toBeNull();
+		expect(bulkListUnread({ ...run, list: null })).toBeNull();
+		expect(bulkListUnread({ ...run, list: undefined })).toBeNull();
+		// A run that ended before it read its list never reads it.
+		expect(bulkListUnread({ ...run, phase: 'aborted', haltKey: 'mandateEnded', haltReason: 'mandateEnded' })).toBeNull();
+	});
+
+	it('names every halt whose way on is planning again as not read, and every other halt as not read yet', () => {
+		// Over every halt the engine knows, so a halt added later falls on the side its restart says.
+		const keys = Object.keys(BULK_HALT_REASONS);
+		expect(keys.length).toBeGreaterThan(20);
+		let never = 0;
+		for (const haltKey of keys) {
+			const run = { phase: 'planned', total: 0, list: { state: 'pending' }, haltKey, haltReason: 'engine English' } as const;
+			const replan = bulkRestartKind({ ...run, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }) === 'none';
+			if (replan) never++;
+			expect(bulkListUnread(run), haltKey).toBe(replan ? 'never' : 'later');
+		}
+		// The control: both sides hold halts, so the loop compares something.
+		expect(never).toBeGreaterThan(3);
+		expect(never).toBeLessThan(keys.length);
 	});
 
 	it('shows the host of an external run and the raw name of a system it has no word for', () => {
@@ -306,6 +349,11 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.unmeasured_note')).toBe(entry('bulk.approve.unmeasured_note',
 			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung.',
 			BULK_UNMEASURED_NOTE));
+	});
+
+	it('names a run whose list was not read, word for word', () => {
+		expect(line('bulk.label_list_unread')).toBe(entry('bulk.label_list_unread', 'Liste noch nicht gelesen · {target}', 'List not read yet · {target}'));
+		expect(line('bulk.label_list_not_read')).toBe(entry('bulk.label_list_not_read', 'Liste nicht gelesen · {target}', 'List not read · {target}'));
 	});
 
 	it('holds the note on a list read page by page', () => {
