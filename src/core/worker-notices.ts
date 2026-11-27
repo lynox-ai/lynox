@@ -137,6 +137,13 @@ export interface WorkerNotices {
    * shows them, a task the user sees as their own message is localized too and gets an eval
    * (ux U-099).
    */
+  /**
+   * Every grant's push of a run's end that noted the owner's member-connection lines: a fixed
+   * sentence in place of the run's result, which the model words after a refusal that names
+   * another member, their provider and the owner's way (U-411). True for every mandate, so no
+   * "only the owner": a mandate under a later access can connect its own connection again.
+   */
+  readonly memberEndForMandates: string;
   readonly chipRunAgain: string;
   readonly chipRetry: string;
   readonly chipExplain: string;
@@ -315,6 +322,7 @@ const EN: WorkerNotices = Object.freeze({
   workflowStepIdReserved: (step: number) => `Step ${String(step)} of this workflow has a name lynox uses for something else, so the workflow did not run, and it will not run until that step is renamed or removed. Ask lynox in a chat to rename that step.`,
   stoppedWith: (message: string) => `Stopped on your instruction: ${message}`,
   stopped: 'Stopped on your instruction.',
+  memberEndForMandates: 'The run finished without a connection it may not use, so its result may be incomplete. Contact the owner of this instance.',
   chipRunAgain: 'Run again',
   chipRetry: 'Retry',
   chipExplain: 'Explain',
@@ -454,6 +462,7 @@ const DE: WorkerNotices = Object.freeze({
   workflowStepIdReserved: (step: number) => `Schritt ${String(step)} dieses Workflows trägt einen Namen, den lynox für etwas anderes braucht. Darum lief der Workflow nicht, und er läuft erst wieder, wenn der Schritt anders heisst oder entfernt ist. Bitte lynox im Chat, diesen Schritt umzubenennen.`,
   stoppedWith: (message: string) => `Auf deine Anweisung gestoppt: ${message}`,
   stopped: 'Auf deine Anweisung gestoppt.',
+  memberEndForMandates: 'Der Lauf ist zu Ende, ohne eine Verbindung, die er nicht nutzen darf. Sein Ergebnis kann darum unvollständig sein. Wende dich an den Inhaber dieser Instanz.',
   chipRunAgain: 'Erneut ausführen',
   chipRetry: 'Erneut versuchen',
   chipExplain: 'Erklären',

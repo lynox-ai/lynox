@@ -3442,11 +3442,11 @@ export class WorkerLoop {
       const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
-      const pushed = resultReduced
-        ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberSaid).result
-        : capStop === null ? memberTold.result
-          : withMemberNotes(truncate(`${capStop}\n\n${withRefusals}`), 'other', memberSaid).result;
-      await this.notificationRouter.notify({
+      const pushedText = resultReduced
+        ? (capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`)
+        : capStop === null ? truncatedResult : truncate(`${capStop}\n\n${withRefusals}`);
+      const pushed = withMemberNotes(pushedText, 'other', memberSaid).result;
+      const message: NotificationMessage = {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
         //
@@ -3471,7 +3471,10 @@ export class WorkerLoop {
           { label: notices.chipDetails, task: `Show me more details about: ${stripHidden(task.title)}` },
           { label: notices.chipRunAgain, task: stripHidden(task.description ?? task.title) },
         ],
-      });
+      };
+      // With the owner's member-connection lines, told by reader (#notifyMemberEnd).
+      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, notices.memberEndForMandates);
+      else await this.notificationRouter.notify(message);
     }
   }
 
@@ -4003,11 +4006,15 @@ export class WorkerLoop {
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
       const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
       const readers = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
+      const withLines = notes.length > 0;
+      const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
+      if (readers === null && withLines) {
+        // Not split by reader, but with the owner's member-connection lines: see #notifyMemberEnd.
+        void this.#notifyMemberEnd(message, WORKER_NOTICES[lang].memberEndForMandates);
+        return;
+      }
       void this.notificationRouter.notify({
-        title,
-        body: told.result,
-        taskId: task.id,
-        priority: toldLook.priority,
+        ...message,
         // Only the owner can take the way this sentence names: no other device reads it.
         ...(readers === null ? {} : { audience: 'owner' as const }),
       });
@@ -4028,6 +4035,29 @@ export class WorkerLoop {
         });
       }
     }
+  }
+
+  /**
+   * A run's end that carries the owner's member-connection lines, told by reader. The lines name
+   * another member's provider, profile and login and the owner's way to change it, so only the
+   * owner's devices read `message` as it is. Every live grant reads the same end in its own
+   * sentence (`forMandates`), a fixed one, not the run's result: the model words its reply after a
+   * refusal that names the other member, so the result without the lines can still carry them. A
+   * mandate gets the notices the owner gets, in the sentence that is true for it. A push without an
+   * audience would reach every live grant's devices with the lines.
+   */
+  async #notifyMemberEnd(message: NotificationMessage, forMandates: string): Promise<void> {
+    const owner = this.notificationRouter.notify({ ...message, audience: 'owner' });
+    // Only what names the end: no deep link into the run's thread and no follow-ups, which would
+    // lead a mandate back to the reply this sentence stands in for.
+    void this.notificationRouter.notify({
+      title: message.title,
+      body: forMandates,
+      taskId: message.taskId,
+      priority: message.priority,
+      audience: 'all_mandates',
+    });
+    await owner;
   }
 
   /**
