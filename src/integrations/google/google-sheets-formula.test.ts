@@ -545,7 +545,10 @@ describe('google_sheets after content from outside the chat, asked in German', (
 
   it('writes the formulas as they are on "Write as formulas", as in English', async () => {
     mockFetch.mockResolvedValueOnce(WRITTEN);
-    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING]] }, agentDe('Write as formulas'));
+    const a = agentDe('Write as formulas');
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING]] }, a);
+    // Asked, with the option offered: the formula went out because of the answer.
+    expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
     expect(sentValues()).toEqual([['Name', FETCHING]]);
   });
 
