@@ -26358,15 +26358,39 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(((await res.json()) as { error?: string }).error).toBe('No changeset to review');
     });
 
-    it('a throw after a finished rollback is not reported as one that stopped partway', async () => {
+    it('a throw after a finished rollback answers as rolled back, names every file left without a count, and ends the review and the hold', async () => {
       const { csm, file } = review(OWNER_PRINCIPAL);
       vi.spyOn(csm, 'hasOriginal').mockImplementation(() => { throw new Error('after'); });
       vi.spyOn(csm, 'getChanges').mockReturnValue([{ file: 'gone.txt', absolutePath: join(dirname(file), 'gone.txt'), status: 'modified', diff: '', compared: true }] as never);
-      const left = vi.spyOn(csm, 'rollbackAll').mockReturnValue([join(dirname(file), 'x.txt')]);
+      const left = vi.spyOn(csm, 'rollbackAll').mockReturnValue([file]);
       const res = await answer('rollback');
-      expect(left).toHaveBeenCalled();
+      expect(left, 'positive control: the rollback ran').toHaveBeenCalled();
+      expect(res.status, 'not a failed answer').toBe(200);
+      expect(await res.json()).toEqual({ ok: true, accepted: null, rolledBack: null, notRestored: ['a.txt'] });
+      expect(csm.isEmpty(), 'the review ends').toBe(true);
+      expect(await outcome(await send()), 'and so does the hold').toEqual(RAN);
+    });
+
+    it('a throw after a finished partial rollback answers as rolled back too, with the files it left', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      // Counting what was accepted throws, after the chosen files are back.
+      const shown = [{ file: 'a.txt', absolutePath: file, status: 'modified', diff: '', compared: true }];
+      Object.defineProperty(shown, 'filter', { value: () => { throw new Error('after'); } });
+      vi.spyOn(csm, 'getChanges').mockReturnValue(shown as never);
+      const left = vi.spyOn(csm, 'rollbackFiles').mockReturnValue([file]);
+      const res = await jsonFetch(`/api/sessions/${OWN}/changeset/review`, { method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run-held', rolledBackFiles: ['a.txt'] }) });
+      expect(left, 'positive control: the rollback ran').toHaveBeenCalled();
+      expect(res.status, 'not a failed answer').toBe(200);
+      expect(await res.json()).toEqual({ ok: true, accepted: null, rolledBack: null, notRestored: ['a.txt'] });
+      expect(csm.isEmpty(), 'the review ends').toBe(true);
+    });
+
+    it('control: a throw before any rollback is still a failed answer', async () => {
+      const { csm } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'acceptAll').mockImplementation(() => { throw new Error('before'); });
+      const res = await answer('accept');
       expect(res.status).toBe(500);
-      expect(await res.text(), 'not "stopped partway"').not.toContain('rollback_aborted');
+      expect(await res.text()).not.toContain('"ok":true');
     });
 
     it('a rollback that stops partway answers with its own refusal, keeps the review and its backups, and the hold stays', async () => {
