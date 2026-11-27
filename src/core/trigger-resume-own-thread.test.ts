@@ -10,7 +10,7 @@ import type { Engine } from './engine.js';
 
 /**
  * A run for a mandate that picks up an answer given in a conversation the mandate does not own
- * does not write into that conversation. The worker's choice of thread is checked here through a
+ * does not write into that conversation, and does not take the answer into a conversation of its own. The worker's choice of thread is checked here through a
  * REAL engine, session and thread store (the model stream stubbed, as in
  * `owner-continues-helper-thread.test.ts`), so the proof is what lands in the store, not which
  * id a mock was handed.
@@ -84,6 +84,7 @@ describe('a mandate\'s run that picks up an answer from a conversation it does n
 
     let dispatched = false;
     const recorded: string[] = [];
+    const released: string[] = [];
     const manager = {
       getDueTriggers: () => (dispatched ? [] : (dispatched = true, [plan])),
       getExpiredWaitingTriggers: () => [], getWaitingTriggers: () => [], getAwaitingConsentUnreminded: () => [],
@@ -96,7 +97,7 @@ describe('a mandate\'s run that picks up an answer from a conversation it does n
       getAnsweredForTrigger: () => ({
         id: 'prompt-1', session_id: threadId, question: 'Which week?', answer: 'Last week.', created_by: 'owner',
       }),
-      releaseTrigger: () => {},
+      releaseTrigger: (id: string) => { released.push(id); return true; },
       getPendingForTrigger: () => undefined,
     } as unknown as PromptStore;
     // The real engine, with the plan's schedule and the answered row put in front of it.
@@ -119,22 +120,28 @@ describe('a mandate\'s run that picks up an answer from a conversation it does n
     }
     expect(recorded, 'the run ended').toHaveLength(1);
     const added = threads.listThreadsForExport({ limit: 1000 }).filter((t) => !before.has(t.id));
-    return { threads, added };
+    return { threads, added, recorded, released };
   }
 
-  it('leaves the owner\'s conversation as it was and writes the run into a new one of Eva\'s', async () => {
-    const { threads, added } = await resumeIn('thread-owner', 'owner');
+  it('leaves the owner\'s conversation as it was, and writes the run into a new one of Eva\'s without the owner\'s question or answer', async () => {
+    const { threads, added, recorded, released } = await resumeIn('thread-owner', 'owner');
     expect(threads.getMessages('thread-owner'), 'nothing appended to the owner\'s conversation').toHaveLength(2);
     expect(added, 'one new conversation').toHaveLength(1);
     expect(added[0]!.created_by, 'opened for Eva').toBe(EVA_TAG);
     const written = threads.getMessages(added[0]!.id).map((m) => JSON.stringify(m));
-    expect(written.length, 'the run wrote there').toBeGreaterThan(0);
-    expect(written.some((m) => m.includes('Last week.')), 'with the answer as input').toBe(true);
+    expect(written.some((m) => m.includes('Report written.')), 'the run wrote there').toBe(true);
+    expect(written.some((m) => m.includes('Last week.')), 'without the owner\'s answer').toBe(false);
+    expect(written.some((m) => m.includes('Which week?')), 'without the owner\'s question').toBe(false);
+    expect(recorded[0], 'and the run succeeded').toBe('Report written.');
+    expect(released, 'the answer was released').toEqual(['prompt-1']);
   });
 
-  it('control: continues in Eva\'s own conversation', async () => {
-    const { threads, added } = await resumeIn('thread-eva', EVA_TAG);
+  it('control: continues in Eva\'s own conversation, with the answer', async () => {
+    const { threads, added, recorded } = await resumeIn('thread-eva', EVA_TAG);
     expect(added, 'no new conversation').toHaveLength(0);
-    expect(threads.getMessages('thread-eva').length, 'the run wrote into it').toBeGreaterThan(2);
+    const written = threads.getMessages('thread-eva').map((m) => JSON.stringify(m));
+    expect(written.some((m) => m.includes('Report written.')), 'the run wrote into it').toBe(true);
+    expect(written.some((m) => m.includes('Last week.')), 'with the answer').toBe(true);
+    expect(recorded[0], 'and the run succeeded').toBe('Report written.');
   });
 });
