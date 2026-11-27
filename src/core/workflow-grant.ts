@@ -6,7 +6,7 @@ import type { WorkflowGrantLookup } from './run-history.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import { canonicalJson } from './bulk-ledger.js';
 import { isFeatureEnabled } from './features.js';
-import { bindWorkflowParameters } from '../orchestrator/workflow-params.js';
+import { bindWorkflowParameters, shownParamName } from '../orchestrator/workflow-params.js';
 import { buildReviewedContract, validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 
 /**
@@ -44,9 +44,10 @@ export interface GrantChecksumInput {
  * A value as the database holds it, in canonical JSON. The acceptance may hash an
  * in-memory workflow (the pipeline cache) whose steps carry keys set to `undefined`; the
  * run hashes the blob read back, where `JSON.stringify` dropped them. Hashing the stored
- * form on both sides keeps the two computations over the same bytes.
+ * form on both sides keeps the two computations over the same bytes. The workflow stamp
+ * (`workflow-stamp.ts`) hashes the same way.
  */
-function storedForm(value: unknown): string {
+export function storedForm(value: unknown): string {
   return canonicalJson(JSON.parse(JSON.stringify(value ?? null)) as unknown);
 }
 
@@ -149,7 +150,7 @@ export function hiddenInBoundValues(params: Readonly<Record<string, unknown>>): 
     // space, or start what looks like another row, so names may not hold them.
     if (HIDDEN_IN_VALUE.test(name) || /[\n\t]/.test(name)) return 'A parameter name holds a character that does not show as text. Rename the parameter in the workflow.';
     const shown = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
-    if (HIDDEN_IN_VALUE.test(shown)) return `The value of parameter "${name}" holds a character that does not show as text. Enter the value again without it.`;
+    if (HIDDEN_IN_VALUE.test(shown)) return `The value of parameter ${shownParamName(name)} holds a character that does not show as text. Enter the value again without it.`;
   }
   return null;
 }
@@ -355,7 +356,7 @@ export function grantName(raw: unknown): string | undefined {
 /** What the acceptance needs from the stores; the scheduling route passes the engine's. */
 export interface GrantAcceptStores {
   history: {
-    acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string): boolean;
+    acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string, seen: PlannedPipeline): boolean;
     deleteTrigger(id: string): boolean;
   };
   taskManager: {
@@ -426,7 +427,7 @@ export function acceptWorkflowGrant<T extends { id: string }>(
       triggerId: task.id,
       afterUntrusted: prepared.afterUntrusted,
       grantId,
-    }, now);
+    }, now, planned);
   } catch {
     written = false;
   }

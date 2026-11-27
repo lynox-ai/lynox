@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
 
+import { SPAWN_DIALOG } from '../dialog-text.js';
 import { pinnedModelOf } from '../../core/profile-pair.js';
+import { dialogToolWord } from '../tool-words.js';
 import type { CostSnapshot, ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, modelIdIsDeepBand, isBlockedModelId, profileNamed } from '../../types/index.js';
 import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolCallImitationError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
+import { copyToolContext } from '../../core/tool-context.js';
 import { loopGuardStopReason } from '../../core/loop-guard-stop.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
@@ -20,7 +23,7 @@ import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, getActiveRou
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../../core/llm/provider-keys.js';
 import { resolveTools } from '../resolve-tools.js';
 
-import { adjustSessionCost, checkSessionBudget } from '../../core/session-budget.js';
+import { adjustSessionCost, checkSessionBudget, releasePersistentBudget, reservePersistentBudget } from '../../core/session-budget.js';
 import { compose, engineText, escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
 import { childFilingContext } from '../../core/approval-filing.js';
@@ -35,13 +38,14 @@ import {
   MAX_SPAWN_TURNS,
 } from '../../core/limits.js';
 
-const SPAWN_TIMEOUT = 10 * 60 * 1000;
+export const SPAWN_TIMEOUT = 10 * 60 * 1000;
 
 /**
  * What a child's run is debited with: its OWN spend. What was booked onto it
  * from outside is left out: a grandchild it delegated to records and debits its own spend,
- * and an in-run helper call debits itself (spawned children run none, see
- * `recordExternalCost`). The child's ceiling still counts it (`estimatedCostUSD`, which
+ * and an in-run helper call debits itself. A child runs none of the agent's own helper
+ * fallbacks, but its tools' helper calls (a rerank, a docs extraction, a plan) charge its
+ * guard like that and debit themselves (`recordExternalCost`). The child's ceiling still counts it (`estimatedCostUSD`, which
  * `onSettled` hands to the delegating run, together with the bounds of the child's ended calls
  * for its ceiling only). The child's run row adds one display term on top, see
  * {@link childRowCostUSD}.
@@ -143,6 +147,31 @@ function childRowCostUSD(agent: Agent | undefined): number {
  * argument exists for. It was reverted rather than shipped, because an argument that works
  * in half the cases reads as a guarantee and is not one.
  */
+/**
+ * The refusal when a batch does not fit under the daily or monthly cap. The figures are the ones
+ * the reservation refused with, not a second reading. A smaller batch is offered only when one
+ * child could still fit (`smallestUSD`, the least any child of this batch is held at); otherwise
+ * the cap stops the work.
+ */
+function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | undefined; cap?: 'daily' | 'monthly' | undefined; capUSD?: number | undefined }, batchUSD: number, smallestUSD: number): string {
+  if (r.headroomUSD === undefined || r.cap === undefined || r.capUSD === undefined) {
+    return `Not delegated: ${r.reason ?? 'the spending cap cannot be checked.'}`;
+  }
+  const usd = (n: number): string => `$${n.toFixed(2)}`;
+  const budget = `${r.cap} budget`;
+  // ⚠ No reset time and no cause: what is left may be short for spend already booked OR for work
+  // still running that holds part of it (which can be the delegating run's own hold), and the
+  // sentence has to be true for both.
+  if (r.headroomUSD < smallestUSD) {
+    return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left, `
+      + 'less than one of these sub-agents may spend. '
+      + `Tell the user that the ${budget} leaves no room for this delegation now, and that you cannot change the budget.`;
+  }
+  return `Not delegated: these sub-agents could together spend up to ${usd(batchUSD)}, and the ${budget} `
+    + `of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left. Delegate to fewer sub-agents or give them `
+    + `a lower max_budget_usd, so that together they stay within ${usd(r.headroomUSD)}.`;
+}
+
 function minChildBudgetUSD(model: string, maxOutputTokens: number | undefined): number {
   if (!hasKnownPricing(model)) return 0;
   return estimateFirstTurnUSD(model, maxOutputTokens);
@@ -1445,7 +1474,7 @@ function promptCallbacksWithOrigin(
 ): { promptUser?: PromptUserFn | undefined; promptSecret?: PromptSecretFn | undefined; promptTabs?: PromptTabsFn | undefined } {
   // `subagent: true` is the claim; the two names are decoration on it. Keep them
   // in that order in your head, because the first version had only the names and
-  // a child called "​" then rendered no origin line at all.
+  // a child called "\u200B" then rendered no origin line at all.
   const origin: PromptMeta = { subagent: true, subagentName: spec.name, subagentTask: spec.task };
   const { promptUser, promptSecret, promptTabs } = parent;
   return {
@@ -1754,6 +1783,8 @@ async function executeThinker(
     maxIterations,
     isolation: childIsolation,
     autonomy: parentAgent.autonomy,
+    // A child asks in its parent's language.
+    language: parentAgent.dialogLanguage,
     // A child of a run nobody watches files a mail like its parent: under the parent's trigger
     // (so the flooding limit counts the whole tree) and naming the root run. Taken from the
     // parent agent only, never from this tool's input; a chat's child gets none.
@@ -1786,6 +1817,8 @@ async function executeThinker(
     // Share the parent's Session counters so one conversation accumulates
     // a single http/write budget across the main agent + all sub-agents.
     sessionCounters: parentAgent.sessionCounters,
+    // One conversation, one record of what its searches listed (`SearchResultAddresses`).
+    searchResultAddresses: parentAgent.searchResultAddresses,
     // Share the recall blob store so a sub-agent's `recall_tool_result` can
     // resolve handles minted by the parent conversation's last compaction.
     toolResultBlobStore: parentAgent.toolResultBlobStore,
@@ -1802,7 +1835,9 @@ async function executeThinker(
     // also write-reachable — a child can mutate parent state through
     // dataStore / apiStore / runHistory (e.g. updateRun on the parent's
     // row). Acceptable because the child IS trusted code, but not hidden.
-    toolContext: { ...parentAgent.toolContext },
+    // `copyToolContext` keeps the mark of a context that does not carry the instance's network
+    // policy, so the provider-side web search stays withheld for the child as for its parent.
+    toolContext: copyToolContext(parentAgent.toolContext),
     // T2-X1 part 2: share the parent's SecretStore so `ask_secret`, vault
     // reads, and tool credential lookups work in the child. Documented
     // reach delta: a child's `http_request` will auto-inject `Bearer` tokens
@@ -1851,6 +1886,9 @@ async function executeThinker(
     // customer-granted-operator-access §3.13 E5) — again on top of the filtered list. After both
     // spreads for the same reason as the scope: no key a source gains later can rebind it.
     principal: parentAgent.principal,
+    // And who the parent writes as: a child of a trigger's run writes as that trigger, never
+    // as the owner. Unknown when the parent has none.
+    writeAuthor: parentAgent.writeAuthor ?? null,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
     // onto the child and the child's downstream code (memory writes, tool-call
     // recording) can attribute work to this run.
@@ -1867,6 +1905,18 @@ async function executeThinker(
     recordToolCall: parentAgent.recordToolCall,
     // The root's set, by reference: what the child fetches is in it before the parent writes.
     conversationGrants: parentAgent.conversationGrants,
+    // The parent's owner-known targets, by reference and read-only: the child's task, written by
+    // the parent's model, and what the child reads add nothing. And the conversation's record of
+    // outside reads, which the child sets under the same thread.
+    ownerKnown: parentAgent.ownerKnown,
+    conversationLatch: parentAgent.conversationLatch,
+    noticeLanguage: parentAgent.noticeLanguage,
+    onOriginRefused: parentAgent.onOriginRefused,
+    // A target the child was not given by the owner comes from the run the parent is (a
+    // trigger's, a workflow's), or else from the subtask itself.
+    sendOrigin: parentAgent.sendOrigin?.kind === 'triggerRun' || parentAgent.sendOrigin?.kind === 'workflowRun'
+      ? parentAgent.sendOrigin
+      : { kind: 'childAgent' },
   };
 
   // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row
@@ -1919,7 +1969,14 @@ async function executeThinker(
     });
 
     // Same per-turn time anchor as top-level chat / pipeline steps.
-    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), { disposableDeadline: deadline?.signal });
+    // A parent run admitted with a spending bound of its own hands that kind of bound on: the
+    // child runs under its share as a run ceiling too, so whatever is refused under such a bound
+    // (an in-session workflow, whose steps no guard of this run sees) is refused in the child.
+    const parentBounded = parentAgent.hasRunCostCeiling();
+    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), {
+      disposableDeadline: deadline?.signal,
+      ...(parentBounded ? { runCostCeilingUSD: budgetUSD } : {}),
+    });
     // Built HERE, not at the return: `runHistory.updateRun` below stores
     // `responseText`, and appending the note only on the way out left the run row
     // holding a version of the result the parent never saw — the one place
@@ -2347,6 +2404,10 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
      * `finally` below gives it back.
      */
     let heldForBatch = 0;
+    /** Each child's hard cap, as held against the instance's daily and monthly caps. */
+    let capHolds: number[] = [];
+    /** What of that hold is still taken; given back like `heldForBatch`. */
+    let capHeld = 0;
     if (remainingRunUSD !== null) {
       const asked = requested.reduce((sum, usd) => sum + usd, 0);
       // SCALED proportionally rather than refused outright. Refusing reads as the
@@ -2474,6 +2535,32 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // cost, until the session refused all further work for money it never spent. Inside
     // the `try`, so its own refusal gives the run's hold back through the `finally`.
     // No `await` lies between the run's reservation and this line.
+    //
+    // ⛔ The instance's daily and monthly caps, for the whole batch and before the first child.
+    // The session checks them once per turn, so without this a turn that passed the cap just
+    // below it could fan out batch after batch on top. Before `checkSessionBudget`, which
+    // reserves on the session counter and gives nothing back.
+    //
+    // Held is each child's hard cap (its share, or what it asked for), not the turn-based
+    // estimate: that is the most a child can spend, up to one turn over, as any limit here (a
+    // turn is recorded before it is compared). Never under the cost of one turn on the child's
+    // model: a child given nothing still runs that one turn.
+    //
+    // ⚠ NOT on a background run whose whole budget the admission already holds against the
+    // caps (`budgetHeldAgainstCaps`): the shares are carved out of that budget, so holding them
+    // again would count the same dollars twice and refuse the batch for room the run itself is
+    // holding. Only shares qualify; without a run budget there is nothing they are inside of.
+    const coveredByRun = shares !== null && agent.budgetHeldAgainstCaps?.() === true;
+    if (!coveredByRun) {
+      capHolds = specs.map((_, i) => Math.max(
+        shares?.[i] ?? requested[i]!,
+        minChildBudgetUSD(childModels[i]!, childCaps[i]),
+      ));
+      const batchUSD = capHolds.reduce((sum, usd) => sum + usd, 0);
+      const capReservation = reservePersistentBudget(batchUSD);
+      if (!capReservation.allowed) throw new Error(capRefusal(capReservation, batchUSD, Math.min(...capHolds)));
+      capHeld = capReservation.reservedUSD;
+    }
     checkSessionBudget(agent.sessionCounters, totalEstimate);
 
     channels.spawnStart.publish({ agents: names, parent: agent.name, parentRunId, depth: childDepth });
@@ -2579,6 +2666,13 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           if (shares !== null) {
             agent.releaseExternalCost?.(shares[i]!);
             heldForBatch -= shares[i]!;
+          }
+          // The child's cap hold against the daily and monthly caps, on the same exits. Its
+          // run row, written before this, carries what it really spent.
+          if (capHeld > 0) {
+            const back = Math.min(capHolds[i] ?? 0, capHeld);
+            releasePersistentBudget(back);
+            capHeld -= back;
           }
           // ⛔ The child's ACTUAL cost, onto the delegating run's own ceiling. Without
           // it the run keeps counting only its own turns while the tenant's daily total
@@ -2896,6 +2990,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       // is a no-op; `releaseExternalCost` floors at 0 either way, so a miscount cannot
       // mint budget.
       if (heldForBatch > 0) agent.releaseExternalCost?.(heldForBatch);
+      if (capHeld > 0) releasePersistentBudget(capHeld);
+      capHeld = 0;
     }
   },
   // Spawning writes nothing outside; each call the child makes is classified on its own.
@@ -2953,20 +3049,14 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         providers.add(profile?.provider ?? inheritedProvider ?? (r.hybridSlot.crossProviderSlot ? r.hybridSlot.provider : baseProvider));
       }
       const providerList = [...providers].map((p) => providerFamilyLabel(p)).join(', ');
-      const childWord = deepSpecs.length === 1 ? 'One child would run' : `${deepSpecs.length} children would run`;
-      const tierWord = hasUnknownBand
-        ? 'a model gated as DEEP (or an unregistered custom model whose cost band the engine cannot prove)'
-        : 'the DEEP tier (a stronger reasoning model, more capable but more expensive)';
+      const said = SPAWN_DIALOG[ctx?.language ?? 'en'];
+      const childWord = said.children(deepSpecs.length);
+      const tierWord = hasUnknownBand ? said.tierUnknownBand : said.tierDeep;
       // The trailing clause must match the buttons offered (predicate 6,
       // non-phishing): promise "Run on balanced" only when the engine can honour it.
-      const tail = canDowngrade
-        ? `Allow only if the work genuinely needs deep; otherwise choose "Run on balanced".`
-        : `A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.`;
+      const tail = canDowngrade ? said.tailDowngrade : said.tailPinned;
       return {
-        message:
-          `⚠ spawn_agent: ${childWord} on ${tierWord}. ` +
-          `Estimated cost ~$${costUsd.toFixed(2)} against this session. ` +
-          `Provider: ${providerList}. ${tail}`,
+        message: said.sentence(dialogToolWord('spawn_agent', ctx?.language ?? 'en'), childWord, tierWord, costUsd.toFixed(2), providerList, tail),
         tier: resolvedTier,
         costUsd,
         provider: providerList,

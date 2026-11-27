@@ -43,11 +43,13 @@ import {
   type MailWatchHandle,
   type MailWatchHandler,
   type MailWatchOptions,
+  listIdFromHeader,
 } from '../provider.js';
 import { decodeBytes, bodyQuarantinePlaceholder } from './charset.js';
 import { googleFetch } from '../../../core/connector-egress.js';
 import { joinCallSignal } from '../../../core/call-connection.js';
 import { buildRfc2822 } from '../mime-compose.js';
+import { AUTOMATIC_MAIL_HEADERS, automaticMail } from '../automatic-mail.js';
 
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -423,12 +425,6 @@ function snippetFrom(text: string, max: number): string {
   return (lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd();
 }
 
-function isAutoSubmitted(value: string | undefined): boolean {
-  if (!value) return false;
-  const lower = value.toLowerCase().trim();
-  return lower !== 'no' && lower !== '';
-}
-
 /**
  * Map Gmail label IDs to IMAP-style MailFlag values.
  *
@@ -470,7 +466,7 @@ function buildListQuery(opts: MailListOptions): string {
 }
 
 function metadataHeaders(): string[] {
-  return ['From', 'To', 'Cc', 'Subject', 'Date', 'Message-ID', 'In-Reply-To', 'References', 'Reply-To', 'Auto-Submitted'];
+  return ['From', 'To', 'Cc', 'Subject', 'Date', 'Message-ID', 'In-Reply-To', 'References', 'Reply-To', ...AUTOMATIC_MAIL_HEADERS, 'List-Id'];
 }
 
 function wrapGmailError(err: unknown, fallback: string): MailError {
@@ -789,7 +785,8 @@ export class OAuthGmailProvider implements MailProvider {
       hasAttachments: attachments.length > 0,
       attachmentCount: attachments.length,
       sizeBytes: msg.sizeEstimate,
-      isAutoReply: isAutoSubmitted(header(headers, 'Auto-Submitted')),
+      ...automaticMail((name) => header(headers, name)),
+      listId: listIdFromHeader(header(headers, 'List-Id')),
     };
   }
 

@@ -9,6 +9,7 @@
  * stylesheet below, by its SHA-256 in `style-src`. Not `'unsafe-inline'`: a hash admits these
  * bytes and nothing else, so markup injected into a page could not bring a style of its own.
  */
+import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
 import { createHash } from 'node:crypto';
 
 /**
@@ -180,6 +181,28 @@ export const OAUTH_RESULT_TEXTS = {
     en: 'The authorization could not be completed with the provider. Nothing was stored. You can start the connection again.',
     de: 'Die Anmeldung beim Anbieter liess sich nicht abschliessen. Es wurde nichts gespeichert. Du kannst die Verbindung neu starten.',
   },
+  // A store's exchange that got no pass (`storeExchangePassFor`), one text per cause. Only the
+  // one the control plane did not answer says to try again: for the others, it changes nothing.
+  shopifySwitchedOff: {
+    en: 'Shopify connections are switched off on this instance. Nothing was stored. Trying again does not change that; only lynox can switch them on.',
+    de: 'Shopify-Verbindungen sind auf dieser Instanz ausgeschaltet. Es wurde nichts gespeichert. Ein neuer Versuch ändert daran nichts; einschalten kann sie nur lynox.',
+  },
+  shopifySelfHosted: {
+    en: 'lynox reaches Shopify stores only on an instance run by lynox. You run this instance yourself. Nothing was stored.',
+    de: 'Shopify-Shops erreicht lynox nur auf einer Instanz, die lynox betreibt. Diese Instanz betreibst du selbst. Es wurde nichts gespeichert.',
+  },
+  shopifyNotSetUp: {
+    en: 'Shopify is not set up on this instance. Nothing was stored. lynox has to fix this, not you; until then, trying again changes nothing.',
+    de: 'Shopify ist auf dieser Instanz nicht eingerichtet. Es wurde nichts gespeichert. Das behebt lynox, nicht du; bis dahin ändert ein neuer Versuch nichts.',
+  },
+  shopifyUnconfirmed: {
+    en: 'lynox could not confirm just now that this instance may reach Shopify. Nothing was stored. Try again in a few minutes.',
+    de: 'lynox konnte gerade nicht bestätigen, dass diese Instanz Shopify erreichen darf. Es wurde nichts gespeichert. Versuch es in ein paar Minuten noch einmal.',
+  },
+  shopifyNotCleared: {
+    en: 'Shopify is not cleared for this instance right now. Nothing was stored. Trying again does not change that; only lynox can clear it.',
+    de: 'Shopify ist für diese Instanz zurzeit nicht freigegeben. Es wurde nichts gespeichert. Ein neuer Versuch ändert daran nichts; freigeben kann nur lynox.',
+  },
   unreadableAnswer: {
     en: 'The provider answered with something lynox could not read. Nothing was stored.',
     de: 'Der Anbieter hat mit etwas geantwortet, das lynox nicht lesen konnte. Es wurde nichts gespeichert.',
@@ -191,6 +214,10 @@ export const OAUTH_RESULT_TEXTS = {
   otherSessionStored: {
     en: 'This connection can no longer be completed for the session that started it. Nothing was stored.',
     de: 'Diese Verbindung lässt sich für die Sitzung, die sie gestartet hat, nicht mehr abschliessen. Es wurde nichts gespeichert.',
+  },
+  refreshRunning: {
+    en: 'lynox is renewing its access to this store right now. Nothing was stored. Wait a minute, then start the connection again.',
+    de: 'lynox erneuert gerade seinen Zugang zu diesem Shop. Es wurde nichts gespeichert. Warte eine Minute und starte die Verbindung dann noch einmal.',
   },
   addressChanged: {
     en: 'This connection\'s address changed while it was being completed. Nothing was stored.',
@@ -212,11 +239,32 @@ export const OAUTH_RESULT_TEXTS = {
     en: 'This connection has no provider this instance knows, so it cannot show what the owner sees of it. Nothing was sent to the provider.',
     de: 'Diese Verbindung nennt keinen Anbieter, den lynox kennt. Deshalb kann diese Seite nicht zeigen, was der Inhaber dieser Instanz von ihr sieht. An den Anbieter wurde nichts gesendet.',
   },
+  consentChanged: {
+    en: 'The text for this connection changed while you had the page open. Open the link again and read the new text. Nothing was sent to the provider.',
+    de: 'Der Text zu dieser Verbindung hat sich geändert, während du die Seite offen hattest. Öffne den Link noch einmal und lies den neuen Text. An den Anbieter wurde nichts gesendet.',
+  },
   noteChanged: {
     en: 'This connection now shows another note than the page you confirmed. Open the link again and read the page. Nothing was sent to the provider.',
     de: 'Der Hinweis zu dieser Verbindung hat sich geändert, seit du die Seite bestätigt hast. Öffne den Link noch einmal und lies die Seite. An den Anbieter wurde nichts gesendet.',
   },
 } as const satisfies Record<string, OAuthText>;
+
+/**
+ * The page's text for an exchange that was not sent: the cause a store's exchange got no pass for,
+ * else (no store, or the callback, token URL and profile are not one store) the plain failure,
+ * where starting again is right.
+ */
+export function exchangeRefusedText(refused: StoreExchangeRefusal | undefined): OAuthText {
+  switch (refused) {
+    case 'switched_off': return OAUTH_RESULT_TEXTS.shopifySwitchedOff;
+    case 'self_hosted': return OAUTH_RESULT_TEXTS.shopifySelfHosted;
+    case 'not_set_up': return OAUTH_RESULT_TEXTS.shopifyNotSetUp;
+    case 'unconfirmed': return OAUTH_RESULT_TEXTS.shopifyUnconfirmed;
+    case 'not_cleared': return OAUTH_RESULT_TEXTS.shopifyNotCleared;
+    case 'not_this_store':
+    case undefined: return OAUTH_RESULT_TEXTS.exchangeFailed;
+  }
+}
 
 /** The 200 page's text: which provider is now connected. */
 export function connectedText(provider: string): OAuthText {
@@ -239,8 +287,54 @@ export function connectedWithMoreText(grantedBeyond: readonly string[]): OAuthTe
 }
 
 /**
+ * The page an engine without engine.db shows instead of connecting an account (`connect`, the OAuth
+ * start) or saving the connection (`save`, the callback). A person reads it, so it is shorter than
+ * the JSON refusal. The closing paragraph is word for word the status bar's for the same mode
+ * (web-ui i18n `status.boot_store_missing_selfhost` / `status.boot_store_missing_managed`), chosen
+ * the same way: managed when a control plane runs the instance. The status bar shows the owner only;
+ * the callback page reaches whoever started the connection, so on self-host a mandate that started it
+ * on a healthy engine gets `helper`: it cannot fix the cause, the owner can. (At the start a mandate
+ * is turned away earlier: without engine.db no mandate is live.) Each is its own paragraph on the page.
+ */
+const ENGINE_LESS_PAGE_HEADS = {
+  connect: {
+    de: 'lynox verbindet gerade keine Konten: Die Engine ist ohne engine.db gestartet, und eine neue Verbindung ginge verloren, sobald sie engine.db wieder öffnet. An den Anbieter wurde nichts gesendet. Verbinde das Konto erneut, wenn die Engine neu gestartet ist.',
+    en: 'lynox is not connecting accounts right now: the engine started without engine.db, and a new connection would be lost once it opens engine.db again. Nothing was sent to the provider. Connect the account again once the engine has restarted.',
+  },
+  save: {
+    de: 'lynox hat diese Verbindung nicht gespeichert: Die Engine ist ohne engine.db gestartet, und die Änderung ginge verloren, sobald sie engine.db wieder öffnet. Füge die Verbindung erneut hinzu oder ändere sie, wenn die Engine neu gestartet ist.',
+    en: 'lynox did not save this connection: the engine started without engine.db, and the change would be lost once it opens engine.db again. Add or change the connection again once the engine has restarted.',
+  },
+} as const satisfies Record<string, OAuthText>;
+
+export const ENGINE_LESS_PAGE_CLOSE = {
+  selfhost: {
+    de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Den Grund nennt das Log, das die Engine beim Start schreibt; behebe ihn und starte die Engine neu.',
+    en: 'This lasts until the engine restarts and can open all its files again. The log the engine writes at startup names the cause; fix it and restart the engine.',
+  },
+  helper: {
+    de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Sag dem Inhaber dieser Instanz Bescheid.',
+    en: 'This lasts until the engine restarts and can open all its files again. Let the owner of this instance know.',
+  },
+  managed: {
+    de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Das lynox-Team bekommt dazu automatisch eine Meldung.',
+    en: 'This lasts until the engine restarts and can open all its files again. The lynox team gets an automatic alert about it.',
+  },
+} as const satisfies Record<string, OAuthText>;
+
+/** Which closing paragraph: managed for everyone, else the owner's or a helper's. */
+export function engineLessPageClose(managed: boolean, owner: boolean): keyof typeof ENGINE_LESS_PAGE_CLOSE {
+  if (managed) return 'managed';
+  return owner ? 'selfhost' : 'helper';
+}
+
+export function engineLessPageText(kind: keyof typeof ENGINE_LESS_PAGE_HEADS, managed: boolean, owner: boolean): readonly OAuthText[] {
+  return [ENGINE_LESS_PAGE_HEADS[kind], ENGINE_LESS_PAGE_CLOSE[engineLessPageClose(managed, owner)]];
+}
+
+/**
  * Where a result page's one button leads. `apis` once the page knows the
- * profile — Settings → APIs shows the connection's state; `app` where it does not. The paths are
+ * profile — Settings → API connections shows the connection's state; `app` where it does not. The paths are
  * fixed here and a caller names only the kind, so no request value can become the target.
  */
 export type OAuthBack = 'apis' | 'app';
@@ -250,14 +344,15 @@ export const OAUTH_BACK_PATHS: Readonly<Record<OAuthBack, string>> = Object.free
 });
 
 /** The result page, in `lang`: a title by outcome, the text, and one button back into lynox —
- *  never "close this tab" as the only way on. */
-export function oauthResultHtml(lang: OAuthLang, status: number, text: OAuthText, back: OAuthBack): string {
+ *  never "close this tab" as the only way on. A list is one paragraph per entry; a text is never
+ *  split, so a value written into it (a profile name) cannot start a paragraph of its own. */
+export function oauthResultHtml(lang: OAuthLang, status: number, text: OAuthText | readonly OAuthText[], back: OAuthBack): string {
   const title = status === 200
     ? (lang === 'de' ? 'Verbunden' : 'Connected')
     : (lang === 'de' ? 'Verbindung nicht abgeschlossen' : 'Connection not completed');
   const go = lang === 'de' ? 'Zu lynox' : 'Go to lynox';
   return oauthPageHtml(lang, title,
-    `<h1>${escapeOAuthHtml(title)}</h1><p>${escapeOAuthHtml(text[lang])}</p>`
+    `<h1>${escapeOAuthHtml(title)}</h1>${(Array.isArray(text) ? text : [text]).map((p: OAuthText) => `<p>${escapeOAuthHtml(p[lang])}</p>`).join('')}`
     + `<a class="go" href="${OAUTH_BACK_PATHS[back]}">${escapeOAuthHtml(go)}</a>`);
 }
 

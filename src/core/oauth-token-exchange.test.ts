@@ -266,7 +266,7 @@ describe('a non-2xx is handed back, not interpreted', () => {
 // endpoint the profile's acceptance covers. The control posts to another accepted host.
 describe('a token exchange with a Shopify store is refused', () => {
   it('posts nothing to the store, says why, and posts to another accepted host', async () => {
-    const { SHOPIFY_UNAVAILABLE } = await import('./shopify-host.js');
+    const { SHOPIFY_FETCH_TOKEN } = await import('./shopify-host.js');
     fetchWithValidatedRedirects.mockResolvedValue({ response: { status: 200, ok: true } });
     readBodyLimited.mockResolvedValue({ text: '{}', truncated: false });
     const accepted = (url: string) => {
@@ -276,7 +276,7 @@ describe('a token exchange with a Shopify store is refused', () => {
     };
     const store = await exchangeToken({ endpoint: accepted('https://shop.myshopify.com./admin/oauth/access_token'), params: { client_secret: 's' }, bodyFormat: 'json' }, undefined);
     expect(store.ok).toBe(false);
-    if (!store.ok) expect(store.message).toBe(`token exchange refused: ${SHOPIFY_UNAVAILABLE}`);
+    if (!store.ok) expect(store.message).toBe(`token exchange refused: ${SHOPIFY_FETCH_TOKEN}`);
     expect(fetchWithValidatedRedirects).not.toHaveBeenCalled();
 
     const other = await exchangeToken({ endpoint: accepted('https://shop.commerce.example/admin/oauth/access_token'), params: { client_secret: 's' }, bodyFormat: 'json' }, undefined);

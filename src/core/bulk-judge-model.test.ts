@@ -29,7 +29,14 @@ describe('the judge model per provider', () => {
     for (const id of Object.values(JUDGE_MODELS)) expect(modelCapability(id), id).toBeDefined();
   });
 
-  it('judges on Haiku on Anthropic and Vertex, with the ambient client', () => {
+  it('pins Sonnet as the judge on Anthropic and Vertex, by its fixed id', () => {
+    // The ids as literals: a test that reads them back from JUDGE_MODELS holds whatever it says.
+    expect(judgeModelId(uc(), 'fast', 'anthropic')).toBe('claude-sonnet-4-6');
+    expect(judgeModelId(uc(), 'fast', 'vertex')).toBe('claude-sonnet-4-6');
+    expect(modelCapability('claude-sonnet-4-6')?.tier).toBe('balanced');
+  });
+
+  it('judges on the pinned model on Anthropic and Vertex, with the ambient client', () => {
     expect(judgeModelId(uc(), 'fast', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
     expect(judgeModelId(uc(), 'balanced', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
     expect(judgeModelId(uc(), 'fast', 'vertex')).toBe(JUDGE_MODELS.vertex);
@@ -56,10 +63,11 @@ describe('the judge model per provider', () => {
     expect(resolveJudgeModel(uc(), 'fast', ambient, 'anthropic')!.modelId).toBe(JUDGE_MODELS.fireworks);
   });
 
-  it('judges on Haiku under the max-quality preset', () => {
+  it('judges on the pinned model under the max-quality preset, also from its fast slot', () => {
     hybrid('max-quality');
     expect(judgeModelId(uc(), 'deep', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
-    expect(MODEL_MAP.fast).toBe(JUDGE_MODELS.anthropic);
+    expect(judgeModelId(uc(), 'fast', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
+    expect(MODEL_MAP.fast).not.toBe(JUDGE_MODELS.anthropic);
   });
 
   it('gives no judge to a provider it has no decided model for', () => {
@@ -72,8 +80,14 @@ describe('the judge model per provider', () => {
   it('refuses a blocked judge model instead of falling back', () => {
     expect(judgeModelId(uc({ blocked_model_ids: [JUDGE_MODELS.anthropic] }), 'balanced', 'anthropic')).toBeNull();
     expect(judgeModelId(uc({ blocked_model_ids: [JUDGE_MODELS.mistral], api_base_url: MISTRAL_BASE }), 'fast', 'openai')).toBeNull();
-    // A blocked chat model on the tier is not the judge's: the judge still judges.
-    expect(judgeModelId(uc({ blocked_model_ids: [MODEL_MAP.balanced] }), 'balanced', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
+    expect(judgeModelId(uc({ blocked_model_ids: [JUDGE_MODELS.vertex] }), 'fast', 'vertex')).toBeNull();
+    // The judge is the balanced chat model: blocking that model for chat blocks the judge too.
+    expect(MODEL_MAP.balanced).toBe(JUDGE_MODELS.anthropic);
+    expect(judgeModelId(uc({ blocked_model_ids: [MODEL_MAP.balanced] }), 'fast', 'anthropic')).toBeNull();
+    expect(judgeModelId(uc({ blocked_model_ids: ['claude-sonnet'] }), 'fast', 'vertex')).toBeNull();
+    // A blocked chat model that is not the judge's leaves it alone: the judge still judges.
+    expect(MODEL_MAP.fast).not.toBe(JUDGE_MODELS.anthropic);
+    expect(judgeModelId(uc({ blocked_model_ids: [MODEL_MAP.fast] }), 'fast', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
   });
 
   it('refuses a judge model above max_tier', () => {
@@ -87,7 +101,11 @@ describe('the judge model per provider', () => {
     expect(judgeModelId(uc({ max_tier: 'balanced' }), 'fast', 'anthropic')).toBeNull();
     expect(judgeModelId(uc({ max_tier: 'deep' }), 'fast', 'anthropic')).toBe(JUDGE_MODELS.fireworks);
     setTierSetResolver({ routingMode: 'standard', tierSet: null });
-    expect(judgeModelId(uc({ max_tier: 'fast' }), 'deep', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
+    // Sonnet is in the balanced band: a `fast` cap refuses it on both, `balanced` lets it judge.
+    for (const provider of ['anthropic', 'vertex'] as const) {
+      expect(judgeModelId(uc({ max_tier: 'fast' }), 'deep', provider), provider).toBeNull();
+      expect(judgeModelId(uc({ max_tier: 'balanced' }), 'deep', provider), provider).toBe(JUDGE_MODELS[provider]);
+    }
   });
 });
 

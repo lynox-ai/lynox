@@ -8,8 +8,9 @@
 // the queue can wrap it with a per-job AbortController + timeout.
 
 import { buildClassifierPrompt, type ClassifierPromptInput, type ClassifierProvider } from './prompt.js';
-import { parseClassifierResponse, type ClassifierVerdict } from './schema.js';
+import { parseClassifierResponse, type ClassifierVerdict, type FailReason } from './schema.js';
 import { FORWARDED_REASON_DE, isForwardedByPerson } from './forwarded.js';
+import type { InboxRuleWithheldReason } from '../../../types/index.js';
 
 /**
  * Identifier persisted in `inbox_items.classifier_version`. Bumping this
@@ -46,6 +47,15 @@ export interface ClassifyResult extends ClassifierVerdict {
   classifierVersion: string;
   /** True when the body was sliced for size — surfaced for telemetry. */
   bodyTruncated: boolean;
+  /**
+   * Set when a description rule named the mail (`rule-check.ts`). `withheld`: why the rule was not
+   * applied (it would have filed the mail as handled, but the mail is sensitive, a person forwarded
+   * it, or the classifier did not confirm it), so the mail is shown instead and the item does not
+   * count as filed by the rule; `false` when it was applied.
+   */
+  rule?: { id: string; name: string | undefined; action: string; withheld: false | InboxRuleWithheldReason } | undefined;
+  /** When the classifier overruled a description rule: its own fail reason (null = clean verdict). */
+  classifierFailReason?: FailReason | null | undefined;
 }
 
 /**

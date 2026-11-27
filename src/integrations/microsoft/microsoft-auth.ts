@@ -2,6 +2,7 @@ import type { OAuthRefreshRequest } from '../../contract/http.js';
 import type { SecretVault } from '../../core/secret-vault.js';
 import type { HostPolicyContext } from '../../core/network-guard.js';
 import { cpFetch } from '../../core/connector-egress.js';
+import { processErrorText } from '../../core/error-egress.js';
 import { readControlPlaneIdentity, validateControlPlaneRefresh } from '../../core/control-plane-client.js';
 import {
   MICROSOFT_REFRESH_CODES,
@@ -9,6 +10,7 @@ import {
   type MicrosoftRefreshFailureKind,
 } from '../../core/oauth-refresh-failure.js';
 import { MICROSOFT_OAUTH_TOKENS_KEY } from './vault-keys.js';
+import { tokenAnswer } from '../../core/oauth-token-answer.js';
 
 /**
  * A Microsoft 365 mailbox grant, held by the engine and refreshed through the
@@ -346,6 +348,12 @@ export class MicrosoftAuth {
     this.drop();
   }
 
+  /**
+   * One refresh at a time; concurrent callers share it. Because it is shared, it
+   * takes no caller's stop signal: the callers waiting on it can belong to
+   * different runs, or to none, and one run's stop would fail the others. The request
+   * carries its own 30 s limit instead.
+   */
   private async refresh(): Promise<void> {
     if (this.refreshInFlight) return this.refreshInFlight;
     this.refreshInFlight = this.doRefresh().finally(() => {
@@ -403,7 +411,7 @@ export class MicrosoftAuth {
       throw new Error(`Token refresh failed: ${response.status}.${message}`);
     }
 
-    const json: unknown = await response.json();
+    const json = await tokenAnswer(response, 'Token refresh failed');
     this.assertStillCurrent(grant);
     const body = validateControlPlaneRefresh(json, MICROSOFT_REFRESH_REMEDY.transient);
     // Microsoft rotates the refresh token on every refresh. A handle that is
@@ -465,7 +473,7 @@ export class MicrosoftAuth {
         },
       });
     } catch (err: unknown) {
-      console.warn(`[lynox] Microsoft token-change hook failed (${reason}): ${err instanceof Error ? err.message : String(err)}`);
+      console.warn(`[lynox] Microsoft token-change hook failed (${reason}): ${processErrorText(err)}`);
     }
   }
 }

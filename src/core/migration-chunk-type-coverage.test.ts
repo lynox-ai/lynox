@@ -121,7 +121,7 @@ describe('a manifest naming a type this build does not know is refused', () => {
     try {
       for (const bad of ['', 'Memory', 'memory ', 'sqlite', 'portable-dir', '__proto__']) {
         const importer = armed(dir);
-        expect(() => importer.setManifest(manifestWith([bad])), `"${bad}" was accepted`).toThrow(/Unknown chunk type/);
+        expect(() => importer.setManifest(manifestWith([bad])), `"${bad}" was accepted`).toThrow(/^Unknown chunk type .* newer lynox than the target instance — update the target instance before migrating\./);
       }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -135,7 +135,7 @@ describe('the declared list is the single source of the bucket table', () => {
     // drops it without a word (measured on v2.13.0 and v2.14.2). That addition owes a release
     // note, and a decision about whether it is the release that starts checking the version.
     expect([...MIGRATION_CHUNK_TYPES].sort()).toEqual([
-      'artifacts', 'config', 'memory', 'portable_dir', 'secrets', 'sqlite_db', 'sweeps',
+      'artifacts', 'config', 'memory', 'portable_dir', 'secrets', 'sqlite_db', 'sqlite_db_plain', 'sweeps',
     ]);
   });
 

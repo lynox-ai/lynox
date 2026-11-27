@@ -701,10 +701,6 @@ export function buildComposeFile(
 services:
   lynox:
     image: ghcr.io/lynox-ai/lynox:latest
-    # Explicit platform pin — safe default while the multi-arch manifest
-    # rolls out. Apple Silicon users can remove this line once :latest is
-    # multi-arch to get a native arm64 image instead of Rosetta emulation.
-    platform: linux/amd64
     restart: unless-stopped
     read_only: true
     user: "${engineIds}"

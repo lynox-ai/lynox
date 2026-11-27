@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
 import { TaskManager } from './task-manager.js';
 import { WorkflowStore } from './workflow-store.js';
 import { ConnectionStore } from './connection-store.js';
@@ -11,6 +12,7 @@ import { InboundEventStore } from './inbound-events.js';
 import { TriggerStore } from './trigger-store.js';
 import { EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_STOPPED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
 import { WORKER_NOTICES } from './worker-notices.js';
+import { currentWorkerRunStart } from './worker-run-start.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import { setPlanPauseForTests } from './plan-pause.js';
@@ -25,21 +27,36 @@ const runner = vi.hoisted(() => ({
   mode: { value: 'autonomous' as string },
   steps: { value: [] as unknown[] },
   confirmedAt: { value: '2026-10-01T00:00:00.000Z' as string | undefined },
+  // The engine's hash, so a confirmed workflow carries a stamp that holds (`workflow-stamp.ts`).
+  hasher: { value: null as EngineDb | null },
+  // The stamp was taken over other steps than the ones the workflow has now.
+  staleStamp: { value: false },
 }));
-const budget = vi.hoisted(() => ({ refuse: false, released: 0 }));
+const budget = vi.hoisted(() => ({ refuse: false, released: 0, releasedUSD: 0 }));
 vi.mock('./session-budget.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('./session-budget.js')>();
   return {
     ...real,
     reservePersistentBudget: (usd: number) => budget.refuse ? { allowed: false, reason: 'monthly cap reached', reservedUSD: 0 } : real.reservePersistentBudget(usd),
     releasePersistentBudget: (usd: number) => { budget.released++; real.releasePersistentBudget(usd); },
+    // The worker gives an admission's reservation back by the object it was issued as.
+    releaseReservation: (r: Parameters<typeof real.releaseReservation>[0]) => { budget.released++; budget.releasedUSD += r.reservedUSD; real.releaseReservation(r); },
   };
 });
 vi.mock('./saved-workflow-runner.js', () => ({ runGuardedSavedWorkflow: (...args: unknown[]) => runner.run(...args) }));
-vi.mock('../tools/builtin/pipeline.js', async (importOriginal) => ({
+vi.mock('../tools/builtin/pipeline.js', async (importOriginal) => {
+  const { withOwnerStamp } = await import('./workflow-stamp.js');
+  return {
   ...(await importOriginal<object>()),
-  getPipeline: (id: string) => ({ id, name: 'Orders', mode: runner.mode.value, steps: runner.steps.value, confirmedAt: runner.confirmedAt.value }),
-}));
+  getPipeline: (id: string) => {
+    const planned = { id, name: 'Orders', mode: runner.mode.value, steps: runner.steps.value } as unknown as PlannedPipeline;
+    const at = runner.confirmedAt.value;
+    if (at === undefined || runner.hasher.value === null) return planned;
+    const stamped = withOwnerStamp(runner.hasher.value, planned, at);
+    return runner.staleStamp.value ? { ...stamped, steps: [{ id: 'later', task: 'changed after the stamp' }] } : stamped;
+  },
+  };
+});
 
 const SHOP = 'demo-store.myshopify.com';
 
@@ -61,11 +78,14 @@ describe('the webhook drain', () => {
     runner.mode.value = 'autonomous';
     runner.steps.value = [];
     runner.confirmedAt.value = '2026-10-01T00:00:00.000Z';
+    runner.staleStamp.value = false;
     budget.refuse = false;
     budget.released = 0;
+    budget.releasedUSD = 0;
     dir = mkdtempSync(join(tmpdir(), 'lynox-webhook-drain-'));
     history = new RunHistory(join(dir, 'history.db'));
     engineDb = new EngineDb(join(dir, 'engine.db'));
+    runner.hasher.value = engineDb;
     history.setVerbGraph(engineDb);
     tm = new TaskManager(history);
     ledger = new InboundEventStore(engineDb);
@@ -115,9 +135,13 @@ describe('the webhook drain', () => {
     return tm.createWebhookTrigger({ title: 'Orders', pipelineId: 'wf-orders', verifier: 'shopify-hmac', connectionId: 'shop-a', confirmedAt: '2026-10-01T00:00:00.000Z' }).trigger.id;
   }
   let seq = 0;
+  // Events arrive an hour before the test runs, a second apart: inside the retention window, which
+  // the loop measures from the clock, on whatever day the suite runs.
+  const arrivedFrom = Date.now() - 60 * 60 * 1000;
+  const arrivedAt = (n: number): string => new Date(arrivedFrom + n * 1000).toISOString();
   function deliver(triggerId: string, values: Record<string, string | number | boolean> = { email: 'kim@example.com' }, headers: Record<string, string> = {}): string {
     seq++;
-    ledger.record({ triggerId, dedupKey: `k-${String(seq)}`, headers, state: 'received', values: { values, unread: {} }, now: `2026-10-22T12:00:${String(seq).padStart(2, '0')}.000Z` });
+    ledger.record({ triggerId, dedupKey: `k-${String(seq)}`, headers, state: 'received', values: { values, unread: {} }, now: arrivedAt(seq) });
     return ledger.listByTrigger(triggerId).at(-1)!.id;
   }
   const eventOf = (triggerId: string, id: string) => ledger.listByTrigger(triggerId).find((e) => e.id === id)!;
@@ -147,6 +171,35 @@ describe('the webhook drain', () => {
     expect([after.status, after.next_run_at, after.enabled]).toEqual([before.status, before.next_run_at, before.enabled]);
     expect(after.last_run_status).toBe('success');
     expect(eventOf(t, id).runId).toBe('run-1');
+  });
+
+  it('gives the budget reservation back once the event\'s run settled', async () => {
+    const { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } = await import('./session-budget.js');
+    configurePersistentBudget({ costProvider: { getCostByDay: () => [] }, dailyCapUSD: 100, monthlyCapUSD: 1000 });
+    try {
+      let heldWhileRunning = 0;
+      runner.run.mockImplementationOnce(() => { heldWhileRunning = getReservedInFlight(); return Promise.resolve({ ok: true, status: 'completed', runId: 'run-1' }); });
+      const t = sharedTrigger();
+      const id = deliver(t);
+      await loop.tick();
+      await settled(t, id, 'done');
+      expect(heldWhileRunning, 'positive control: the run was held').toBeGreaterThan(0);
+      await vi.waitFor(() => { expect(getReservedInFlight(), 'the hold is back').toBe(0); });
+    } finally {
+      resetPersistentBudget();
+    }
+  });
+
+  // The run is held as an event's start, so a workflow its steps start never says it was
+  // started by hand or by a schedule.
+  it("holds the run as an event's start for everything it does", async () => {
+    let seen: string | undefined = 'unread';
+    runner.run.mockImplementationOnce(() => { seen = currentWorkerRunStart(); return Promise.resolve({ ok: true, status: 'completed', runId: 'run-1' }); });
+    const t = sharedTrigger();
+    const id = deliver(t, { email: 'kim@example.com', total: 12.5 });
+    await loop.tick();
+    await settled(t, id, 'done');
+    expect(seen).toBe('event');
   });
 
   // A push per order is noise; the run history holds the success.
@@ -314,6 +367,20 @@ describe('the webhook drain', () => {
   });
 
   // A refusal before the run that holds until the owner acts drops the event.
+  it('drops an event of a workflow whose steps changed after its stamp, switches the trigger off, and says so once', async () => {
+    runner.staleStamp.value = true;
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'dropped');
+    expect(runner.run).not.toHaveBeenCalled();
+    expect(eventOf(t, id).reason).toContain('waits for its owner to review its steps');
+    expect(Boolean(tm.getTrigger(t)!.enabled)).toBe(false);
+    await loop.tick();
+    await loop.tick();
+    expect(pushes('waits for its owner to review its steps')).toBe(1);
+  });
+
   it('drops an event of a workflow nobody confirmed, switches the trigger off, and says so once', async () => {
     runner.confirmedAt.value = undefined;
     const t = sharedTrigger();
@@ -389,6 +456,45 @@ describe('the webhook drain', () => {
     await loop.tick();
     await settled(t, id, 'failed');
     expect(eventOf(t, id).reason).toContain('uses the event value "note"');
+  });
+
+  // A step id stored before ids had a shape runs under its run name, and its references move with
+  // it: a reference the stored text shows as an unmapped param is a step's output in the run.
+  it('refuses a run in which a reference reads as a param only before the run renames its step', async () => {
+    runner.steps.value = [
+      { id: 'params ', task: 'Summarize the order' },
+      { id: 'call', task: 'Call it', tool: 'http_request', input_from: ['params '], input_template: { method: 'GET', url: '{{params .result}}' } },
+    ];
+    runner.run.mockImplementation(async (...args: unknown[]) => {
+      const opts = args[3] as { checkWorkflow?: (p: { steps: unknown[] }) => string | null };
+      const refused = opts.checkWorkflow?.({ steps: runner.steps.value }) ?? null;
+      return refused === null ? { ok: true, status: 'completed', runId: 'run-1' } : { ok: false, error: refused };
+    });
+    const t = sharedTrigger({ note: '/note' });
+    const id = deliver(t, { note: 'hello' });
+    await loop.tick();
+    await settled(t, id, 'failed');
+    expect(eventOf(t, id).reason).toContain('Step "call" uses "{{step-1.result}}" outside its task text');
+  });
+
+  // An id outside the shape that holds braces is renamed in the run; the reference the run executes
+  // is the one in the input template, and that is the one refused, by the step's run name.
+  it('refuses the reference the run executes, by the run name of a step stored with braces in its id', async () => {
+    runner.steps.value = [
+      { id: 's1', task: 'Summarize the order' },
+      { tool: '{{params.foo', id: '}}{{s1.x}}', task: 'Call it', input_from: ['s1'], input_template: { url: '{{s1.result}}' } },
+    ];
+    runner.run.mockImplementation(async (...args: unknown[]) => {
+      const opts = args[3] as { checkWorkflow?: (p: { steps: unknown[] }) => string | null };
+      const refused = opts.checkWorkflow?.({ steps: runner.steps.value }) ?? null;
+      return refused === null ? { ok: true, status: 'completed', runId: 'run-1' } : { ok: false, error: refused };
+    });
+    const t = sharedTrigger({ note: '/note' });
+    const id = deliver(t, { note: 'hello' });
+    await loop.tick();
+    await settled(t, id, 'failed');
+    expect(eventOf(t, id).reason).toContain('Step "step-2" uses "{{s1.result}}" outside its task text');
+    expect(eventOf(t, id).reason).not.toContain('{{s1.x}}');
   });
 
   it('CONTROL: a mapped value used only in task text runs', async () => {
@@ -563,9 +669,18 @@ describe('the webhook drain', () => {
     const t = sharedTrigger();
     const id = deliver(t);
     const spy = vi.spyOn(WorkerLoop.prototype as unknown as { takeLease: (id: string) => string }, 'takeLease').mockImplementationOnce(() => { throw new Error('database is locked'); });
-    await loop.tick();
-    expect(spy).toHaveBeenCalled();
-    expect(budget.released).toBe(1);
+    // A real hold, so the release is measured in money and not only counted as a call.
+    const { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } = await import('./session-budget.js');
+    configurePersistentBudget({ costProvider: { getCostByDay: () => [] }, dailyCapUSD: 100, monthlyCapUSD: 1000 });
+    try {
+      await loop.tick();
+      expect(spy).toHaveBeenCalled();
+      expect(budget.released).toBe(1);
+      expect(budget.releasedUSD, 'positive control: a real hold was taken').toBeGreaterThan(0);
+      expect(getReservedInFlight(), 'the hold is back').toBe(0);
+    } finally {
+      resetPersistentBudget();
+    }
     expect(eventOf(t, id).state).toBe('received');
   });
 
@@ -856,8 +971,9 @@ describe('the webhook drain', () => {
     const id = deliver(t);
     expect(ledger.begin(id, 'a1')).toBe(true);
     expect(ledger.finish(id, 'a1', { state: 'failed', reason: 'x' })).toBe(true);
-    expect(ledger.sweepValues('2026-10-22T12:00:00.000Z')).toBe(0);
-    expect(ledger.sweepValues('2026-11-30T00:00:00.000Z')).toBe(1);
+    // Not before its own arrival: the window clears what arrived strictly before it.
+    expect(ledger.sweepValues(arrivedAt(seq))).toBe(0);
+    expect(ledger.sweepValues(new Date(arrivedFrom + 39 * 24 * 60 * 60 * 1000).toISOString())).toBe(1);
     expect(eventOf(t, id).valuesJson).toBeNull();
   });
 });
@@ -945,7 +1061,7 @@ describe('the ledger\'s moves', () => {
   it('gets the index on a database that ran the drain columns before it existed', () => {
     const db = engineDb.getDb();
     // Every later version goes too: the migrations run from the highest one recorded.
-    db.exec('ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62;');
+    db.exec('ALTER TABLE bulk_runs DROP COLUMN phase_before_undo; DROP INDEX IF EXISTS idx_bulk_runs_superseded; ALTER TABLE bulk_runs DROP COLUMN superseded_by; ALTER TABLE triggers DROP COLUMN last_escalation_chat_kind; ALTER TABLE triggers DROP COLUMN last_escalation_thread_id; ALTER TABLE triggers DROP COLUMN last_escalation_case; ALTER TABLE bulk_targets DROP COLUMN refusal_detail; ALTER TABLE bulk_targets DROP COLUMN target_title; DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause; ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62; DROP INDEX IF EXISTS idx_audit_log_poll_fold; DROP INDEX IF EXISTS idx_audit_log_ts; ALTER TABLE audit_log DROP COLUMN poll_last; ALTER TABLE audit_log DROP COLUMN poll_count;');
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'));
     expect(engineDb.getDb().prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbound_events_state_received'`).get()).toBeDefined();

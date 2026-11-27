@@ -29,6 +29,8 @@
  * extension point: production callers pass nothing.
  */
 
+import { createHash } from 'node:crypto';
+
 /**
  * The words around a preset's customer text on the consent page, in the text's language. Each
  * one is binding customer text like the paragraphs, so it comes from here as approved. Absent,
@@ -64,6 +66,38 @@ export interface ConsentNotice {
    */
   readonly scopeNames?: Readonly<Record<string, string>>;
 }
+
+/**
+ * The version of a customer text: the first 16 hex digits of a SHA-256 over everything the consent
+ * page shows of it — its language, its paragraphs, its frame and the names of its write scopes.
+ * Which of the write scopes a link asks for is left out: a page that lists fewer of them shows the
+ * same text. A change to any word gives a new version, and a consent recorded under the old one no
+ * longer reads as a consent to this text ({@link SHOPIFY_CONSENT_VERSION}).
+ */
+export function consentNoticeVersion(notice: ConsentNotice): string {
+  // A literal in a fixed order and the scope names sorted: the digest moves with the text only.
+  const shown = {
+    lang: notice.lang,
+    paragraphs: [...notice.paragraphs],
+    frame: notice.frame === undefined ? null : {
+      title: notice.frame.title, scopesIntro: notice.frame.scopesIntro, scopesNote: notice.frame.scopesNote,
+      button: notice.frame.button, afterButton: notice.frame.afterButton ?? null,
+    },
+    scopeNames: notice.scopeNames === undefined ? null
+      : Object.fromEntries(Object.keys(notice.scopeNames).sort().map((k) => [k, notice.scopeNames![k]])),
+  };
+  return createHash('sha256').update(JSON.stringify(shown)).digest('hex').slice(0, 16);
+}
+
+/**
+ * The version of the Shopify customer text a connection must have been confirmed under before a
+ * bulk run writes a field beyond a product's title and SEO texts (`shopifyConsentBlock`). Written
+ * out, not computed: a test holds it equal to {@link consentNoticeVersion} of the Shopify text, so
+ * a change to the text fails that test until this line is changed with it, in the same review.
+ */
+// One language today (`lang: 'de'`). A second one gets its own version, and the check must then
+// compare with the version of the language the page showed, not with this one constant.
+export const SHOPIFY_CONSENT_VERSION = 'bd121d2355d89db5';
 
 /**
  * What is wrong with a customer text's frame, empty when nothing is: a frame without names or
@@ -224,6 +258,13 @@ export interface OAuthPreset {
    */
   readonly tokenBodyFormat?: 'form' | 'json';
   /**
+   * A parameter the code exchange adds to ask the provider for a token that expires and comes with
+   * a refresh token. Absent: none. Shopify takes `expiring=1` and requires it of every app created
+   * from 2026-12-01; an older app takes it as an opt-in. Whether the token expires is read from the
+   * answer, never from this field. Read through {@link codeExchangeExtraParams}.
+   */
+  readonly expiringParam?: { readonly name: string; readonly value: string };
+  /**
    * A check the callback runs on the provider's redirect before it exchanges the code, on top
    * of the state cookie every preset already has. Absent: none. `shopify-hmac` is
    * {@link ./oauth-callback-hmac.ts}.
@@ -263,6 +304,22 @@ export function presetTokenHeaderName(preset: OAuthPreset): string | undefined {
  */
 export function presetTokenBodyFormat(preset: OAuthPreset, profileFormat: 'form' | 'json' | undefined): 'form' | 'json' {
   return preset.tokenBodyFormat ?? profileFormat ?? 'form';
+}
+
+/**
+ * What the code exchange adds to the standard parameters for this preset: the ask for an expiring
+ * token, unless the profile already holds a connection whose token does not expire. That
+ * connection keeps the exchange it was made with, also when it is connected again; moving it to
+ * expiring tokens is a step of its own, not a side effect of a reconnect.
+ */
+export function codeExchangeExtraParams(
+  preset: OAuthPreset | undefined,
+  held: { readonly hasAccessToken: boolean; readonly expiringHeld: boolean },
+): Record<string, string> {
+  const ask = preset?.expiringParam;
+  if (ask === undefined) return {};
+  if (held.hasAccessToken && !held.expiringHeld) return {};
+  return { [ask.name]: ask.value };
 }
 
 /**
@@ -338,8 +395,8 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
       writeScopes: ['contact_edit', 'note_edit', 'task_edit', 'kb_offer_edit', 'kb_invoice_edit'],
       paragraphs: [
         'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
-        'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
+        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+        'Für Buchhaltung, Bank und Lohn fragt lynox bei bexio keine Rechte an. Welche Rechte der Zugang am Ende erhält, legt bexio fest. Gewährt bexio mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
       ],
       // The page around the text, approved 2026-10-21 (reviewed first), its line under the list
       // 2026-11-03, under the same
@@ -348,8 +405,8 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
       // that leaves out, so the line under the list says what it covers.
       frame: {
         title: 'Schreibrechte für bexio bestätigen',
-        scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
+        scopesIntro: 'lynox fragt bei bexio diese Schreibrechte an:',
+        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
         button: 'Zustimmen und weiter zu bexio',
         afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
       },
@@ -366,8 +423,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     // An app the merchant creates in their store's organisation, authorised through lynox's
     // connect link (PRD shopify-preset, revision 9). Paths, comma-separated scopes, the token
     // header and the form-encoded exchange from shopify.dev's authorization-code grant and
-    // access-scopes pages, read 2026-10-09 and 2026-10-18. No `expiring`: the token does not
-    // expire, so there is no refresh.
+    // access-scopes pages, read 2026-10-09 and 2026-10-18. `expiring=1` from shopify.dev's
+    // changelog of 2026-11-19: an app created from 2026-12-01 gets only expiring offline tokens
+    // (one hour, with a refresh token for 90 days); an older one may opt in.
     id: 'shopify',
     label: 'Shopify',
     host: { kind: 'template', param: 'shop', template: '{shop}.myshopify.com' },
@@ -376,44 +434,49 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     apiPathPrefix: '/admin/',
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
+    expiringParam: { name: 'expiring', value: '1' },
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
     // starting with a hyphen, at most 63 of them (one DNS label). Shopify itself admits upper
     // case; the boundary does not.
     params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]{0,62}$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
     requiredScopes: [],
-    // `read_all_orders` stays out: Shopify grants it only on request. `write_products` is the one
-    // write scope: a bulk run writes a product only through the engine's own write document
-    // (`shopify-graphql.ts`), and Shopify grants a write only to the token, so the scope sits on
-    // the connection. It is asked for only when the profile names it. No other write scope.
-    allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products'],
-    // Customer text, approved 2026-11-03. A change to a word needs a new approval; the test that
-    // holds this text byte for byte is the reminder. Shown before every link that asks for
-    // write_products, a new connection's or a reconnect's. The fields in the second paragraph
-    // are those of the engine's product write form, a test holds the two together. Image alt
-    // texts are not among them: the engine's image form writes through `fileUpdate`, which
-    // needs `write_files` or `write_themes`, and this preset refuses both. `write_products`
-    // itself can change an alt text (the deprecated `productUpdateMedia`), which a chat request
-    // may send after a yes; paragraph 1 and the line under the scope list cover that.
+    // `read_all_orders` stays out: Shopify grants it only on request. Two write scopes:
+    // `write_products`, and `write_files` for the bulk image form (`fileUpdate`, alt texts only,
+    // `shopify-graphql.ts`). A bulk run writes only through the engine's own write documents, and
+    // Shopify grants a write only to the token, so the scope sits on the connection. Each is
+    // asked for only when the profile names it. `write_themes` stays out: it reaches theme code
+    // (Liquid and scripts in the storefront), a different class of access.
+    allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products', 'write_files'],
+    // Customer text. A change to a word needs a new approval; the test that holds this text byte
+    // for byte is the reminder. Shown before every link that asks for a write scope, a new
+    // connection's or a reconnect's. The second paragraph names no fields: a bulk run changes
+    // what its approved list holds, in any of its forms. The third says that the app, not the
+    // request, decides what the token holds (Shopify grants the app's configured scopes).
+    // The breadth of `write_files` under the list from shopify.dev, read 2026-11-10: the `File`
+    // interface and the objects that implement it (`GenericFile`, `MediaImage`, `Video`,
+    // `Model3d`), the `files` query and the file mutations (access-scopes); `fileUpdate` can
+    // replace a file's content while keeping its URL (mutations/fileUpdate).
     consentNotice: {
       lang: 'de',
-      writeScopes: ['write_products'],
+      writeScopes: ['write_products', 'write_files'],
       paragraphs: [
         'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an Shopify schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in Shopify, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er.',
-        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Zuerst schreibt lynox eine einzige Änderung, die der Inhaber bestätigen muss, bevor der Rest folgt. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel und SEO-Beschreibung. Anlegen, löschen oder Preise ändern kann er nicht.',
-        'Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.',
+        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+        'Für Bestellungen, Kunden, Lagerbestand und Versand fragt lynox bei Shopify keine Schreibrechte an. Welche Rechte der Zugang am Ende erhält, legt die App in deinem Shopify fest. Gewährt sie mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
       ],
       // The breadth under the list from shopify.dev, read 2026-10-28: write_products covers
       // Product, ProductVariant and Collection (access-scopes); productCreate, productDelete,
       // collectionCreate and productVariantsBulkUpdate, whose input carries the price, require it.
       frame: {
         title: 'Schreibrechte für Shopify bestätigen',
-        scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in Shopify:',
-        scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
+        scopesIntro: 'lynox fragt bei Shopify diese Schreibrechte an:',
+        scopesNote: 'Ein Schreibzugriff auf Produkte gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Ein Schreibzugriff auf Dateien gilt für alle Dateien des Stores, also Bilder, Videos, 3D-Modelle und andere Dateien, etwa hochladen, ersetzen, umbenennen, Alt-Texte ändern und löschen. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
         button: 'Zustimmen und weiter zu Shopify',
         afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
       },
       scopeNames: {
         write_products: 'Produkte: Schreibzugriff',
+        write_files: 'Dateien: Schreibzugriff',
       },
     },
     scopeSeparator: ',',
@@ -643,6 +706,39 @@ export function builtInPresetOf(
 }
 
 /**
+ * Provider ids this engine once shipped in the register and no longer has. A profile set up
+ * through one of them stays what it was: a user's authorization through a built-in provider.
+ * Without this list, removing a provider from the register would turn its profiles into
+ * profiles of no provider, and the two checks that keep a user's grant from being replaced
+ * (the save that may not take a profile off its provider, and the renewal that may not swap
+ * the grant for an app-level token) would let them through.
+ *
+ * An id that was never shipped is not here, on purpose: a profile may be saved naming a
+ * provider this engine does not have, and such a profile must stay editable and keep its
+ * app-level exchange. Removing an entry from {@link REGISTER_ENTRIES} means adding its id
+ * here; a test pins the ids ever shipped and fails when one is in neither place.
+ *
+ * When an id goes in here, check what this list does not cover: the profile's `token_url` and
+ * `base_url` stay editable (fetch_token exchanges nothing for such a profile today).
+ */
+export const RETIRED_PRESET_IDS: readonly string[] = Object.freeze<string[]>([]);
+
+/**
+ * The retired provider a profile was set up through: its `auth.oauth.preset_id`, when
+ * `auth.type` is oauth2 and the id is one of {@link RETIRED_PRESET_IDS}. Undefined otherwise.
+ * Asked next to {@link builtInPresetOf} wherever a provider binds a profile; it does not read
+ * the register, so a provider still in the register is answered there and not here.
+ */
+export function retiredPresetIdOf(
+  profile: { readonly auth?: { readonly type?: string | undefined; readonly oauth?: { readonly preset_id?: string | undefined } | undefined } | undefined },
+  retired: readonly string[] = RETIRED_PRESET_IDS,
+): string | undefined {
+  if (profile.auth?.type !== 'oauth2') return undefined;
+  const presetId: unknown = profile.auth.oauth?.preset_id;
+  return typeof presetId === 'string' && retired.includes(presetId) ? presetId : undefined;
+}
+
+/**
  * The built-in provider whose API host a profile points at, when the profile does not go
  * through it: anything but `auth.type` oauth2 with that provider's `preset_id`. Undefined when
  * no provider claims the host, or when the profile follows the one that does. Asked where a
@@ -737,11 +833,22 @@ export function presetClientKeys(presetId: string): { readonly id: string; reado
 
 /**
  * Whether `name` is the client secret of a built-in provider ({@link presetClientKeys}). The set
- * is the register's, so it is finite and fixed at build time; a name an operator chose for an OAuth
- * client of their own (`MY_APP_CLIENT_SECRET`) is not in it.
+ * is the register's and the retired ids' ({@link RETIRED_PRESET_IDS}), so it is finite and fixed at
+ * build time; a name an operator chose for an OAuth client of their own (`MY_APP_CLIENT_SECRET`)
+ * is not in it. A retired provider's secret stays in it: the name keeps it off the model's list
+ * of secrets and out of `secret:` references, and retiring the provider leaves the value stored.
  */
-export function isPresetClientSecretName(name: string, register: PresetRegister = OAUTH_PRESETS): boolean {
-  return register.ids().some((id) => presetClientKeys(id).secret === name);
+export function isPresetClientSecretName(
+  name: string,
+  register: PresetRegister = OAUTH_PRESETS,
+  retired: readonly string[] = RETIRED_PRESET_IDS,
+): boolean {
+  return [...register.ids(), ...retired].some((id) => presetClientKeys(id).secret === name);
+}
+
+/** Whether `name` is the client secret of a provider this engine once shipped ({@link RETIRED_PRESET_IDS}). */
+export function isRetiredPresetClientSecretName(name: string, retired: readonly string[] = RETIRED_PRESET_IDS): boolean {
+  return retired.some((id) => presetClientKeys(id).secret === name);
 }
 
 /**
@@ -751,6 +858,20 @@ export function isPresetClientSecretName(name: string, register: PresetRegister 
  * a profile that names it as its client secret.
  */
 export function presetClientSecretGuidance(name: string): string {
+  return presetClientSecretGuidanceWith(name, RETIRED_PRESET_IDS);
+}
+
+/**
+ * {@link presetClientSecretGuidance} against a given retired list. Its own function, not a second
+ * parameter: callers pass the guidance to `.map`, which would hand the index in as that list.
+ */
+export function presetClientSecretGuidanceWith(name: string, retired: readonly string[]): string {
+  // A provider this engine once shipped has no connection form any more, so the form is not
+  // named; the name stays protected (`isPresetClientSecretName`), and a profile of the user's
+  // own takes another one.
+  if (isRetiredPresetClientSecretName(name, retired)) {
+    return `"${name}" is the OAuth client secret of a built-in provider this engine no longer has. It is not entered, used or referenced here — not in the chat and not through ask_secret. A profile of the user's own names its client secret differently.`;
+  }
   return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret and may read it.`;
 }
 
@@ -801,4 +922,18 @@ export function askedScopes(oauth: { readonly preset_id?: string | undefined; re
 export function scopesBeyondAsked(granted: readonly string[], asked: readonly string[]): string[] {
   const known = new Set(asked);
   return [...new Set(granted.filter((s) => !known.has(s)))];
+}
+
+/**
+ * How a text sends the model to a built-in provider's sign-in: the connect call, and what that call
+ * returns. "Give the user the link it returns" assumed a link; connect may answer without one,
+ * and a model told to pass a link on then looks for one or writes one (U-191, U-195). One
+ * text for every place that sends the model there, so a fix reaches all of them. `id` is a stored
+ * profile's id, which every path into the store checks; without one the text names "that profile".
+ */
+export function connectCallText(id?: string): string {
+  const call = id === undefined
+    ? 'call api_setup with action "connect" for that profile'
+    : `call api_setup with action "connect" and id "${id}"`;
+  return `${call}; that call returns the sign-in link for the user, or says why there is none.`;
 }

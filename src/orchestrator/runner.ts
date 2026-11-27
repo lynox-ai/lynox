@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_CALLER_ENDED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, workflowBoundError } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { join } from 'node:path';
@@ -13,13 +13,14 @@ import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, contextForEventRun, resolveTaskTemplate, resolveInputTemplate } from './context.js';
+import { runStepsIssue } from './template-refs.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin, type StepSpawnResult } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import { currentRunGroup, openRunGroup } from '../core/run-group.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
-import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
+import { GateRejectedError, GateExpiredError, StepReportedFailureError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
@@ -213,6 +214,13 @@ export interface RunManifestOptions {
    */
   stopSignal?: AbortSignal | undefined;
   /**
+   * Aborted when the run that started this one ended, whatever ended it (a chat's stop, its time
+   * limit, the timeout of the step that ran it). Read where `stopSignal` is read, after it, so an
+   * owner's stop keeps its own cause; the run then starts no further step and ends with
+   * {@link WORKFLOW_CALLER_ENDED_ERROR}. Set by the in-session path, which has no owner-only stop.
+   */
+  endSignal?: AbortSignal | undefined;
+  /**
    * The question channel's state, for a scheduled run whose steps may ask its owner (PRD 3b-2
    * §4.5, G5): a question that went unanswered halts the run, after the owner's stop, and the
    * time spent waiting for answers does not count against the wall clock. Absent for every run
@@ -300,6 +308,13 @@ export interface RunCtxInput {
    * ending the step agents in flight is `abortScope`'s job, so a caller passes both.
    */
   stopSignal?: AbortSignal | undefined;
+  /**
+   * Aborted when the run that started this one ended, whatever ended it (a chat's stop, its time
+   * limit, the timeout of the step that ran it). Read where `stopSignal` is read, after it, so an
+   * owner's stop keeps its own cause; the run then starts no further step and ends with
+   * {@link WORKFLOW_CALLER_ENDED_ERROR}. Set by the in-session path, which has no owner-only stop.
+   */
+  endSignal?: AbortSignal | undefined;
   /** See `RunManifestOptions.questionWait`. */
   questionWait?: import('../core/workflow-questions.js').WorkflowQuestionWait | undefined;
   /** See `RunManifestOptions.chatOrigin`. */
@@ -348,6 +363,7 @@ export function buildRunCtx(input: RunCtxInput): StartedRunOptions {
     runTaint: input.runTaint,
     abortScope: input.abortScope,
     stopSignal: input.stopSignal,
+    endSignal: input.endSignal,
     questionWait: input.questionWait,
     chatOrigin: input.chatOrigin,
     parentChangeset: input.parentChangeset,
@@ -363,6 +379,16 @@ function stoppedByOwner(options: RunManifestOptions, state: RunState): boolean {
   if (state.status !== 'running') return true;
   state.status = 'failed';
   state.error = WORKFLOW_STOPPED_ERROR;
+  state.completedAt = new Date().toISOString();
+  return true;
+}
+
+/** Whether the run that started this one ended; if so, end this one with that cause. */
+function endedWithCaller(options: RunManifestOptions, state: RunState): boolean {
+  if (options.endSignal?.aborted !== true) return false;
+  if (state.status !== 'running') return true;
+  state.status = 'failed';
+  state.error = WORKFLOW_CALLER_ENDED_ERROR;
   state.completedAt = new Date().toISOString();
   return true;
 }
@@ -410,13 +436,13 @@ export function workflowBoundExceeded(
 ): string | null {
   if (!limits) return null;
   if (limits.maxIterations !== undefined && iterations >= limits.maxIterations) {
-    return `Workflow exceeded its step limit (${limits.maxIterations}) — aborting to prevent a runaway.`;
+    return workflowBoundError('step', String(limits.maxIterations));
   }
   if (limits.maxWallClockMs !== undefined && Date.now() - startMs > limits.maxWallClockMs) {
-    return `Workflow exceeded its wall-clock limit (${Math.round(limits.maxWallClockMs / 1000)}s) — aborting to prevent a runaway.`;
+    return workflowBoundError('wall-clock', `${Math.round(limits.maxWallClockMs / 1000)}s`);
   }
   if (limits.maxSpendUsd !== undefined && stepCounters.costUSD > limits.maxSpendUsd) {
-    return `Workflow exceeded its spend limit ($${limits.maxSpendUsd.toFixed(2)}) — aborting to prevent a runaway.`;
+    return workflowBoundError('spend', `$${limits.maxSpendUsd.toFixed(2)}`);
   }
   return null;
 }
@@ -573,6 +599,15 @@ async function runManifestInGroup(
   if (preApproving) {
     throw new Error(`Invalid manifest: agents.${preApproving.id}.pre_approve: ${PRE_APPROVE_REMOVED}`);
   }
+
+  // Every manifest that runs, a nested pipeline's and a direct caller's included: a step id the
+  // context already uses, or a reference no run resolves (`template-refs.ts`).
+  // A caller outside the type system may leave `context` out, as the run's own spread allows. A
+  // nested run's steps are a `runtime: 'pipeline'` step's `pipeline` list, which no saved workflow holds.
+  const nested = depth > 0;
+  const stepsIssue = runStepsIssue(manifest.agents, (manifest.context as Record<string, unknown> | undefined) ?? {},
+    nested ? 'pipeline' : 'agents', { saved: !nested });
+  if (stepsIssue !== null) throw new Error(`Invalid manifest: ${nested ? 'in a nested pipeline, ' : ''}${stepsIssue}`);
 
   assertGatesEnforceable(manifest, options.gateAdapter !== undefined);
   const agentsDir = options.agentsDir ?? config.agents_dir ?? join(process.cwd(), 'agents');
@@ -1102,7 +1137,13 @@ async function executeStep(
   // next sequential step, the first step of the next phase, and a step of a wide phase the
   // pool hands out after the stop (the scope can only abort agents that already exist).
   if (stoppedByOwner(options, state)) return 'halt';
+  if (endedWithCaller(options, state)) return 'halt';
   if (questionUnanswered(options, state)) return 'halt';
+  // A run already ended for its makers' access — by a sibling's sub-run, or by a check that threw
+  // once — starts no further step, even when reading the access again would now let it: the
+  // pool of a capped phase hands out every step it holds. Only that cause: a sibling's gate
+  // rejection or failure leaves the steps of its phase to finish, as the parallel contract says.
+  if (state.status !== 'running' && isAuthorStop(state.error)) return 'halt';
   if (stopForEndedAuthor(options, state)) return 'halt';
 
   const stepStart = new Date().toISOString();
@@ -1198,7 +1239,7 @@ async function executeStep(
         }
       : undefined;
 
-    let r: { result: string; tokensIn: number; tokensOut: number; durationMs: number };
+    let r: StepSpawnResult;
 
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
@@ -1251,6 +1292,11 @@ async function executeStep(
     stepTokensIn = r.tokensIn;
     stepTokensOut = r.tokensOut;
     stepDurationMs = r.durationMs;
+
+    // The step's agent reported that it could not complete its task (`fail_step`). Thrown here,
+    // after its spend is stamped like a gate rejection's, so the catch records what it cost and
+    // `on_failure` decides what follows — as for any step that failed.
+    if (r.reportedFailure !== undefined) throw new StepReportedFailureError(step.id, r.reportedFailure);
 
     // Gate point check after step completes (real and mock paths)
     if (manifest.gate_points.includes(step.id) && options.gateAdapter) {
@@ -1337,6 +1383,7 @@ async function executeStep(
     // A step that failed while the owner's stop is out ended because of it (its agent was
     // aborted) or ends the run anyway: a stopped run does not carry on to the next step.
     if (stoppedByOwner(options, state)) return 'halt';
+    if (endedWithCaller(options, state)) return 'halt';
     if (questionUnanswered(options, state)) return 'halt';
     // …and so does a sub-run that stopped for its makers' access: the run that holds it ends with
     // that cause as the sub-run read it, whatever `on_failure` says. Only that error: a step that
@@ -1364,9 +1411,11 @@ async function executeStep(
       return 'halt';
     }
 
+    const reported = err instanceof StepReportedFailureError;
     if (manifest.on_failure === 'stop') {
       state.status = 'failed';
       state.error = error.message;
+      state.errorReportedBy = reported ? { stepId: step.id, reason: error.message } : undefined;
       state.completedAt = new Date().toISOString();
       return 'halt';
     }
@@ -1383,6 +1432,7 @@ async function executeStep(
       costUsd: 0,
       skipped: false,
       error: error.message,
+      ...(reported ? { reportedFailure: true as const } : {}),
     });
 
     // 'notify' = continue + notification

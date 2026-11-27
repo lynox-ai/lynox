@@ -43,6 +43,10 @@ import type { MailStateDb, MailFollowup } from './state.js';
 import { createMailTools, InMemoryMailRegistry } from './tools/index.js';
 import { MailWatcher, type MailWatcherHandler } from './watch.js';
 import { googleFetch } from '../../core/connector-egress.js';
+import { parentMessageIds } from './thread-key.js';
+
+/** Most From addresses of one inbound mail a waiting follow-up is matched against. */
+const MAX_REPLY_SENDERS = 5;
 
 export interface AddAccountInput {
   config: MailAccountConfig;
@@ -152,7 +156,7 @@ export interface OutboundContext {
 
 export interface MailHooks {
   /**
-   * Fires for every fresh (post-dedup, post-prefilter) inbound envelope. A hook that cannot
+   * Fires for every fresh (post-dedup) inbound envelope. A hook that cannot
    * take the mail now throws `InboundMailDeferred`; the batch then stays unseen.
    */
   onInboundMail?: (accountId: string, envelope: MailEnvelope) => Promise<void>;
@@ -208,6 +212,27 @@ export interface MailHooks {
    * Absent while the inbox is off. Wired with the runtime and replaced when it is rebuilt.
    */
   inboxReader?: InboxReader;
+  /**
+   * Not an event but a write: a rule the agent proposes (`inbox_rule_propose`). It waits for the
+   * owner and applies only once confirmed. Absent while the inbox is off.
+   */
+  inboxRuleProposer?: InboxRuleProposer;
+}
+
+/** What `inbox_rule_propose` may do: file one waiting rule, nothing else. */
+export interface InboxRuleProposer {
+  propose(input: {
+    accountId: string;
+    matcherKind: 'from' | 'subject_contains' | 'matches_description';
+    matcherValue: string;
+    name: string;
+    runId?: string | undefined;
+  }):
+    | { ok: true; id: string }
+    | { ok: false; reason: 'limit'; pending: number }
+    | { ok: false; reason: 'description_limit'; descriptions: number };
+  /** At most this many waiting proposals per account. */
+  readonly maxPending: number;
 }
 
 /** What `inbox_read` reads: the inbox store of one runtime, read-only. */
@@ -217,8 +242,9 @@ export interface InboxReader {
    * items of `exclude` (accounts).
    */
   countByBucket(exclude: ReadonlySet<string>): Record<InboxBucket, number>;
-  /** The open items of one bucket, the ones `countByBucket` counts, newest first. */
-  listItems(bucket: InboxBucket, limit: number, offset: number, exclude: ReadonlySet<string>): ReadonlyArray<InboxItem>;
+  /** The open items of one bucket, the ones `countByBucket` counts, newest first; with `ruleId`,
+   *  only those that rule filed. */
+  listItems(bucket: InboxBucket, limit: number, offset: number, exclude: ReadonlySet<string>, ruleId?: string): ReadonlyArray<InboxItem>;
   getItem(id: string): InboxItem | null;
   /** The item's own message text, or null when none is stored (a skipped sensitive mail). */
   bodyOf(item: InboxItem): string | null;
@@ -364,13 +390,20 @@ export class MailContext {
     const wrappedHandler: MailWatcherHandler = async (accountId, envelopes) => {
       for (const env of envelopes) {
         // Resolve any pending follow-ups in this thread that were waiting
-        // for a reply from the sender of this inbound.
-        for (const sender of env.from) {
-          if (!env.threadKey) continue;
-          const resolved = this.stateDb.resolveFollowupsByReply(accountId, env.threadKey, sender.address);
-          if (this.hooks.onFollowupResolved) {
-            for (const followup of resolved) {
-              try { await this.hooks.onFollowupResolved(followup, env); } catch { /* swallow */ }
+        // for a reply from the sender of this inbound. A follow-up is kept under the sent mail's
+        // Message-ID, which an answer's thread key is not wherever the server gives no thread id or
+        // its own one; so it is also matched by the mails the reply headers name, in this account.
+        // An automatic reply (an out-of-office note, a read receipt) is not the answer waited for.
+        const keys = env.isAutoReply ? [] : parentMessageIds(env);
+        if (!env.isAutoReply && env.threadKey && !keys.includes(env.threadKey)) keys.unshift(env.threadKey);
+        // The From list comes from the sender: only its first few addresses are looked up.
+        for (const sender of env.from.slice(0, MAX_REPLY_SENDERS)) {
+          for (const key of keys) {
+            const resolved = this.stateDb.resolveFollowupsByReply(accountId, key, sender.address);
+            if (this.hooks.onFollowupResolved) {
+              for (const followup of resolved) {
+                try { await this.hooks.onFollowupResolved(followup, env); } catch { /* swallow */ }
+              }
             }
           }
         }

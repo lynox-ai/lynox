@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
 import { MailStateDb } from '../mail/state.js';
-import { bootstrapInbox } from './bootstrap.js';
+import { bootstrapInbox, MAX_PENDING_RULE_PROPOSALS } from './bootstrap.js';
 import { ClassifierQueue } from './classifier/queue.js';
 import { InboxCostBudget } from './cost-budget.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import { InboxStateDb } from './state.js';
 import type { CRM } from '../../core/crm.js';
 import type { MailAccountConfig, MailEnvelope } from '../mail/provider.js';
+import { getModelId, MODEL_CAPABILITIES } from '../../types/index.js';
 
 const ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
@@ -82,6 +83,29 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
   });
 
+  it('a reminder for an item whose mail the sensitive check flagged names no subject', async () => {
+    const bodies: string[] = [];
+    const router = { notify: vi.fn(async (m: { body: string }) => { bodies.push(m.body); return []; }) };
+    const runtime = bootstrapInbox({
+      mailStateDb: mail, anthropicClient: makeClient({ content: [] }), reminderPollIntervalMs: 10, language: () => 'de',
+      notificationRouter: router as unknown as Parameters<typeof bootstrapInbox>[0]['notificationRouter'],
+    });
+    const insert = (threadKey: string, subject: string, sensitive: boolean): string => {
+      const id = runtime.state.insertItemWithAudit(
+        { accountId: 'acct-1', channel: 'email', threadKey, bucket: 'requires_user', confidence: 0, reasonDe: 'r',
+          classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', subject },
+        { action: 'classified', actor: 'rule_engine', payloadJson: JSON.stringify(sensitive ? { sensitive_categories: ['otp'] } : {}) },
+      );
+      runtime.state.setSnooze(id, new Date(Date.now() - 5000), null, true, true);
+      return id;
+    };
+    insert('t-flagged', 'Ihr Code 482917', true);
+    insert('t-plain', 'Vertrag prüfen', false);
+    await vi.waitFor(() => expect(bodies).toHaveLength(2));
+    await runtime.shutdown();
+    expect([...bodies].sort()).toEqual(['Eine Mail mit vertraulichem Inhalt. Absender und Betreff siehst du in lynox.', 'Vertrag prüfen']);
+  });
+
   it('returns a runtime bundle with all parts populated', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
@@ -111,6 +135,40 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.inboxLabelOf('acct-1', 't-l')).toEqual({ bucket: 'draft_ready', userAction: 'replied', reason: 'r' });
     expect(runtime.inboxLabelOf('acct-2', 't-l')).toBeNull();
     expect(runtime.inboxLabelOf('acct-1', 't-unknown')).toBeNull();
+  });
+
+  it('takes a follow-up from any account connected here, also one connected after the start, for our own mail', async () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    const id = runtime.state.insertItem({
+      accountId: 'acct-1', channel: 'email', threadKey: 'imap:t1', bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', messageId: '<m1@x>',
+    });
+    runtime.state.updateUserAction(id, 'replied');
+    const later = new Date(Date.now() + 60_000);
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'support@acme.example', isDefault: false });
+    await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'Support@Acme.Example' }], messageId: '<m2@x>', date: later }));
+    expect(runtime.state.getItem(id)!.userAction, 'a copy from the shared address').toBe('replied');
+    await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'mustermann@example.com' }], messageId: '<m3@x>', date: later }));
+    expect(runtime.state.getItem(id)!.userAction, 'a customer reopens').toBeUndefined();
+    await runtime.shutdown();
+  });
+
+  it('the rule proposer files waiting rules in its tenant, at most ten per account, and the runtime does not apply them', () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, tenantId: 't-9' });
+    expect(runtime.inboxRuleProposer.maxPending).toBe(MAX_PENDING_RULE_PROPOSALS);
+    expect(MAX_PENDING_RULE_PROPOSALS).toBe(10);
+    for (let i = 0; i < 10; i++) {
+      expect(runtime.inboxRuleProposer.propose({ accountId: 'acct-1', matcherKind: 'from', matcherValue: `p${String(i)}@x`, name: 'P', runId: 'run-1' }).ok).toBe(true);
+    }
+    expect(runtime.inboxRuleProposer.propose({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'p10@x', name: 'P' }))
+      .toEqual({ ok: false, reason: 'limit', pending: 10 });
+    const stored = runtime.state.listRulesForAccount('acct-1', 't-9');
+    expect(stored).toHaveLength(10);
+    expect(stored.every((r) => r.source === 'agent' && r.confirmedAt === undefined && r.runId === 'run-1')).toBe(true);
+    expect(runtime.state.listRulesForAccount('acct-1')).toHaveLength(0);
+    expect(runtime.rules.match({ tenantId: 't-9', accountId: 'acct-1', from: 'p0@x', subject: '', listId: undefined } as never)).toBeNull();
   });
 
   it('shows no verdict, rather than throwing, when the lookup fails', () => {
@@ -216,6 +274,25 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.state.listItems()[0]?.bucket).toBe('auto_handled');
   });
 
+  // The rule a mail met rides through the queue onto the item the classifier
+  // writes, so what it spends on, say, no-reply mail can be counted.
+  it('a classified no-reply mail records its prefilter rule; a newsletter costs no call', async () => {
+    const client = makeClient({
+      content: [{ type: 'text', text: JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'Rechnung' }) }],
+      usage: { input_tokens: 500, output_tokens: 80 },
+    });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    expect(await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'noreply@billing.example' }] }))).toBe('enqueued');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', from: [{ address: 'promo@newsletter.shop.example' }] }))).toBe('prefilter_filed');
+    await runtime.shutdown();
+    expect((client.messages.create as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+    const rows = mail.getConnection().prepare('SELECT bucket, prefilter_rule AS rule FROM inbox_items ORDER BY thread_key').all();
+    expect(rows).toEqual([
+      { bucket: 'requires_user', rule: 'automated_sender' },
+      { bucket: 'auto_handled', rule: 'newsletter_domain' },
+    ]);
+  });
+
   it('shutdown drains the queue without throwing on an empty runtime', async () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
@@ -285,6 +362,115 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.state.listItems()[0]?.bucket).toBe('requires_user');
     expect(runtime.budget.snapshot().spentUSD).toBeGreaterThan(0);
     fetchSpy.mockRestore();
+  });
+
+  describe('description rules, checked by their own model per region', () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+    const mistralReply = (content: string, tokens = 1_000_000) => ({
+      ok: true, status: 200, statusText: '',
+      json: async () => ({ choices: [{ message: { content } }], usage: { prompt_tokens: tokens, completion_tokens: tokens } }),
+      text: async () => '',
+    }) as unknown as Response;
+    /** The label the rule check gave the rule named `name`, read from the prompt. */
+    const labelOf = (user: string, name: string): string => {
+      const m = new RegExp(`Regel (R\\d+) \\| Name: ${name} \\|`).exec(user);
+      if (!m) throw new Error(`no label for ${name}`);
+      return m[1]!;
+    };
+    const runHistory = () => {
+      const inserted: Array<Record<string, unknown>> = [];
+      const updated: Array<Record<string, unknown>> = [];
+      return { inserted, updated, rh: { insertRun: (r: Record<string, unknown>) => { inserted.push(r); return `run-${String(inserted.length)}`; }, updateRun: (_id: string, u: Record<string, unknown>) => { updated.push(u); } } };
+    };
+
+    it('EU: checks them with ministral-8b, priced at its own rates, recorded as its own run; an auto_handled hit the classifier confirms files the mail', async () => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '1');
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        const req = JSON.parse(String((init as RequestInit).body)) as { model: string; messages: Array<{ content: string }> };
+        if (req.model === 'ministral-8b-2512') return mistralReply(JSON.stringify({ rule_id: labelOf(req.messages[1]!.content, 'Termine') }));
+        return mistralReply(JSON.stringify({ bucket: 'auto_handled', confidence: 0.95, one_line_why_de: 'Termin bestätigt' }), 0);
+      });
+      const h = runHistory();
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: makeClient({ content: [] }), llmRegion: 'eu', mistralApiKey: 'eu-key', runHistory: h.rh as never });
+      try {
+        const ruleId = runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'auto_handled', action: 'mark_read', source: 'on_demand', name: 'Termine' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        const models = fetchSpy.mock.calls.map((c) => (JSON.parse(String((c[1] as RequestInit).body)) as { model: string }).model);
+        expect(models[0]).toBe('ministral-8b-2512');
+        expect(models[1]).not.toBe('ministral-8b-2512');
+        expect(runtime.state.listItems()[0]).toMatchObject({ bucket: 'auto_handled', matchedRuleId: ruleId });
+        const pricing = MODEL_CAPABILITIES['ministral-8b-2512']!.pricing;
+        expect(runtime.budget.snapshot().spentUSD).toBeCloseTo(pricing.input + pricing.output, 6);
+        expect(h.inserted[0]).toMatchObject({ taskText: 'inbox rule check', modelId: 'ministral-8b-2512', modelTier: 'fast' });
+        expect(h.updated[0]?.['costUsd']).toBeCloseTo(pricing.input + pricing.output, 6);
+      } finally {
+        fetchSpy.mockRestore();
+        await runtime.shutdown();
+      }
+    });
+
+    it('US: checks them with the fast Anthropic model, charged to the budget and recorded as its own run', async () => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '1');
+      const create = vi.fn(async (req: { model: string; messages: Array<{ content: string }> }) => ({
+        content: [{ type: 'text', text: JSON.stringify({ rule_id: labelOf(req.messages[0]!.content, 'Termine') }) }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }));
+      const client = { messages: { create } } as unknown as Anthropic;
+      const h = runHistory();
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, privacyAck: true, runHistory: h.rh as never });
+      try {
+        runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Termine' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(create.mock.calls[0]![0].model).toBe(getModelId('fast'));
+        expect(runtime.state.listItems()[0]?.matchedRuleId).toBeDefined();
+        expect(runtime.budget.snapshot().spentUSD).toBeCloseTo((10 * 1 + 5 * 5) / 1_000_000, 9); // Haiku $1 / $5 per MTok
+        expect(h.inserted[0]).toMatchObject({ taskText: 'inbox rule check', modelId: getModelId('fast'), modelTier: 'fast' });
+      } finally {
+        await runtime.shutdown();
+      }
+    });
+
+    it.each([[undefined], ['']] as const)('with the flag unset (%j), checks them: the feature is on by default', async (flag) => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', flag);
+      const create = vi.fn(async (req: { model: string; messages: Array<{ content: string }> }) => ({
+        content: [{ type: 'text', text: JSON.stringify({ rule_id: labelOf(req.messages[0]!.content, 'Termine') }) }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }));
+      const client = { messages: { create } } as unknown as Anthropic;
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, privacyAck: true });
+      try {
+        const ruleId = runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Termine' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(create.mock.calls[0]![0].model).toBe(getModelId('fast'));
+        expect(runtime.state.listItems()[0]?.matchedRuleId).toBe(ruleId);
+      } finally {
+        await runtime.shutdown();
+      }
+    });
+
+    it('with the flag off, checks no description rule: the classifier alone decides', async () => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(mistralReply(JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'x' }), 10));
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: makeClient({ content: [] }), llmRegion: 'eu', mistralApiKey: 'eu-key' });
+      try {
+        runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'auto_handled', action: 'mark_read', source: 'on_demand' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const body = JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)) as { model: string };
+        expect(body.model).not.toBe('ministral-8b-2512');
+        expect(runtime.state.listItems()[0]?.matchedRuleId).toBeUndefined();
+      } finally {
+        fetchSpy.mockRestore();
+        await runtime.shutdown();
+      }
+    });
   });
 
   it('prices classifier spend per region — Mistral for EU, Haiku for US', async () => {
@@ -382,6 +568,25 @@ describe('bootstrapInbox — push notifier wire', () => {
     expect(send).toHaveBeenCalledTimes(1);
     const msg = send.mock.calls[0]?.[0] as { data?: { itemId?: string } };
     expect(msg.data?.itemId).toMatch(/^inb_/);
+  });
+
+  it('words the push of a flagged mail in the language it is handed', async () => {
+    const { NotificationRouter } = await import('../../core/notification-router.js');
+    const { FLAGGED_PUSH_TEXT } = await import('./notifier.js');
+    for (const language of ['de', 'en'] as const) {
+      mail.close();
+      mail = new MailStateDb({ path: ':memory:' });
+      mail.upsertAccount(ACCOUNT);
+      const router = new NotificationRouter();
+      const send = vi.fn(async () => 'delivered' as const);
+      router.register({ name: 'web-push', send });
+      const runtime = bootstrapInbox({
+        mailStateDb: mail, anthropicClient: makeClient({ content: [] }), notificationRouter: router, language: () => language,
+      });
+      await runtime.hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'Your one-time code is 123456.' }));
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0] as unknown as [{ body: string }])[0].body).toBe(FLAGGED_PUSH_TEXT[language]);
+    }
   });
 
   it('respects inbox_push_enabled=false: notifier silently skips even with router wired', async () => {

@@ -1,0 +1,115 @@
+// === The text of an inbox rule: its name and what it matches, on one line ===
+//
+// A rule's name and value are read by the owner when they confirm it and by the model in the audit
+// and in tool results. Both must read the same text, so every character a reader does not see (the
+// class in `core/hidden-chars.ts`: controls, format and direction characters, joiners, variation
+// selectors, the tag block, line and paragraph separators) becomes a space, as a line break does.
+// A name is not running text, so none of them is kept in any place.
+
+import { hiddenCharIndexes } from '../../core/hidden-chars.js';
+import { normalizeHeaderText } from './classifier/sanitize.js';
+
+/** One line of rule text: hidden characters and line breaks become spaces, runs of space collapse. */
+export function ruleLine(raw: string): string {
+  const chars = Array.from(raw);
+  for (const i of hiddenCharIndexes(raw, { inPlace: false })) chars[i] = ' ';
+  return chars.join('').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * A header value or a rule value as the match compares it: normalized as a stored header,
+ * lowercased, and with the Greek final sigma read as the medial one (lowercasing picks one of
+ * the two by the letters around it, which a piece of a subject does not carry).
+ */
+export function ruleMatchText(value: string): string {
+  return normalizeHeaderText(value).toLowerCase().replace(/\u03C2/g, '\u03C3');
+}
+
+/** Half of a surrogate pair without its other half: no character at all, so no reader sees it. */
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * A matched value is stored as given, only trimmed: the loader compares the value and the mail
+ * both as the inbox stores a header (`ruleMatchText` below), so a value as the owner
+ * reads it and a value as the mail carries it (a warning sign as emoji is U+26A0 U+FE0F, a subject
+ * may hold two spaces, or a non-breaking one) both match. The caller refuses one that holds a
+ * character a reader does not see, outside the places real text puts one (`hidden-chars.ts`,
+ * checked on the raw input), half of a surrogate pair, or a line break or tab, which no subject
+ * or address carries.
+ */
+export function ruleValue(raw: string): { value: string; hidden: boolean; multiline: boolean } {
+  const hidden = hiddenCharIndexes(raw).length > 0 || LONE_SURROGATE_RE.test(raw);
+  return { value: raw.trim(), hidden, multiline: /[\t\n\r]/.test(raw.trim()) };
+}
+
+/** A subject fragment shorter than this would file almost every mail. */
+export const SUBJECT_MIN = 3;
+
+/**
+ * True when a subject phrase is too short, as typed or as the match compares it: characters the
+ * match drops (a direction mark, a narrow no-break space, a variation selector) would otherwise
+ * let `r\u200Ee` pass as three characters and match as `re`.
+ */
+export function subjectTooShort(value: string): boolean {
+  return charCount(value) < SUBJECT_MIN || charCount(ruleMatchText(value)) < SUBJECT_MIN;
+}
+/** The longest value of a fixed rule (sender, subject, list id), in characters (code points). */
+export const FIXED_VALUE_MAX = 200;
+
+/**
+ * True when the value is one bare sender address, as a `from` rule compares it with the sender:
+ * brackets, a scheme, a list or a part without `@` would never equal a sender and only hold a place.
+ */
+export function isOneSenderAddress(value: string): boolean {
+  return /^[^\s@<>()[\]{},;:"`]+@[^\s@<>()[\]{},;:"`]+$/.test(value);
+}
+
+/**
+ * Why the value of a fixed rule (sender, subject, list id) cannot be stored, or null. Checked on
+ * the raw input, as `ruleValue` does: a character a reader does not see, a line break or tab, more
+ * than `FIXED_VALUE_MAX` characters, for a sender anything but one address, for a subject fewer
+ * than `SUBJECT_MIN` characters as typed or as matched (`subjectTooShort`).
+ */
+export function fixedValueProblem(raw: string, kind: 'from' | 'subject_contains' | 'list_id'): string | null {
+  const v = ruleValue(raw);
+  if (v.hidden) return 'matcherValue holds characters a reader does not see';
+  if (v.multiline) return 'matcherValue must be one line';
+  if (charCount(v.value) > FIXED_VALUE_MAX) return `matcherValue exceeds ${String(FIXED_VALUE_MAX)} characters`;
+  if (kind === 'from' && !isOneSenderAddress(v.value.toLowerCase())) return 'matcherValue must be one sender address';
+  if (kind === 'subject_contains' && subjectTooShort(v.value)) return `subject phrase must be at least ${String(SUBJECT_MIN)} characters`;
+  return null;
+}
+
+/** A rule description: one line a reader sees whole, 3 to 300 characters. */
+export const DESCRIPTION_MIN = 3;
+export const DESCRIPTION_MAX = 300;
+/** At most this many description rules per account, in any state: each is in every model call
+ *  of its account, so the list must stay short. */
+export const MAX_DESCRIPTION_RULES = 20;
+
+/** Why a description cannot be stored, or null. Checked on the raw input, as `ruleValue` does. */
+export function descriptionProblem(raw: string): string | null {
+  const v = ruleValue(raw);
+  if (v.hidden) return 'holds characters a reader does not see';
+  if (v.multiline) return 'must be one line';
+  if (namesRuleLabel(v.value)) return 'must not name a rule label such as R1';
+  const n = charCount(v.value);
+  if (n < DESCRIPTION_MIN || n > DESCRIPTION_MAX) return `must be ${String(DESCRIPTION_MIN)} to ${String(DESCRIPTION_MAX)} characters`;
+  return null;
+}
+
+/** True when the text names a label the rule check uses (`R1`, `r 12`): a rule text that names
+ *  one could steer the check towards another rule. */
+export function namesRuleLabel(text: string): boolean {
+  return /(^|[^\p{L}\p{N}])r\s?\d{1,3}(?![\p{N}])/iu.test(text);
+}
+
+/** Length in characters (code points), as `cutChars` counts. */
+export function charCount(text: string): number {
+  return Array.from(text).length;
+}
+
+/** At most `max` characters, counted in code points, so a surrogate pair is never cut. */
+export function cutChars(text: string, max: number): string {
+  return Array.from(text).slice(0, max).join('').trim();
+}

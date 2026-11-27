@@ -22,6 +22,7 @@ import { UidPool, DEFAULT_POOL_FIRST_UID, DEFAULT_POOL_SIZE } from './pool.js';
 import { buildCallEnv } from './call-env.js';
 import { releaseUid, killUntilEmpty, type ReleaseOps } from './release.js';
 import { linuxReleaseOps, CALLS_DIR } from './linux-ops.js';
+import { assertSignalDebuggerOff } from '../core/signal-debugger.js';
 
 export const DEFAULT_SOCKET_PATH = '/run/lynox-exec/s/exec.sock';
 export const DEFAULT_WORKSPACE = '/workspace';
@@ -196,7 +197,8 @@ export async function startupSweep(deps: DaemonDeps): Promise<void> {
   for (let uid = deps.pool.acquire(); uid !== null; uid = deps.pool.acquire()) uids.push(uid);
   for (const uid of uids) await finishUid(uid, deps);
   const left = readdirSync(deps.callsDir);
-  if (left.length > 0) throw new Error(`calls dir not empty after the start-up sweep: ${left.slice(0, 5).join(', ')}`);
+  // A count, not the names: a pool uid (a model-run command) chooses them, and this message reaches the log.
+  if (left.length > 0) throw new Error(`calls dir not empty after the start-up sweep: ${left.length} entries left`);
   const { free, quarantined } = deps.pool.stats();
   if (free === 0) throw new Error(`no usable pool uid after the start-up sweep (${quarantined} quarantined)`);
 }
@@ -307,7 +309,7 @@ export async function main(): Promise<void> {
 }
 
 if (process.argv[1] && /exec-daemon\.js$/.test(process.argv[1])) {
-  main().catch((err: unknown) => {
+  Promise.resolve().then(() => { assertSignalDebuggerOff('exec-daemon'); return main(); }).catch((err: unknown) => {
     process.stderr.write(`[exec-daemon] fatal: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });
