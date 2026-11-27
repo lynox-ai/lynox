@@ -501,13 +501,21 @@
 		void loadStampPreview(wf);
 	}
 
-	// Cancel and Escape: the view closes and the focus goes back to what opened it, if it is still
-	// on the page. A stamp that went through closes with closeStamp alone: what comes next (the
-	// schedule dialog, the list) takes the focus.
+	// Cancel and Escape: the view closes and the focus goes back to what opened it. When that is gone
+	// (the schedule dialog it came from, a card the list redrew), to this workflow's review button,
+	// else to the library's heading, never to the page. A stamp that went through closes with
+	// closeStamp alone: what comes next (the schedule dialog, the list) takes the focus.
 	function cancelStamp(): void {
 		const back = stampOpener;
+		const id = stampWf?.id;
 		closeStamp();
-		void tick().then(() => { if (back?.isConnected === true) back.focus(); });
+		void tick().then(() => {
+			const again = back?.isConnected === true
+				? back
+				: [...document.querySelectorAll<HTMLElement>('[data-testid="stamp-review"]')].find((b) => id !== undefined && b.dataset['stampFor'] === id);
+			if (again !== undefined) again.focus();
+			else libraryHeading?.focus();
+		});
 	}
 
 	function closeStamp(): void {
@@ -894,6 +902,7 @@
 									<!-- Always visible, not on hover: it is the one thing this workflow waits for. -->
 									<button
 										data-testid="stamp-review"
+										data-stamp-for={wf.id}
 										onclick={() => openStamp(wf)}
 										class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 {actionSize} text-warning hover:bg-warning/20 transition-colors"
 									>

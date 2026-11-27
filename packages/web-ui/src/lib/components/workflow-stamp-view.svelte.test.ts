@@ -961,6 +961,16 @@ describe('the review keeps its reason and its buttons in sight', () => {
 		expect(document.activeElement).toBe(q('stamp-review'));
 	});
 
+	it('Cancel after the opener is gone gives the focus to this workflow\'s review button, not to the page', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
+		await click(q('stamp-review'));
+		// Opened with the focus on the page: there is no opener to go back to.
+		expect(q('stamp-dialog')).not.toBeNull();
+		await click(byText('Abbrechen'));
+		expect(q('stamp-dialog')).toBeNull();
+		expect(document.activeElement).toBe(q('stamp-review'));
+	});
+
 	it('Cancel closes the view and gives the focus back to what opened it', async () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
 		q('stamp-review')!.focus();
@@ -1041,6 +1051,8 @@ describe('the review keeps its reason and its buttons in sight', () => {
 	it('a reload that marks nothing puts the focus on the heading, not on the confirm', async () => {
 		await open('owner', WF, changedTwice('Send the report'));
 		await click(q('stamp-review'));
+		q('stamp-confirm')!.focus();
+		expect(document.activeElement).toBe(q('stamp-confirm'));
 		await click(q('stamp-confirm'));
 		expect(q('stamp-line')).not.toBeNull();
 		expect(q('stamp-dialog')!.querySelector('[data-stamp-changed]')).toBeNull();
