@@ -26,10 +26,10 @@ describe('a tool confirmation\'s buttons', () => {
 		expect(consentButtons('plan')[1]).toMatchObject({ key: 'adjust', tone: 'secondary' });
 	});
 
-	it('on the formula question, lead with writing as text, show writing formulas in red, and say that the way out writes nothing', () => {
+	it('on the formula question, lead with writing as text, keep writing formulas out of red, and say that the way out writes nothing', () => {
 		expect(consentButtons('formula')).toEqual([
 			{ key: 'as-text', label: 'chat.consent.write_text', tone: 'primary' },
-			{ key: 'as-formulas', label: 'chat.consent.write_formulas', tone: 'danger' },
+			{ key: 'as-formulas', label: 'chat.consent.write_formulas', tone: 'secondary' },
 			{ key: 'cancel', label: 'chat.consent.dont_write', tone: 'secondary' },
 		]);
 		// With some formulas only counted, there is no button that writes them.

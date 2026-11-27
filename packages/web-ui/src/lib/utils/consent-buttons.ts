@@ -43,9 +43,9 @@ export function consentButtons(kind: ToolConsentKind, action?: ConsentAction): C
 			CANCEL,
 		];
 		// Cells from content outside the chat: writing them as text is the choice that runs no
-		// formula, so it leads; writing formulas is red, since a formula from outside runs on
-		// Google's side and can fetch. The way out says that nothing is written.
-		case 'formula': return [WRITE_AS_TEXT, { key: 'as-formulas', label: 'chat.consent.write_formulas', tone: 'danger' }, DONT_WRITE];
+		// formula, so it leads as the primary one. Writing formulas is not red: red is kept for
+		// deleting, and the question's text carries the warning. The way out says that nothing is written.
+		case 'formula': return [WRITE_AS_TEXT, { key: 'as-formulas', label: 'chat.consent.write_formulas', tone: 'secondary' }, DONT_WRITE];
 		case 'formula-text': return [WRITE_AS_TEXT, DONT_WRITE];
 	}
 }
