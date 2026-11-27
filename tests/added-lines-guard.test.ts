@@ -605,7 +605,11 @@ describe('the scan as a function another repository can call', () => {
     ];
     const [cli, fn] = both(base);
     expect(cli!.code).toBe(1);
-    expect(cli!.stderr).toContain('Rewrite the commit that ADDED it');
+    // The command's own refusal, in order: the public-repo header, its advice, the id hint, the closing hint.
+    const order = ['PUBLIC repo', 'Describe the behaviour', `'${['DE', 'F-'].join('')}' + 'example'`, 'Rewrite the commit that ADDED it']
+      .map((t) => cli!.stderr.indexOf(t));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(fn).toEqual(cli);
     const clean = git('rev-parse', 'HEAD');
     commit('ok.md', 'plain\n', 'clean');
@@ -649,6 +653,7 @@ describe('the scan as a function another repository can call', () => {
     expect(r.out).toContain('2 finding(s) in lines this range adds.');
     expect(r.out).not.toContain('internal register id');
     expect(r.out).not.toContain('PUBLIC repo');
+    expect(r.out).not.toContain('Describe the behaviour');
     expect(r.out).not.toContain(`'${['DE', 'F-'].join('')}' + 'example'`);
     expect(r.out).toContain('write its escape instead');
     expect(r.out).toContain('Rewrite the commit that ADDED it');
