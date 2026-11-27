@@ -823,7 +823,10 @@ describe('a lineage write that fails after the workflow is saved', () => {
     expect(JSON.stringify(result.content)).not.toContain('history.db is read-only');
     const rows = trail.db.prepare('SELECT phase, target FROM audit_log WHERE action LIKE ? ORDER BY id').all('instance:save_workflow#session:%') as Array<{ phase: string; target: string }>;
     expect(rows.map(r => r.phase)).toEqual(['attempt', 'returned']);
-    expect(rows[1]!.target).toMatch(/^workflows wrote=all created=[0-9a-f-]{36} workflow=[0-9a-f-]{36} lineage=lost$/);
+    const target = /^workflows wrote=all created=([0-9a-f-]{36}) workflow=[0-9a-f-]{36} lineage=lost$/.exec(rows[1]!.target);
+    expect(target).not.toBeNull();
+    const answer = JSON.parse(typeof result.content === 'string' ? result.content : JSON.stringify(result.content)) as { workflow_id?: unknown };
+    expect(answer.workflow_id).toBe(target![1]);
   });
 });
 

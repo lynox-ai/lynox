@@ -406,6 +406,8 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       w.created('pipeline', pipelineId);
       storePipeline(pipelineId, planned);
       record.promotedToPipelineId = pipelineId;
+      // This catch takes every error from `insertProcess`, so a check added inside it later
+      // would fail here without stopping the save: only the warning line below would show it.
       try {
         runHistory.insertProcess(record);
       } catch (err) {
