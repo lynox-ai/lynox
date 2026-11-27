@@ -3471,7 +3471,8 @@ export class WorkerLoop {
     // Compared as recorded (English); pushed in the owner's language (`said`).
     const memberNotes = currentMemberNotes();
     const memberSaid = currentMemberNotesIn(noticeLanguage(this.engine.config?.language));
-    const finishedWithNote = memberSaid.length > 0 && !endedByOwner && budgetCut === null && !questionWentUnanswered;
+    // An owner's stop of a parked run is one whose question went unanswered (`endedByOwner`).
+    const finishedWithNote = memberSaid.length > 0 && budgetCut === null && !questionWentUnanswered;
     // A run whose question was kept for the next process is not over: no push, not ✗ (nothing
     // went wrong, a deploy is internal) and not ⏸ (a second notice of a question already asked).
     // The catch in `#runFramed` holds back its push on the same mark (`ActiveTask.questionKept`).
