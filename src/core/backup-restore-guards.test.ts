@@ -10,7 +10,7 @@ import { join } from 'node:path';
  * here lands in exactly that window. The verify pass reads the same file first; `skip` lets the
  * reads before the restore's own one go by.
  */
-const readHook = vi.hoisted(() => ({ path: null as string | null, skip: 0, run: null as (() => void) | null }));
+const readHook = vi.hoisted(() => ({ path: null as string | null, skip: 0, run: null as (() => void) | null, lengths: null as number[] | null }));
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>();
   return {
@@ -24,6 +24,10 @@ vi.mock('node:fs', async (importOriginal) => {
       fire(String(args[0]));
       return fs.openSync(...args);
     }) as typeof fs.openSync,
+    readSync: ((...args: Parameters<typeof fs.readSync>) => {
+      if (readHook.lengths !== null && typeof args[3] === 'number') readHook.lengths.push(args[3]);
+      return fs.readSync(...args);
+    }) as typeof fs.readSync,
   };
   function fire(path: string): void {
     if (readHook.run !== null && path === readHook.path && readHook.skip-- <= 0) {
@@ -66,6 +70,7 @@ afterEach(() => {
   readHook.path = null;
   readHook.skip = 0;
   readHook.run = null;
+  readHook.lengths = null;
   _resetWorkspaceAccess();
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   reloadConfig();
@@ -370,6 +375,29 @@ describe('a link inside the backup (the read side)', () => {
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
   });
 
+  it('a larger file swapped in after the check: refused as changed by its size, without a read of it', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    writeFileSync(join(data, 'memory', 'x.md'), 'live');
+    const entry = join(created.path, 'memory', 'x.md');
+    const larger = 1024 * 1024;
+    readHook.path = entry;
+    readHook.skip = 1; // the verify pass
+    readHook.run = () => {
+      writeFileSync(entry, Buffer.alloc(larger, 0x61));
+      readHook.lengths = [];
+    };
+
+    const result = await m.restoreBackup(created.path, { allowUnverified: true });
+    expect(readHook.run).toBeNull(); // the hook ran
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Backup file changed after it was verified — refusing to restore: memory/x.md');
+    // The size the manifest names decides before any read: no read asks for the larger file.
+    expect(Math.max(0, ...(readHook.lengths ?? []))).toBeLessThan(larger);
+    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
+  });
+
   it('a workspace entry that is a link: refused, word for word, the workspace file not replaced', async () => {
     writeFileSync(ws('http-api/f.txt'), 'backed up');
     const m = manager();
@@ -547,8 +575,8 @@ describe.skipIf(process.platform === 'win32')('a FIFO where a backup file is rea
   /**
    * A read that waited on a FIFO would block the whole process, past any test timeout. So each
    * test starts its own way out: a process that, after `UNBLOCK_MS`, opens the FIFO for writing,
-   * which ends a blocked open with an empty read. The test then tells by the time it took whether
-   * the read waited. The helper process is bounded itself and killed afterwards.
+   * again and again, which ends each blocked open with an empty read. The test then tells by the
+   * time it took whether a read waited. The helper process is bounded itself and killed afterwards.
    */
   const UNBLOCK_MS = 2000;
   /** Every helper started, ended as a whole group after each test, also one that failed. */
@@ -561,7 +589,8 @@ describe.skipIf(process.platform === 'win32')('a FIFO where a backup file is rea
   const fifoAt = (path: string): (() => void) => {
     execFileSync('mkfifo', [path]);
     // Its own process group, so the kill takes `timeout` and the shell under it alike.
-    const helper = spawn('timeout', ['5', 'sh', '-c', `sleep ${String(UNBLOCK_MS / 1000)}; : > "$0"`, path], { stdio: 'ignore', detached: true });
+    // After the pause it opens the FIFO for writing again and again: every open that waited ends.
+    const helper = spawn('timeout', ['10', 'sh', '-c', `sleep ${String(UNBLOCK_MS / 1000)}; while :; do : > "$0"; done`, path], { stdio: 'ignore', detached: true });
     helper.unref();
     if (helper.pid !== undefined) helpers.push(helper.pid);
     return () => {
