@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { saveWorkflowTool, processToSteps, SESSION_PARAM_NAME_REFUSAL, saveWorkflowFailure } from './process.js';
+import { saveWorkflowTool, processToSteps, SESSION_PARAM_NAME_REFUSAL, saveWorkflowFailure, lineageFailureClass } from './process.js';
 import { _resetPipelineStore, getPipeline, getPipelineStore, storePipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
@@ -773,5 +773,87 @@ describe('processToSteps (deterministic-replay carry-through)', () => {
     }));
     expect(steps[1]!.input_from).toEqual(['step-0']); // 99 has no step → dropped
     expect(steps[0]!.input_from).toBeUndefined();
+  });
+});
+
+// =====================================================================
+// Source A — a lineage write that fails after the workflow is stored
+// =====================================================================
+
+describe('save_workflow — the lineage record fails after the workflow is stored', () => {
+  let mockHistory: ReturnType<typeof makeMockRunHistory>;
+
+  /** What better-sqlite3 throws for a broken constraint; the class name is what is read. */
+  class SqliteError extends Error {}
+
+  beforeEach(() => {
+    _resetPipelineStore();
+    mockHistory = makeMockRunHistory();
+    captureProcessMock.mockReset();
+    captureProcessMock.mockResolvedValue(structuredClone(SAMPLE_RECORD));
+    vi.stubEnv('LYNOX_DEBUG', undefined);
+  });
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+  it('answers saved, byte for byte as a save without the failure, and stores the workflow once', async () => {
+    const normal = await saveWorkflowTool.handler({ name: 'Monthly Report' }, makeAgent({ currentThreadId: 'thread-1' }, mockHistory));
+    const normalId = (JSON.parse(normal) as { workflow_id: string }).workflow_id;
+
+    _resetPipelineStore();
+    mockHistory = makeMockRunHistory();
+    mockHistory.insertProcess.mockImplementation(() => { throw new SqliteError('FOREIGN KEY constraint failed'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, makeAgent({ currentThreadId: 'thread-1' }, mockHistory));
+    const id = (JSON.parse(result) as { workflow_id: string }).workflow_id;
+
+    expect(result.split(id).join('ID')).toBe(normal.split(normalId).join('ID'));
+    expect(saveWorkflowFailure(result)).toBeNull();
+    expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
+    expect(getPipelineStore().size).toBe(1);
+    expect(getPipeline(id)).toBeDefined();
+    // The loss is in the log without LYNOX_DEBUG, with the class and not the message.
+    expect(warn).toHaveBeenCalledWith(`[lynox:workflow] workflow ${id} saved without its capture record (SqliteError)`);
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('FOREIGN KEY');
+  });
+
+  it('a mandate\'s turn also notes the loss on the trail row of the save', async () => {
+    mockHistory.insertProcess.mockImplementation(() => { throw new SqliteError('FOREIGN KEY constraint failed'); });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const trail = testAuditLog();
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    const agent = makeAgent({ currentThreadId: 'thread-1', principal: eva }, mockHistory);
+    agent.toolContext.auditLog = trail.log;
+    const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, agent);
+    expect(saveWorkflowFailure(result)).toBeNull();
+    const outcome = trail.rows().filter((r) => r.action.includes('save_workflow') && r.phase === 'returned');
+    expect(outcome).toHaveLength(1);
+    expect(outcome[0]!.target).toContain('lineage=lost');
+  });
+
+  it('control: when the workflow itself is not stored, the answer is not saved and nothing is warned', async () => {
+    mockHistory.insertPlannedPipeline.mockImplementation(() => { throw new SqliteError('database is locked'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, makeAgent({ currentThreadId: 'thread-1' }, mockHistory));
+    expect(result).toMatch(/^Error: Could not save the workflow \(.*\)\. No workflow was saved\.$/);
+    expect(getPipelineStore().size).toBe(0);
+    expect(mockHistory.insertProcess).not.toHaveBeenCalled();
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('[lynox:workflow]');
+  });
+});
+
+describe('lineageFailureClass', () => {
+  it('names a class from its list and nothing else', () => {
+    class SqliteError extends Error {}
+    expect(lineageFailureClass(new SqliteError('x'))).toBe('SqliteError');
+    expect(lineageFailureClass(new TypeError('x'))).toBe('TypeError');
+    expect(lineageFailureClass(new RangeError('x'))).toBe('RangeError');
+  });
+
+  it('a class whose name reads like data is named Error', () => {
+    class Kunde_Mueller_AG_Rechnung_4711 extends Error {}
+    expect(lineageFailureClass(new Kunde_Mueller_AG_Rechnung_4711('x'))).toBe('Error');
+    expect(lineageFailureClass(new Error('x'))).toBe('Error');
+    expect(lineageFailureClass('a string')).toBe('Error');
+    expect(lineageFailureClass(undefined)).toBe('Error');
   });
 });

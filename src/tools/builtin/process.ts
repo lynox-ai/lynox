@@ -398,12 +398,21 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // succeeded. Then the ProcessRecord for lineage/audit (D11 — internal,
     // never agent-facing); stamping the promotion link last keeps the
     // ProcessRecord consistent with the pipeline that exists.
+    // Once the workflow is stored it is saved: a failure of the lineage record after that point is
+    // not a failed save. Answering "not saved" there sent the model to save the same workflow
+    // again, and a second copy was stored. Errors before that point still answer "not saved".
     return withInstanceWrite(agent, { site: 'save_workflow#session', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]], main: ['pipeline'] }, (w) => {
       w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, agent.principal), ifReturned);
       w.created('pipeline', pipelineId);
       storePipeline(pipelineId, planned);
       record.promotedToPipelineId = pipelineId;
-      runHistory.insertProcess(record);
+      try {
+        runHistory.insertProcess(record);
+      } catch (err) {
+        logErrorChain('save_workflow:lineage', err);
+        console.warn(`[lynox:workflow] workflow ${pipelineId} saved without its capture record (${lineageFailureClass(err)})`);
+        w.counts([['lineage', 'lost']]);
+      }
 
       const paramNames = record.parameters.map(p => p.name);
       return JSON.stringify({
@@ -420,6 +429,18 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     logErrorChain('save_workflow:promote', err);
     return `Error: Could not save the workflow (${getErrorMessage(err)}). No workflow was saved.`;
   }
+}
+
+/** The error classes a lineage write is known to throw; any other is named `Error`. */
+const LINEAGE_FAILURE_CLASSES: ReadonlySet<string> = new Set(['SqliteError', 'TypeError', 'RangeError']);
+
+/**
+ * The class of a lineage write's failure, for the warning line: a name from a fixed list, never
+ * the message, and never a class name the list does not hold (a class can be named by any code).
+ */
+export function lineageFailureClass(err: unknown): string {
+  const name = err instanceof Error ? err.constructor.name : '';
+  return LINEAGE_FAILURE_CLASSES.has(name) ? name : 'Error';
 }
 
 export const saveWorkflowTool: ToolEntry<SaveWorkflowInput> = {
