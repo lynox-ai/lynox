@@ -482,6 +482,17 @@ describe('a raw invisible character in an added line', () => {
     expect(r.out).not.toContain(RLO);
   });
 
+  it('reads the new name of a renamed file, which adds no line', () => {
+    commit('plain.ts', 'one\ntwo\nthree\n', 'plain name');
+    const base = git('rev-parse', 'HEAD');
+    git('mv', 'plain.ts', `p${RLO}.ts`);
+    git('commit', '-qm', 'rename only');
+    const r = guard(base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('p\\u202E.ts: raw invisible character U+202E in the file name');
+    expect(r.out).not.toContain(RLO);
+  });
+
   it('prints the name of a file with another finding escaped too', () => {
     const base = git('rev-parse', 'HEAD');
     commit(`n${RLO}.md`, `see ${ID}\n`, 'id in an odd name');
