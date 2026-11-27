@@ -475,20 +475,29 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     }
   }, 60_000);
 
-  it('marks the knowledge graph incomplete when the subject graph is on without its store', async () => {
+  it('marks the knowledge graph incomplete when the subject graph is on without its store, and leaves the older store\'s entities to the graph block', async () => {
     const saved = h.engine().knowledgeLayer;
+    const legacy = new Database(join(h.dir(), 'agent-memory.db'));
+    legacy.prepare("INSERT INTO entities (id, canonical_name, entity_type, scope_type, scope_id, first_seen_at, last_seen_at) VALUES ('lu-a', 'Alice', 'person', 'global', 'global', '2026-01-01', '2026-01-01')").run();
+    // The layer started with the subject graph on, but its store did not open: it reads the older store.
     h.engine().knowledgeLayer = {
       readFallbackCount: 0,
+      readsSubjectGraph: true,
       subjectGraphUnavailable: true,
-      listEntities: () => Promise.resolve([]),
+      listEntities: ({ offset }: { offset: number }) => Promise.resolve(offset === 0 ? [{ id: 'lu-a' }] : []),
       stats: () => Promise.resolve({}),
       getEntityRelationsForExport: () => Promise.resolve([]),
     };
     try {
       const body = await h.exportBody();
       expect(body.knowledge_graph_may_be_incomplete, 'only the legacy store was read').toBe(true);
+      const half = body.knowledge_graph.memories!['agent-memory.db'] as unknown as { entities: unknown[] };
+      expect(half.entities, 'not carried here as well').toEqual([]);
+      expect((body.knowledge_graph.entities as Array<{ id?: string }>).map(e => e.id), 'in the graph block').toEqual(['lu-a']);
     } finally {
       h.engine().knowledgeLayer = saved;
+      legacy.prepare("DELETE FROM entities WHERE id = 'lu-a'").run();
+      legacy.close();
     }
   }, 60_000);
 

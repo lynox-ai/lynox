@@ -88,9 +88,9 @@
   under `knowledge_graph.memories`, keyed by the store that holds them:
   `agent-memory.db` with its `memories`, `mentions`, `supersedes`,
   `cooccurrences` and `metrics` (with the subject graph on also its `entities`
-  and `relations`, which the graph block then reads from `engine.db`; where it
-  falls back to the older store, they stay in the graph block only), and
-  `engine.db` with its `memories`, `memory_subjects`, every row of
+  and `relations`, which the graph block then reads from `engine.db`; where its
+  store did not open, or `engine.db` is missing, the graph block reads them
+  instead), and `engine.db` with its `memories`, `memory_subjects`, every row of
   `relationships` (with `source_deleted` and a `relationships_note`),
   `supersedes`, `subject_cooccurrences` and `subject_mints`; the graph block
   lists only the subjects it maps to entities, so relations between other
