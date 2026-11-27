@@ -158,14 +158,16 @@ function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | und
     return `Not delegated: ${r.reason ?? 'the spending cap cannot be checked.'}`;
   }
   const usd = (n: number): string => `$${n.toFixed(2)}`;
-  const resets = r.cap === 'daily' ? 'tomorrow' : 'next month';
+  // The day and the month are the UTC ones `computeRecordedSpend` sums (`toISOString`).
+  const resets = r.cap === 'daily' ? 'at 00:00 UTC' : 'on the 1st at 00:00 UTC';
+  const budget = `${r.cap} budget`;
   if (r.headroomUSD < smallestUSD) {
-    return `Not delegated: the ${r.cap} spending cap (${usd(r.capUSD)}) leaves ${usd(r.headroomUSD)}, `
-      + `less than one of these sub-agents needs. No sub-agent can run before the cap resets ${resets}. `
-      + 'Tell the user that the spending cap stops this work.';
+    return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left, `
+      + `less than one of these sub-agents may spend. No sub-agent can run before the budget resets ${resets}. `
+      + `Tell the user that the ${budget} stops this work, when it resets, and that you cannot change the budget.`;
   }
-  return `Not delegated: these sub-agents could together spend up to ${usd(batchUSD)}, and the ${r.cap} `
-    + `spending cap (${usd(r.capUSD)}) leaves ${usd(r.headroomUSD)}. Delegate fewer sub-agents or give them `
+  return `Not delegated: these sub-agents could together spend up to ${usd(batchUSD)}, and the ${budget} `
+    + `of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left. Delegate to fewer sub-agents or give them `
     + `a lower max_budget_usd, so that together they stay within ${usd(r.headroomUSD)}.`;
 }
 

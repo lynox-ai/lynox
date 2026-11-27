@@ -6947,8 +6947,9 @@ describe('spawn_agent holds a batch against the daily and monthly caps', () => {
     const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
     configurePersistentBudget({ costProvider: spentToday(10), dailyCapUSD: 10, monthlyCapUSD: 500 });
     await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
-      'Not delegated: the daily spending cap ($10.00) leaves $0.00, less than one of these sub-agents needs. '
-      + 'No sub-agent can run before the cap resets tomorrow. Tell the user that the spending cap stops this work.',
+      'Not delegated: the daily budget of $10.00 has $0.00 left, less than one of these sub-agents may spend. '
+      + 'No sub-agent can run before the budget resets at 00:00 UTC. '
+      + 'Tell the user that the daily budget stops this work, when it resets, and that you cannot change the budget.',
     );
     expect(mockSend).not.toHaveBeenCalled();
     expect(testCounters.costUSD, 'the session counter is not charged for a refused batch').toBe(0);
@@ -6963,12 +6964,17 @@ describe('spawn_agent holds a batch against the daily and monthly caps', () => {
     const { configurePersistentBudget } = await import('../../core/session-budget.js');
     configurePersistentBudget({ costProvider: spentToday(8), dailyCapUSD: 10, monthlyCapUSD: 500 });
     await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
-      'Not delegated: these sub-agents could together spend up to $3.00, and the daily spending cap ($10.00) leaves $2.00. '
-      + 'Delegate fewer sub-agents or give them a lower max_budget_usd, so that together they stay within $2.00.',
+      'Not delegated: these sub-agents could together spend up to $3.00, and the daily budget of $10.00 has $2.00 left. '
+      + 'Delegate to fewer sub-agents or give them a lower max_budget_usd, so that together they stay within $2.00.',
     );
     configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 100, monthlyCapUSD: 3.5 });
     await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
-      'the monthly spending cap ($3.50) leaves $2.50. Delegate fewer sub-agents',
+      'the monthly budget of $3.50 has $2.50 left. Delegate to fewer sub-agents',
+    );
+    configurePersistentBudget({ costProvider: spentToday(3.5), dailyCapUSD: 100, monthlyCapUSD: 3.5 });
+    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
+      'the monthly budget of $3.50 has $0.00 left, less than one of these sub-agents may spend. '
+      + 'No sub-agent can run before the budget resets on the 1st at 00:00 UTC.',
     );
     expect(mockSend).not.toHaveBeenCalled();
   });
