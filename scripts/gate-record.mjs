@@ -659,11 +659,14 @@ function aaRoutes(text) {
  *   naming its file; `unjudged`: why nothing could be judged (no base, a file that cannot be read).
  */
 export function agentAwarenessOwed({ files, base, head, read }) {
-  const quoted = files.find((f) => isQuotedPath(f));
-  if (quoted) return { adds: [], unjudged: `${quoted} is a name git printed quoted, so it could not be read` };
-  const code = files.filter((f) => !AA_TEST.some((p) => p.test(f)));
-  const relevant = code.filter((f) => AA_TOOL_FILE.test(f) || AA_ROUTE_FILE.test(f) || AA_PAGE_FILE.test(f));
-  if (relevant.length === 0) return { adds: [] };
+  // A name git printed quoted cannot be read, but it hides nothing else: the other files are still
+  // judged, and the note is raised only when the quoted name itself could be a trigger file.
+  const isTrigger = (f) => AA_TOOL_FILE.test(f) || AA_ROUTE_FILE.test(f) || AA_PAGE_FILE.test(f);
+  const quoted = files.filter((f) => isQuotedPath(f)).find((f) => isTrigger(f.slice(1, -1)));
+  const note = quoted ? { unjudged: `${quoted} is a name git printed quoted, so it could not be read` } : {};
+  const code = files.filter((f) => !isQuotedPath(f) && !AA_TEST.some((p) => p.test(f)));
+  const relevant = code.filter(isTrigger);
+  if (relevant.length === 0) return { adds: [], ...note };
   if (!base || !head) return { adds: [], unjudged: `without \`--base\` and \`--head\` nothing can tell what ${relevant[0]} adds` };
   const at = {};
   for (const f of relevant) {
@@ -688,7 +691,7 @@ export function agentAwarenessOwed({ files, base, head, read }) {
   for (const f of relevant.filter((p) => AA_PAGE_FILE.test(p))) {
     if (at[f].base === null && at[f].head !== null) adds.push(`${f} adds a UI page`);
   }
-  return { adds };
+  return { adds, ...note };
 }
 
 const AA_KINDS = new Map([

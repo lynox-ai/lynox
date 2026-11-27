@@ -3852,6 +3852,16 @@ describe('agent-awareness: every registration form the code uses (review round 1
     expect(r.adds).toEqual([]);
     expect(r.unjudged).toContain('quoted');
   });
+
+  it('a quoted name hides no other addition, and a quoted doc raises no note', () => {
+    const T = 'src/tools/builtin/t.ts';
+    const tree = reader({ [B]: { [T]: 'const x = 1;\n' }, [H]: { [T]: "const t = { definition: { name: 'new_tool' } };\n" } });
+    const doc = agentAwarenessOwed({ files: ['"docs/a\\tb.md"', T], base: B, head: H, read: tree });
+    expect(doc).toEqual({ adds: [`${T} adds the tool \`new_tool\``] });
+    const code = agentAwarenessOwed({ files: ['"src/tools/builtin/\\303\\244.ts"', T], base: B, head: H, read: tree });
+    expect(code.adds).toEqual([`${T} adds the tool \`new_tool\``]);
+    expect(code.unjudged).toContain('quoted');
+  });
 });
 
 describe('agent-awareness: the line, review round 1', () => {
