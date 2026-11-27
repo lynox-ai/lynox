@@ -35,7 +35,7 @@ describe('subjectKindKey', () => {
 		const engine = readFileSync(fileURLToPath(new URL('../../../../../src/core/subject-store.ts', import.meta.url)), 'utf8');
 		const list = /export const KNOWN_SUBJECT_KINDS = \[([^\]]*)\]/.exec(engine)?.[1];
 		expect(list, 'positive control: the engine list was found').toBeDefined();
-		expect([...list!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1])).toEqual([...SUBJECT_KINDS]);
+		expect([...list!.matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1])).toEqual([...SUBJECT_KINDS]);
 		// That each key has a word in both languages is held where the chip is mounted.
 		expect(SUBJECT_KINDS.map((kind) => subjectKindKey(kind))).toEqual(SUBJECT_KINDS.map((kind) => `subjects.kind.${kind}`));
 		expect(subjectKindKey('robot'), 'an unknown kind has none').toBeNull();

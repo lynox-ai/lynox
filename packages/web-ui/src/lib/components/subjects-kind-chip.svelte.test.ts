@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { SUBJECT_KINDS as KINDS } from '../utils/subjects-view.js';
 
 // The kind chip in the subject list and in the open panel shows a word per kind, in the page's
 // language and not in a code font; a kind without a word shows the value as it came.
@@ -21,7 +22,6 @@ const json = (body: unknown, status = 200): Response =>
 	new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const settle = async (): Promise<void> => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
 
-const KINDS = ['person', 'organization', 'engagement', 'product', 'service', 'other'] as const;
 const SUBJECTS = [
 	...KINDS.map((kind, i) => ({ id: `s${i}`, kind, name: `Subject ${kind}` })),
 	{ id: 'sx', kind: 'robot', name: 'Subject robot' },
