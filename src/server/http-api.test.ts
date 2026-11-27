@@ -26280,14 +26280,28 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
   // answer is the same whether a session is live there or not.
   describe('GET /api/sessions/:id/changeset on another person\'s conversation', () => {
     it('gives a mandate the same status and body whether a session is live in it or not', async () => {
-      asMandate();
-      sessionRanBy(OWNER_PRINCIPAL);
-      const live = await jsonFetch(`/api/sessions/${FOREIGN}/changeset`);
-      expect(live.status, 'with a live session').toBe(200);
-      mockSessionGet.mockReturnValue(undefined);
-      const none = await jsonFetch(`/api/sessions/${FOREIGN}/changeset`);
-      expect(none.status, 'without a session').toBe(200);
-      expect(await none.text(), 'the answer differs with the session').toBe(await live.text());
+      // The live session holds the owner's review of a file it changed, so the mandate's answer
+      // there comes from the check of who may answer it, not from a session without a review.
+      const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-foreign-'));
+      try {
+        const file = join(cwd, 'a.txt');
+        writeFileSync(file, 'before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run-owner', [], { createdBy: principalTag(OWNER_PRINCIPAL) });
+        csm.backupBeforeWrite(file);
+        writeFileSync(file, 'after', 'utf-8');
+        sessionRanBy(OWNER_PRINCIPAL, { getChangesetManager: vi.fn(() => csm) });
+        const owners = await jsonFetch(`/api/sessions/${FOREIGN}/changeset`);
+        expect(((await owners.json()) as { hasChanges: unknown }).hasChanges, 'positive control: the owner sees the review').toBe(true);
+        asMandate();
+        const live = await jsonFetch(`/api/sessions/${FOREIGN}/changeset`);
+        expect(live.status, 'with a live session').toBe(200);
+        mockSessionGet.mockReturnValue(undefined);
+        const none = await jsonFetch(`/api/sessions/${FOREIGN}/changeset`);
+        expect(none.status, 'without a session').toBe(200);
+        expect(await none.text(), 'the answer differs with the session').toBe(await live.text());
+      } finally {
+        rmSync(cwd, { recursive: true, force: true });
+      }
     });
 
     it('control: the owner, and a mandate in its own conversation, still get the 404 for no session', async () => {
