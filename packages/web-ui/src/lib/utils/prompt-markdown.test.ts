@@ -461,7 +461,7 @@ describe('ChatView wiring', () => {
 		// Both branches are asserted, because the fallback is the one that stays
 		// reachable forever (an older engine sends no segments) and the segment
 		// branch is the one that carries the boundary.
-		expect(source).toMatch(/pendingPermission\.segments[\s\S]{0,120}renderPromptSegments\(\s*pendingPermission\.segments\s*\)/);
+		expect(source).toMatch(/pendingPermission\.segments[\s\S]{0,120}renderPromptSegments\(\s*pendingPermission\.segments\s*(,\s*\{[^}]*\}\s*)?\)/);
 		expect(source).toMatch(/renderPromptMarkdown\(\s*pendingPermission\.question\s*\)/);
 		expect(source).toMatch(/import\s*\{[^}]*renderPromptSegments[^}]*\}\s*from\s*'\.\.\/utils\/prompt-markdown\.js'/);
 	});

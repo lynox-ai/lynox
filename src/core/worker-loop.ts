@@ -8,8 +8,8 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { CONSENT_KEYS, type ConsentKind } from '../contract/prompt.js';
-import { CONSENT_LABELS } from '../tools/dialog-text.js';
+import { CONSENT_KEYS, type ConsentAction, type ConsentKind } from '../contract/prompt.js';
+import { CONSENT_ACTION_LABELS, CONSENT_LABELS } from '../tools/dialog-text.js';
 import { join } from 'node:path';
 import { claimStoreReconnectHints } from './store-token-refresh.js';
 import { recipientsConfirmable } from './recipient-confirm.js';
@@ -23,7 +23,7 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
   WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
+import { BULK_NOTICES, bulkHaltForReaders, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { originRunNotice, type OriginRefusal, type SendOrigin, type TriggerSetUpBy } from './origin-notices.js';
@@ -33,7 +33,7 @@ import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, ownerInstructionCounts, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, ownedBy, ownerInstructionCounts, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
@@ -694,8 +694,8 @@ export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: stri
 }
 
 /** An engine consent's options as a notification lists them: the keys in the owner's words. */
-function consentInquiryOptions(kind: ConsentKind, language: 'de' | 'en'): string[] {
-  return CONSENT_KEYS[kind].map((key) => CONSENT_LABELS[language][key]);
+function consentInquiryOptions(kind: ConsentKind, language: 'de' | 'en', action?: ConsentAction): string[] {
+  return CONSENT_KEYS[kind].map((key) => (key === 'confirm' && action !== undefined ? CONSENT_ACTION_LABELS[language][action] : CONSENT_LABELS[language][key]));
 }
 
 /** The refusal notice of a run that ended by throwing, carried from the run to where the failure is recorded. */
@@ -2874,10 +2874,21 @@ export class WorkerLoop {
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
     const runAs = this.#runAs(task.id, starter);
     const triggerTier = admittedTriggerTier(task.model_tier);
+    // An answer given in a conversation that is not the one of whom the run is for is not taken:
+    // a run by hand of a mandate, or a mandate's plan, that picked up a question asked in the
+    // owner's chat would write into that chat, or, in a new thread, put its question and answer
+    // where the mandate reads them (a mandate reads every chat it opened, contained or not). The
+    // answer is released unread, as for an access that has ended, and the run goes on without it.
+    // The owner owns every conversation; a missing row is no one's.
+    const threads = answered !== undefined ? this.engine.getThreadStore() : null;
+    if (answered !== undefined && !isOwnerPrincipal(runAs) && !ownedBy(threads?.getThread(answered.session_id), runAs)) {
+      this.engine.getPromptStore()?.releaseTrigger(answered.id);
+      answered = undefined;
+    }
     // Same thread, so the run's own history shows the exchange it continues — unless the owner
     // deleted that conversation in the meantime. Then the run goes to a new thread: a deleted
     // one is not opened again, and the question and its answer reach the run as input anyway.
-    const continueIn = answered !== undefined && this.engine.getThreadStore()?.isDeleted(answered.session_id) !== true
+    const continueIn = answered !== undefined && threads?.isDeleted(answered.session_id) !== true
       ? answered.session_id
       : undefined;
     const session = this.engine.createSession({
@@ -3022,7 +3033,7 @@ export class WorkerLoop {
         promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: false }, session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
           principal: runAs,
           handRun: active?.handRun === true,
-        }, meta?.consent);
+        }, meta?.consent, meta?.consentAction);
       } catch (err: unknown) {
         if (err instanceof UnattendedBlockError) return UNATTENDED_BLOCK_ANSWER;
         throw err;
@@ -3092,7 +3103,7 @@ export class WorkerLoop {
       // Whether the question reached anyone goes onto the trigger and, through the engine as a
       // workflow question's does, to the hooks: on a managed instance a push that reached nobody
       // then mails the owner a fixed text that names neither the question nor the task.
-      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: session.sessionId, kind: 'question' }));
+      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: session.sessionId, kind: 'question' }), 'question');
       const notices = this.#notices();
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
@@ -3106,7 +3117,7 @@ export class WorkerLoop {
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: questionReduced
           ? { question: notices.containedQuestionInquiry }
-          : { question: offBoxQuestion, options: meta?.consent !== undefined ? consentInquiryOptions(meta.consent, noticeLanguage(this.engine.config?.language)) : inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+          : { question: offBoxQuestion, options: meta?.consent !== undefined ? consentInquiryOptions(meta.consent, noticeLanguage(this.engine.config?.language), meta.consentAction) : inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       }).then((report) => { recordDelivery(summarizeDelivery(report), { case: deliveryCase(report) }); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });
@@ -3448,11 +3459,11 @@ export class WorkerLoop {
       const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
-      const pushed = resultReduced
-        ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberSaid).result
-        : capStop === null ? memberTold.result
-          : withMemberNotes(truncate(`${capStop}\n\n${withRefusals}`), 'other', memberSaid).result;
-      await this.notificationRouter.notify({
+      const pushedText = resultReduced
+        ? (capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`)
+        : capStop === null ? truncatedResult : truncate(`${capStop}\n\n${withRefusals}`);
+      const pushed = withMemberNotes(pushedText, 'other', memberSaid).result;
+      const message: NotificationMessage = {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
         //
@@ -3477,7 +3488,10 @@ export class WorkerLoop {
           { label: notices.chipDetails, task: `Show me more details about: ${stripHidden(task.title)}` },
           { label: notices.chipRunAgain, task: stripHidden(task.description ?? task.title) },
         ],
-      });
+      };
+      // With the owner's member-connection lines, told by reader (#notifyMemberEnd).
+      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, notices.memberEndForMandates);
+      else await this.notificationRouter.notify(message);
     }
   }
 
@@ -3896,7 +3910,7 @@ export class WorkerLoop {
       maskOffBox: (text) => this.engine.getSecretStore()?.maskAll(text) ?? text,
       notify: (msg) => this.notificationRouter.notify(msg),
       // Through the engine, as an escalation's is, so the hooks hear of a question that reached nobody.
-      recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: runId, kind: 'question' })),
+      recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: runId, kind: 'question' }), 'question'),
       ownerStop,
       teardown,
       tearingDown: () => active?.tearingDown === true,
@@ -3981,9 +3995,16 @@ export class WorkerLoop {
    */
   private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
+    // A bulk halt whose way on only the owner can take: the history, which a mandate reads too,
+    // keeps the fact; the owner's push keeps the way; every mandate's push says the owner
+    // resolves it (U-383).
+    const haltRow = this.#bulkRunRow(task);
+    const lang = noticeLanguage(this.engine.config?.language);
+    const byReader = haltRow !== null;
+    const recordAs = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, resultSummary, lang);
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      this.#recordRun(taskManager, task.id, resultSummary, look.status, undefined, opts);
+      this.#recordRun(taskManager, task.id, recordAs?.record ?? resultSummary, look.status, undefined, opts);
     }
 
     // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that
@@ -4000,13 +4021,60 @@ export class WorkerLoop {
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
       const shownEnd: BulkPushEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
+      const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
+      const readers = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
+      const withLines = notes.length > 0;
+      const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
+      if (readers === null && withLines) {
+        // Not split by reader, but with the owner's member-connection lines: see #notifyMemberEnd.
+        void this.#notifyMemberEnd(message, WORKER_NOTICES[lang].memberEndForMandates);
+        return;
+      }
       void this.notificationRouter.notify({
-        title: `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`,
-        body: told.result,
-        taskId: task.id,
-        priority: toldLook.priority,
+        ...message,
+        // Only the owner can take the way this sentence names: no other device reads it.
+        ...(readers === null ? {} : { audience: 'owner' as const }),
       });
+      // Every live grant reads the same end in the mandates' sentence, not only the planning one:
+      // a mandate gets the notices the owner gets, in the sentence that is true for it. It reads
+      // the fact without the member-connection lines: they are the owner's, naming another
+      // member's provider and profile and the owner's way to change it. They stand in the history,
+      // which a mandate reads, as recorded. The sentence is where `told.result` starts, so this
+      // finds a part only where `readers` found one too.
+      const forMandate = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, said ?? resultSummary, lang);
+      if (forMandate !== null) {
+        void this.notificationRouter.notify({
+          title,
+          body: forMandate.mandate,
+          taskId: task.id,
+          priority: toldLook.priority,
+          audience: 'all_mandates',
+        });
+      }
     }
+  }
+
+  /**
+   * A run's end that carries the owner's member-connection lines, told by reader. The lines name
+   * another member's provider, profile and login and the owner's way to change it, so only the
+   * owner's devices read `message` as it is. Every live grant reads the same end in its own
+   * sentence (`forMandates`), a fixed one, not the run's result: the model words its reply after a
+   * refusal that names the other member, so the result without the lines can still carry them. A
+   * mandate gets the notices the owner gets, in the sentence that is true for it. A push without an
+   * audience would reach every live grant's devices with the lines.
+   */
+  async #notifyMemberEnd(message: NotificationMessage, forMandates: string): Promise<void> {
+    const owner = this.notificationRouter.notify({ ...message, audience: 'owner' });
+    // Only what names the end: no deep link into the run's thread and no follow-ups, which would
+    // lead a mandate back to the reply this sentence stands in for.
+    void this.notificationRouter.notify({
+      title: message.title,
+      body: forMandates,
+      taskId: message.taskId,
+      priority: message.priority,
+      audience: 'all_mandates',
+    });
+    await owner;
   }
 
   /**

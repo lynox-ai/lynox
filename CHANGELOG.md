@@ -77,29 +77,38 @@
   `secrets_may_be_incomplete` is `true` when the secret store or its vault did
   not open. `secrets_note` says that only secret names are exported, never
   values.
+- With the subject graph on, `GET /api/export` reads the knowledge graph's
+  entities by key instead of by offset, so its time grows with the number of
+  subjects rather than with the square of that number;
+  `knowledge_graph.entities` is then in id order, unless a key read fails and
+  the export pages by offset instead. Without a search term, the entity list
+  of the web app on the subject graph cuts its page in the query and breaks
+  ties in its order by id.
 - `GET /api/export` now carries the remembered texts of the knowledge graph,
   under `knowledge_graph.memories`, keyed by the store that holds them:
-  `agent-memory.db` with its `memories` and `mentions`, and `engine.db` with
-  its `memories`, `memory_subjects` and every row of `relationships`, with
-  `source_deleted` and a `relationships_note`; the graph block lists only the
-  subjects it maps to entities, so relations between other subjects were in no
-  block. Every stored column is included except the embedding, and replaced or
-  retired texts are included as well, with their `is_active` and
-  `superseded_by`. Texts and relationship descriptions and notes are masked the
-  way durable knowledge is. A text that cannot be decrypted, or is not stored as
-  text, is written as a marker, never as what is stored.
+  `agent-memory.db` with its `memories`, `mentions`, `supersedes`,
+  `cooccurrences` and `metrics`, and `engine.db` with its `memories`,
+  `memory_subjects`, every row of `relationships` (with `source_deleted` and a
+  `relationships_note`), `supersedes`, `subject_cooccurrences` and
+  `subject_mints`; the graph block lists only the subjects it maps to entities,
+  so relations between other subjects were in no block. Every stored column is
+  included except the embedding, and replaced or retired texts are included as
+  well, with their `is_active` and `superseded_by`. Texts, relationship
+  descriptions and notes, and the reason one text replaced another are masked
+  the way durable knowledge is. A text that cannot be decrypted, or is not
+  stored as text, is written as a marker, never as what is stored.
   `knowledge_graph_may_be_incomplete` no longer turns `true` just because such
   texts are stored. It turns `true` when one of these tables could not be read,
-  a table returned more than 20,000 rows (the rest is left out), a text could not
-  be decrypted, `engine.db` is not open, or `agent-memory.db` comes from a newer
-  build. It also stays `true` while graph rows are stored that no block carries:
-  subjects the graph block does not list (archived ones and those of kind
-  `service` or `other` with the subject graph on, every subject with it off),
-  the tables no block carries (`supersedes` in both stores, `cooccurrences`,
-  `subject_cooccurrences`, `subject_mints`), with the subject graph on the
-  entities and relations of `agent-memory.db`, and with it off relations neither
-  of whose entities is stored. Those are counted, not read. Both files are only read, as for the entities and
-  relations.
+  a table returned more than 20,000 rows (the rest is left out), a text could
+  not be decrypted, `engine.db` is not open, or `agent-memory.db` comes from a
+  newer build. It also stays `true` while graph rows are stored that no block
+  carries: subjects the graph block does not list (archived ones and those of
+  kind `service` or `other` with the subject graph on, every subject with it
+  off), rows in an `agent-memory.db` table this build does not export (one an
+  older schema kept), with the subject graph on the entities and relations of
+  `agent-memory.db`, and with it off relations neither of whose entities is
+  stored. Those are counted, not read. Both files are only read, as for the
+  entities and relations.
 - When a database was set aside as corrupt (`<name>.corrupt-<ms>`: by the boot
   for `history.db` and `engine.db`, by a restore for those and `datastore.db`
   and `agent-memory.db`, and an `engine.db.migration-tmp.corrupt-<ms>` left by

@@ -74,12 +74,15 @@ const hints = (notify: ReturnType<typeof vi.fn>): { title: string; body: string 
   (notify.mock.calls.map((c) => c[0]) as { title: string; body: string }[]).filter((m) => m.title.startsWith('Shop'));
 
 describe('the worker tick and the store reconnect hint', () => {
-  it('tells the owner once, through the router, when a store\'s access runs out within 14 days', async () => {
+  it('tells the owner and every grant once, through the router, when a store\'s access runs out within 14 days', async () => {
     const p = boot(true);
     await tick(p.loop);
-    expect(hints(p.notify)).toEqual([expect.objectContaining({ title: 'Shop bald neu verbinden', body: expect.stringContaining('acme.myshopify.com läuft am 15. Januar 2027 ab') as string })]);
+    expect(hints(p.notify)).toEqual([
+      expect.objectContaining({ title: 'Shop bald neu verbinden', audience: 'owner', body: expect.stringContaining('acme.myshopify.com läuft am 15. Januar 2027 ab') as string }),
+      expect.objectContaining({ title: 'Shop-Zugang läuft bald ab', audience: 'all_mandates', body: expect.stringContaining('acme.myshopify.com läuft am 15. Januar 2027 ab') as string }),
+    ]);
     await tick(p.loop);
-    expect(hints(p.notify)).toHaveLength(1);
+    expect(hints(p.notify)).toHaveLength(2);
   });
 
   it('without a channel tells nothing and claims nothing, so a channel added later still gets it', async () => {

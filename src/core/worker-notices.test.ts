@@ -8,7 +8,7 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, SAID_WORKFLOW_ID_MAX, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, eventModeRefusedReason, inQuotes, firstRunUnconfirmedReason,
   type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, BULK_STORE_REACH_REFUSALS, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
+import { BULK_NOTICES, BULK_STORE_REACH_REFUSALS, bulkHaltForReaders, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { EVENT_STOPPED, OWN_FAILURE_REASONS, REMINDER_BODY_MAX } from './worker-loop.js';
@@ -44,7 +44,7 @@ function workerSamples(n: WorkerNotices): Record<string, string> {
   return {
     consentManyTitle: n.consentManyTitle(4), consentManyBody: n.consentManyBody, consentOneTitle: n.consentOneTitle,
     consentOneBody: n.consentOneBody('Wochenbericht', true), failed: n.failed('E'), stoppedWith: n.stoppedWith('E'),
-    stopped: n.stopped, chipRunAgain: n.chipRunAgain, chipRetry: n.chipRetry, chipExplain: n.chipExplain,
+    stopped: n.stopped, memberEndForMandates: n.memberEndForMandates, chipRunAgain: n.chipRunAgain, chipRetry: n.chipRetry, chipExplain: n.chipExplain,
     containedResult: n.containedResult, containedQuestion: n.containedQuestion, containedQuestionInquiry: n.containedQuestionInquiry,
     workflowIncomplete: n.workflowIncomplete('Wochenbericht', 'failed'), errorLabel: n.errorLabel,
     affectedStepsLabel: n.affectedStepsLabel, writesLabel: n.writesLabel, workflowRef: n.workflowRef('r-1', 'w-1'),
@@ -650,6 +650,173 @@ describe('a title quoted in a turn the model reads', () => {
   });
   it('leaves a title without them as it came', () => {
     expect(inQuotes('Weekly offer – 50% off')).toBe('Weekly offer – 50% off');
+  });
+});
+
+describe('a halt only the owner can resolve, as each reader gets it (bulkHaltForReaders, U-383)', () => {
+  const R = BULK_HALT_REASONS;
+  const COUNTS = { de: ' 2 von 5 Zielen geschrieben.', en: ' Wrote 2 of 5 targets.' } as const;
+  const CLOSING = { de: 'Lösen kann das nur der Inhaber.', en: 'Only the owner can resolve this.' } as const;
+  // Every stored halt reason, sorted by hand: whose sentence names a way only the owner can take
+  // (reconnect, fix the profile, switch writing on, continue the run), and whose holds for any
+  // reader. A reason added to BULK_HALT_REASONS fails the test below until it is sorted here.
+  type Said = readonly [record: string, mandate: string];
+  const closing = (fact: string, lang: 'de' | 'en'): Said => [fact, `${fact} ${CLOSING[lang]}`];
+  const goesOn = (fact: string, mandate: string): Said => [fact, `${fact} ${mandate}`];
+  // The fact and the mandate's sentence, word for word (U-383), per reason; `judge` where that step reads otherwise.
+  const OWNER_WAY: Readonly<Record<string, { readonly de: Said; readonly en: Said; readonly judge?: { readonly de: Said; readonly en: Said } }>> = {
+    credential: { de: closing('lynox findet keinen gespeicherten Zugang zum Zielsystem.', 'de'), en: closing('lynox finds no stored access to the target system.', 'en') },
+    unauthorized: { de: closing('Das Zielsystem hat den gespeicherten Zugang abgelehnt.', 'de'), en: closing('The target system refused the stored access.', 'en') },
+    unavailable: {
+      de: goesOn('Zielsystem nicht erreichbar oder Fehler in lynox.', 'Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, ist das Zielsystem noch nicht erreichbar.'),
+      en: goesOn('Target system not reachable, or an error in lynox.', 'The owner can continue the run; if it halts again right away, the target system is not reachable yet.'),
+      judge: {
+        de: goesOn('KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox.', 'Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, kann der Inhaber es später erneut versuchen.'),
+        en: goesOn('AI model or target system not reachable, or an error in lynox.', 'The owner can continue the run; if it halts again right away, the owner can try again later.'),
+      },
+    },
+    shopifyWriteOff: { de: closing('Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.', 'de'), en: closing('Writing to Shopify stores in a bulk run is switched off on this instance.', 'en') },
+    storeAccessEnded: { de: closing('lynox konnte den Zugang zum Shop nicht erneuern.', 'de'), en: closing('lynox could not renew its access to the store.', 'en') },
+    storeClientMisnamed: { de: closing('In der Shopify-Verbindung liegen die App-Zugangsdaten unter anderen Namen.', 'de'), en: closing('The Shopify connection keeps the app credentials under other names.', 'en') },
+    consentOutdated: { de: closing('Diese Shopify-Verbindung lässt lynox diese Felder noch nicht ändern.', 'de'), en: closing('This Shopify connection does not yet let lynox change these fields.', 'en') },
+    productWriteNotAsked: { de: closing('Diese Shopify-Verbindung darf keine Produkte ändern.', 'de'), en: closing('This Shopify connection may not change products.', 'en') },
+    shopifyNotSetUp: {
+      de: goesOn('Shopify ist auf dieser Instanz nicht eingerichtet. Einrichten kann das nur lynox.', 'Sobald lynox Shopify eingerichtet hat, kann der Inhaber den Lauf fortsetzen.'),
+      en: goesOn('Shopify is not set up on this instance. Only lynox can set it up.', 'Once lynox has set up Shopify, the owner can continue the run.'),
+    },
+    shopifyNotCleared: {
+      de: goesOn('Shopify ist für diese Instanz zurzeit nicht freigegeben. Freigeben kann nur lynox.', 'Sobald lynox Shopify freigegeben hat, kann der Inhaber den Lauf fortsetzen.'),
+      en: goesOn('Shopify is not cleared for this instance right now. Only lynox can clear it.', 'Once lynox has cleared Shopify, the owner can continue the run.'),
+    },
+    shopifyUnconfirmed: {
+      de: goesOn('lynox konnte nicht bestätigen, dass diese Instanz Shopify erreichen darf.', 'Der Inhaber kann den Lauf in ein paar Minuten fortsetzen.'),
+      en: goesOn('lynox could not confirm that this instance may reach Shopify.', 'The owner can continue the run in a few minutes.'),
+    },
+    containmentUnwritable: {
+      de: goesOn('lynox konnte nicht festhalten, dass dieser Lauf den Shop liest; gesendet wurde nichts.', 'Der Inhaber kann den Lauf später fortsetzen.'),
+      en: goesOn('lynox could not record that this run reads the store; nothing was sent.', 'The owner can continue the run later.'),
+    },
+  };
+  // Whose sentence has no part this split takes off. Some of them still speak to the reader as
+  // "you" or name a step (awaitingStart, discarded, listTooLarge, markupAddedByShop, the rollbacks
+  // that did not complete); they go to every reader as they did before.
+  const NEUTRAL: ReadonlySet<string> = new Set([
+    'awaitingStart', 'failureRate', 'consecutiveFailures', 'timeBudget', 'expired', 'checksum', 'maxTargets', 'probeRequired',
+    'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete',
+    'blocked', 'contract', 'stoppedByOwner', 'mandateEnded', 'unrecorded', 'runUnrecorded', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge',
+    'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff',
+    'shopifySelfHosted', 'storeRequestRefused', 'shopifyNoApiVersion', 'markupAddedByShop', 'superseded', 'discarded', 'costCap', 'spendLimit',
+    'creditRefused', 'judgeModel',
+  ]);
+
+  it('sorts every stored halt reason into one whose way only the owner takes or one that holds for any reader', () => {
+    for (const key of Object.keys(R)) expect(Object.hasOwn(OWNER_WAY, key) !== NEUTRAL.has(key), key).toBe(true);
+    for (const key of [...Object.keys(OWNER_WAY), ...NEUTRAL]) expect(Object.hasOwn(R, key), key).toBe(true);
+  });
+
+  it('keeps only the fact in the history and tells the mandate the owner, for every reason in both steps and both languages', () => {
+    for (const [key, reason] of Object.entries(R)) {
+      for (const phase of ['apply', 'judge'] as const) {
+        for (const lang of ['de', 'en'] as const) {
+          const summary = `${BULK_NOTICES[lang].halted(phase, reason)}${COUNTS[lang]}`;
+          const got = bulkHaltForReaders(reason, summary, lang);
+          const want = OWNER_WAY[key];
+          if (want === undefined) {
+            expect(got, `${key} ${phase} ${lang}`).toBeNull();
+            continue;
+          }
+          const [record, mandate] = (phase === 'judge' ? want.judge?.[lang] : undefined) ?? want[lang];
+          expect(got, `${key} ${phase} ${lang}`).toEqual({ record: `${record}${COUNTS[lang]}`, mandate: `${mandate}${COUNTS[lang]}` });
+        }
+      }
+    }
+  });
+
+  it('keeps an outdated consent\'s fields and its lead, and drops only the way', () => {
+    const de = `${BULK_NOTICES.de.consentOutdated(['title'], false)}${COUNTS.de}`;
+    const r = bulkHaltForReaders(R.consentOutdated, de, 'de')!;
+    expect(r.record).toBe(`lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt. Diese Shopify-Verbindung erlaubt lynox noch nicht, den Titel zu ändern.${COUNTS.de}`);
+    expect(r.mandate).toBe(`lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt. Diese Shopify-Verbindung erlaubt lynox noch nicht, den Titel zu ändern. ${CLOSING.de}${COUNTS.de}`);
+    const en = bulkHaltForReaders(R.consentOutdated, BULK_NOTICES.en.consentOutdated(['title'], true), 'en')!;
+    expect(en.record).toBe('lynox wrote nothing. This Shopify connection does not yet let lynox change the title.');
+    expect(en.mandate).toBe(`lynox wrote nothing. This Shopify connection does not yet let lynox change the title. ${CLOSING.en}`);
+  });
+
+  it('says one fact for both ways a product write was not allowed, after its lead', () => {
+    for (const access of ['not_asked', 'not_granted'] as const) {
+      expect(bulkHaltForReaders(R.productWriteNotAsked, BULK_NOTICES.de.productWriteNotAsked(access, true), 'de'), access).toEqual({
+        record: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung darf keine Produkte ändern.',
+        mandate: `lynox hat nichts geschrieben. Diese Shopify-Verbindung darf keine Produkte ändern. ${CLOSING.de}`,
+      });
+      expect(bulkHaltForReaders(R.productWriteNotAsked, BULK_NOTICES.en.productWriteNotAsked(access, false), 'en')?.record, access)
+        .toBe('lynox writes nothing more in this run; what it already wrote stays. This Shopify connection may not change products.');
+    }
+  });
+
+  it('takes the product-write push\'s short form too: the owner keeps the pointer, the mandate reads the owner instead of it', () => {
+    const SHORT = {
+      de: { not_asked: 'Beim Verbinden hat lynox Shopify nicht um das Recht gebeten, Produkte zu ändern.', not_granted: 'Shopify erlaubt dieser Verbindung nicht, Produkte zu ändern.' },
+      en: { not_asked: 'When connecting, lynox did not ask Shopify for permission to change products.', not_granted: 'Shopify does not let this connection change products.' },
+    } as const;
+    const LEAD = { de: ['lynox hat nichts geschrieben.', 'lynox schreibt nichts mehr; Geschriebenes bleibt.'], en: ['lynox wrote nothing.', 'lynox writes nothing more; what it wrote stays.'] } as const;
+    for (const lang of ['de', 'en'] as const) {
+      for (const access of ['not_asked', 'not_granted'] as const) {
+        for (const [i, nothingYet] of [[0, true], [1, false]] as const) {
+          const push = BULK_NOTICES[lang].productWriteNotAskedPush(access, nothingYet);
+          const m = bulkHaltForReaders(R.productWriteNotAsked, push, lang);
+          const fact = `${LEAD[lang][i]} ${SHORT[lang][access]}`;
+          expect(m, `${lang} ${access} ${nothingYet}`).toEqual({ record: fact, mandate: `${fact} ${CLOSING[lang]}` });
+          expect(m!.mandate.length, `${lang} ${access} ${nothingYet}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+        }
+      }
+    }
+  });
+
+  // The longest the mandate's push gets: the longer lead after a first write and four-digit counts,
+  // as the worker pushes it, fits the web-push cut whole. After an unclear send the warning stands
+  // whole before the cut, so only the counts can fall to it, as in the owner's push.
+  it('keeps the mandate\'s product-write push within the web-push cut with the longer lead and four-digit counts, and its warning whole', () => {
+    for (const lang of ['de', 'en'] as const) {
+      const b = BULK_NOTICES[lang];
+      const fourDigits = b.applyCounts({ applied: 9_999, foundAsPlanned: 0, failed: 0, conflicts: 0, undone: 0, total: 9_999, sentUnknown: 0 });
+      const warning = applyWarning(b, 9_999);
+      for (const access of ['not_asked', 'not_granted'] as const) {
+        const m = bulkHaltForReaders(R.productWriteNotAsked, `${b.productWriteNotAskedPush(access, false)} ${warning}`, lang)!;
+        expect(m.mandate.endsWith(`${CLOSING[lang]} ${warning}`), `${lang} ${access} warning`).toBe(true);
+        expect(m.mandate.length, `${lang} ${access} warning`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+      }
+      for (const tail of [fourDigits]) {
+        for (const access of ['not_asked', 'not_granted'] as const) {
+          for (const nothingYet of [true, false]) {
+            const m = bulkHaltForReaders(R.productWriteNotAsked, `${b.productWriteNotAskedPush(access, nothingYet)} ${tail}`, lang)!;
+            const at = `${lang} ${access} ${nothingYet} ${tail}`;
+            expect(m.mandate.endsWith(`${CLOSING[lang]} ${tail}`), at).toBe(true);
+            expect(m.mandate.length, at).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+          }
+        }
+      }
+    }
+  });
+
+  it('leaves every other halt to every reader, a list too large to hold among them, since a mandate can plan again', () => {
+    for (const reason of [R.listTooLarge, R.checksum, R.contract, R.timeBudget, R.mandateEnded, R.costCap]) {
+      expect(bulkHaltForReaders(reason, `${BULK_NOTICES.en.halted('apply', reason)}${COUNTS.en}`, 'en'), reason).toBeNull();
+    }
+    expect(bulkHaltForReaders(null, 'Done.', 'en')).toBeNull();
+    // A sentence the parts are not found in stays as it is: nothing is cut that is not the way.
+    expect(bulkHaltForReaders(R.credential, 'Something else.', 'en')).toBeNull();
+  });
+
+  it('keeps the mandate\'s push within the web-push cut for the longest summary', () => {
+    for (const key of Object.keys(OWNER_WAY)) {
+      const reason = R[key as keyof typeof R];
+      for (const phase of ['apply', 'judge'] as const) {
+        for (const lang of ['de', 'en'] as const) {
+          const m = bulkHaltForReaders(reason, `${BULK_NOTICES[lang].halted(phase, reason)}${COUNTS[lang]}`, lang)!;
+          expect(m.mandate.length, `${key} ${phase} ${lang}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+        }
+      }
+    }
   });
 });
 

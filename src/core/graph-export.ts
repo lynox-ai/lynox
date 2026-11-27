@@ -7,7 +7,8 @@ import {
   entityRelationsForExportOn, listEntitiesOn, relationCountOn,
 } from './agent-memory-db.js';
 import { toEntityRecord } from './entity-resolver.js';
-import { EXPORT_RELATIONS_PER_ENTITY, legacyRelationForExport, listSubjectEntitiesOn, relRowToRelationRecord } from './knowledge-layer.js';
+import { EXPORT_TABLES } from './export-tables.js';
+import { EXPORT_RELATIONS_PER_ENTITY, legacyRelationForExport, listSubjectEntitiesAfterOn, listSubjectEntitiesOn, relRowToRelationRecord } from './knowledge-layer.js';
 import { sourceDeletedSql } from './relation-source.js';
 import { RelationshipStore } from './relationship-store.js';
 import { ENTITY_MAPPABLE_SUBJECT_KINDS, SubjectStore } from './subject-store.js';
@@ -24,6 +25,12 @@ export type ExportRelation = RelationRecord & { sourceDeleted: boolean };
 /** What the export needs from a graph store: the entities page by page, and each one's relations. */
 export interface GraphExportSource {
   listEntities(opts: { limit: number; offset: number }): Promise<EntityRecord[]> | EntityRecord[];
+  /**
+   * The next page after the entity `after` (by key; `null` starts at the first). A source that
+   * offers it is walked by key, which is linear; `null` means it cannot read that way, and the
+   * walk pages with `listEntities` instead.
+   */
+  listEntitiesAfter?(after: string | null, limit: number): Promise<EntityRecord[] | null> | EntityRecord[] | null;
   getEntityRelationsForExport(entityId: string): Promise<ExportRelation[]> | ExportRelation[];
 }
 
@@ -45,12 +52,17 @@ const MAX_PAGES = 1000;
 export async function collectGraphForExport(source: GraphExportSource): Promise<{
   entities: EntityRecord[]; relationships: ExportRelation[]; truncated: boolean; relationCapHit: boolean;
 }> {
-  const entities: EntityRecord[] = [];
-  let truncated = true;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const batch = await source.listEntities({ limit: PAGE, offset: page * PAGE });
-    entities.push(...batch);
-    if (batch.length < PAGE) { truncated = false; break; }
+  let entities: EntityRecord[] | null = source.listEntitiesAfter ? await walkByKey(source.listEntitiesAfter.bind(source)) : null;
+  let truncated = entities === null ? true : entities.length >= MAX_PAGES * PAGE;
+  if (entities === null) {
+    // No key walk, or it failed part way: page from the start, so no entity is counted twice.
+    entities = [];
+    truncated = true;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const batch = await source.listEntities({ limit: PAGE, offset: page * PAGE });
+      entities.push(...batch);
+      if (batch.length < PAGE) { truncated = false; break; }
+    }
   }
   if (truncated) {
     // Surfaced, not silent: hitting the cap means the export may be incomplete.
@@ -69,6 +81,22 @@ export async function collectGraphForExport(source: GraphExportSource): Promise<
     }
   }
   return { entities, relationships: [...relationSet.values()], truncated, relationCapHit };
+}
+
+/** Walks every entity by key, page by page; `null` when the source cannot, or stops part way. */
+async function walkByKey(
+  next: (after: string | null, limit: number) => Promise<EntityRecord[] | null> | EntityRecord[] | null,
+): Promise<EntityRecord[] | null> {
+  const entities: EntityRecord[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const batch = await next(after, PAGE);
+    if (batch === null) return null;
+    entities.push(...batch);
+    if (batch.length < PAGE) return entities;
+    after = batch[batch.length - 1]!.id;
+  }
+  return entities;
 }
 
 export interface HeldGraph {
@@ -137,6 +165,7 @@ export async function readHeldGraph(opts: {
       const relationships = new RelationshipStore(opts.engineDb);
       source = {
         listEntities: (o) => listSubjectEntitiesOn(subjects, o),
+        listEntitiesAfter: (after, limit) => listSubjectEntitiesAfterOn(subjects, after, limit),
         getEntityRelationsForExport: (id) => relationships.getRelationshipsForSubjectForExport(id, EXPORT_RELATIONS_PER_ENTITY)
           .map(r => ({ ...relRowToRelationRecord(r), sourceDeleted: r.source_deleted === 1 })),
       };
@@ -189,11 +218,17 @@ export const MEMORY_TEXTS_RELATIONSHIPS_NOTE = 'source_deleted: 1 when the memor
 type ExportRow = Record<string, unknown>;
 
 export interface HeldMemoryTexts {
-  /** The legacy store: each remembered text, and which entity it mentions. */
-  'agent-memory.db': { memories: ExportRow[]; mentions: ExportRow[] };
-  /** The subject-graph store: each remembered text, which subject it is about, and every
-   * relation between subjects, those of a kind the graph block does not list included. */
-  'engine.db': { memories: ExportRow[]; memory_subjects: ExportRow[]; relationships: ExportRow[]; relationships_note: string };
+  /** The legacy store: each remembered text, which entity it mentions, which text replaced which
+   * (with its reason), which entities appear together, and the counters kept per text. */
+  'agent-memory.db': { memories: ExportRow[]; mentions: ExportRow[]; supersedes: ExportRow[]; cooccurrences: ExportRow[]; metrics: ExportRow[] };
+  /** The subject-graph store: each remembered text, which subject it is about, every relation
+   * between subjects (those of a kind the graph block does not list included), which text
+   * replaced which, which subjects appear together, and in which conversation each subject was
+   * first made. */
+  'engine.db': {
+    memories: ExportRow[]; memory_subjects: ExportRow[]; relationships: ExportRow[]; relationships_note: string;
+    supersedes: ExportRow[]; subject_cooccurrences: ExportRow[]; subject_mints: ExportRow[];
+  };
   /** Not the whole of what is held: a read failed or was cut at the cap, a text could not be
    * decrypted, agent-memory.db has a newer schema than this build, or engine.db is not open. */
   mayBeIncomplete: boolean;
@@ -204,7 +239,8 @@ export interface HeldMemoryTexts {
  * Active or not: a text that was replaced or retired is still stored, and Art. 15 asks what is
  * held. Each row carries its stored columns except the embedding (numbers, no content of their
  * own), which is not even read. Every text, and a relationship's free-text description and
- * notes, goes through `mask`, as the other blocks do; engine.db texts are decrypted first, and
+ * notes, and the reason one text replaced another, goes through `mask`, as the other blocks do;
+ * engine.db texts are decrypted first, and
  * one that cannot be, or is not stored as text at all, is written as
  * {@link UNREADABLE_MEMORY_TEXT}, never as what is stored.
  *
@@ -254,7 +290,7 @@ export function readMemoryTextsForExport(opts: {
     return { ...row, text: UNREADABLE_MEMORY_TEXT };
   };
 
-  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [] };
+  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [] };
   let legacy: Database.Database | null = null;
   try {
     if (existsSync(opts.agentMemoryFile)) {
@@ -265,6 +301,10 @@ export function readMemoryTextsForExport(opts: {
         legacyHalf.memories = read(legacy, 'memories', '', 't.created_at, t.id', 'agent-memory.db memories')
           .map(row => typeof row['text'] === 'string' ? maskField(row, 'text') : unreadable(row));
         legacyHalf.mentions = read(legacy, 'mentions', '', 't.created_at, t.memory_id, t.entity_id', 'agent-memory.db mentions');
+        legacyHalf.supersedes = read(legacy, 'supersedes', '', 't.created_at, t.new_memory_id, t.old_memory_id', 'agent-memory.db supersedes')
+          .map(row => maskField(row, 'reason'));
+        legacyHalf.cooccurrences = read(legacy, 'cooccurrences', '', 't.last_seen_at, t.entity_a_id, t.entity_b_id', 'agent-memory.db cooccurrences');
+        legacyHalf.metrics = read(legacy, 'metrics', '', 't.computed_at, t.id', 'agent-memory.db metrics');
       }
     }
   } catch {
@@ -274,7 +314,10 @@ export function readMemoryTextsForExport(opts: {
     try { legacy?.close(); } catch { /* ignore */ }
   }
 
-  const engineHalf: HeldMemoryTexts['engine.db'] = { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE };
+  const engineHalf: HeldMemoryTexts['engine.db'] = {
+    memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE,
+    supersedes: [], subject_cooccurrences: [], subject_mints: [],
+  };
   if (opts.engineDb) {
     const engineDb = opts.engineDb;
     const db = engineDb.getDb();
@@ -289,6 +332,10 @@ export function readMemoryTextsForExport(opts: {
     engineHalf.memory_subjects = read(db, 'memory_subjects', '', 't.created_at, t.memory_id, t.subject_id', 'engine.db memory_subjects');
     engineHalf.relationships = read(db, 'relationships', `, CASE WHEN ${sourceDeletedSql('t')} THEN 1 ELSE 0 END AS source_deleted`, 't.created_at, t.id', 'engine.db relationships')
       .map(row => maskField(maskField(row, 'description'), 'notes'));
+    engineHalf.supersedes = read(db, 'supersedes', '', 't.created_at, t.new_memory_id, t.old_memory_id', 'engine.db supersedes')
+      .map(row => maskField(row, 'reason'));
+    engineHalf.subject_cooccurrences = read(db, 'subject_cooccurrences', '', 't.last_seen_at, t.subject_a_id, t.subject_b_id', 'engine.db subject_cooccurrences');
+    engineHalf.subject_mints = read(db, 'subject_mints', '', 't.minted_at, t.subject_id', 'engine.db subject_mints');
   } else {
     // No engine.db: what it holds was not read, and cannot be shown to be nothing.
     incomplete = true;
@@ -302,8 +349,7 @@ export function readMemoryTextsForExport(opts: {
  *  - engine.db subjects the graph block does not list: with the subject graph on, archived ones
  *    and those of a kind it maps to no entity; with it off, every subject, since the block is
  *    then read from agent-memory.db;
- *  - engine.db `supersedes`, `subject_cooccurrences` and `subject_mints`, and agent-memory.db
- *    `supersedes` and `cooccurrences`, which no block carries on either setting;
+ *  - any row in an agent-memory.db table this build does not export (one an older schema kept);
  *  - with the subject graph on, agent-memory.db entities and relations, since the block is then
  *    read from engine.db; with it off, relations neither of whose entities is stored, since the
  *    block collects relations through their entities.
@@ -322,10 +368,6 @@ export function graphHoldsRowsNotExported(opts: {
     const all = subjects.count({ includeArchived: true });
     const listed = opts.subjectGraph ? subjects.count({ kinds: ENTITY_MAPPABLE_SUBJECT_KINDS }) : 0;
     if (all > listed) return true;
-    const engineRows = opts.engineDb.getDb().prepare(
-      'SELECT (SELECT COUNT(*) FROM supersedes) + (SELECT COUNT(*) FROM subject_cooccurrences) + (SELECT COUNT(*) FROM subject_mints) AS n',
-    ).get() as { n: number };
-    if (engineRows.n > 0) return true;
   } catch {
     return true;
   }
@@ -334,12 +376,23 @@ export function graphHoldsRowsNotExported(opts: {
   try {
     legacy = new Database(opts.agentMemoryFile, { readonly: true, fileMustExist: true });
     if (agentMemoryVersionOn(legacy) > AGENT_MEMORY_SCHEMA_VERSION) return true;
+    // A file this build can read may still hold a table it no longer knows (an older schema keeps
+    // what a later one dropped, as v1's `episodes`): any row in one is in no block.
+    // The tables the archive's list names for this store: what it carries and what it names as
+    // holding no content. The two exports read the same list, so they cannot drift apart.
+    const listed = EXPORT_TABLES['agent-memory.db'];
+    const known = [...Object.keys(listed.include), ...Object.keys(listed.name)];
+    const other = legacy.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN (${known.map(() => '?').join(', ')})`,
+    ).all(...known) as Array<{ name: string }>;
+    for (const t of other) {
+      const row = legacy.prepare(`SELECT EXISTS (SELECT 1 FROM "${t.name.replaceAll('"', '""')}") AS e`).get() as { e: number };
+      if (row.e === 1) return true;
+    }
     const graphRows = opts.subjectGraph
       ? '(SELECT COUNT(*) FROM entities) + (SELECT COUNT(*) FROM relations)'
       : '(SELECT COUNT(*) FROM relations r WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE e.id IN (r.from_entity_id, r.to_entity_id)))';
-    const rows = legacy.prepare(
-      `SELECT (SELECT COUNT(*) FROM supersedes) + (SELECT COUNT(*) FROM cooccurrences) + ${graphRows} AS n`,
-    ).get() as { n: number };
+    const rows = legacy.prepare(`SELECT ${graphRows} AS n`).get() as { n: number };
     return rows.n > 0;
   } catch {
     return true;

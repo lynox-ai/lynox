@@ -201,6 +201,28 @@ class PushSubscriptionStore {
  */
 let untaggedSends = 0;
 
+/**
+ * The subscriptions a message for `msg.audience` goes to, out of the live ones (`liveSubscriptions`
+ * has already left out every device of an ended grant, and of one whose state cannot be read).
+ * Every audience is named here: one this does not know does not compile, and reaches nobody.
+ */
+function forAudience(msg: NotificationMessage, reachable: PushSubscriptionRow[]): PushSubscriptionRow[] {
+  const audience = msg.audience;
+  switch (audience) {
+    case undefined: return reachable;
+    case 'owner': return reachable.filter((row) => !isMandateTag(row.created_by));
+    // One grant's devices; without a named grant, none (a live mandate's row always names its grant).
+    case 'mandates': return reachable.filter((row) => isMandateTag(row.created_by) && row.mandate_id === msg.mandateId);
+    // Every live grant's devices, never the owner's.
+    case 'all_mandates': return reachable.filter((row) => isMandateTag(row.created_by));
+    default: {
+      const unknown: never = audience;
+      void unknown;
+      return [];
+    }
+  }
+}
+
 export class WebPushNotificationChannel implements NotificationChannel {
   readonly name = 'web-push';
   private readonly store: PushSubscriptionStore;
@@ -326,7 +348,10 @@ export class WebPushNotificationChannel implements NotificationChannel {
    * subscription to try, counting one the push service answered as gone (404/410) — then
    * setting up a device would help, after `failed` it would not. A mandate's device that failed
    * does not make an owner's message `failed`. A message for the mandates' side
-   * (`audience: 'mandates'`) is meant for them, so reaching one of them is its delivery.
+   * (`audience: 'mandates'`) is meant for them, so reaching one of them is its delivery. A message
+   * for every grant (`audience: 'all_mandates'`) is the mandates' sentence of a notice the owner is
+   * told apart: with no mandate's device to try it is `skipped`, not `no_recipient`, because setting
+   * up a device of the owner's would not help it.
    */
   async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const result = await this.sendDetailed(msg);
@@ -334,6 +359,9 @@ export class WebPushNotificationChannel implements NotificationChannel {
       if (result.sent > 0) return 'delivered';
       return result.failed > 0 ? 'failed' : 'no_recipient';
     }
+    // Every grant's sentence of a notice the owner is told apart: an instance where no mandate has
+    // a device has nobody it is for, which is no failure (`skipped`).
+    if (msg.audience === 'all_mandates') return result.sent > 0 ? 'delivered' : result.failed > 0 ? 'failed' : 'skipped';
     if (result.sentToOwner > 0) return 'delivered';
     if (result.sent > 0) return 'reached_others';
     return result.failedOwner > 0 ? 'failed' : 'no_recipient';
@@ -347,13 +375,7 @@ export class WebPushNotificationChannel implements NotificationChannel {
     // A message for one side goes to that side's subscriptions only, within what `onlyFor` allows:
     // the owner's sentence never reaches a mandate's device, and a mandate's device cannot make
     // the owner's message count as sent while the owner heard nothing.
-    const reachable = this.liveSubscriptions(onlyFor);
-    const subscriptions = msg.audience === 'owner'
-      ? reachable.filter((row) => !isMandateTag(row.created_by))
-      : msg.audience === 'mandates'
-        // One grant's devices; without a named grant, none (a live mandate's row always names its grant).
-        ? reachable.filter((row) => isMandateTag(row.created_by) && row.mandate_id === msg.mandateId)
-        : reachable;
+    const subscriptions = forAudience(msg, this.liveSubscriptions(onlyFor));
     if (subscriptions.length === 0) return { sent: 0, sentToOwner: 0, failed: 0, failedOwner: 0, cleaned: 0 };
 
     const tag = msg.taskId ?? `lynox-${Date.now()}-${String(++untaggedSends)}`;
