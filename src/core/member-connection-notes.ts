@@ -116,8 +116,8 @@ export function refuseMemberConnection(
 /**
  * The refusal's own words ({@link memberRefusalText}) for a refusal that is said in a sentence of
  * its own, not as a request's (a save that was not made), noted for the run as the request's is,
- * or null when nothing is refused. The note is the same line, so the run's end tells the two apart
- * by reader in the same way.
+ * or null when nothing is refused. The note is the same prefixed line a request's refusal records,
+ * with the same owner's wording.
  */
 export function noteMemberRefusal(
   profile: ApiProfile,

@@ -161,7 +161,7 @@ describe('the owner saving over a member\'s connection (P3)', () => {
     expect(reply).toBe(`Error: API profile "crm-api" was not saved. ${LEAD}, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this connection under Settings → API connections and connect it yourself (that disconnects setup@example.org).`);
     expect([...notes]).toEqual([expect.stringMatching(/^Connection not used: setup@example\.org set up this connection/)]);
     const line = [...notes][0]!;
-    expect(said.get(line), 'the owner reads a note of their own, in German').toMatch(/^Verbindung nicht verwendet|setup@example\.org/);
+    expect(said.get(line), 'the owner reads a note of their own, in German').toBe('setup@example.org hat diese Verbindung (api.crm.example, "CRM" (id crm-api)) mit eigenem Login eingerichtet, deshalb nutzt lynox sie nicht für dich. Übernimm sie im Chat, sobald der Zugang von setup@example.org beendet ist, oder lösche diese Verbindung unter Einstellungen → API-Verbindungen und verbinde den Dienst selbst (das trennt setup@example.org).');
     expect(said.get(line), 'not the model\'s line').not.toBe(line);
     expect(store.get('crm-api')?.description).toBe('CRM API');
   });
