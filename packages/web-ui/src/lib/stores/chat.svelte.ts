@@ -4502,6 +4502,38 @@ function drainAfterReattach(gen: number): void {
 	void fetchChangeset().then((answered) => { if (answered && gen === _resumeGeneration) drainQueueSoon(100); });
 }
 
+/** How long to wait between asks whether a run a re-attach lost hold of still runs. */
+const RUN_END_POLL_MS = 2000;
+
+/**
+ * A re-attach let go of its run before the run ended: the stream dropped, could not be reached,
+ * or its reading was refused. The run may still go on on the server, so a turn queued in this
+ * opening waits for its end: sent earlier, the server would answer busy. The registry is asked
+ * until the run is no longer in it, then the turns go as after a re-attach that found its run
+ * ended (the review is asked for first). An unanswered ask is asked again. It stops when the
+ * thread is left or opened again, a run of this chat starts (that run drains the queue), or
+ * nothing waits any more.
+ */
+function drainWhenRunEnds(runId: string, gen: number): void {
+	const epoch = streamEpoch;
+	const current = (): boolean => gen === _resumeGeneration && streamEpoch === epoch && !isStreaming && messageQueue.length > 0;
+	const ask = async (): Promise<void> => {
+		if (!current()) return;
+		let ended = false;
+		try {
+			const res = await fetch(`${getApiBase()}/runs/active`);
+			if (res.ok) {
+				const runs = ((await res.json()) as { runs?: unknown } | null)?.runs;
+				ended = Array.isArray(runs) && !runs.some((r) => typeof r === 'object' && r !== null && (r as { runId?: unknown }).runId === runId);
+			}
+		} catch { /* not answered: asked again */ }
+		if (!current()) return;
+		if (ended) { drainAfterReattach(gen); return; }
+		setTimeout(() => { void ask(); }, RUN_END_POLL_MS);
+	};
+	void ask();
+}
+
 async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<void> {
 	// userIdx for handleSSEEvent's error path = the last user message.
 	let userIdx = -1;
@@ -4520,11 +4552,14 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	try {
 		res = await fetch(`${getApiBase()}/runs/${runId}/stream?since=${since}`);
 	} catch {
-		return; // network drop — nav poll still reflects the run; user can reload
+		// Network drop — nav poll still reflects the run; user can reload. A turn queued here
+		// waits for the run's end.
+		drainWhenRunEnds(runId, gen);
+		return;
 	}
 	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
 	const refused = res.ok ? null : await containedReadKey(res);
-	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; return; }
+	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; drainWhenRunEnds(runId, gen); return; }
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
@@ -4629,6 +4664,9 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			// run left to review holds it (`drainQueueSoon`). A thread opened meanwhile has its
 			// own queue and review: not this re-attach's to drain.
 			if (gen === _resumeGeneration) drainQueueSoon(100);
+		} else if (!completedNormally && streamEpoch === myEpoch && gen === _resumeGeneration) {
+			// The stream ended without its `done`: the run may still be going.
+			drainWhenRunEnds(runId, gen);
 		}
 		persistChat();
 	}

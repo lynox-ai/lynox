@@ -39,8 +39,11 @@ let holdReopen: Map<string, Promise<void>>;
 let holdReview: Promise<void> | null;
 /** A run the server still runs in a thread, for a thread opened again to re-attach to. */
 let liveRunIn: string | null;
-/** How the stream of the run re-attached to answers: as usual, or not found (the run had ended). */
-let liveStream: 'done' | 'gone';
+/** How the stream of the run re-attached to answers: as usual, not found (the run had ended),
+ *  dropped before its end, not reachable, or its reading refused. */
+let liveStream: 'done' | 'gone' | 'aborted' | 'unreachable' | 'refused';
+/** While true, the registry lists the live run as running. */
+let liveRunActive: boolean;
 /** The transcript the server gives with the live run; long enough, the chat takes it and re-attaches. */
 let liveTranscript: Array<{ role: string; content: string }>;
 /** How often the live run's stream was asked for. */
@@ -65,7 +68,7 @@ function serve(): void {
 			// A thread opened again keeps its id; new chats get t1, then t2.
 			return json({ sessionId: body.threadId ?? (newSessions++ === 0 ? 't1' : 't2') });
 		}
-		if (url.endsWith('/runs/active')) return json({ runs: [] });
+		if (url.endsWith('/runs/active')) return json({ runs: liveRunActive ? [{ runId: 'r-live', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] : [] });
 		if (url.endsWith('/run') && refuseNextRunForReview) {
 			const held = refuseNextRunForReview;
 			refuseNextRunForReview = null;
@@ -91,6 +94,11 @@ function serve(): void {
 		if (url.includes('/runs/r-live/stream')) {
 			liveStreamGets++;
 			if (liveStream === 'gone') return json({ error: 'not found' }, 404);
+			if (liveStream === 'unreachable') throw new TypeError('network');
+			if (liveStream === 'refused') return json({ error: 'refused', code: 'contained_thread' }, 403);
+			if (liveStream === 'aborted') {
+				return new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('dropped')); } }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+			}
 			const enc = new TextEncoder();
 			return new Response(new ReadableStream<Uint8Array>({
 				start(c) { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); },
@@ -149,6 +157,7 @@ beforeEach(async () => {
 	holdReview = null;
 	liveRunIn = null;
 	liveStream = 'done';
+	liveRunActive = false;
 	liveTranscript = [{ role: 'user', content: 'earlier' }];
 	liveStreamGets = 0;
 	newSessions = 0;
@@ -621,6 +630,49 @@ describe('a turn queued before a reload waits for the review the server holds', 
 			changed = notes;
 			const release = await reopenWhileRunning('gone');
 			release();
+			await settle();
+			await wait(200);
+			await settle();
+			expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
+			expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
+		});
+	});
+
+	describe('a turn queued behind a run, when its thread is opened again and the re-attach lets go before the run ends', () => {
+		const reopenAndLose = async (stream: 'aborted' | 'unreachable' | 'refused'): Promise<void> => {
+			const release = await queueBehindRun(); // t1's run streams on, a turn queued behind it
+			liveRunIn = 't1';
+			liveStream = stream;
+			liveRunActive = true; // the server still runs it
+			liveTranscript = Array.from({ length: 6 }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `turn ${i}` }));
+			await store.resumeThread('t1');
+			await settle();
+			expect(liveStreamGets, 'positive control: the opening tried to re-attach').toBe(1);
+			release(); // the stream of the run from before the opening ends here; it drains nothing
+			await settle();
+			await wait(2300); // past one ask of the registry
+			await settle();
+		};
+
+		for (const stream of ['aborted', 'unreachable', 'refused'] as const) {
+			it(`${stream}: the queued turn waits while the run runs, and goes once it ended and no review holds it`, async () => {
+				await reopenAndLose(stream);
+				expect(runTasks, 'nothing sent while the server still runs the run').toEqual(['edit the notes']);
+				expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+				liveRunActive = false; // the run ends on the server
+				await wait(2300);
+				await settle();
+				await wait(200);
+				await settle();
+				expect(runTasks, 'the turn goes once, after the run\'s end').toEqual(['edit the notes', 'then this']);
+			});
+		}
+
+		it('the queued turn is not sent after the run\'s end while a review is open', async () => {
+			await reopenAndLose('aborted');
+			changed = notes;
+			liveRunActive = false;
+			await wait(2300);
 			await settle();
 			await wait(200);
 			await settle();
