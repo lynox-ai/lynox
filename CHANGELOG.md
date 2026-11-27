@@ -57,9 +57,11 @@
   without changing anything. Switching it off never deleted them, and until now
   the block came out empty and marked complete. The block's new `enabled` field
   says whether durable memory is switched on. The same read runs when durable
-  memory is on but its store did not open, and the block is marked incomplete
-  while entries the owner rejected or that were superseded are stored, since
-  the export does not carry those yet.
+  memory is on but its store did not open. Entries the owner rejected or that
+  were superseded by a newer one are still stored, and the block now carries
+  them in `rejected_or_superseded_entries`, each with its `status` and, if
+  superseded, `supersededBy`, masked like the other entries; they no longer mark
+  the block incomplete.
 - `GET /api/export` has three new fields. `knowledge_graph_may_be_incomplete`
   is `true` when the knowledge graph was not read in full: reading it failed,
   a read fell back to the older store, the subject graph is on without

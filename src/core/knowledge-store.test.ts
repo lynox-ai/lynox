@@ -40,20 +40,23 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     expect(done(ro)).toBe(before);
   });
 
-  it('counts the rejected and superseded entries it still holds, and no active or pending one', () => {
+  it('lists the rejected and superseded entries it still holds, masked, with status and successor, and no active or pending one', () => {
     const { ks, engine } = make();
     const a = ks.write({ text: 'Ships from Basel', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
-    expect(ks.countRejectedOrSuperseded(), 'an active entry is not counted').toBe(0);
+    expect(ks.listRejectedOrSupersededMasked(), 'an active entry is not listed').toEqual([]);
     const b = ks.write({ text: 'The invoice address is in Bern', subjectName: 'Muster AG', sourceChannel: 'agent', sourceUntrusted: false });
     const c = ks.write({ text: 'Orders above 500 need a second signature', subjectName: 'Lager', sourceChannel: 'agent', sourceUntrusted: false });
     expect([a, b, c].some((r) => r.deduped === true), 'fixture: three separate entries').toBe(false);
     const db = engine.getDb();
-    db.prepare("UPDATE knowledge_entries SET status = 'rejected' WHERE id = ?").run(b.id);
-    expect(ks.countRejectedOrSuperseded(), 'a rejected entry is counted').toBe(1);
-    db.prepare("UPDATE knowledge_entries SET status = 'superseded' WHERE id = ?").run(c.id);
-    expect(ks.countRejectedOrSuperseded(), 'a superseded entry is counted').toBe(2);
+    db.prepare("UPDATE knowledge_entries SET status = 'rejected', updated_at = '2026-01-01 00:00:01' WHERE id = ?").run(b.id);
+    db.prepare("UPDATE knowledge_entries SET status = 'superseded', superseded_by = ?, updated_at = '2026-01-01 00:00:02' WHERE id = ?").run(a.id, c.id);
     db.prepare("UPDATE knowledge_entries SET status = 'pending_review' WHERE id = ?").run(a.id);
-    expect(ks.countRejectedOrSuperseded(), 'a pending entry is not counted').toBe(2);
+    const listed = ks.listRejectedOrSupersededMasked();
+    expect(listed.map(e => [e.id, e.status, e.supersededBy, e.text]), 'newest change first; the pending one is not listed').toEqual([
+      [c.id, 'superseded', a.id, 'Orders above 500 need a second signature'],
+      [b.id, 'rejected', null, 'The invoice address is in Bern'],
+    ]);
+    expect(ks.listRejectedOrSupersededMasked(1).map(e => e.id), 'the limit holds').toEqual([c.id]);
   });
 
   // ── Tier derivation + routing (D-3/D-6, acceptance §7) ──

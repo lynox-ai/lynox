@@ -682,23 +682,37 @@ describe('export with durable memory on and its store gone, engine.db open (real
   }, 60_000);
 });
 
+// Built at runtime: a key-shaped literal is what the commit-time scan looks for, and this repo is public.
+const OLD_KEY = `sk-ant-api03-${randomBytes(24).toString('hex')}`;
+
 describe('export with durable memory on and a rejected or superseded entry stored (real engine)', () => {
   const h = harness((dir) => {
     const db = new EngineDb(join(dir, 'engine.db'));
     const store = new KnowledgeStore(db, new SubjectStore(db), null);
-    store.write({ text: 'Invoices go out monthly', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    const kept = store.write({ text: 'Invoices go out monthly', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
     const held = store.write({ text: 'The warehouse closes at noon on Saturdays', subjectName: 'Lager', sourceChannel: 'agent', sourceUntrusted: false });
-    if (held.deduped === true) throw new Error('fixture: the second entry was merged into the first');
-    const changed = db.getDb().prepare("UPDATE knowledge_entries SET status = 'rejected' WHERE id = ?").run(held.id).changes;
-    if (changed !== 1) throw new Error(`fixture: expected one entry to reject, got ${String(changed)}`);
+    const old = store.write({ text: `Invoices went out quarterly, key ${OLD_KEY}`, subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    if ([held, old].some(r => r.deduped === true)) throw new Error('fixture: an entry was merged into another');
+    const raw = db.getDb();
+    const changed = raw.prepare("UPDATE knowledge_entries SET status = 'rejected', updated_at = '2026-01-01 00:00:01' WHERE id = ?").run(held.id).changes
+      + raw.prepare("UPDATE knowledge_entries SET status = 'superseded', superseded_by = ?, updated_at = '2026-01-01 00:00:02' WHERE id = ?").run(kept.id, old.id).changes;
+    if (changed !== 2) throw new Error(`fixture: expected two entries to change, got ${String(changed)}`);
     db.close();
   }, true);
 
-  it('marks the block incomplete: the rejected entry is held but not in the copy', async () => {
+  it('carries the rejected and the superseded entry with status and successor, masked, and reads complete', async () => {
     expect(h.engine().getKnowledgeStore(), 'fixture: the store opened').not.toBeNull();
-    const body = await h.exportBody();
+    const res = await fetch(`${h.baseUrl()}/api/export`, { headers: { Authorization: `Bearer ${h.secret}` } });
+    const text = await res.text();
+    const body = JSON.parse(text) as ExportBody;
     expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['Invoices go out monthly']);
-    expect(body.durable_knowledge.may_be_incomplete, 'a stored entry is left out').toBe(true);
+    const kept = (body.durable_knowledge.entries[0] as unknown as { id: string }).id;
+    const retired = (body.durable_knowledge as unknown as { rejected_or_superseded_entries: Array<{ id: string; status: string; supersededBy: string | null; text: string }> }).rejected_or_superseded_entries;
+    expect(retired.map(e => [e.status, e.supersededBy]), 'newest change first, each with its status').toEqual([['superseded', kept], ['rejected', null]]);
+    expect(retired[1]?.text, 'the rejected entry').toBe('The warehouse closes at noon on Saturdays');
+    expect(retired[0]?.text, 'the superseded entry, masked').toMatch(/^Invoices went out quarterly, key (?!sk-ant-)/);
+    expect(text.includes(OLD_KEY), 'the key is not in the export').toBe(false);
+    expect(body.durable_knowledge.may_be_incomplete, 'every stored entry is in the copy').toBe(false);
   }, 60_000);
 });
 

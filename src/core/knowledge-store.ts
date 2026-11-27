@@ -1000,15 +1000,20 @@ export class KnowledgeStore {
   }
 
   /**
-   * How many entries are still stored though no list here returns them: rejected by the owner,
-   * or superseded by a newer one. A reader that has to carry everything held (the data export)
-   * uses it to say its copy is not complete.
+   * The entries still stored that no other list here returns: rejected by the owner, or
+   * superseded by a newer one (`supersededBy` names it). Each carries its `status`. MASKED, as
+   * the active list is: the reader is the data export, a file that gets stored and forwarded.
+   * Newest change first, capped at 500 like the other lists.
    */
-  countRejectedOrSuperseded(): number {
-    const row = this.db.prepare(
-      "SELECT COUNT(*) AS n FROM knowledge_entries WHERE status IN ('rejected', 'superseded')",
-    ).get() as { n: number };
-    return row.n;
+  listRejectedOrSupersededMasked(limit = 200): KnowledgeEntry[] {
+    const capped = Math.max(1, Math.min(limit, 500));
+    const rows = this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status IN ('rejected', 'superseded') ORDER BY updated_at DESC, rowid DESC LIMIT ?",
+    ).all(capped) as KnowledgeRow[];
+    return rows.map(r => {
+      const e = this._rowToEntry(r);
+      return { ...e, text: this._maskText(e.text) };
+    });
   }
 
   listActive(limit = 200): Array<KnowledgeEntry & { subjectName: string | null }> {

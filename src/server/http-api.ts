@@ -15201,7 +15201,7 @@ export class LynoxHTTPApi {
       //
       // Pending entries are included: a queued fact is stored personal data whether or not it
       // was ever approved, and Art. 15 asks what is held, not what is active.
-      const EMPTY_KNOWLEDGE = { entries: [], pending_entries: [], sources: [], blocks: {}, may_be_incomplete: false };
+      const EMPTY_KNOWLEDGE = { entries: [], pending_entries: [], rejected_or_superseded_entries: [], sources: [], blocks: {}, may_be_incomplete: false };
       // One store's block. It throws where a read does: `listActive` decrypts every row, so one
       // unreadable row would otherwise throw out of a handler with no wrapper and take the ENTIRE
       // export with it — threads, CRM, everything. Each caller catches, as its `knowledge_graph`
@@ -15212,6 +15212,9 @@ export class LynoxHTTPApi {
         // Masked, matching the active half. The raw-text queue is for a human deciding about
         // an entry; this is a file that gets stored and forwarded.
         const pending = store.listPendingMasked(ENTRY_CAP);
+        // Rejected and superseded entries are still stored, so they are part of what is held: each
+        // with its `status`, a superseded one with `supersededBy`, masked like the rest.
+        const retired = store.listRejectedOrSupersededMasked(ENTRY_CAP);
         // The wording each conversation used for an entry, masked like the rest: a source can
         // hold words the entry itself does not carry.
         const sources = store.listSourcesMasked(ENTRY_CAP);
@@ -15222,6 +15225,7 @@ export class LynoxHTTPApi {
         return {
           entries: active,
           pending_entries: pending,
+          rejected_or_superseded_entries: retired,
           sources,
           blocks,
           // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
@@ -15229,10 +15233,8 @@ export class LynoxHTTPApi {
           // than `truncated` because that is the honest strength of the claim — the store
           // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
           // exactly 500, and over-reporting is the right way to be wrong here.
-          // Rejected and superseded entries are still stored but not in these lists, so a copy
-          // that leaves them out is not complete.
-          may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP
-            || store.countRejectedOrSuperseded() > 0,
+          may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || retired.length >= ENTRY_CAP
+            || sources.length >= ENTRY_CAP,
         };
       };
       const knowledgeStore = engine.getKnowledgeStore();
