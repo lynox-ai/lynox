@@ -35,6 +35,16 @@ const RESERVED_ACCOUNT_PREFIXES: ReadonlyArray<string> = [];
 /** A migration: SQL run as one script, or a step that reads the schema before it changes it. */
 type Migration = string | ((db: Database.Database) => void);
 
+/** v23's table and index, kept in one place: v25 creates them too where v23 never ran (see v25).
+ *  The text is the one v23 has always written, so `sqlite_master` reads the same either way. */
+const OWNER_KNOWN_DDL = `CREATE TABLE IF NOT EXISTS mail_sent_owner_known (
+     sent_id TEXT NOT NULL,
+     tenant_id TEXT NOT NULL,
+     address TEXT NOT NULL,
+     PRIMARY KEY (sent_id, address)
+   );
+   CREATE INDEX IF NOT EXISTS idx_mail_sent_owner_known_address ON mail_sent_owner_known(tenant_id, address);`;
+
 const MIGRATIONS: Migration[] = [
   // v1: Initial schema — Message-ID dedup table
   `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
@@ -636,13 +646,7 @@ const MIGRATIONS: Migration[] = [
   // here only reads as not known.
   `BEGIN;
    INSERT OR IGNORE INTO schema_version (version) VALUES (23);
-   CREATE TABLE IF NOT EXISTS mail_sent_owner_known (
-     sent_id TEXT NOT NULL,
-     tenant_id TEXT NOT NULL,
-     address TEXT NOT NULL,
-     PRIMARY KEY (sent_id, address)
-   );
-   CREATE INDEX IF NOT EXISTS idx_mail_sent_owner_known_address ON mail_sent_owner_known(tenant_id, address);
+   ${OWNER_KNOWN_DDL}
    COMMIT;`,
 
   // v24: the rule that named an item but was not applied: its id, its name as it was then, and
@@ -665,7 +669,8 @@ const MIGRATIONS: Migration[] = [
   // classifier call; this column lets that spend be counted per rule. Not shown
   // to the user. One transaction, as v17. A build of this change once ran from a branch
   // image that added the column as v23, so the column is added only when it is missing:
-  // such a database then opens, and its values stay.
+  // such a database then opens, and its values stay. That database reads 23 and so never
+  // ran main's v23; its table and index are created here, from the same text.
   (db) => {
     db.transaction(() => {
       db.prepare('INSERT OR IGNORE INTO schema_version (version) VALUES (25)').run();
@@ -673,6 +678,7 @@ const MIGRATIONS: Migration[] = [
       if (!columns.some((c) => c.name === 'prefilter_rule')) {
         db.exec('ALTER TABLE inbox_items ADD COLUMN prefilter_rule TEXT');
       }
+      db.exec(OWNER_KNOWN_DDL);
     })();
   },
 ];

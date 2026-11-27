@@ -1257,9 +1257,9 @@ describe('MailStateDb — deferred mails kept across a restart (v20)', () => {
 describe('MailStateDb — prefilter rule on inbox items (v25)', () => {
 
   // A branch image of this change added the column as v23. A database it ran opens at v25 with
-  // its values kept, instead of failing on a duplicate column. (Main's own v23 is skipped there,
-  // as on any database that already reads 23; that repair is separate.)
-  it('a database that already has the column at v23 opens, and its values stay', () => {
+  // its values kept, instead of failing on a duplicate column, and gets the table of main's v23,
+  // which it never ran, exactly as a fresh database has it.
+  it('a database that already has the column at v23 opens, its values stay, and it gets the table v23 makes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'mail-prefilter-branch-v23-'));
     try {
       const path = join(dir, 'mail-state.db');
@@ -1277,6 +1277,16 @@ describe('MailStateDb — prefilter rule on inbox items (v25)', () => {
         expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(25);
         expect(conn.prepare("SELECT prefilter_rule, rule_withheld_reason FROM inbox_items WHERE id = 'inb-branch'").get())
           .toEqual({ prefilter_rule: 'bounce', rule_withheld_reason: null });
+        const schemaOf = (db: BetterSqlite3.Database) => db
+          .prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'mail_sent_owner_known' ORDER BY type, name").all();
+        const fresh = new MailStateDb({ path: join(dir, 'fresh.db') });
+        try {
+          const freshSchema = schemaOf((fresh as unknown as { db: BetterSqlite3.Database }).db);
+          expect(freshSchema.map((r) => (r as { type: string }).type), 'a table, its index and the primary key\'s').toEqual(['index', 'index', 'table']);
+          expect(schemaOf(conn)).toEqual(freshSchema);
+        } finally {
+          fresh.close();
+        }
       } finally {
         migrated.close();
       }
