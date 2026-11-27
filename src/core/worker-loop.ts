@@ -1722,6 +1722,7 @@ export class WorkerLoop {
         // The run's cost guard is told its budget is held only when the grant IS that budget
         // (`capUSD`); an estimate-sized hold under a larger constant ceiling covers less than it.
         void this.executeTask(task, capUSD, undefined, capUSD !== null ? reservation : undefined)
+          // run-group-starter: fires once, when this run settles; it only frees the run's budget reservation and reports no spend.
           .finally(() => releaseReservation(reservation));
       }
       // After the due triggers, and on its own: a drain that throws leaves the next tick's
