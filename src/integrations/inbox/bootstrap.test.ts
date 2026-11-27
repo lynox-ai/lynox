@@ -154,6 +154,16 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
   });
 
+  it('counts a list under the domain of any account connected here as our own group, also one connected after the start', async () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'office@team.example', isDefault: false });
+    const noreply = [{ address: 'noreply@shop.example' }];
+    expect(await runtime.hook(ACCOUNT.id, envelope({ from: noreply, messageId: '<l1@x>', listId: 'info.team.example' })), 'our own group').toBe('ignored');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-foreign', from: noreply, messageId: '<l2@x>', listId: 'news.foreign.example' })), 'CONTROL: a foreign list').toBe('list_handled');
+    await runtime.shutdown();
+  });
+
   it('the rule proposer files waiting rules in its tenant, at most ten per account, and the runtime does not apply them', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, tenantId: 't-9' });
