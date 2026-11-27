@@ -203,6 +203,7 @@ interface TriggerFullDbRow {
   last_run_result: string | null;
   last_run_status: string | null;
   last_run_cause: string | null;
+  last_run_member_notes: string | null;
   notification_channel: string | null;
   max_retries: number | null;
   retry_count: number;
@@ -264,7 +265,8 @@ const TRIGGER_READ_COLS =
    created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
    last_escalation_outcome, last_escalation_case, last_escalation_thread_id, last_escalation_chat_kind,
    paused_at, paused_due_at, paused_for,
-   covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at`;
+   covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at,
+   last_run_member_notes`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -281,6 +283,24 @@ const TRIGGER_READ_COLS =
  * Optional columns map `null → undefined` (the legacy cast types them
  * `string | undefined`; both mean "absent" and every consumer treats them so).
  */
+/**
+ * The stored lines of a last run; a malformed or empty value is none, never a throw. A run end
+ * stores its lines as an array, each read as it was recorded, so a line that holds `\n• ` itself
+ * stays one line. The entry the v80 migration split off a result (`{"migrated": …}`) holds every
+ * line after the first, joined as recorded: it alone is read as those lines, so a repeat compares
+ * line by line, and read back joined it is the same text.
+ */
+function memberNotesOf(raw: string | null): { last_run_member_notes?: string[] } {
+  if (raw === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const migrated = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as { migrated?: unknown }).migrated : undefined;
+    const lines = typeof migrated === 'string' ? migrated.split('\n• ')
+      : Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string') : [];
+    return lines.length > 0 ? { last_run_member_notes: lines } : {};
+  } catch { return {}; }
+}
+
 export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
   let scheduleCron: string | undefined;
   let watchConfig: string | undefined;
@@ -307,6 +327,7 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     last_run_result: row.last_run_result ?? undefined,
     last_run_status: row.last_run_status ?? undefined,
     last_run_cause: row.last_run_cause ?? undefined,
+    ...memberNotesOf(row.last_run_member_notes),
     waiting_until: row.waiting_until ?? undefined,
     source: row.source as TriggerSource,
     effect: row.effect as TriggerEffect,
@@ -990,11 +1011,14 @@ export class TriggerStore {
     lastRunStatus: string;
     /** The cause of a failed run (`RunCause`, as JSON), or null: written on every run end. */
     lastRunCause: string | null;
+    /** The run's member-connection lines; none clears the last run's. */
+    lastRunMemberNotes?: readonly string[] | undefined;
     nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   }): void {
-    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?', 'last_run_cause = ?'];
-    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus, update.lastRunCause];
+    const notes = update.lastRunMemberNotes ?? [];
+    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?', 'last_run_cause = ?', 'last_run_member_notes = ?'];
+    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus, update.lastRunCause, notes.length > 0 ? JSON.stringify(notes) : null];
     if (update.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(update.nextRunAt); }
     if (update.retryCount !== undefined) { sets.push('retry_count = ?'); values.push(update.retryCount); }
     sets.push("updated_at = datetime('now')");

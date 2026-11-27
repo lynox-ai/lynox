@@ -60,8 +60,27 @@ export function withMemberNotes<S extends string>(result: string, status: S, not
 }
 
 /** Whether the last run already halted on these same lines, so the owner was told once already. */
-export function memberNotesRepeat(last: { last_run_status?: string | null | undefined; last_run_result?: string | null | undefined }, notes: readonly string[]): boolean {
-  return notes.length > 0 && last.last_run_status === 'halted' && notes.every((l) => last.last_run_result?.includes(l) === true);
+export function memberNotesRepeat(last: { last_run_status?: string | null | undefined; last_run_member_notes?: readonly string[] | undefined }, notes: readonly string[]): boolean {
+  return notes.length > 0 && last.last_run_status === 'halted' && notes.every((l) => last.last_run_member_notes?.includes(l) === true);
+}
+
+/**
+ * A run's end as `reader` reads it. The lines are stored apart from the result
+ * (`last_run_member_notes`): the owner reads the result with its lines under it, as the run ended.
+ * Anyone else reads, for an end with lines, `forMandates` in place of the result: the lines name
+ * another member, their provider and profile, and the result is the model's reply, which the
+ * refusal it read tells to say the same (`memberRefusalText`). An end without lines is the result.
+ */
+export function lastRunResultFor(
+  row: { last_run_result?: string | null | undefined; last_run_member_notes?: readonly string[] | undefined },
+  owner: boolean,
+  forMandates: string,
+): string | undefined {
+  const notes = row.last_run_member_notes ?? [];
+  const result = row.last_run_result ?? undefined;
+  if (notes.length === 0) return result;
+  if (!owner) return forMandates;
+  return withMemberNotes(result ?? '', 'other', notes).result;
 }
 
 /** Whether a run in progress collects the lines itself, so a report that also picks them up
