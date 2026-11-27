@@ -95,7 +95,7 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, consentOfPayload, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
+import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, consentOfPayload, consentActionOfPayload, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { CONSENT_UNRECOGNISED } from '../contract/prompt.js';
 import { decideConsent } from '../core/consent-ask.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
@@ -5849,7 +5849,7 @@ export class LynoxHTTPApi {
         // Read in the run's own chat: live over this stream, or on reconnect through
         // /pending-prompt, which shows this session's question with the run above it. Neither
         // sends it anywhere else (no notification on this path), so a hard block may be asked here.
-        const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp, meta?.consent);
+        const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp, meta?.consent, meta?.consentAction);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
@@ -5870,6 +5870,8 @@ export class LynoxHTTPApi {
             // The engine's own confirmation: the client draws its consent card from this
             // marker alone (`src/contract/prompt.ts`), never from the option texts.
             consent: meta?.consent,
+            // What the consent's confirming button names (a Google write); words only.
+            consentAction: meta?.consentAction,
           });
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
@@ -6510,6 +6512,7 @@ export class LynoxHTTPApi {
         // this alone. A question stored before the marker existed has none and is an ordinary
         // question, whose answer no consent gate reads.
         consent: consentOfPayload(row.payload_json),
+        consentAction: consentActionOfPayload(row.payload_json),
         // Who asked (v52). A workflow's prompt can sit here for minutes, which
         // is exactly the window in which a page gets reloaded — restoring the
         // dialog without its provenance would put the user back in front of the

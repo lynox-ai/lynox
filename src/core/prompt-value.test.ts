@@ -150,10 +150,11 @@ describe('promptUser callers', () => {
   const AUTHORSHIP_EXEMPT: Record<string, { proof: RegExp } | { unmarked: string }> = {
     'tools/builtin/plan-task.ts': { proof: /joinPrompts\(/ },
     'integrations/mail/tools/mail-send.ts': { proof: /const preview = buildSendPreview\(/ },
-    // Not `buildSendPreview` — this one assembles its own `pv`. The first draft
+    // Not `buildSendPreview` — this one asks with its own question from the mail dialog table
+    // (`said = MAIL_DIALOG[…]`, then `said.reply(…)`, frame and values). The first draft
     // gave both mail files the same proof and this test caught it, which is the
     // point: a reason copied from a neighbour is not a reason.
-    'integrations/mail/tools/mail-reply.ts': { proof: /const preview = pv`/ },
+    'integrations/mail/tools/mail-reply.ts': { proof: /const said = MAIL_DIALOG\[[\s\S]*?const preview = said\.reply\(/ },
     'integrations/google/google-sheets.ts': { proof: /confirmMsg:\s*PromptText/ },
     'integrations/google/google-calendar.ts': { proof: /confirmMsg:\s*PromptText/ },
     'integrations/google/google-drive.ts': { proof: /confirmMsg:\s*PromptText/ },

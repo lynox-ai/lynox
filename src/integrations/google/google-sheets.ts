@@ -9,6 +9,9 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv, joinPrompts, singleLine } from '../../core/prompt-value.js';
 import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 import { formulaCells, formulasAsText, type FormulaCell } from './sheets-formula.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import type { ConsentAction } from '../../contract/prompt.js';
+import { GOOGLE_DIALOG } from '../../tools/dialog-text.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
@@ -463,17 +466,19 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
         }
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
-          // `pv` splits frame from value, so the renderer can put the id and
+          // The dialog table builds the question with `pv`, which splits frame from value, so the renderer can put the id and
           // the range in text nodes — see core/prompt-value.ts. They are no
           // longer collapsed on the way in, which means the prompt now shows
           // the value that is actually about to be used.
+          const said = GOOGLE_DIALOG[agent.dialogLanguage ?? 'en'];
+          const sheet = input.spreadsheet_id ?? said.unknown;
+          const range = input.range ?? said.unspecified;
           // An append inserts its rows (`insertDataOption=INSERT_ROWS`), so it overwrites nothing
           // and is not asked about as if it did.
-          const confirmMsg: PromptText = input.action === 'format'
-            ? pv`Apply batch changes to spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Formatting requests can delete or overwrite cells and sheets.`
-            : input.action === 'append'
-              ? pv`Add rows to range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Nothing is overwritten.`
-              : pv`Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
+          const action: ConsentAction = input.action === 'format' ? 'format' : input.action === 'append' ? 'append' : 'overwrite';
+          const confirmMsg: PromptText = action === 'format' ? said.format(sheet)
+            : action === 'append' ? said.append(range, sheet)
+            : said.overwrite(range, sheet);
           // After content from outside the chat, a cell that starts like a formula is shown with
           // the question: Google runs it on its side, where no check on the engine's requests
           // sees the address it may fetch. Before that, the question is the plain one above.
@@ -484,10 +489,9 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           const requests = tainted && input.action === 'format' ? formatRequestsNote(input.format_requests ?? []) : null;
           if (requests !== null && 'refusal' in requests) return requests.refusal;
           if (formulas.length === 0) {
-            const answer = await agent.promptUser(requests === null ? confirmMsg : joinPrompts([confirmMsg, requests.note], '\n\n'), ['Yes', 'No']);
-            if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-              return 'Action cancelled by user.';
-            }
+            // Only the `confirm` key goes ahead; its button names `action`, which decides nothing.
+            const consent = decideConsent('google', await agent.promptUser(requests === null ? confirmMsg : joinPrompts([confirmMsg, requests.note], '\n\n'), consentOptions('google'), consentMeta('google', undefined, action)));
+            if (consent !== 'confirm') return consentRefusal(consent, 'Action cancelled by user.');
           } else {
             const options = formulas.length > FORMULAS_SHOWN ? FORMULA_OPTIONS_SOME_HIDDEN : FORMULA_OPTIONS;
             const chosen = chosenOption(await agent.promptUser(joinPrompts([confirmMsg, formulaNote(formulas)], '\n\n'), options), options);

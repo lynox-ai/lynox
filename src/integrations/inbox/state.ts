@@ -32,6 +32,7 @@ import type {
 } from '../../types/index.js';
 import { INBOX_RULE_WITHHELD_REASONS } from '../../types/index.js';
 import { sanitizeHeader, stripHtmlAndInvisibles } from './classifier/sanitize.js';
+import type { PrefilterRule } from '../mail/triage/rules.js';
 import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 
 /** Sentinel used in single-user instances. Team-inbox lands in Phase 5+. */
@@ -66,6 +67,11 @@ export interface InboxItemInput {
   inReplyTo?: string | undefined;
   /** The rule that filed the item (v20). */
   matchedRuleId?: string | undefined;
+  /**
+   * The prefilter rule the mail met, if any (v25). Written, never shown: it
+   * lets the classifier's spend be counted per rule.
+   */
+  prefilterRule?: PrefilterRule | undefined;
   /** The rule that named the item but was not applied (v24). Never set with `matchedRuleId`. */
   ruleWithheld?: { id: string; name: string | undefined; reason: InboxRuleWithheldReason } | undefined;
 }
@@ -474,9 +480,9 @@ export class InboxStateDb {
            bucket, confidence, reason_de, classified_at, classifier_version,
            unsnooze_on_reply,
            from_address, from_name, subject, mail_date, snippet,
-           message_id, in_reply_to, matched_rule_id,
+           message_id, in_reply_to, matched_rule_id, prefilter_rule,
            rule_withheld_id, rule_withheld_name, rule_withheld_reason
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (tenant_id, account_id, thread_key) DO NOTHING`,
       )
       .run(
@@ -499,6 +505,7 @@ export class InboxStateDb {
         input.messageId ?? null,
         input.inReplyTo ?? null,
         input.matchedRuleId ?? null,
+        input.prefilterRule ?? null,
         input.ruleWithheld?.id ?? null,
         input.ruleWithheld?.name ?? null,
         input.ruleWithheld?.reason ?? null,
