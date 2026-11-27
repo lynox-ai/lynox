@@ -280,7 +280,7 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — adversarial mailbox fixtures', 
     registry.add(frankProvider);
     registry.setDefault(frankProvider.accountId);
     const replyTool = createMailReplyTool(registry);
-    const yesAgent: IAgent = { promptUser: async () => 'Yes', principal: OWNER_PRINCIPAL } as unknown as IAgent;
+    const yesAgent: IAgent = { promptUser: async () => 'send', principal: OWNER_PRINCIPAL } as unknown as IAgent;
     const out = await replyTool.handler({ uid: target.uid, body: 'should not send' }, yesAgent);
     expect(out).toContain('mail_reply blocked');
     expect(out).toContain('Auto-Submitted');
