@@ -179,6 +179,35 @@ describe('ChatView in a chat that only reads', () => {
 		expect(target.querySelector('[data-contained-removed-hidden]')).toBeNull();
 	});
 
+	it('says under the bar\'s button that only what the user wrote comes along', async () => {
+		contained = true;
+		await turnThenRender('Verbessere die Beschreibungen', []);
+		const note = target.querySelector('[data-contained-bar] [data-plan-new-chat-note]');
+		expect(note?.textContent).toMatch(/Mit geht nur, was du geschrieben hast|Only what you wrote comes along/);
+		// Once, in the bar; not again under the button in the history.
+		expect(target.querySelectorAll('[data-plan-new-chat-note]')).toHaveLength(1);
+	});
+
+	it('shows no such line in a chat that does not only read', async () => {
+		await turnThenRender('Hallo', []);
+		expect(target.querySelector('[data-plan-new-chat-note]')).toBeNull();
+	});
+
+	it('says in the new chat that the input holds the user\'s messages, while it holds any', async () => {
+		contained = true;
+		await turnThenRender('Verbessere die Beschreibungen', refused('contained_write'));
+		(target.querySelector('[data-contained-bar] [data-plan-new-chat]') as HTMLButtonElement).click();
+		svelte.flushSync();
+		await settle();
+		const note = (): Element | null => target.querySelector('[data-contained-origin] [data-contained-input-note]');
+		expect(note()?.textContent).toMatch(/Im Eingabefeld stehen deine Nachrichten|The input holds your messages/);
+		const input = target.querySelector('textarea') as HTMLTextAreaElement;
+		input.value = '   ';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		svelte.flushSync();
+		expect(note(), 'an emptied input holds none of them').toBeNull();
+	});
+
 	it('promises the bulk run in that line only where this instance runs one that reads the store', async () => {
 		const openWith = async (cfg: Record<string, unknown>): Promise<string> => {
 			contained = true;
@@ -287,6 +316,7 @@ describe('ChatView in a chat that only reads', () => {
 		svelte.flushSync();
 		await settle();
 		expect(input().value).toBe('');
+		expect(target.querySelector('[data-contained-input-note]'), 'nothing was carried over, so no line says so').toBeNull();
 		expect(input().placeholder).not.toBe(before);
 		expect(input().placeholder).toMatch(/Verbessere die Produktbeschreibungen|Improve the product descriptions/);
 	});
