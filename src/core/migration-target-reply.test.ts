@@ -134,7 +134,7 @@ describe('the target\'s words are shown without what would not display as itself
     ['bidi embeddings, overrides, isolates and marks', '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\u200E\u200F\u061C'],
     ['zero-width characters and the byte order mark', '\u200B\u200C\u200D\u2060\uFEFF'],
     ['invisible operators and deprecated format characters', '\u2061\u2062\u2063\u2064\u206A\u206F'],
-    ['soft hyphen, Mongolian vowel separator, interlinear annotation', '\u00AD\u180E￹￺￻'],
+    ['soft hyphen, Mongolian vowel separator, interlinear annotation', '\u00AD\u180E\uFFF9\uFFFA\uFFFB'],
     ['tag characters', '\u{e0001}\u{e0041}\u{e007f}'],
     ['lone surrogates', '\udc00\ud800'],
     ['variation selectors and fillers', '\uFE0F\u{e0100}\u034F\u115F\u3164\uFFA0'],
