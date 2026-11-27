@@ -239,6 +239,22 @@ describe('files a rollback left', () => {
 		expect(t(key), 'positive control: the key has a text').not.toBe(key);
 		expect(toasts).toContainEqual([tf(key, { files: 'notes.md' }), 'error', null]);
 	});
+
+	it('the answer to a rollback that finished before a later step threw names the files left and is not reported as a failed review', async () => {
+		runAnswers = ['held'];
+		card = notes;
+		await store.sendMessage('next step');
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
+		const { t, tf } = await import('../i18n.svelte.js');
+		expect(t('changeset.review_failed'), 'positive control: the failure key has a text').not.toBe('changeset.review_failed');
+		// The answer the server gives when a step throws after the rollback finished: no counts.
+		reviewAnswer = { status: 200, body: { ok: true, accepted: null, rolledBack: null, notRestored: ['notes.md'] } };
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(toasts.map((toast) => toast[0]), 'no failed-review toast').not.toContain(t('changeset.review_failed'));
+		expect(toasts).toEqual([[tf('changeset.not_restored_unknown', { files: 'notes.md' }), 'error', null]]);
+	});
 });
 
 describe('a rollback the server could not do', () => {
