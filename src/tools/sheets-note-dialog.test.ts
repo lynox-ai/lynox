@@ -6,7 +6,9 @@ import { flattenPrompt, isPromptText } from '../core/prompt-value.js';
 function said(d: SheetsNoteDialog): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, entry] of Object.entries(d) as [string, unknown][]) {
-    const value = typeof entry === 'function' ? (entry as (...a: unknown[]) => unknown)(2, 3, true) : entry;
+    // Each entry with arguments of its own type: a count, a cell's place, or the option's label.
+    const args: unknown[] = key === 'formulaOnlyShown' ? ['Write as formulas'] : key === 'formatUntyped' ? ['"odd"'] : [2, 3, true];
+    const value = typeof entry === 'function' ? (entry as (...a: unknown[]) => unknown)(...args) : entry;
     out[key] = isPromptText(value) ? flattenPrompt(value) : String(value);
   }
   return out;

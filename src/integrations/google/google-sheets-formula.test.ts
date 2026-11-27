@@ -543,6 +543,23 @@ describe('google_sheets after content from outside the chat, asked in German', (
     expect(sentValues()).toEqual([['Name', `'${FETCHING}`]]);
   });
 
+  it('writes the formulas as they are on "Write as formulas", as in English', async () => {
+    mockFetch.mockResolvedValueOnce(WRITTEN);
+    await createSheetsTool(auth).handler({ action: 'write', spreadsheet_id: 'sid', range: 'Sheet1!B2:C3', values: [['Name', FETCHING]] }, agentDe('Write as formulas'));
+    expect(sentValues()).toEqual([['Name', FETCHING]]);
+  });
+
+  it('refuses a format batch too large to show in English, the same words as for an English question', async () => {
+    const range = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
+    const cells = { updateCells: { range, rows: [{ values: [{ userEnteredValue: { formulaValue: FETCHING } }] }], fields: 'userEnteredValue' } };
+    const batch = { action: 'format' as const, spreadsheet_id: 'sid', format_requests: Array.from({ length: FORMAT_REQUESTS_SHOWN + 1 }, () => cells) };
+    const de = await createSheetsTool(auth).handler(batch, agentDe('confirm'));
+    const en = await createSheetsTool(auth).handler(batch, agent('sawUntrustedData', 'confirm'));
+    expect(de).toBe(en);
+    expect(de).toMatch(/^Error: this chat has read content from outside lynox, so a "format" call must show the owner/);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('asks about a format batch in German, the requests as they are', async () => {
     const a = agentDe('cancel');
     const range = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
