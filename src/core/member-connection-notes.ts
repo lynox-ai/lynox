@@ -109,11 +109,27 @@ export function refuseMemberConnection(
   ends: Pick<MandateEnds, 'isLive'> | null,
   mode: 'read' | 'write' = 'read',
 ): string | null {
+  const text = noteMemberRefusal(profile, reader, ends, mode);
+  return text === null ? null : `${MEMBER_CONNECTION_PREFIX} ${text}`;
+}
+
+/**
+ * The refusal's own words ({@link memberRefusalText}) for a refusal that is said in a sentence of
+ * its own, not as a request's (a save that was not made), noted for the run as the request's is,
+ * or null when nothing is refused. The note is the same prefixed line a request's refusal records,
+ * with the same owner's wording.
+ */
+export function noteMemberRefusal(
+  profile: ApiProfile,
+  reader: RequestPrincipal,
+  ends: Pick<MandateEnds, 'isLive'> | null,
+  mode: 'read' | 'write' = 'read',
+): string | null {
   const refusal = memberRefusalCase(profile, reader, ends, mode);
   if (refusal === null) return null;
-  const line = `${MEMBER_CONNECTION_PREFIX} ${memberRefusalText(refusal)}`;
-  noteMemberConnection(line, (plan) => memberRefusalOwnerNote(refusal, plan));
-  return line;
+  const text = memberRefusalText(refusal);
+  noteMemberConnection(`${MEMBER_CONNECTION_PREFIX} ${text}`, (plan) => memberRefusalOwnerNote(refusal, plan));
+  return text;
 }
 
 /**
