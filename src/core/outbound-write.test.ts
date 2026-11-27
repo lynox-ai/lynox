@@ -1035,7 +1035,7 @@ describe('a part too costly to read every way', () => {
   it('shows a German product form of 30 KB as before', () => {
     const shown = bodyForQuestion(germanForm, plain, 'application/x-www-form-urlencoded');
     expect('text' in shown && shown.text.includes('Küche')).toBe(true);
-    expect(queryForQuestion(`?${germanForm}`, plain).unreadable).toBe(false);
+    expect(queryForQuestion(`?${germanForm}`, plain).unreadable).toBeUndefined();
     expect(bodyFieldNames(germanForm, plain)).toMatch(/^fields "f0"/);
   });
 
@@ -1200,10 +1200,34 @@ describe('a secret inside JSON text inside a value', () => {
   });
 
   it('JSON text whose strings, read, add up past the budget is not shown, with no secret in it', () => {
-    // Each string of about 1 KB costs about 2 KB of the 2 M budget: parsed once, read once.
+    // A value this large is past the reading budget of its part (600 K) before its JSON text is
+    // read: about 400 KB is shown, about 800 KB is not shown and counts as unreadable.
     const many = (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => `${'x'.repeat(1000)}${i}`));
-    expect('text' in bodyForQuestion(JSON.stringify({ value: many(800) }), mask)).toBe(true);
-    expect(bodyForQuestion(JSON.stringify({ value: many(1200) }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    expect('text' in bodyForQuestion(JSON.stringify({ value: many(400) }), mask)).toBe(true);
+    expect(bodyForQuestion(JSON.stringify({ value: many(800) }), mask)).toEqual({ unshowable: 'unreadable' });
+  });
+
+  // JSON text is read on a budget of its own (2 M), shared by every value of one part; its readings
+  // do not count against the part's reading budget. A string whose readings are many spends it
+  // well below 600 K of text.
+  describe('JSON text read past its own budget', () => {
+    const piece = '%2541%u0041%E9%2525%41+';
+    // The escapes are written as JSON escapes, so the body itself holds no `%`: only reading the
+    // JSON text inside the value finds them.
+    const inner = (k: number, tag: string): string => `[${Array.from({ length: k }, (_, i) => `"${`${tag}${i}${piece.repeat(30)}`.replace(/%/g, '\\u0025')}"`).join(',')}]`;
+
+    it('is not shown and counts as holding a secret, below the reading budget of the part', () => {
+      const body = JSON.stringify({ value: inner(160, 'a') });
+      expect(body.length).toBeLessThan(300_000);
+      expect(bodyForQuestion(body, mask)).toEqual({ unshowable: 'escaped-secret' });
+      // Control: fewer such strings are read and shown.
+      expect('text' in bodyForQuestion(JSON.stringify({ value: inner(80, 'a') }), mask)).toBe(true);
+    });
+
+    it('is one budget for the whole part: two values that each fit it alone do not fit it together', () => {
+      expect('text' in bodyForQuestion(JSON.stringify({ a: inner(80, 'a') }), mask)).toBe(true);
+      expect(bodyForQuestion(JSON.stringify({ a: inner(80, 'a'), b: inner(80, 'b') }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    });
   });
 
   it('JSON text with many short strings and no secret is shown, not counted as unread', () => {

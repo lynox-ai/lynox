@@ -1014,11 +1014,19 @@ const READING_DEPTH = 3;
  * where a hidden secret would refuse the write (a mandate's session, a connected account), it is
  * refused too. The URL-only checks (`isGraphqlEndpoint`, `graphqlUrlWrites`, `urlQueryStrings`)
  * read under the same budget and count such a URL as GraphQL with a query string.
+ * This is not the whole bound on one part: JSON text inside a value is read on its own budget,
+ * {@link JSON_TEXT_BUDGET_CHARS}, shared by every reading of that part, and its readings are not
+ * charged here. One part costs at most this plus that, 600 K and 2 M; past either, it is not shown
+ * and counts as holding a secret.
  */
 export const READING_BUDGET_CHARS = 600_000;
 /** What one more distinct reading costs beyond its length: it is masked as a call of its own. */
 const READING_OVERHEAD_CHARS = 64;
 let readingBudgetLeft: number | null = null;
+/** While JSON text is read (`jsonTextHides`): its readings are charged to its own budget, not this one. */
+let readingBudgetPaused = false;
+/** The JSON text budget one part shares while it is read under {@link withinReadingBudget}. */
+let jsonBudgetLeft: number | null = null;
 class ReadingBudgetSpent extends Error {}
 
 /**
@@ -1029,6 +1037,7 @@ class ReadingBudgetSpent extends Error {}
 function withinReadingBudget<T>(read: () => T, over: () => T): T {
   if (readingBudgetLeft !== null) return read();
   readingBudgetLeft = READING_BUDGET_CHARS;
+  jsonBudgetLeft = JSON_TEXT_BUDGET_CHARS;
   try {
     return read();
   } catch (err) {
@@ -1036,6 +1045,7 @@ function withinReadingBudget<T>(read: () => T, over: () => T): T {
     throw err;
   } finally {
     readingBudgetLeft = null;
+    jsonBudgetLeft = null;
   }
 }
 
@@ -1047,7 +1057,7 @@ function serverReadings(text: string): Set<string> {
     for (const t of frontier) {
       for (const step of READING_STEPS) {
         const read = step(t);
-        if (readingBudgetLeft !== null && !seen.has(read)) {
+        if (readingBudgetLeft !== null && !readingBudgetPaused && !seen.has(read)) {
           readingBudgetLeft -= read.length + READING_OVERHEAD_CHARS;
           if (readingBudgetLeft < 0) throw new ReadingBudgetSpent();
         }
@@ -1081,7 +1091,8 @@ function hidesEncodedSecret(text: string, mask: (text: string) => string, unread
 const JSON_TEXT_DEPTH = 3;
 /** The most characters reading the JSON text inside one value may cost: each text parsed, and
  *  each server reading of a string in it, counted by its length and 32 characters on top (each
- *  is masked once more, or parsed). */
+ *  is masked once more, or parsed). Under {@link withinReadingBudget} it is the budget of the
+ *  whole part, shared by every value of it, so a part with many values does not get it many times. */
 const JSON_TEXT_BUDGET_CHARS = 2_000_000;
 
 /**
@@ -1096,21 +1107,34 @@ const JSON_TEXT_BUDGET_CHARS = 2_000_000;
  * with (`pathHoldsSecret`).
  */
 function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: string) => string, unread = true): boolean {
+  // Read on its own budget: the part's share of it when the part is read under one, else a whole one.
+  const shared = jsonBudgetLeft !== null;
+  const paused = readingBudgetPaused;
+  readingBudgetPaused = true;
+  const budget = { left: jsonBudgetLeft ?? JSON_TEXT_BUDGET_CHARS };
+  try {
+    return jsonTextHidesRead(text, readings, mask, unread, budget);
+  } finally {
+    readingBudgetPaused = paused;
+    if (shared) jsonBudgetLeft = budget.left;
+  }
+}
+
+function jsonTextHidesRead(text: string, readings: Iterable<string>, mask: (text: string) => string, unread: boolean, budget: { left: number }): boolean {
   const ofText = [...readings];
   const literalSeen = new Set<string>();
   for (const read of [...ofText, ...formSides(text).flatMap((side) => [...serverReadings(side)])]) {
     if (escapedLiteralHides(read, mask, literalSeen, 0)) return true;
   }
   const seen = new Set<string>();
-  let left = JSON_TEXT_BUDGET_CHARS;
   const hides = (t: string, ofT: Iterable<string>, depth: number): boolean => {
     for (const reads of [ofT, ...formSides(t).map(serverReadings)]) {
       for (const read of reads) {
         for (const candidate of jsonCandidates(read)) {
-          left -= 32;
-          if (left < 0) return unread;
+          budget.left -= 32;
+          if (budget.left < 0) return unread;
           const strings = jsonStrings(candidate);
-          if (strings.length > 0) left -= candidate.length;
+          if (strings.length > 0) budget.left -= candidate.length;
           for (const s of strings) {
             if (seen.has(s)) continue;
             seen.add(s);
@@ -1121,7 +1145,7 @@ function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: st
             const ofS = serverReadings(s);
             for (const r of ofS) {
               // Charged here, checked by the next piece `hides` reads below: there always is one.
-              left -= r.length + 32;
+              budget.left -= r.length + 32;
               if (mask(r) !== r) return true;
             }
             if (hides(s, ofS, depth + 1)) return true;
@@ -1677,10 +1701,11 @@ function formPart(raw: string, mask: (text: string) => string): string {
  * the mask did not see as sent; a mandate's session and a connected account refuse such a query
  * (`http.ts`).
  */
-export function queryForQuestion(search: string, mask: (text: string) => string): { text: string; secret: boolean; escaped: boolean; unreadable: boolean } {
+export function queryForQuestion(search: string, mask: (text: string) => string): { text: string; secret: boolean; escaped: boolean; unreadable?: true } {
   // Too costly to read (`READING_BUDGET_CHARS`): not shown, and counted as hiding a secret.
-  return withinReadingBudget<{ text: string; secret: boolean; escaped: boolean; unreadable: boolean }>(
-    () => ({ ...queryForQuestionRead(search, mask), unreadable: false }),
+  // `unreadable` only when it is so: a query that was read carries no such field.
+  return withinReadingBudget<{ text: string; secret: boolean; escaped: boolean; unreadable?: true }>(
+    () => queryForQuestionRead(search, mask),
     () => ({ text: '', secret: true, escaped: true, unreadable: true }),
   );
 }
