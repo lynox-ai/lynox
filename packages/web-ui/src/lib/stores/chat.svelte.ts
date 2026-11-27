@@ -1674,6 +1674,69 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	}
 }
 
+/** Whether a saved or shown message is the one a turn put on screen: same text, same time. */
+function isTurnMessage(m: ChatMessage, msg: ChatMessage): boolean {
+	return m.role === 'user' && m.content === msg.content && m.createdAt === msg.createdAt;
+}
+
+/** Drop the empty answer bubble a turn put right after its message. */
+function dropEmptyAnswerAfter(list: ChatMessage[], i: number): void {
+	const next = list[i + 1];
+	if (next && next.role === 'assistant' && !next.content && !(next.toolCalls && next.toolCalls.length > 0) && !(next.blocks && next.blocks.length > 0)) list.splice(i + 1, 1);
+}
+
+/**
+ * The open review held a message after its thread was left or opened again: the message waits
+ * in that thread, so it is back, waiting, when the thread is shown. Opened again, that is the list
+ * on screen; left, it is the thread's saved copy (or, with none yet, the list the turn started
+ * in), which a waiting message keeps over the server's transcript when the thread opens. A message with files cannot wait in the saved copy (its queue
+ * keeps text only) and is marked failed there, for a tap to send again.
+ */
+function requeueHeldInThread(sid: string, turn: TurnStart, task: string, files: FileAttachment[] | undefined): void {
+	const msg = turn.userMsg;
+	if (!msg || _deletedOnServer.has(sid) || _droppedThreads.has(sid)) return;
+	const withFiles = files !== undefined && files.length > 0;
+	if (sessionId === sid) {
+		let i = messages.findIndex((m) => isTurnMessage(m, msg) && !m.queued);
+		// The opening showed the server's transcript, which never had the refused message.
+		if (i < 0) {
+			const { queued: _q, queueId: _id, failed: _f, ...copy } = msg;
+			messages.push(copy);
+			i = messages.length - 1;
+		}
+		const shown = messages[i]!;
+		const id = shown.queueId ?? newQueueId();
+		shown.queueId = id;
+		shown.queued = true;
+		shown.failed = false;
+		if (!messageQueue.some((q) => q.id === id)) messageQueue.unshift({ id, task, ...(withFiles ? { files } : {}) });
+		dropEmptyAnswerAfter(messages, i);
+		persistChatNow();
+		// The card of the review that holds it, as `holdForReview` fetches it.
+		void fetchChangeset();
+		return;
+	}
+	const root = readPersistedRoot();
+	// The debounced save writes the thread on screen only, so a thread left mid-turn may have no
+	// saved copy yet: the list the turn started in is that thread's.
+	const list = root.threads[sid] ?? (JSON.parse(JSON.stringify(turn.messages)) as ChatMessage[]);
+	root.threads[sid] = list;
+	const i = list.findIndex((m) => isTurnMessage(m, msg) && !m.queued);
+	if (i < 0) return;
+	const saved = list[i]!;
+	dropEmptyAnswerAfter(list, i);
+	if (withFiles) {
+		saved.failed = true;
+	} else {
+		const id = newQueueId();
+		saved.queueId = id;
+		saved.queued = true;
+		saved.failed = false;
+		root.queues = { ...(root.queues ?? {}), [sid]: [{ id, task }, ...(root.queues?.[sid] ?? [])] };
+	}
+	writePersistedRoot(root);
+}
+
 /** Whether a refused `/run` says the open review holds the message (`code: 'review_pending'`).
  *  Reads a copy of the body, so the caller can still read the answer itself. */
 async function reviewPendingIn(res: Response): Promise<boolean> {
@@ -1858,11 +1921,13 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			_queuePollController = null;
 		}
 		// The thread was left or opened again meanwhile: the list belongs to another opening now.
+		// The message still waits for the review, in the thread it was typed in.
 		if (sessionId !== sid || _resumeGeneration !== turnGen) {
 			endStreaming(turn.assistantMsg);
 			streamingActivity = 'idle';
 			streamingToolName = null;
 			streamingToolPhase = null;
+			requeueHeldInThread(sid, turn, task, files);
 			return;
 		}
 		const held = messages[userMsgIdx];

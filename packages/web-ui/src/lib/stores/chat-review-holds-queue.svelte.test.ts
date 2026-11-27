@@ -24,6 +24,8 @@ let holdFirstRun: Promise<void> | null;
 let holdChangeset: Promise<void> | null;
 /** Per thread: its changeset answer waits until the promise here resolves. */
 let holdChangesetIn: Map<string, Promise<void>>;
+/** While set, the next `/run` waits for it and is refused: the open review holds the message. */
+let refuseNextRunForReview: Promise<void> | null;
 /** Per thread: what its changeset answer names, in place of `changed`. */
 let changedIn: Map<string, Array<{ file: string; status: string; diff: string }>>;
 /** While set, every run after the first streams until it resolves. */
@@ -64,6 +66,12 @@ function serve(): void {
 			return json({ sessionId: body.threadId ?? (newSessions++ === 0 ? 't1' : 't2') });
 		}
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
+		if (url.endsWith('/run') && refuseNextRunForReview) {
+			const held = refuseNextRunForReview;
+			refuseNextRunForReview = null;
+			await held;
+			return json({ error: 'review pending', code: 'review_pending' }, 409);
+		}
 		if (url.endsWith('/run')) {
 			const body = JSON.parse(String(init?.body)) as { task?: string };
 			runTasks.push(String(body.task));
@@ -134,6 +142,7 @@ beforeEach(async () => {
 	holdFirstRun = null;
 	holdChangeset = null;
 	holdChangesetIn = new Map();
+	refuseNextRunForReview = null;
 	changedIn = new Map();
 	holdLaterRuns = null;
 	holdReopen = new Map();
@@ -365,6 +374,44 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		await store.sendMessage('in the other thread');
 		await settle();
 		expect(runTasks, 'a message typed there is sent, not held by the other thread\'s review').toEqual(['edit the notes', 'in the other thread']);
+	});
+
+	it('a message the open review holds, refused after another thread opened, waits in its thread on the way back, not sent', async () => {
+		let refuse!: () => void;
+		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
+		void store.sendMessage('held by the review');
+		await settle();
+		expect(store.getMessages().find((m) => m.content === 'held by the review'), 'positive control: the message is on screen').toBeDefined();
+		await store.resumeThread('t9');
+		await settle();
+		refuse(); // the server answers: the review of the last run holds it
+		await settle();
+		changedIn.set('t1', notes); // and that review is still open on the way back
+		await store.resumeThread('t1');
+		await settle();
+		const back = store.getMessages().find((m) => m.content === 'held by the review');
+		expect(back, 'the message is still there').toBeDefined();
+		expect(back?.queued, 'it waits').toBe(true);
+		expect(store.getPendingChangeset(), 'behind the review that holds it').not.toBeNull();
+		expect(runTasks, 'nothing sent past the review').toEqual([]);
+	});
+
+	it('a message the open review holds, refused after its thread was opened again, waits there, not sent', async () => {
+		let refuse!: () => void;
+		refuseNextRunForReview = new Promise<void>((r) => { refuse = r; });
+		void store.sendMessage('held by the review');
+		await settle();
+		const sid = store.getSessionId();
+		expect(sid, 'positive control: the message went to a thread').not.toBeNull();
+		changedIn.set(sid!, notes);
+		await store.resumeThread(sid!); // the same thread, opened again before the answer
+		await settle();
+		refuse();
+		await settle();
+		const back = store.getMessages().find((m) => m.content === 'held by the review');
+		expect(back?.queued, 'it waits in the thread on screen').toBe(true);
+		expect(store.getPendingChangeset(), 'behind the review that holds it').not.toBeNull();
+		expect(runTasks, 'nothing sent past the review').toEqual([]);
 	});
 
 	it('an answer to a review that arrives after another thread opened clears neither its review nor sends its turn', async () => {
