@@ -961,11 +961,28 @@ describe('the review keeps its reason and its buttons in sight', () => {
 		expect(document.activeElement).toBe(q('stamp-review'));
 	});
 
-	it('Cancel after the opener is gone gives the focus to this workflow\'s review button, not to the page', async () => {
+	it('Cancel with no opener to go back to gives the focus to this workflow\'s review button, not to the page', async () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }] });
 		await click(q('stamp-review'));
 		// Opened with the focus on the page: there is no opener to go back to.
 		expect(q('stamp-dialog')).not.toBeNull();
+		await click(byText('Abbrechen'));
+		expect(q('stamp-dialog')).toBeNull();
+		expect(document.activeElement).toBe(q('stamp-review'));
+	});
+
+	it('Cancel after the opener is gone (the schedule dialog it came from) gives the focus to this workflow\'s review button', async () => {
+		await open('owner', WF, {
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+		});
+		await click(byText('Planen'));
+		const scheduleConfirm = byText('Bestätigen & planen');
+		scheduleConfirm!.focus();
+		expect(document.activeElement).toBe(scheduleConfirm);
+		await click(scheduleConfirm);
+		expect(q('stamp-dialog')).not.toBeNull();
+		expect(scheduleConfirm!.isConnected).toBe(false);
 		await click(byText('Abbrechen'));
 		expect(q('stamp-dialog')).toBeNull();
 		expect(document.activeElement).toBe(q('stamp-review'));
