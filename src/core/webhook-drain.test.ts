@@ -39,6 +39,8 @@ vi.mock('./session-budget.js', async (importOriginal) => {
     ...real,
     reservePersistentBudget: (usd: number) => budget.refuse ? { allowed: false, reason: 'monthly cap reached', reservedUSD: 0 } : real.reservePersistentBudget(usd),
     releasePersistentBudget: (usd: number) => { budget.released++; real.releasePersistentBudget(usd); },
+    // The worker gives an admission's reservation back by the object it was issued as.
+    releaseReservation: (r: Parameters<typeof real.releaseReservation>[0]) => { budget.released++; real.releaseReservation(r); },
   };
 });
 vi.mock('./saved-workflow-runner.js', () => ({ runGuardedSavedWorkflow: (...args: unknown[]) => runner.run(...args) }));

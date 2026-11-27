@@ -153,7 +153,7 @@ function childRowCostUSD(agent: Agent | undefined): number {
  * child could still fit (`smallestUSD`, the least any child of this batch is held at); otherwise
  * the cap stops the work.
  */
-function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | undefined; cap?: 'daily' | 'monthly' | undefined; capUSD?: number | undefined }, batchUSD: number, smallestUSD: number): string {
+function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | undefined; recordedHeadroomUSD?: number | undefined; cap?: 'daily' | 'monthly' | undefined; capUSD?: number | undefined }, batchUSD: number, smallestUSD: number): string {
   if (r.headroomUSD === undefined || r.cap === undefined || r.capUSD === undefined) {
     return `Not delegated: ${r.reason ?? 'the spending cap cannot be checked.'}`;
   }
@@ -161,6 +161,14 @@ function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | und
   // The day and the month are the UTC ones `computeRecordedSpend` sums (`toISOString`).
   const resets = r.cap === 'daily' ? 'at 00:00 UTC' : 'on the 1st at 00:00 UTC';
   const budget = `${r.cap} budget`;
+  // Room that other work still running holds comes back when it ends. Only the amount is named,
+  // never which work: a run here need not be one that may see what else this instance runs.
+  if (r.headroomUSD < smallestUSD && (r.recordedHeadroomUSD ?? 0) >= smallestUSD) {
+    const heldUSD = (r.recordedHeadroomUSD ?? 0) - r.headroomUSD;
+    return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left right now, `
+      + `because ${usd(heldUSD)} of it is held for work that is still running. That is less than one of these `
+      + 'sub-agents may spend. Try again when that work has finished.';
+  }
   if (r.headroomUSD < smallestUSD) {
     return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left, `
       + `less than one of these sub-agents may spend. No sub-agent can run before the budget resets ${resets}. `

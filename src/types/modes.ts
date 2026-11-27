@@ -82,6 +82,8 @@ export interface PersistentBudgetReservation {
    * spend could not be checked.
    */
   headroomUSD?: number | undefined;
+  /** The same cap's headroom from recorded spend alone, without what is held in flight. */
+  recordedHeadroomUSD?: number | undefined;
   cap?: 'daily' | 'monthly' | undefined;
   capUSD?: number | undefined;
 }

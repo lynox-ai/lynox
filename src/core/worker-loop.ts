@@ -59,7 +59,7 @@ import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
-import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, releaseReservation, getSessionCostCeiling, checkPersistentBudget } from './session-budget.js';
+import { persistentBudgetHeadroom, reservePersistentBudget, releaseReservation, getSessionCostCeiling, checkPersistentBudget } from './session-budget.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
 // handler was its first consumer; src/core/ is the better home now that there
 // are two. `src/core/config.ts` already imports across the same seam, so this
@@ -1687,7 +1687,7 @@ export class WorkerLoop {
         // Taken after the reservation, so a deferred task never holds a lease it does not use.
         const lease = this.takeLease(task.id);
         if (lease === 'held' || lease === 'not_found') {
-          releasePersistentBudget(reservation.reservedUSD);
+          releaseReservation(reservation);
           continue;
         }
         // AFTER the lease, so the word is true of a task that really proceeds. Said before
@@ -1703,7 +1703,7 @@ export class WorkerLoop {
           // were set up for), and the owner can run it again by hand. Fenced per task: a
           // store error here must not stop the other due triggers of this tick; the lease
           // then stays and lapses again, and the run is reported once more, never re-run.
-          releasePersistentBudget(reservation.reservedUSD);
+          releaseReservation(reservation);
           try {
             this.recordAndNotify(task, this.#notices().interrupted, 'interrupted');
             this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
@@ -1837,11 +1837,11 @@ export class WorkerLoop {
           lease = this.takeLease(triggerId);
         } catch (err: unknown) {
           // Not held up by the trigger's catch below with the reservation still taken.
-          releasePersistentBudget(reservation.reservedUSD);
+          releaseReservation(reservation);
           throw err;
         }
         if (lease !== 'claimed') {
-          releasePersistentBudget(reservation.reservedUSD);
+          releaseReservation(reservation);
           if (lease === 'interrupted') {
             // Fails closed: never read as `claimed`. The lease is ours now; give it back.
             process.stderr.write(`[lynox:worker] "${trigger.title}" (${triggerId}) webhook trigger reported a lost run on its lease; no event run\n`);
@@ -1880,10 +1880,10 @@ export class WorkerLoop {
           // The row read again now that the lease is held, as `executeTask` does: an owner's takeover
           // of the plan may have committed since the read above.
           // run-group-starter: fires once, when this run settles; it only frees the run's budget reservation and reports no spend.
-          void this.#runInSlot(this.#freshRecord(trigger), null, false, undefined, slotEvent).finally(() => releasePersistentBudget(reservation.reservedUSD));
+          void this.#runInSlot(this.#freshRecord(trigger), null, false, undefined, slotEvent).finally(() => releaseReservation(reservation));
         } finally {
           if (!started) {
-            releasePersistentBudget(reservation.reservedUSD);
+            releaseReservation(reservation);
             try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
           }
         }

@@ -6960,6 +6960,17 @@ describe('spawn_agent holds a batch against the daily and monthly caps', () => {
     expect(mockSend).toHaveBeenCalledTimes(2);
   });
 
+  it('says the room comes back when work still running holds it, without naming that work', async () => {
+    const { configurePersistentBudget, reservePersistentBudget } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    expect(reservePersistentBudget(8.5).allowed, 'another run holds $8.50').toBe(true);
+    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
+      'Not delegated: the daily budget of $10.00 has $0.50 left right now, because $8.50 of it is held for work that is still running. '
+      + 'That is less than one of these sub-agents may spend. Try again when that work has finished.',
+    );
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   it('refuses a batch whose children fit one by one but not together, and on a reached monthly cap', async () => {
     const { configurePersistentBudget } = await import('../../core/session-budget.js');
     configurePersistentBudget({ costProvider: spentToday(8), dailyCapUSD: 10, monthlyCapUSD: 500 });
