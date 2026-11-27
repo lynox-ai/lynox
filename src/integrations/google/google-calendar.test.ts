@@ -182,7 +182,7 @@ describe('google_calendar tool', () => {
         attendees: ['a@example.org', 'b@example.org'],
       }, agent);
       expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe([
-        'Create event "Review"',
+        'Create event “Review”',
         'Calendar: team@group.calendar.google.com',
         'Time: 2026-03-20T10:00:00 (Europe/Zurich) – 2026-03-20T11:00:00 (Europe/Zurich)',
         'Location: Room 2',
@@ -205,7 +205,7 @@ describe('google_calendar tool', () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'X', start: { date: '2026-03-20' }, end: { date: '2026-03-21' }, htmlLink: 'x' }) });
       const agent = createMockAgent('confirm');
       await tool.handler({ action: 'create_event', calendar_id: 'primary', summary: 'X', start: '2026-03-20', end: '2026-03-21' }, agent);
-      expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event "X"\nTime: 2026-03-20 – 2026-03-21');
+      expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event “X”\nTime: 2026-03-20 – 2026-03-21');
     });
 
     it('marks every supplied text as a value, never as frame', async () => {
@@ -239,7 +239,7 @@ describe('google_calendar tool', () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'Untitled Event', start: { date: '2026-03-20' }, end: { date: '2026-03-21' }, htmlLink: 'x' }) });
       const agent = createMockAgent('confirm');
       await tool.handler({ action: 'create_event', start: '2026-03-20', end: '2026-03-21', description: '', location: '' }, agent);
-      expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event "Untitled Event"\nTime: 2026-03-20 – 2026-03-21');
+      expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event “Untitled Event”\nTime: 2026-03-20 – 2026-03-21');
       expect(JSON.parse((mockFetch.mock.calls[0]![1] as { body: string }).body)).toEqual({ summary: 'Untitled Event', start: { date: '2026-03-20' }, end: { date: '2026-03-21' } });
     });
 

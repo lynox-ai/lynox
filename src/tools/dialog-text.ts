@@ -802,7 +802,7 @@ ${body}`,
 **From:** ${from}${persona}
 
 ${body}`,
-    reply: (original, to, cc, subject, from, smart, persona, body) => pv`**Reply to "${original}"?**
+    reply: (original, to, cc, subject, from, smart, persona, body) => pv`**Reply to “${escapeQuoted(original)}”?**
 
 **To:** ${to}${cc}
 **Subject:** ${subject}
@@ -837,7 +837,7 @@ ${body}`,
 **Von:** ${from}${persona}
 
 ${body}`,
-    reply: (original, to, cc, subject, from, smart, persona, body) => pv`**Auf „${original}“ antworten?**
+    reply: (original, to, cc, subject, from, smart, persona, body) => pv`**Auf „${escapeQuoted(original)}“ antworten?**
 
 **An:** ${to}${cc}
 **Betreff:** ${subject}
@@ -890,14 +890,14 @@ export interface GoogleDialog {
 
 export const GOOGLE_DIALOG: Readonly<Record<DialogLanguage, GoogleDialog>> = {
   en: {
-    upload: (name) => pv`Upload file "${name}" to Drive?`,
-    createDoc: (name) => pv`Create Google Doc "${name}"?`,
+    upload: (name) => pv`Upload file “${escapeQuoted(name)}” to Drive?`,
+    createDoc: (name) => pv`Create Google Doc “${escapeQuoted(name)}”?`,
     move: (file, folder) => pv`Move file ${file} to folder ${folder}?`,
     share: (file, email, role) => pv`Share file ${file} with ${email} as ${role}?`,
-    overwrite: (range, sheet) => pv`Overwrite range "${range}" in spreadsheet ${sheet}? This will replace existing data.`,
-    append: (range, sheet) => pv`Add rows to range "${range}" in spreadsheet ${sheet}? Nothing is overwritten.`,
+    overwrite: (range, sheet) => pv`Overwrite range “${escapeQuoted(range)}” in spreadsheet ${sheet}? This will replace existing data.`,
+    append: (range, sheet) => pv`Add rows to range “${escapeQuoted(range)}” in spreadsheet ${sheet}? Nothing is overwritten.`,
     format: (sheet) => pv`Apply batch changes to spreadsheet ${sheet}? Formatting requests can delete or overwrite cells and sheets.`,
-    createEvent: (summary, calendar) => pv`Create event "${summary}"${calendar}`,
+    createEvent: (summary, calendar) => pv`Create event “${escapeQuoted(summary)}”${calendar}`,
     time: (start, end) => pv`Time: ${start} – ${end}`,
     location: (location) => pv`Location: ${location}`,
     repeats: (rules) => pv`Repeats: ${rules}`,
@@ -918,14 +918,14 @@ export const GOOGLE_DIALOG: Readonly<Record<DialogLanguage, GoogleDialog>> = {
     unspecified: '(unspecified)',
   },
   de: {
-    upload: (name) => pv`Datei „${name}“ in Drive hochladen?`,
-    createDoc: (name) => pv`Google-Dokument „${name}“ anlegen?`,
+    upload: (name) => pv`Datei „${escapeQuoted(name)}“ in Drive hochladen?`,
+    createDoc: (name) => pv`Google-Dokument „${escapeQuoted(name)}“ anlegen?`,
     move: (file, folder) => pv`Datei ${file} in den Ordner ${folder} verschieben?`,
     share: (file, email, role) => pv`Datei ${file} für ${email} freigeben, als ${role}?`,
-    overwrite: (range, sheet) => pv`Bereich „${range}“ in Tabelle ${sheet} überschreiben? Die Daten dort werden ersetzt.`,
-    append: (range, sheet) => pv`Zeilen zum Bereich „${range}“ in Tabelle ${sheet} hinzufügen? Es wird nichts überschrieben.`,
+    overwrite: (range, sheet) => pv`Bereich „${escapeQuoted(range)}“ in Tabelle ${sheet} überschreiben? Die Daten dort werden ersetzt.`,
+    append: (range, sheet) => pv`Zeilen zum Bereich „${escapeQuoted(range)}“ in Tabelle ${sheet} hinzufügen? Es wird nichts überschrieben.`,
     format: (sheet) => pv`Tabelle ${sheet} formatieren? Formatierungen können Zellen und Blätter löschen oder überschreiben.`,
-    createEvent: (summary, calendar) => pv`Termin „${summary}“ anlegen${calendar}`,
+    createEvent: (summary, calendar) => pv`Termin „${escapeQuoted(summary)}“ anlegen${calendar}`,
     time: (start, end) => pv`Zeit: ${start} – ${end}`,
     location: (location) => pv`Ort: ${location}`,
     repeats: (rules) => pv`Wiederholung: ${rules}`,
@@ -958,17 +958,17 @@ export interface MemoryDialog {
 
 export const MEMORY_DIALOG: Readonly<Record<DialogLanguage, MemoryDialog>> = {
   en: {
-    merge: (dup, canon) => pv`Merge "${dup}" into "${canon}"? Every note, task and mention of "${dup}" moves to "${canon}", and "${dup}" is archived. Undoing it needs a command-line rollback — not something you can do from chat.`,
+    merge: (dup, canon) => pv`Merge “${escapeQuoted(dup)}” into “${escapeQuoted(canon)}”? Every note, task and mention of “${escapeQuoted(dup)}” moves to “${escapeQuoted(canon)}”, and “${escapeQuoted(dup)}” is archived. Undoing it needs a command-line rollback — not something you can do from chat.`,
     editBlock: (block, mode, preview) => pv`Edit the ${block} block (${mode}${preview})? This block loads into every future turn. This is reversible by editing it again.`,
-    blockPreview: (preview) => pv`: "${preview}"`,
-    retire: (entry, reason) => pv`Retire this memory entry? "${entry}"${reason} It stays on record as superseded and stops surfacing. This needs a new \`remember\` if a corrected fact should replace it.`,
+    blockPreview: (preview) => pv`: “${escapeQuoted(preview)}”`,
+    retire: (entry, reason) => pv`Retire this memory entry? “${escapeQuoted(entry)}”${reason} It stays on record as superseded and stops surfacing. This needs a new \`remember\` if a corrected fact should replace it.`,
     retireReason: (reason) => pv` Reason: ${reason}.`,
   },
   de: {
-    merge: (dup, canon) => pv`„${dup}“ mit „${canon}“ zusammenführen? Alle Notizen, Aufgaben und Erwähnungen von „${dup}“ gehen zu „${canon}“, und „${dup}“ wird archiviert. Rückgängig geht das nur über die Kommandozeile, nicht im Chat.`,
+    merge: (dup, canon) => pv`„${escapeQuoted(dup)}“ mit „${escapeQuoted(canon)}“ zusammenführen? Alle Notizen, Aufgaben und Erwähnungen von „${escapeQuoted(dup)}“ gehen zu „${escapeQuoted(canon)}“, und „${escapeQuoted(dup)}“ wird archiviert. Rückgängig geht das nur über die Kommandozeile, nicht im Chat.`,
     editBlock: (block, mode, preview) => pv`Den Block ${block} ändern (${mode}${preview})? Dieser Block wird in jeden künftigen Schritt geladen. Du kannst ihn später wieder ändern.`,
-    blockPreview: (preview) => pv`: „${preview}“`,
-    retire: (entry, reason) => pv`Diesen Eintrag zurückziehen? „${entry}“${reason} Er bleibt als überholt gespeichert und taucht nicht mehr auf. Soll ein korrigierter Fakt ihn ersetzen, braucht es ein neues \`remember\`.`,
+    blockPreview: (preview) => pv`: „${escapeQuoted(preview)}“`,
+    retire: (entry, reason) => pv`Diesen Eintrag zurückziehen? „${escapeQuoted(entry)}“${reason} Er bleibt als überholt gespeichert und taucht nicht mehr auf. Soll ein korrigierter Fakt ihn ersetzen, braucht es ein neues \`remember\`.`,
     retireReason: (reason) => pv` Grund: ${reason}.`,
   },
 };

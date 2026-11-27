@@ -60,7 +60,7 @@ const APPENDED = { ok: true, json: async () => ({ updates: { updatedRange: 'Shee
 /** Said wherever a question shows a formula: the functions are examples, and the address may be built. */
 const FETCHES = 'A formula can make Google fetch an address and send data from the sheet with it. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE and IMAGE are examples; other functions can do it too. The address need not be written out: a formula can build it from other cells.';
 const HIDDEN = 'Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.';
-const PLAIN_WRITE_QUESTION = 'Overwrite range "Sheet1!B2:C3" in spreadsheet sid? This will replace existing data.';
+const PLAIN_WRITE_QUESTION = 'Overwrite range “Sheet1!B2:C3” in spreadsheet sid? This will replace existing data.';
 
 describe('a cell that starts like a formula', () => {
   it.each([
@@ -252,7 +252,7 @@ describe('google_sheets after content from outside the chat', () => {
     const result = await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
     expect(result).toContain('Data appended');
     expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
-    expect(flattenPrompt(asked(a).prompt).split('\n')[0]).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Nothing is overwritten.');
+    expect(flattenPrompt(asked(a).prompt).split('\n')[0]).toBe('Add rows to range “Sheet1!A:B” in spreadsheet sid? Nothing is overwritten.');
     expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(`1st new row, 2nd value: ${FETCHING}`);
     expect(sentValues()).toEqual([['x', `'${FETCHING}`]]);
   });
@@ -262,7 +262,7 @@ describe('google_sheets after content from outside the chat', () => {
     mockFetch.mockResolvedValueOnce(APPENDED);
     await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
     expect(asked(a).options).toEqual(['confirm', 'cancel']);
-    expect(flattenPrompt(asked(a).prompt)).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Nothing is overwritten.');
+    expect(flattenPrompt(asked(a).prompt)).toBe('Add rows to range “Sheet1!A:B” in spreadsheet sid? Nothing is overwritten.');
     expect(sentUrl()).toContain('insertDataOption=INSERT_ROWS');
   });
 

@@ -89,7 +89,7 @@ describe('Google writes go ahead on the `confirm` key only', () => {
   it('an append is asked as an append: nothing it says is an overwrite', async () => {
     const seen: Seen = {};
     await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 's1', range: 'A1', values: [['1']] } as never, agent('cancel', seen));
-    expect(seen.question).toContain('Add rows to range "A1"');
+    expect(seen.question).toContain('Add rows to range “A1”');
     // "Nothing is overwritten" is the one mention, and it says the opposite of an overwrite.
     expect(seen.question).not.toMatch(/^Overwrite|replace/i);
   });
