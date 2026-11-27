@@ -6,7 +6,7 @@ import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, bulkLabelParts, bulkUndoApproveText, bulkUndoExplainText,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
-	bulkSentenceParts, bulkSecretInContextKey, bulkOwnerNoticeShown,
+	bulkSentenceParts, bulkSecretInContextKey,
 	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
 	bulkRefusalText, bulkRefusalSentence, BULK_REFUSAL_KINDS,
 } from './bulk-runs.js';
@@ -1369,44 +1369,18 @@ describe('going on from a run that halted', () => {
 	});
 });
 
-describe('a way on is said once on the run page (U-374)', () => {
+describe('the switched-off sentence a mandate reads (U-383)', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
 	const de: Record<string, string> = {};
-	const en: Record<string, string> = {};
 	for (const l of source.split('\n')) {
 		const m = ENTRY.exec(l);
-		if (m) { de[m[1]!] = m[2]!; en[m[1]!] = m[3]!; }
+		if (m) de[m[1]!] = m[2]!;
 	}
-
-	it('drops the owner-only notice for a mandate where the halt sentence already sends it to the owner', () => {
-		expect(bulkOwnerNoticeShown('consentOutdated')).toBe(false);
-		expect(bulkOwnerNoticeShown('productWriteNotAsked')).toBe(false);
-		expect(bulkOwnerNoticeShown('shopifyWriteOff')).toBe(false);
-		// A sentence that does not name the owner keeps the notice.
-		expect(bulkOwnerNoticeShown('storeAccessEnded')).toBe(true);
-		expect(bulkOwnerNoticeShown('unavailable')).toBe(true);
-		expect(bulkOwnerNoticeShown(null)).toBe(true);
-	});
-
-	it('every halt it treats as naming the owner does so in each of its mandate sentences, before and after a first write, in both languages', () => {
-		for (const key of ['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff']) {
-			// The base sentence, and its variant after a first write wherever the owner has one: a
-			// mandate is shown `_more_mandate` for it (`bulk-runs.ts`), so that variant must exist too.
-			const keys = [`bulk.halt.${key}_mandate`, ...(de[`bulk.halt.${key}_more`] === undefined ? [] : [`bulk.halt.${key}_more_mandate`])];
-			for (const k of keys) {
-				expect(de[k], k).toMatch(/Inhaber/);
-				expect(en[k], k).toMatch(/owner/);
-			}
-		}
-		// At least one of them has a variant after a first write, so the second sentence is pinned.
-		expect(['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff'].filter((key) => de[`bulk.halt.${key}_more`] !== undefined).length).toBeGreaterThan(0);
-	});
 
 	it('pins the switched-off sentence a mandate reads, word for word (U-383)', () => {
 		expect(de['bulk.halt.shopifyWriteOff_mandate']).toBe('Änderungen per Massenlauf an Shopify-Shops sind auf dieser Instanz ausgeschaltet. Der Lauf ist angehalten. Sobald sie wieder eingeschaltet sind, kann der Inhaber ihn hier fortsetzen.');
 	});
-
 });
 
 // Taking a merge back: the page says what came of it by the route's status and code, in the
