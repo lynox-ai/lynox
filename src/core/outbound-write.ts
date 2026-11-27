@@ -1014,10 +1014,14 @@ const READING_DEPTH = 3;
  * where a hidden secret would refuse the write (a mandate's session, a connected account), it is
  * refused too. The URL-only checks (`isGraphqlEndpoint`, `graphqlUrlWrites`, `urlQueryStrings`)
  * read under the same budget and count such a URL as GraphQL with a query string.
- * This is not the whole bound on one part: JSON text inside a value is read on its own budget,
- * {@link JSON_TEXT_BUDGET_CHARS}, shared by every reading of that part, and its readings are not
- * charged here. One part costs at most this plus that, 600 K and 2 M; past either, it is not shown
- * and counts as holding a secret.
+ * This is not the whole bound on one part. JSON text inside a value is read on its own budget,
+ * {@link JSON_TEXT_BUDGET_CHARS}, shared by every value of that part, and nothing read for it is
+ * charged here. That budget counts each JSON text parsed and each reading of a string in it; the
+ * counted readings of one part come to at most this plus that, 600 K and 2 M, and past either the
+ * part is not shown and counts as holding a secret. Two kinds of reading done for JSON text are
+ * counted by neither budget: the readings of each side of a `name=value` pair (`formSides`) and
+ * those of the string literals found in a text (`escapedLiteralHides`). They are bounded by the
+ * text's structure and by their depth (`READING_DEPTH`, `LITERAL_READ_DEPTH`), not by a budget.
  */
 export const READING_BUDGET_CHARS = 600_000;
 /** What one more distinct reading costs beyond its length: it is masked as a call of its own. */
