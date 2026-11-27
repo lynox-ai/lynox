@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { CONSENT_KEYS, type ConsentAction } from '../contract/prompt.js';
 import { consentButtons, isToolConsent, type ToolConsentKind } from './consent-buttons.js';
 
-const TOOL_KINDS: readonly ToolConsentKind[] = ['send', 'google', 'merge', 'apply', 'retire', 'plan'];
+const TOOL_KINDS: readonly ToolConsentKind[] = ['send', 'google', 'merge', 'apply', 'retire', 'plan', 'formula', 'formula-text'];
 const ACTIONS: readonly ConsentAction[] = ['upload', 'create', 'move', 'share', 'overwrite', 'append', 'format', 'update', 'delete'];
 
 describe('a tool confirmation\'s buttons', () => {
@@ -24,6 +24,17 @@ describe('a tool confirmation\'s buttons', () => {
 		for (const kind of ['send', 'merge', 'apply', 'plan'] as const) expect(consentButtons(kind)[0]!.tone, kind).toBe('primary');
 		for (const kind of TOOL_KINDS) expect(consentButtons(kind).at(-1), kind).toMatchObject({ key: 'cancel', tone: 'secondary' });
 		expect(consentButtons('plan')[1]).toMatchObject({ key: 'adjust', tone: 'secondary' });
+	});
+
+	it('on the formula question, lead with writing as text, keep writing formulas out of red, and say that the way out writes nothing', () => {
+		expect(consentButtons('formula')).toEqual([
+			{ key: 'as-text', label: 'chat.consent.write_text', tone: 'primary' },
+			{ key: 'as-formulas', label: 'chat.consent.write_formulas', tone: 'secondary' },
+			{ key: 'cancel', label: 'chat.consent.dont_write', tone: 'secondary' },
+		]);
+		// With some formulas only counted, there is no button that writes them.
+		expect(consentButtons('formula-text').map((b) => b.key)).toEqual(['as-text', 'cancel']);
+		expect(consentButtons('formula-text').at(-1)!.label).toBe('chat.consent.dont_write');
 	});
 
 	it('draw only the tools\' kinds; the guard and the deep consent keep their own cards', () => {

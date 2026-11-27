@@ -181,6 +181,8 @@ describe('a tool\'s own confirmation', () => {
 		{ kind: 'apply', keys: ['apply', 'cancel'], labels: ['chat.consent.apply', 'chat.consent_cancel'] },
 		{ kind: 'retire', keys: ['retire', 'cancel'], labels: ['chat.consent.retire', 'chat.consent_cancel'] },
 		{ kind: 'plan', keys: ['proceed', 'adjust', 'cancel'], labels: ['chat.consent.proceed', 'chat.consent.adjust', 'chat.consent_cancel'] },
+		{ kind: 'formula', keys: ['as-text', 'as-formulas', 'cancel'], labels: ['chat.consent.write_text', 'chat.consent.write_formulas', 'chat.consent.dont_write'] },
+		{ kind: 'formula-text', keys: ['as-text', 'cancel'], labels: ['chat.consent.write_text', 'chat.consent.dont_write'] },
 	] as const;
 	for (const locale of ['de', 'en'] as const) {
 		for (const k of KINDS) {

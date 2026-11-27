@@ -16,7 +16,7 @@
  */
 
 /** Which of the engine's own confirmations a question is. */
-export type ConsentKind = 'guard' | 'deep' | 'send' | 'google' | 'merge' | 'apply' | 'retire' | 'plan';
+export type ConsentKind = 'guard' | 'deep' | 'send' | 'google' | 'merge' | 'apply' | 'retire' | 'plan' | 'formula' | 'formula-text';
 
 /** The fixed keys each kind offers, in the order they are shown. */
 export const CONSENT_KEYS = {
@@ -34,11 +34,19 @@ export const CONSENT_KEYS = {
   retire: ['retire', 'cancel'],
   /** A plan to run; text typed instead is a change the person asks for (`consentTakesText`). */
   plan: ['proceed', 'adjust', 'cancel'],
+  /** Sheets cells that start like a formula, after content from outside: written as text, as formulas, or not at all. */
+  formula: ['as-text', 'as-formulas', 'cancel'],
+  /**
+   * The same question when some formulas are only counted: writing formulas the person was not
+   * shown is not offered. A kind of its own, not a subset, since an answer is read against all
+   * of its kind's keys. (Not `text`: that word is how `decideConsent` reports a plan's typed change.)
+   */
+  'formula-text': ['as-text', 'cancel'],
 } as const;
 
 export type ConsentKey = (typeof CONSENT_KEYS)[ConsentKind][number];
 
-const CONSENT_KINDS: readonly ConsentKind[] = ['guard', 'deep', 'send', 'google', 'merge', 'apply', 'retire', 'plan'];
+const CONSENT_KINDS: readonly ConsentKind[] = ['guard', 'deep', 'send', 'google', 'merge', 'apply', 'retire', 'plan', 'formula', 'formula-text'];
 
 /** The code the reply route answers with when a consent got an answer that is none of its keys. */
 export const CONSENT_UNRECOGNISED = 'unrecognised_answer';
