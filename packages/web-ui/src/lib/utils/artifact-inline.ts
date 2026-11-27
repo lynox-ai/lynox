@@ -194,10 +194,11 @@ export function withPlaceholderBadge(card: string, label: string): string {
 	);
 }
 
-/** What a card with the badge shows when opened, in place of the document it
- *  would show: the gallery's two sentences for a lost document, which also name
- *  the way out. Both are shown as text and escaped here. The placeholder itself
- *  is not shown: it is the engine's note, in English, with an internal id. */
+/** What a card the store found lost ({@link LOST_MARKER}) shows when opened, in
+ *  place of the document it would show: the gallery's two sentences for a lost
+ *  document, which also name the way out. Both are shown as text and escaped
+ *  here. The placeholder itself is not shown there: it is the engine's note, in
+ *  English, with an internal id. A fence the model wrote keeps its content. */
 export function lostNoticeMarkup(title: string, body: string): string {
 	return `<div class="artifact-lost-notice" role="note" data-testid="artifact-inline-lost-notice"><p class="artifact-lost-notice-title">${escapeText(title)}</p><p class="artifact-lost-notice-body">${escapeText(body)}</p></div>`;
 }
