@@ -1714,7 +1714,7 @@ describe('the context C the judge only reads (U-140)', () => {
 		expect(bulkInvalidText('secret_in_context', false, true, own, { field: 'note', host: null, dataStore: true }))
 			.toBe('column note holds a key');
 		// A column name is the owner's text: shown through bulkVisibleText, as every supplied value.
-		const odd = 'no‮te';
+		const odd = 'no\u202Ete';
 		expect(bulkInvalidText('secret_in_context', false, true, own, { field: odd, host: null, dataStore: true }))
 			.toBe(`column ${bulkVisibleText(odd)} holds a key`);
 		// Neither a store nor the data store: by the field's name as the list has it.
@@ -1791,7 +1791,7 @@ describe('the markup list of a target (1010)', () => {
 		expect(bulkMarkupItemText({ ...link, namespace: 'svg' })).toBe('<svg:a href="https://partner.example/p?q=1&r=2">');
 		expect(bulkMarkupItemText({ ...script, namespace: 'svg' })).toBe('<svg:script>steal()</svg:script>');
 		// A hidden character in a value shows as its mark, never as nothing.
-		expect(bulkMarkupItemText({ ...link, attributes: [['href', 'https://a.example/​']] })).toBe(`<a href="https://a.example/${bulkVisibleText('​')}">`);
+		expect(bulkMarkupItemText({ ...link, attributes: [['href', 'https://a.example/\u200B']] })).toBe(`<a href="https://a.example/${bulkVisibleText('\u200B')}">`);
 	});
 
 	it('lists a write under a head naming the field, added and removed, and says plain formatting is left out', () => {

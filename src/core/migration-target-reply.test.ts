@@ -131,13 +131,13 @@ describe('the target\'s words are shown without what would not display as itself
   const hidden: Array<[string, string]> = [
     ['C0 and DEL', '\u0000\u0007\u001b\u007f'],
     ['C1', '\u0085\u009b'],
-    ['bidi embeddings, overrides, isolates and marks', '‪‫‬‭‮⁦⁧⁨⁩‎‏؜'],
-    ['zero-width characters and the byte order mark', '​‌‍⁠﻿'],
-    ['invisible operators and deprecated format characters', '⁡⁢⁣⁤⁪⁯'],
-    ['soft hyphen, Mongolian vowel separator, interlinear annotation', '­᠎￹￺￻'],
+    ['bidi embeddings, overrides, isolates and marks', '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\u200E\u200F\u061C'],
+    ['zero-width characters and the byte order mark', '\u200B\u200C\u200D\u2060\uFEFF'],
+    ['invisible operators and deprecated format characters', '\u2061\u2062\u2063\u2064\u206A\u206F'],
+    ['soft hyphen, Mongolian vowel separator, interlinear annotation', '\u00AD\u180E￹￺￻'],
     ['tag characters', '\u{e0001}\u{e0041}\u{e007f}'],
     ['lone surrogates', '\udc00\ud800'],
-    ['variation selectors and fillers', '️\u{e0100}͏ᅟㅤﾠ'],
+    ['variation selectors and fillers', '\uFE0F\u{e0100}\u034F\u115F\u3164\uFFA0'],
   ];
   for (const [what, chars] of hidden) {
     it(`removes ${what}`, () => {
@@ -146,7 +146,7 @@ describe('the target\'s words are shown without what would not display as itself
   }
 
   it('turns line breaks, tabs and the line and paragraph separators into spaces', () => {
-    expect(relayedText('a\r\nb\tc d e')).toBe('a  b c d e');
+    expect(relayedText('a\r\nb\tc\u2028d\u2029e')).toBe('a  b c d e');
   });
 
   it('keeps ordinary text in any script as it is', () => {
@@ -171,7 +171,7 @@ describe('the target\'s words are shown without what would not display as itself
   });
 
   it('cleans every string of a restore report, its keys included, and leaves the rest as it is', () => {
-    expect(relayedReport({ secretsImported: 3, configApplied: true, portableDirSkipped: ['work‮space/a\nb'], 'k​': null }))
+    expect(relayedReport({ secretsImported: 3, configApplied: true, portableDirSkipped: ['work\u202Espace/a\nb'], 'k\u200B': null }))
       .toEqual({ secretsImported: 3, configApplied: true, portableDirSkipped: ['workspace/a b'], k: null });
   });
 });

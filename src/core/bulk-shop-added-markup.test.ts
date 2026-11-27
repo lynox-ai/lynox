@@ -138,7 +138,7 @@ describe('markupAddedByHost: what the host kept against what was sent', () => {
   });
 
   it('does not refuse a hidden character the host added: that is no markup', () => {
-    expect(added('<p>Neu</p>', '<p>Ne​u</p>')).toBe(false);
+    expect(added('<p>Neu</p>', '<p>Ne\u200Bu</p>')).toBe(false);
   });
 });
 

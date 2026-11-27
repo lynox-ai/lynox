@@ -145,7 +145,7 @@ export interface InboxNotifier {
  * Strip C0 control chars + HTML angle brackets so a crafted `<script>`
  * in subject/from-name cannot reach the OS toast renderer. Also drops
  * Unicode bidi/format overrides (U+202A-202E, U+2066-2069) — without
- * this a sender like `evil‮gro.acme` reverse-renders as
+ * this a sender like `evil\u202Egro.acme` reverse-renders as
  * `acme.gro.live` in the toast and can spoof a known contact. Caps
  * length defensively — web-push is ~4KB, the subject column isn't.
  */

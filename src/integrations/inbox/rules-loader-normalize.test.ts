@@ -255,9 +255,9 @@ describe('a stored subject phrase under the minimum matches by its match form', 
     ['✉️', '✉️ Neue Nachricht'],
     ['⚠️⚠️', 'Frist ⚠️⚠️'],
     ['⚠️!', 'Achtung ⚠️! Frist'],
-    ['1️⃣', '1️⃣ Termin'],
-    ['\u{1F468}‍\u{1F469}', 'Familie \u{1F468}‍\u{1F469}‍\u{1F467}'],
-    ['\u{1F3F3}️‍\u{1F308}', 'Pride \u{1F3F3}️‍\u{1F308} Juni'],
+    ['1\uFE0F⃣', '1\uFE0F⃣ Termin'],
+    ['\u{1F468}\u200D\u{1F469}', 'Familie \u{1F468}\u200D\u{1F469}\u200D\u{1F467}'],
+    ['\u{1F3F3}\uFE0F\u200D\u{1F308}', 'Pride \u{1F3F3}\uFE0F\u200D\u{1F308} Juni'],
     ['Re', 'RE: Angebot'],
     ['AW', 'aw: Termin'],
     ['42', 'Rechnung 42'],
@@ -270,13 +270,13 @@ describe('a stored subject phrase under the minimum matches by its match form', 
   });
 
   it('a phrase a hidden mark kept short now matches as read: create refuses one, so only a value stored before can have it', () => {
-    // Accepted widening: "a‎b" matched only mail with the mark between a and b; read as "ab" it
+    // Accepted widening: "a\u200Eb" matched only mail with the mark between a and b; read as "ab" it
     // also files "Fab Four". Create refuses such a value (`subjectTooShort`), so no rule made today
     // carries one; a special rule for the few stored before cost more than it saves.
-    expect(fixedValueProblem('a‎b', 'subject_contains')).not.toBeNull();
-    expect(oldMatch('a‎b', 'Fab Four')).toBe(false);
-    expect(subjectMatches('a‎b', 'Fab Four')).toBe(true);
-    expect(subjectMatches('a‎b', 'Fa‎b Four')).toBe(true);
+    expect(fixedValueProblem('a\u200Eb', 'subject_contains')).not.toBeNull();
+    expect(oldMatch('a\u200Eb', 'Fab Four')).toBe(false);
+    expect(subjectMatches('a\u200Eb', 'Fab Four')).toBe(true);
+    expect(subjectMatches('a\u200Eb', 'Fa\u200Eb Four')).toBe(true);
   });
 });
 

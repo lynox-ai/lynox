@@ -217,7 +217,7 @@ describe('a refused decision', () => {
 
 describe('what the card shows', () => {
 	it('a hidden character in the body and the subject shows as its code point', async () => {
-		lists.open = { entries: [card({ mail: { ...(card().mail as Card), subject: 'Rech​nung', bodyText: 'Bitte ‮zahlen​.' } })], pending: 1 };
+		lists.open = { entries: [card({ mail: { ...(card().mail as Card), subject: 'Rech\u200Bnung', bodyText: 'Bitte \u202Ezahlen\u200B.' } })], pending: 1 };
 		await render();
 		expect(q('[data-body]')?.textContent).toBe('Bitte ⟨U+202E⟩zahlen⟨U+200B⟩.');
 		expect(q('h2')?.textContent?.trim()).toBe('Rech⟨U+200B⟩nung');
