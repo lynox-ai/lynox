@@ -424,6 +424,19 @@ describe('google_calendar tool', () => {
       expect(result).toContain('Not sent: lynox asked the user whether to send to "x@evil.example", and they said no.');
     });
 
+    it('a word in place of the key: the refusal\'s sentences, then why nothing was allowed, then the guest named by position', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x;y@evil.example' }]));
+      const { agent } = owner([], ['yes']);
+      const result = String(await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent));
+      expect(patches()).toEqual([]);
+      const [sentences, ...rest] = result.split('\n\nThe recipient named above by position');
+      expect(rest).toHaveLength(1);
+      expect(sentences).not.toContain('x;y');
+      expect(sentences!.endsWith('The answer was not one of the offered choices, so nothing was allowed. Tell the user to ask again and answer with the buttons; if no buttons were shown, their page is outdated and needs a reload first.')).toBe(true);
+      expect(result).not.toContain('</untrusted_data>.');
+    });
+
     it('in German the guest is said to come from the event\'s current guest list', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }, { email: 'y@evil.example' }]));

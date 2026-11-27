@@ -34,7 +34,7 @@ import { currentCallFiling, currentCallOwnerKnownFor, currentCallTargetOrigin } 
 import { UNATTENDED_BLOCK_ANSWER } from '../../../core/prompt-store.js';
 import { noticeLanguage } from '../../../core/notice-language.js';
 import { wrapUntrustedData } from '../../../core/data-boundary.js';
-import { originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originUnreadable, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
+import { heldTargets, originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originUnreadable, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
 import { normalizeMailTarget } from '../../../core/send-target.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import type { MailReplyPayload, StoredAddress } from '../../../core/approval-store.js';
@@ -177,7 +177,9 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         if (consent !== 'send') {
           // A no to the question where a recipient comes from is said as such, so the model does
           // not try another recipient.
-          return unnamed.length > 0 ? withSender(consentRefusal(consent, originDenied(targets, shownOrigin, 'mail'))) : consentRefusal(consent, 'mail_reply cancelled by user.');
+          if (unnamed.length === 0) return consentRefusal(consent, 'mail_reply cancelled by user.');
+          // The recipients named by position follow the refusal's own sentences, why-not-understood included.
+          return withSender(`${consentRefusal(consent, originDenied(targets, shownOrigin, 'mail', false))}${heldTargets(targets, 'mail')}`);
         }
 
         // Owner-named in the log only when the dispatcher checked every recipient and found it

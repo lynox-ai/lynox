@@ -2373,6 +2373,14 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
     expect(provider.send).not.toHaveBeenCalled();
   });
 
+  it('a sender the owner did not name makes the confirmation a blocked question', async () => {
+    const { agent, asked } = replyAgent('cancel');
+    await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.meta).toEqual({ blocked: true, consent: 'send' });
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
   it('CONTROL: a sender the owner named gets the confirmation as before, with no origin line', async () => {
     const { agent, asked } = replyAgent('send', { ownerKnown: { known: () => 'known' as const } });
     await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);

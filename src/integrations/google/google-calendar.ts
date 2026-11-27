@@ -1,6 +1,6 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
 import { currentCallSignal, currentCallTargetOrigin } from '../../core/call-connection.js';
-import { originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originUnreadable, type OriginTargets, type SendOrigin } from '../../core/origin-notices.js';
+import { heldTargets, originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originUnreadable, type OriginTargets, type SendOrigin } from '../../core/origin-notices.js';
 import { noticeLanguage } from '../../core/notice-language.js';
 import { UNATTENDED_BLOCK_ANSWER } from '../../core/prompt-store.js';
 import type { GoogleAuth } from './google-auth.js';
@@ -319,7 +319,9 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
           // Only the `confirm` key goes ahead; its button names `action`, which decides nothing.
           const consent = decideConsent('google', answer);
           if (consent !== 'confirm') {
-            return consentRefusal(consent, guestCheck.kind === 'ask' ? originDenied(guestCheck.targets, guestCheck.origin, 'mail') : 'Action cancelled by user.');
+            // The guests named by position follow the refusal's own sentences, why-not-understood included.
+            if (guestCheck.kind !== 'ask') return consentRefusal(consent, 'Action cancelled by user.');
+            return `${consentRefusal(consent, originDenied(guestCheck.targets, guestCheck.origin, 'mail', false))}${heldTargets(guestCheck.targets, 'mail')}`;
           }
         }
 
