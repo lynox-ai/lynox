@@ -1532,7 +1532,9 @@ export type UnshowableHeader =
   /** A name longer than a line is shown: not named, as it was not checked for a secret. */
   | { reason: 'name-too-long'; length: number }
   | { reason: 'escaped-secret'; name: string }
-  | { reason: 'secret-name'; name: string };
+  | { reason: 'secret-name'; name: string }
+  /** The headers together cost more readings than the budget allows (`READING_BUDGET_CHARS`). */
+  | { reason: 'unreadable' };
 
 /** What the question does with one header: show it, leave it out but key it, or leave it out. */
 export type HeaderShowing = 'show' | 'key' | 'omit';
@@ -1550,6 +1552,11 @@ export type HeaderShowing = 'show' | 'key' | 'omit';
  * other), a line longer than `SHOWN_HEADER_MAX_CHARS` as shown, a value whose decoded form still
  * holds a secret, and a name that holds one. The key gets the raw values, by lower-case name,
  * sorted: two secrets that mask alike are still two writes.
+ *
+ * Every header is read under one budget, shared by all of them (`withinReadingBudget`): each
+ * is bounded on its own, their number is not. Past it the headers count as unreadable and the
+ * write is refused for everyone, the owner included: a header the question cannot show was
+ * always refused, and enough headers before it must not turn that into a question.
  */
 export function headersForQuestion(
   headers: Readonly<Record<string, unknown>>,
@@ -1569,23 +1576,25 @@ export function headersForQuestion(
     .sort((a, b) => (a.k.trim().toLowerCase() < b.k.trim().toLowerCase() ? -1 : 1));
   const shown = sent.filter((h) => h.how === 'show');
   const spelled = (text: string): string => visible(text).replace(/\t/g, '⟨U+0009⟩');
-  const lines: string[] = [];
-  for (const { k, v } of shown) {
-    // A name longer than a line is shown is refused unread: reading it every way
-    // a server may decode it costs time in its length. Not named, as it was not checked for a secret.
-    if (k.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'name-too-long', length: k.length } };
-    if (mask(k) !== k || hidesEncodedSecret(k, mask)) return { unshowable: { reason: 'secret-name', name: k } };
-    const masked = mask(v);
-    const line = `${spelled(k)}: ${spelled(masked)}`;
-    if (line.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'too-long', name: k, length: line.length } };
-    if (hidesEncodedSecret(masked, mask)) return { unshowable: { reason: 'escaped-secret', name: k } };
-    lines.push(line);
-  }
-  return {
-    lines,
-    names: shown.map(({ k }) => spelled(k)),
-    keyed: sent.map(({ k, v }) => [k.trim().toLowerCase(), v]),
-  };
+  const keyed = sent.map(({ k, v }): [string, string] => [k.trim().toLowerCase(), v]);
+  type Read = { lines: string[] } | { unshowable: UnshowableHeader };
+  const read = withinReadingBudget<Read>(() => {
+    const lines: string[] = [];
+    for (const { k, v } of shown) {
+      // A name longer than a line is shown is refused unread: reading it every way
+      // a server may decode it costs time in its length. Not named, as it was not checked for a secret.
+      if (k.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'name-too-long', length: k.length } };
+      if (mask(k) !== k || hidesEncodedSecret(k, mask)) return { unshowable: { reason: 'secret-name', name: k } };
+      const masked = mask(v);
+      const line = `${spelled(k)}: ${spelled(masked)}`;
+      if (line.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'too-long', name: k, length: line.length } };
+      if (hidesEncodedSecret(masked, mask)) return { unshowable: { reason: 'escaped-secret', name: k } };
+      lines.push(line);
+    }
+    return { lines };
+  }, () => ({ unshowable: { reason: 'unreadable' } }));
+  if ('unshowable' in read) return read;
+  return { lines: read.lines, names: shown.map(({ k }) => spelled(k)), keyed };
 }
 
 /**
