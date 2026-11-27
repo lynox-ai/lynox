@@ -3921,6 +3921,58 @@ describe('gate-record — printed text cannot start a workflow command (security
     expect(seen).toEqual(['gate-record: first', 'gate-record: ::stop-commands::t', 'gate-record: src/# #[add-mask]x.ts']);
   });
 
+  // The call sites in `main`, end to end: the unit tests above call the helpers directly, so a
+  // site that printed raw again would leave them green.
+  function cliRun(write: (dir: string) => string, over: Record<string, string> | ((base: string, head: string) => Record<string, string>)) {
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    const dir = mkdtempSync(join(tmpdir(), 'gr-site-'));
+    try {
+      const g = (...a: string[]) => {
+        const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+        if (r.status !== 0) throw new Error(r.stderr);
+        return r.stdout.trim();
+      };
+      g('init', '-q'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+      writeFileSync(join(dir, 'README.md'), 'x\n');
+      // The real script at the base, so its fields do not read as "predates" and notes about them stay quiet.
+      mkdirSync(join(dir, 'scripts'), { recursive: true });
+      writeFileSync(join(dir, 'scripts/gate-record.mjs'), readFileSync(script, 'utf-8'));
+      g('add', '-A'); g('commit', '-q', '-m', 'base');
+      const base = g('rev-parse', 'HEAD');
+      const file = write(dir);
+      g('add', '-A'); g('commit', '-q', '-m', 'head');
+      const head = g('rev-parse', 'HEAD');
+      const ev = join(dir, 'event.json');
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'A change', body: record({ head: head.slice(0, 12), ...(typeof over === 'function' ? over(base, head) : over) }) } }));
+      writeFileSync(join(dir, 'files.txt'), `${file}\n`);
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE; delete env.GITHUB_REPOSITORY;
+      return spawnSync(process.execPath, [script, '--event-file', ev, '--head', head, '--base', base, '--files-file', join(dir, 'files.txt'), '--base-tip', base, '--repo-visibility', 'private'], { cwd: dir, encoding: 'utf8', env });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  const lines = (out: string) => out.split(/\r\n|\r|\n/);
+
+  it('end to end, the ERROR site: a record line with a lone CR prints no second workflow line', () => {
+    const out = cliRun((dir) => { writeFileSync(join(dir, 'README.md'), 'y\n'); return 'README.md'; },
+      { closes: 'none\nnot a field\r::stop-commands::tok' });
+    expect(out.status, out.stdout).toBe(1);
+    expect(out.stdout).toContain('%0D::stop-commands::tok');
+    expect(lines(out.stdout).filter((l) => l.startsWith('::stop-commands'))).toEqual([]);
+  });
+
+  it('end to end, the NOTE site: a note quoting a `##[` path prints it defused', () => {
+    const PAGE = 'packages/web-ui/src/routes/##[add-mask]x/+page.svelte';
+    const out = cliRun((dir) => {
+      mkdirSync(join(dir, 'packages/web-ui/src/routes/##[add-mask]x'), { recursive: true });
+      writeFileSync(join(dir, PAGE), '<p>x</p>\n');
+      return PAGE;
+    }, (base, head) => ({ ux: 'reviewed U-042', delta: `clean on ${base.slice(0, 12)}..${head.slice(0, 12)}`, 'agent-awareness': 'not needed: a test page' }));
+    // Notes print only for a record that passes.
+    expect(out.status, out.stdout).toBe(0);
+    expect(out.stdout).toContain('# #[add-mask]');
+    expect(out.stdout).not.toContain('##[add-mask]');
+  });
+
   it('end to end: a backtick route with a line break prints no second workflow line', () => {
     const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
     const dir = mkdtempSync(join(tmpdir(), 'gr-cmd-'));
