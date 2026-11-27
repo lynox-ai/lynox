@@ -1700,6 +1700,12 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (78);
    ALTER TABLE bulk_runs ADD COLUMN superseded_by TEXT REFERENCES bulk_runs(id) ON DELETE SET NULL;
    CREATE INDEX IF NOT EXISTS idx_bulk_runs_superseded ON bulk_runs(superseded_by);`,
+  // v79: the phase a run stood in when an undo took it back (`done`, `aborted`, or `writing` with
+  // a halt), so an undo of that undo puts it back exactly there. NULL on every run taken back
+  // before this version: one without a halt reason stood done, one with a reason cannot be told
+  // halted from aborted, and an undo that would put it back is refused (`phase_not_kept`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (79);
+   ALTER TABLE bulk_runs ADD COLUMN phase_before_undo TEXT;`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */
