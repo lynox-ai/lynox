@@ -99,6 +99,7 @@ export function backupSourceProblem(backupPath: string, entry: Pick<BackupFileEn
  * A backup's `manifest.json`, read without following a link: it is read before any entry, and by
  * the list, whose answer carries its fields — a link would lead that read to a file of this machine.
  */
+const MANIFEST_READ_MAX = 2 ** 31 - 1;
 type ManifestRead = { ok: true; raw: Buffer } | { ok: false; why: 'missing' | 'link' | 'unreadable' };
 function readManifestFile(manifestPath: string): ManifestRead {
   let fd: number;
@@ -113,6 +114,10 @@ function readManifestFile(manifestPath: string): ManifestRead {
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) return { ok: false, why: 'unreadable' };
+    // The bound `readFileSync` holds itself (Node's `kIoMaxLength`): a larger file was never read
+    // before, and `createBackup` cannot write one, so it costs no backup. Without it a sparse file
+    // would allocate its whole size in memory.
+    if (st.size > MANIFEST_READ_MAX) return { ok: false, why: 'unreadable' };
     const buf = Buffer.alloc(st.size);
     let length = 0;
     for (let n = 1; n > 0 && length < buf.length; length += n) n = readSync(fd, buf, length, buf.length - length, length);

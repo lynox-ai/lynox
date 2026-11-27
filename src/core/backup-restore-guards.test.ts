@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,7 @@ import { join } from 'node:path';
  * here lands in exactly that window. The verify pass reads the same file first; `skip` lets the
  * reads before the restore's own one go by.
  */
-const readHook = vi.hoisted(() => ({ path: null as string | null, skip: 0, run: null as (() => void) | null }));
+const readHook = vi.hoisted(() => ({ path: null as string | null, skip: 0, run: null as (() => void) | null, lengths: null as number[] | null }));
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>();
   return {
@@ -20,6 +20,10 @@ vi.mock('node:fs', async (importOriginal) => {
       return fs.readFileSync(...args);
     }) as typeof fs.readFileSync,
     // The restore opens an entry by name (no-follow) and reads the descriptor: the open is the read.
+    readSync: ((...args: Parameters<typeof fs.readSync>) => {
+      if (readHook.lengths !== null && typeof args[3] === 'number') readHook.lengths.push(args[3]);
+      return fs.readSync(...args);
+    }) as typeof fs.readSync,
     openSync: ((...args: Parameters<typeof fs.openSync>) => {
       fire(String(args[0]));
       return fs.openSync(...args);
@@ -66,6 +70,7 @@ afterEach(() => {
   readHook.path = null;
   readHook.skip = 0;
   readHook.run = null;
+  readHook.lengths = null;
   _resetWorkspaceAccess();
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   reloadConfig();
@@ -492,6 +497,19 @@ describe('a link inside the backup (the read side)', () => {
     rmSync(manifest);
     renameSync(elsewhere, manifest);
     expect(m.listBackups().map(b => b.backup_id)).toContain(id);
+  });
+
+  it('a sparse manifest.json above the size readFileSync reads: unreadable, without a buffer of its size', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    truncateSync(join(created.path, 'manifest.json'), 2 ** 31);
+    readHook.lengths = [];
+    const verify = m.verifyBackup(created.path);
+    expect(verify.valid).toBe(false);
+    expect(verify.errors).toEqual(['Invalid manifest.json']);
+    // Refused by its size at the open: no read asks for the file's length.
+    expect(Math.max(0, ...readHook.lengths)).toBeLessThan(1024 * 1024);
   });
 
   it('control: the backups folder itself may be a link', async () => {
