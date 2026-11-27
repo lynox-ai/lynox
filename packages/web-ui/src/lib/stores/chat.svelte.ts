@@ -4514,7 +4514,7 @@ const RUN_END_POLL_MS = 2000;
  * A re-attach let go of its run before the run ended: the stream dropped, could not be reached,
  * or its reading was refused. The run may still go on on the server, so a turn queued in this
  * opening waits for its end: sent earlier, the server would answer busy. The registry is asked
- * until the run is no longer in it, then the turns go as after a re-attach that found its run
+ * until the run is no longer in it (or listed as interrupted by a restart), then the turns go as after a re-attach that found its run
  * ended (the review is asked for first). An unanswered ask is asked again. It stops when the
  * thread is left or opened again, a run of this chat starts (that run drains the queue), or
  * nothing waits any more.
@@ -4529,7 +4529,12 @@ function drainWhenRunEnds(runId: string, gen: number): void {
 			const res = await fetch(`${getApiBase()}/runs/active`);
 			if (res.ok) {
 				const runs = ((await res.json()) as { runs?: unknown } | null)?.runs;
-				ended = Array.isArray(runs) && !runs.some((r) => typeof r === 'object' && r !== null && (r as { runId?: unknown }).runId === runId);
+				// A run a restart left `interrupted` stays listed but runs no more.
+				ended = Array.isArray(runs) && !runs.some((r) => {
+					if (typeof r !== 'object' || r === null) return false;
+					const { runId: id, status } = r as { runId?: unknown; status?: unknown };
+					return id === runId && status !== 'interrupted';
+				});
 			}
 		} catch { /* not answered: asked again */ }
 		if (!current()) return;

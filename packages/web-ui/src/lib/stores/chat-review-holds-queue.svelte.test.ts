@@ -42,8 +42,9 @@ let liveRunIn: string | null;
 /** How the stream of the run re-attached to answers: as usual, not found (the run had ended),
  *  dropped before its end, not reachable, or its reading refused. */
 let liveStream: 'done' | 'gone' | 'aborted' | 'unreachable' | 'refused';
-/** While true, the registry lists the live run as running. */
+/** While true, the registry lists the live run, with this status. */
 let liveRunActive: boolean;
+let liveRunStatus: 'running' | 'interrupted';
 /** The transcript the server gives with the live run; long enough, the chat takes it and re-attaches. */
 let liveTranscript: Array<{ role: string; content: string }>;
 /** How often the live run's stream was asked for. */
@@ -68,7 +69,7 @@ function serve(): void {
 			// A thread opened again keeps its id; new chats get t1, then t2.
 			return json({ sessionId: body.threadId ?? (newSessions++ === 0 ? 't1' : 't2') });
 		}
-		if (url.endsWith('/runs/active')) return json({ runs: liveRunActive ? [{ runId: 'r-live', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] : [] });
+		if (url.endsWith('/runs/active')) return json({ runs: liveRunActive ? [{ runId: 'r-live', threadId: 't1', status: liveRunStatus, lastPersistedSeq: 0 }] : [] });
 		if (url.endsWith('/run') && refuseNextRunForReview) {
 			const held = refuseNextRunForReview;
 			refuseNextRunForReview = null;
@@ -158,6 +159,7 @@ beforeEach(async () => {
 	liveRunIn = null;
 	liveStream = 'done';
 	liveRunActive = false;
+	liveRunStatus = 'running';
 	liveTranscript = [{ role: 'user', content: 'earlier' }];
 	liveStreamGets = 0;
 	newSessions = 0;
@@ -667,6 +669,17 @@ describe('a turn queued before a reload waits for the review the server holds', 
 				expect(runTasks, 'the turn goes once, after the run\'s end').toEqual(['edit the notes', 'then this']);
 			});
 		}
+
+		it('a run a restart left interrupted counts as ended: the queued turn goes', async () => {
+			await reopenAndLose('aborted');
+			expect(runTasks, 'positive control: nothing sent while it runs').toEqual(['edit the notes']);
+			liveRunStatus = 'interrupted'; // still listed, no longer running
+			await wait(2300);
+			await settle();
+			await wait(200);
+			await settle();
+			expect(runTasks, 'the turn goes').toEqual(['edit the notes', 'then this']);
+		});
 
 		it('the queued turn is not sent after the run\'s end while a review is open', async () => {
 			await reopenAndLose('aborted');
