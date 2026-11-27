@@ -6837,7 +6837,12 @@ export class LynoxHTTPApi {
       // The files the rollback was asked to restore, by name: all of them, or the ones chosen.
       // A rollback that stops partway names those of them it has not restored yet.
       let asked: Set<string> | null = null;
+      // The files a finished rollback left, as it returned them. A throw after that (naming them,
+      // counting) still has a rollback that happened to report: the answer is the one given when
+      // the changes cannot be read, every file left named and no count.
+      let finishedLeft: string[] | null = null;
       let aborted = false;
+      let nameOfLeft: (abs: string) => string = (abs) => abs;
       try {
         let accepted: number | null = 0;
         let rolledBack: number | null = 0;
@@ -6848,6 +6853,7 @@ export class LynoxHTTPApi {
         // The files the rollback left as they are (replaced or linked since, or not writable).
         let notRestored: string[] = [];
         const nameOf = (abs: string): string => nameByAbs.get(abs) ?? abs;
+        nameOfLeft = nameOf;
         // Rollback all: a file the review does not show now and the backup could not read is left
         // out. Nothing was saved for it, so nothing was promised, and the reason the answer gives for
         // it would be wrong. A file shown once and replaced by a link since cannot be told apart from
@@ -6864,6 +6870,7 @@ export class LynoxHTTPApi {
           rollbackStarted = true;
           const left = csm.rollbackAll();
           rollbackStarted = false;
+          finishedLeft = left;
           notRestored = changes ? named(left, changes) : left.map(nameOf);
           rolledBack = changes ? changes.filter((c) => !notRestored.includes(c.file)).length : null;
         } else {
@@ -6884,6 +6891,7 @@ export class LynoxHTTPApi {
             rollbackStarted = true;
             const left = csm.rollbackFiles(toRollback);
             rollbackStarted = false;
+            finishedLeft = left;
             notRestored = left.map(nameOf);
           }
           rolledBack = toRollback.length - notRestored.length;
@@ -6892,7 +6900,15 @@ export class LynoxHTTPApi {
 
         jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
       } catch (err) {
-        if (!rollbackStarted) throw err;
+        if (!rollbackStarted) {
+          // A rollback that finished is reported as one, not as a failed answer: the files are
+          // back and the review ends, so a failure would send the person to answer a review
+          // that is gone. Without the count the reason a file stayed is unknown, as the answer
+          // says when the changes cannot be read.
+          if (finishedLeft === null || res.headersSent) throw err;
+          jsonResponse(res, 200, { ok: true, accepted: null, rolledBack: null, notRestored: finishedLeft.map(nameOfLeft) });
+          return;
+        }
         // Stopped partway: what it restored is forgotten, the rest keeps its backup and stays
         // in the review, and so does the hold on the next message. A second rollback can finish
         // the job; the answer names what is left.
