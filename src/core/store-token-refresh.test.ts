@@ -405,6 +405,27 @@ describe('the refresh of an expiring store connection', () => {
     expect(lines().some((l) => l.includes('could not be marked ended'))).toBe(false);
   });
 
+  it('a profile removed while an ending refresh was out is left as it is, and the line does not say it was connected again', async () => {
+    hold.answer = async () => { expect(store.remove(ID)).toBe(true); return answer({ error: 'invalid_grant' }, 400); };
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+    expect(store.get(ID)).toBeUndefined();
+    expect(lines().filter((l) => l.includes('outcome=dead (due): the store refused the refresh with HTTP 400 (invalid_grant); the connection was left as it is (changed meanwhile)'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('connected again') || l.includes('not saved'))).toBe(false);
+  });
+
+  it('an ending refresh whose mark cannot be saved says so, not that the profile changed', async () => {
+    hold.answer = async () => answer({ error: 'invalid_grant' }, 400);
+    const save = vi.spyOn(store, 'save').mockImplementation(() => ({ ok: false }) as never);
+    try {
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+    } finally {
+      save.mockRestore();
+    }
+    expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-old'));
+    expect(lines().filter((l) => l.includes('outcome=dead (due): the store refused the refresh with HTTP 400 (invalid_grant); the connection was left as it is (it could not be marked ended)'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('changed meanwhile'))).toBe(false);
+  });
+
   it('a write failure whose ending cannot be saved either is still dead, and its line says the mark is missing', async () => {
     const save = vi.spyOn(store, 'save').mockImplementation(() => ({ ok: false }) as never);
     try {
