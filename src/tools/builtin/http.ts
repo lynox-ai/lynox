@@ -1046,7 +1046,9 @@ export function detectSecretInContent(content: string): string | null {
   return null;
 }
 
-const BASE64_RUN = /[A-Za-z0-9+/=]{64,}/;
+/** The two shapes of a GET query the exfiltration check flags; exported so a measurement can use the same values. */
+export const GET_QUERY_MAX_CHARS = 500;
+export const BASE64_RUN = /[A-Za-z0-9+/=]{64,}/;
 
 /** A run of 64+ base64 characters that mixes upper case, lower case and digits. */
 function hasBase64ShapedRun(text: string): boolean {
@@ -1063,7 +1065,7 @@ function detectGetExfiltration(url: string): string | null {
     // Flag query strings >500 chars (heuristic for encoded data exfil), measured on the query
     // as sent: percent-decoding only ever shortens a string (each `%XX` becomes one character or
     // one byte), so the form as sent is the upper bound and the conservative one to measure.
-    if (parsed.search.length > 500) {
+    if (parsed.search.length > GET_QUERY_MAX_CHARS) {
       return 'suspiciously long query string (>500 chars, possible data exfiltration)';
     }
     // Detect base64-looking blobs in URL params — in the query as sent, and in the forms
