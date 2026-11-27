@@ -9,6 +9,8 @@
  * choosing such a cell for someone else; these helpers find the cells so the owner sees them.
  */
 
+import { SHEETS_NOTE_DIALOG, type DialogLanguage } from '../../tools/dialog-text.js';
+
 /** A number as Sheets reads it: sign, digits with one decimal mark, an exponent, a percent. */
 const PLAIN_NUMBER = /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:e[+-]?\d+)?%?$/i;
 
@@ -78,23 +80,15 @@ function firstCell(range: string | undefined): { col: number; row: number } | un
   return { col: columnIndex(match[1]!), row: Number(match[2]) };
 }
 
-/** 1 → 1st, 2 → 2nd, 11 → 11th, 23 → 23rd. */
-function ordinal(n: number): string {
-  const tens = n % 100;
-  const suffix = tens >= 11 && tens <= 13 ? 'th' : (['th', 'st', 'nd', 'rd'][n % 10] ?? 'th');
-  return `${n}${suffix}`;
-}
-
 /**
  * Every cell of `values` that may be read as a formula, named as the owner finds it. A write
  * whose range names its first cell starts there, so the cell gets its address (`C2`). Otherwise
- * it is named by its place in the values given (`1st row, 2nd value`): an append's rows go where
+ * it is named by its place in the values given (`1st row, 2nd value`, in the question's language): an append's rows go where
  * Google finds the end of the table, and where its columns start is Google's to find too.
  */
-export function formulaCells(values: unknown, range: string | undefined, action: 'write' | 'append'): FormulaCell[] {
+export function formulaCells(values: unknown, range: string | undefined, action: 'write' | 'append', language: DialogLanguage = 'en'): FormulaCell[] {
   if (!Array.isArray(values)) return [];
   const start = action === 'write' ? firstCell(range) : undefined;
-  const rows = action === 'append' ? 'new row' : 'row';
   const found: FormulaCell[] = [];
   values.forEach((row, r) => {
     if (!Array.isArray(row)) return;
@@ -102,7 +96,7 @@ export function formulaCells(values: unknown, range: string | undefined, action:
       if (!startsLikeFormula(value)) return;
       const cell = start
         ? `${columnName(start.col + c)}${start.row + r}`
-        : `${ordinal(r + 1)} ${rows}, ${ordinal(c + 1)} value`;
+        : SHEETS_NOTE_DIALOG[language].cellPlace(r + 1, c + 1, action === 'append');
       found.push({ cell, formula: value });
     });
   });

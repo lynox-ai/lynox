@@ -953,6 +953,72 @@ export const GOOGLE_DIALOG: Readonly<Record<DialogLanguage, GoogleDialog>> = {
   },
 };
 
+/** 1 → 1st, 2 → 2nd, 11 → 11th, 23 → 23rd. */
+function ordinal(n: number): string {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? 'th' : (['th', 'st', 'nd', 'rd'][n % 10] ?? 'th');
+  return `${n}${suffix}`;
+}
+
+/**
+ * What the sheets tool adds to its question after content from outside the chat: the formula
+ * part of a write or an append, and the request part of a format call. Its options are not here;
+ * they are still words the answer is read against.
+ */
+export interface SheetsNoteDialog {
+  /** Why it asks, with `n` the cells that start like a formula. */
+  readonly formulaHead: (n: number) => PromptText;
+  /** What a formula can do, said the same wherever a question shows one. */
+  readonly formulaFetches: PromptText;
+  readonly formulaMore: (n: number) => PromptText;
+  /**
+   * Why the option that writes formulas is not offered, naming it as `button`, the option's own
+   * label, so the sentence follows the label. The number is written out, as the question's own words.
+   */
+  readonly formulaOnlyShown: (button: string) => PromptText;
+  /** A cell named by its place in the values given, when the range names no first cell. */
+  readonly cellPlace: (row: number, value: number, appended: boolean) => string;
+  /** Why a format call asks, with `n` the requests shown. */
+  readonly formatHead: (n: number) => PromptText;
+  readonly formatShown: (n: number) => PromptText;
+  /** A request whose type cannot be told, shown by its body. */
+  readonly formatUntyped: (body: string) => PromptText;
+  readonly formatMore: (n: number) => PromptText;
+}
+
+export const SHEETS_NOTE_DIALOG: Readonly<Record<DialogLanguage, SheetsNoteDialog>> = {
+  en: {
+    formulaHead: (n) => n === 1
+      ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these cells starts like a formula, and Google runs a formula when it is written.`
+      : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these cells start like a formula, and Google runs a formula when it is written.`,
+    formulaFetches: pv`A formula can make Google fetch an address and send data from the sheet with it. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE and IMAGE are examples; other functions can do it too. The address need not be written out: a formula can build it from other cells.`,
+    formulaMore: (n) => pv`and ${n} more`,
+    formulaOnlyShown: () => pv`Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.`,
+    cellPlace: (row, value, appended) => `${ordinal(row)} ${appended ? 'new row' : 'row'}, ${ordinal(value)} value`,
+    formatHead: (n) => n === 1
+      ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, or change what a reader sees in a cell or sheet, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, which Google runs on its side.`
+      : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these requests can write cell content or a rule, or change what a reader sees in a cell or sheet, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, which Google runs on its side.`,
+    formatShown: (n) => n === 1 ? pv`The request is shown in full:` : pv`These ${n} requests are shown in full:`,
+    formatUntyped: (body) => pv`request: ${body}`,
+    formatMore: (n) => n === 1 ? pv`and 1 formatting request that writes no cell content` : pv`and ${n} formatting requests that write no cell content`,
+  },
+  de: {
+    formulaHead: (n) => n === 1
+      ? pv`Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. 1 dieser Zellen beginnt wie eine Formel, und Google führt eine Formel beim Schreiben aus.`
+      : pv`Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. ${n} dieser Zellen beginnen wie eine Formel, und Google führt eine Formel beim Schreiben aus.`,
+    formulaFetches: pv`Eine Formel kann Google eine Adresse abrufen lassen und dabei Daten aus der Tabelle mitschicken. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE und IMAGE sind Beispiele; andere Funktionen können das auch. Die Adresse muss nicht ausgeschrieben sein: Eine Formel kann sie aus anderen Zellen zusammensetzen.`,
+    formulaMore: (n) => pv`und ${n} weitere`,
+    formulaOnlyShown: (button) => pv`„${button}“ steht nur zur Wahl, wenn hier jede Formel gezeigt wird. Willst du sie als Formeln schreiben, bitte im Chat darum, höchstens 5 auf einmal zu schreiben.`,
+    cellPlace: (row, value, appended) => `${row}. ${appended ? 'neue Zeile' : 'Zeile'}, ${value}. Wert`,
+    formatHead: (n) => n === 1
+      ? pv`Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. 1 dieser Anfragen kann Zellinhalt oder eine Regel schreiben oder ändern, was jemand in einer Zelle oder einem Blatt sieht, etwa ein Zahlenformat, einen Link, die Schreibrichtung oder ausgeblendete Zeilen. Inhalt und Regeln können eine Formel enthalten, die Google bei sich ausführt.`
+      : pv`Dieser Chat hat Inhalt von aussen gelesen, etwa eine Webseite, eine E-Mail oder eine Datei. ${n} dieser Anfragen können Zellinhalt oder eine Regel schreiben oder ändern, was jemand in einer Zelle oder einem Blatt sieht, etwa ein Zahlenformat, einen Link, die Schreibrichtung oder ausgeblendete Zeilen. Inhalt und Regeln können eine Formel enthalten, die Google bei sich ausführt.`,
+    formatShown: (n) => n === 1 ? pv`Die Anfrage steht hier vollständig:` : pv`Diese ${n} Anfragen stehen hier vollständig:`,
+    formatUntyped: (body) => pv`Anfrage: ${body}`,
+    formatMore: (n) => n === 1 ? pv`und 1 Formatierungsanfrage, die keinen Zellinhalt schreibt` : pv`und ${n} Formatierungsanfragen, die keinen Zellinhalt schreiben`,
+  },
+};
+
 /** The memory tools' confirmations: a merge of two subjects, a block edit, a retired entry. */
 export interface MemoryDialog {
   readonly merge: (dup: string, canon: string) => PromptText;
