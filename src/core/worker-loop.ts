@@ -33,7 +33,7 @@ import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, ownerInstructionCounts, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, ownedBy, ownerInstructionCounts, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
@@ -2871,10 +2871,21 @@ export class WorkerLoop {
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
     const runAs = this.#runAs(task.id, starter);
     const triggerTier = admittedTriggerTier(task.model_tier);
+    // An answer given in a conversation that is not the one of whom the run is for is not taken:
+    // a run by hand of a mandate, or a mandate's plan, that picked up a question asked in the
+    // owner's chat would write into that chat, or, in a new thread, put its question and answer
+    // where the mandate reads them (a mandate reads every chat it opened, contained or not). The
+    // answer is released unread, as for an access that has ended, and the run goes on without it.
+    // The owner owns every conversation; a missing row is no one's.
+    const threads = answered !== undefined ? this.engine.getThreadStore() : null;
+    if (answered !== undefined && !isOwnerPrincipal(runAs) && !ownedBy(threads?.getThread(answered.session_id), runAs)) {
+      this.engine.getPromptStore()?.releaseTrigger(answered.id);
+      answered = undefined;
+    }
     // Same thread, so the run's own history shows the exchange it continues — unless the owner
     // deleted that conversation in the meantime. Then the run goes to a new thread: a deleted
     // one is not opened again, and the question and its answer reach the run as input anyway.
-    const continueIn = answered !== undefined && this.engine.getThreadStore()?.isDeleted(answered.session_id) !== true
+    const continueIn = answered !== undefined && threads?.isDeleted(answered.session_id) !== true
       ? answered.session_id
       : undefined;
     const session = this.engine.createSession({
