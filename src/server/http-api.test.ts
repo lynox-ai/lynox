@@ -26276,6 +26276,28 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     });
   });
 
+  // Reading the changes of another person's conversation is allowed, so it is not refused; its
+  // answer is the same whether a session is live there or not.
+  describe('GET /api/sessions/:id/changeset on another person\'s conversation', () => {
+    it('gives a mandate the same status and body whether a session is live in it or not', async () => {
+      asMandate();
+      sessionRanBy(OWNER_PRINCIPAL);
+      const live = await jsonFetch(`/api/sessions/${FOREIGN}/changeset`);
+      expect(live.status, 'with a live session').toBe(200);
+      mockSessionGet.mockReturnValue(undefined);
+      const none = await jsonFetch(`/api/sessions/${FOREIGN}/changeset`);
+      expect(none.status, 'without a session').toBe(200);
+      expect(await none.text(), 'the answer differs with the session').toBe(await live.text());
+    });
+
+    it('control: the owner, and a mandate in its own conversation, still get the 404 for no session', async () => {
+      mockSessionGet.mockReturnValue(undefined);
+      expect((await jsonFetch(`/api/sessions/${FOREIGN}/changeset`)).status).toBe(404);
+      asMandate();
+      expect((await jsonFetch(`/api/sessions/${OWN}/changeset`)).status).toBe(404);
+    });
+  });
+
   // Someone else's conversation is refused before the session is looked up, so the answer does
   // not tell a mandate whether a session is live in it. Each route by name: a lookup moved back
   // before the check on one of them fails that route's test.
