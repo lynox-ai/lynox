@@ -7,8 +7,7 @@
 	import { trySaveArtifact, saveFailureText } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
-	import { getThreadContained } from '../stores/chat.svelte.js';
-	import { visibleTextOfHtml } from '../utils/artifact-copy.js';
+	import { shownTextOfHtml, copyableText } from '../utils/artifact-copy.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
@@ -26,9 +25,11 @@
 		content: string;
 		/** When true, defer artifact iframe rendering (show code instead). */
 		streaming?: boolean;
+		/** The chat this renders in only reads: a copied text is on its way to a new chat. */
+		containedChat?: boolean;
 	}
 
-	let { content, streaming = false }: Props = $props();
+	let { content, streaming = false, containedChat = false }: Props = $props();
 
 	let highlightedHtml = $state('');
 
@@ -145,11 +146,15 @@
 		const body = clean.replace(/<!-{2}\s*type:\s*markdown\s*-->\s*/i, '').trim();
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
-		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
+		// No `style` and no `class`: neither can hide text in the card, so the text "Copy text" takes
+		// from it is the text the card shows.
+		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string, { FORBID_ATTR: ['style', 'class'] });
 		const encodedMd = btoa(unescape(encodeURIComponent(body)));
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
-		const actions = artifactActionBtns(displayTitle, body !== '');
-		return `<div class="artifact-container artifact-md artifact-collapsed"${OWN_MARK} data-md="${encodedMd}" data-title="${safeTitle}" data-artifact-type="markdown"${idAttr}>
+		const shown = shownTextOfHtml(rendered);
+		const copyAttr = shown ? ` data-copy="${btoa(unescape(encodeURIComponent(shown)))}"` : '';
+		const actions = artifactActionBtns(displayTitle, shown ? { lines: null } : null);
+		return `<div class="artifact-container artifact-md artifact-collapsed"${OWN_MARK} data-md="${encodedMd}"${copyAttr} data-title="${safeTitle}" data-artifact-type="markdown"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon('markdown')}</span>
 				<span class="artifact-label">Markdown</span>
@@ -179,6 +184,9 @@
 	 *  produces a real Blob with the right extension and MIME type. The full
 	 *  body is embedded as `data-raw` so the download is the exact file, not
 	 *  the truncated preview. */
+	/** How many lines of a data card the preview shows. */
+	const DATA_PREVIEW_LINES = 60;
+
 	function buildDataArtifact(code: string, type: string, artifactId = ''): string {
 		const meta = DATA_ARTIFACT_META[type] ?? DATA_ARTIFACT_META['text']!;
 		const { title, clean } = extractTitle(code);
@@ -189,9 +197,14 @@
 		const safeTitle = escapeHtml(displayTitle);
 		const encodedRaw = btoa(unescape(encodeURIComponent(body)));
 		const lines = body.split('\n');
-		const preview = escapeHtml(lines.slice(0, 60).join('\n')) + (lines.length > 60 ? '\n…' : '');
+		const preview = escapeHtml(lines.slice(0, DATA_PREVIEW_LINES).join('\n')) + (lines.length > DATA_PREVIEW_LINES ? '\n…' : '');
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
-		const actions = artifactActionBtns(displayTitle, body !== '');
+		// The button copies the whole file; when the preview shows less, the button says how much.
+		const more = lines.length > DATA_PREVIEW_LINES;
+		const actions = artifactActionBtns(displayTitle, body !== '' ? { lines: more ? lines.length : null } : null);
+		const moreLine = more
+			? `<p class="artifact-data-more">${escapeHtml(tf('artifacts.lines_shown', { shown: String(DATA_PREVIEW_LINES), n: String(lines.length) }))}</p>`
+			: '';
 		return `<div class="artifact-container artifact-data artifact-collapsed"${OWN_MARK} data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}" data-artifact-type="${type}"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(type)}</span>
@@ -200,6 +213,7 @@
 				${actions}
 			</div>
 			<pre class="artifact-data-body"><code>${preview}</code></pre>
+			${moreLine}
 		</div>`;
 	}
 
@@ -241,11 +255,9 @@
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
-		// What "Copy text" copies: the text a reader sees, without tags, scripts or styles. A card
-		// that shows no text gets no copy button.
-		const visibleText = visibleTextOfHtml(clean);
-		const copyAttr = visibleText ? ` data-copy="${btoa(unescape(encodeURIComponent(visibleText)))}"` : '';
-		const actions = artifactActionBtns(displayTitle, visibleText !== '');
+		// No copy button: what the frame shows cannot be read from the source (a stylesheet can hide
+		// text, a script can replace it), so a copy could carry text the user never saw.
+		const actions = artifactActionBtns(displayTitle, null);
 		const typeMatch = src.match(/<!-{2}\s*type:\s*([a-z]+)\s*-->/i);
 		const typeKey = typeMatch ? typeMatch[1]!.toLowerCase() : 'html';
 		const typeLabel = typeKey.toUpperCase();
@@ -254,7 +266,7 @@
 		// The frame itself is not markup: the slot below is filled after the render by
 		// `attachFrames`, with a frame on the sandboxed endpoint. The slot carries OWN_MARK,
 		// which the sanitizer strips from message markup, so a message cannot forge one.
-		const markup = `<div class="artifact-container artifact-collapsed"${OWN_MARK} data-html="${encoded}"${copyAttr} data-title="${safeTitle}" data-artifact-type="${typeKey}"${idAttr}>
+		const markup = `<div class="artifact-container artifact-collapsed"${OWN_MARK} data-html="${encoded}" data-title="${safeTitle}" data-artifact-type="${typeKey}"${idAttr}>
 			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(typeKey)}</span>
 				<span class="artifact-label">${typeLabel}</span>
@@ -272,13 +284,23 @@
 	 *  download options live in the gallery view. On mobile the export button
 	 *  uses the iOS share glyph (it opens the native share sheet). Every builder
 	 *  (html/svg, markdown, data) uses this so the pill is identical everywhere. */
-	function artifactActionBtns(title: string, copyable: boolean): string {
+	/** The copy button of a card: `null` for none, `lines` set when it copies more lines than the
+	 *  card shows. */
+	type CopyButton = { readonly lines: number | null } | null;
+
+	function artifactActionBtns(title: string, copy: CopyButton): string {
 		const shareIcon = isIosSafari() ? ICON_SHARE : ICON_DOWNLOAD;
-		// "Copy text" names what it does in words, not only with an icon: it is the way to take a
-		// text from lynox into a new chat, and a chat that only reads says to copy it first.
-		const copyBtn = copyable
-			? `<button type="button" class="artifact-btn artifact-copy"${OWN_MARK} data-action="copy" aria-label="${escapeHtml(tf('artifacts.copy_text_aria', { title }))}">${ICON_COPY}<span class="artifact-copy-label">${escapeHtml(t('artifacts.copy_text'))}</span></button>`
-			: '';
+		// The copy button names what it does in words, not only with an icon: it is the way to take
+		// a text from lynox into a new chat, and a chat that only reads says to copy it first. It
+		// shows on the closed card too, so the way out needs no opening.
+		let copyBtn = '';
+		if (copy) {
+			const n = copy.lines === null ? null : String(copy.lines);
+			const label = n === null ? t('artifacts.copy_text') : tf('artifacts.copy_lines', { n });
+			const name = n === null ? tf('artifacts.copy_text_aria', { title }) : tf('artifacts.copy_lines_aria', { n, title });
+			const linesAttr = n === null ? '' : ` data-lines="${n}"`;
+			copyBtn = `<button type="button" class="artifact-btn artifact-copy"${OWN_MARK} data-action="copy"${linesAttr} aria-label="${escapeHtml(name)}">${ICON_COPY}<span class="artifact-copy-label">${escapeHtml(label)}</span></button>`;
+		}
 		return `${copyBtn}<button class="artifact-btn"${OWN_MARK} data-action="expand" title="Expand">${ICON_EXPAND}</button>
 				<button class="artifact-btn"${OWN_MARK} data-action="share" title="Share">${shareIcon}</button>
 				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>`;
@@ -377,7 +399,7 @@
 		}
 
 		// Copying does not open the card: it takes the text and leaves the card as it is.
-		if (hit.action === 'copy') { void handleCopyText(container); return; }
+		if (hit.action === 'copy') { void handleCopyText(container, e.target as Element); return; }
 
 		// Artifact toolbar actions. Auto-expand if collapsed.
 		if (container.classList.contains('artifact-collapsed')) {
@@ -413,16 +435,17 @@
 	/** Quick export: share (mobile) / download (desktop) the artifact's SOURCE
 	 *  file, dispatched by embedded data. Full print/download live in the gallery
 	 *  big view. Reuses the iOS-aware download handlers (Web Share on iOS). */
-	/** The text "Copy text" takes: what lynox wrote for a markdown or data card, the visible
-	 *  text for an HTML card. */
+	/** The text a card's copy button takes: the shown text of a markdown card, the file of a data
+	 *  card. An HTML card has no copy button. */
 	function copyTextOf(container: HTMLElement): string {
-		if (container.dataset['md'] !== undefined) return decodeDataMd(container);
 		if (container.dataset['raw'] !== undefined) return decodeB64(container.dataset['raw'] ?? '');
-		return decodeB64(container.dataset['copy'] ?? '');
+		if (container.dataset['md'] !== undefined) return decodeB64(container.dataset['copy'] ?? '');
+		return '';
 	}
 
-	async function handleCopyText(container: HTMLElement) {
-		const text = copyTextOf(container);
+	async function handleCopyText(container: HTMLElement, target: Element) {
+		const lines = target.closest('[data-lines]')?.getAttribute('data-lines') ?? null;
+		const { text, removed } = copyableText(copyTextOf(container));
 		try {
 			if (!text) throw new Error('nothing to copy');
 			await navigator.clipboard.writeText(text);
@@ -430,8 +453,13 @@
 			addToast(t('common.copy_failed'), 'error', 4000);
 			return;
 		}
+		const parts: string[] = [];
+		if (lines !== null) parts.push(tf('artifacts.copied_lines', { n: lines }));
+		else parts.push(removed || containedChat ? t('artifacts.copied') : t('common.copied'));
+		if (removed) parts.push(t('artifacts.copy_removed_hidden'));
 		// In a chat that only reads, the copied text is on its way to a new chat: say where it goes.
-		addToast(getThreadContained() ? t('artifacts.copied_for_new_chat') : t('common.copied'), 'success', getThreadContained() ? 4000 : 1500);
+		if (containedChat) parts.push(t('artifacts.copy_paste_hint'));
+		addToast(parts.join(' '), 'success', parts.length > 1 ? 4000 : 1500);
 	}
 
 	function handleShare(container: HTMLElement) {
@@ -1333,8 +1361,18 @@
 	div :global(.artifact-collapsed .artifact-data-body) {
 		display: none;
 	}
-	div :global(.artifact-collapsed .artifact-btn) {
+	/* The copy button stays on the closed card: the way out of a chat that only reads must be
+	   found without opening the card. The pill may wrap at 390px for it. */
+	div :global(.artifact-collapsed .artifact-btn:not(.artifact-copy)) {
 		display: none;
+	}
+	div :global(.artifact-collapsed .artifact-toolbar) {
+		flex-wrap: wrap;
+	}
+	div :global(.artifact-data-more) {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+		padding: 0.25rem 0.75rem 0.5rem;
 	}
 
 	div :global(.hidden) {

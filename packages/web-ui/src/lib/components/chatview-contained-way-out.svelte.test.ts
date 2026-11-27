@@ -193,7 +193,7 @@ describe('ChatView in a chat that only reads', () => {
 		expect(target.querySelector('[data-plan-new-chat-note]')).toBeNull();
 	});
 
-	it('says in the new chat that the input holds the user\'s messages, while it holds any', async () => {
+	it('says in the new chat that the input holds the user\'s messages, only while it still holds them', async () => {
 		contained = true;
 		await turnThenRender('Verbessere die Beschreibungen', refused('contained_write'));
 		(target.querySelector('[data-contained-bar] [data-plan-new-chat]') as HTMLButtonElement).click();
@@ -202,10 +202,15 @@ describe('ChatView in a chat that only reads', () => {
 		const note = (): Element | null => target.querySelector('[data-contained-origin] [data-contained-input-note]');
 		expect(note()?.textContent).toMatch(/Im Eingabefeld stehen deine Nachrichten|The input holds your messages/);
 		const input = target.querySelector('textarea') as HTMLTextAreaElement;
-		input.value = '   ';
+		// Pasted or retyped: the input no longer holds what was carried over, so the line would be wrong.
+		input.value = 'Kürze jede Beschreibung auf drei Sätze.';
 		input.dispatchEvent(new Event('input', { bubbles: true }));
 		svelte.flushSync();
-		expect(note(), 'an emptied input holds none of them').toBeNull();
+		expect(note(), 'a changed input').toBeNull();
+		input.value = '';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		svelte.flushSync();
+		expect(note(), 'an emptied input').toBeNull();
 	});
 
 	it('promises the bulk run in that line only where this instance runs one that reads the store', async () => {

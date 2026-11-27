@@ -2,8 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 
-// "Copy text" on an artifact card in the chat: what it copies for each kind of card, what it says
-// afterwards (in a chat that only reads, where the text goes next), and the card that gets none.
+// The copy button on an artifact card in the chat: what it copies for each kind of card (the text
+// a markdown card shows, the file of a data card), what it says afterwards, and the card that gets
+// none. What the card cannot show, the copy cannot carry.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -23,12 +24,6 @@ const toasts = vi.hoisted(() => [] as { text: string; kind: string }[]);
 vi.mock('../stores/toast.svelte.js', async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
 	addToast: (text: string, kind: string) => { toasts.push({ text, kind }); },
-}));
-
-const chat = vi.hoisted(() => ({ contained: false }));
-vi.mock('../stores/chat.svelte.js', async (importOriginal) => ({
-	...(await importOriginal<Record<string, unknown>>()),
-	getThreadContained: () => chat.contained,
 }));
 
 // Spelled in two parts: a module parser reads the comment opener as an HTML-like comment.
@@ -54,9 +49,9 @@ async function settle(ms = 0): Promise<void> {
 	}
 }
 
-async function render(content: string): Promise<void> {
+async function render(content: string, containedChat = false): Promise<void> {
 	const { default: MarkdownRenderer } = await import('./MarkdownRenderer.svelte');
-	component = mount(MarkdownRenderer, { target, props: { content } });
+	component = mount(MarkdownRenderer, { target, props: { content, containedChat } });
 	// Past the 400 ms debounce of the rich blocks.
 	await settle(500);
 }
@@ -72,7 +67,6 @@ async function clickCopy(): Promise<void> {
 
 beforeEach(() => {
 	toasts.length = 0;
-	chat.contained = false;
 	written = [];
 	writeFails = false;
 	Object.defineProperty(navigator, 'clipboard', {
@@ -95,41 +89,73 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe('"Copy text" on an artifact card', () => {
-	it('copies what lynox wrote in a markdown card, says so, and leaves the card closed', async () => {
+const NBSP = String.fromCharCode(0xa0);
+
+describe('the copy button on an artifact card', () => {
+	it('copies the text a markdown card shows, says so, and leaves the card closed', async () => {
 		await render(markdownCard('Regeltext', '# Regel\n\nKürze jede Beschreibung auf drei Sätze.'));
 		const btn = copyButton();
-		expect(btn?.textContent).toMatch(/Text kopieren|Copy text/);
-		expect(btn?.getAttribute('aria-label')).toMatch(/^(Regeltext kopieren|Copy Regeltext)$/);
+		expect(btn?.textContent).toMatch(/^(Text kopieren|Copy text)$/);
+		expect(btn?.getAttribute('aria-label')).toMatch(/^(Text kopieren: Regeltext|Copy text: Regeltext)$/);
 		await clickCopy();
-		expect(written).toEqual(['# Regel\n\nKürze jede Beschreibung auf drei Sätze.']);
+		expect(written).toEqual(['Regel\n\nKürze jede Beschreibung auf drei Sätze.']);
 		expect(toasts).toEqual([{ text: expect.stringMatching(/^(Kopiert|Copied)$/), kind: 'success' }]);
 		expect(target.querySelector('.artifact-container')?.classList.contains('artifact-collapsed')).toBe(true);
 	});
 
 	it('says where the text goes next in a chat that only reads', async () => {
-		chat.contained = true;
-		await render(markdownCard('Regeltext', 'Kürze jede Beschreibung.'));
+		await render(markdownCard('Regeltext', 'Kürze jede Beschreibung.'), true);
 		await clickCopy();
 		expect(written).toEqual(['Kürze jede Beschreibung.']);
-		expect(toasts.map((x) => x.text)).toEqual([expect.stringMatching(/neuen Chat ins Eingabefeld|input of the new chat/)]);
+		expect(toasts.map((x) => x.text)).toEqual([expect.stringMatching(/^(Kopiert\. Füge ihn im neuen Chat ins Eingabefeld ein\.|Copied\. Paste it into the input of the new chat\.)$/)]);
 	});
 
-	it('copies the file of a data card as it is', async () => {
+	it('shows a markdown card without style or class, so inline styles and classes hide nothing it copies', async () => {
+		await render(markdownCard('Regeltext', '<p>Sichtbar.</p><p><span style="font-size:0">Klein.</span> <span class="sr-only">Klasse.</span></p>'));
+		const shownBody = target.querySelector('.artifact-md-body');
+		expect(shownBody?.textContent, 'positive control: the card shows its paragraphs').toContain('Sichtbar.');
+		expect(shownBody?.querySelectorAll('[style], [class]')).toHaveLength(0);
+		await clickCopy();
+		// Both spans show in the card now, so the copy carries exactly what the card shows.
+		expect(written).toEqual(['Sichtbar.\n\nKlein. Klasse.']);
+	});
+
+	it('leaves out what a markdown card does not show: hidden elements, a closed details, comments', async () => {
+		await render(markdownCard('Regeltext', `<p>Sichtbar.</p><p hidden>Versteckt.</p><p aria-hidden="true">Stumm.</p><details><summary>Mehr</summary>Zugeklappt.</details>${OPEN} Kommentar -->`));
+		await clickCopy();
+		expect(written).toEqual(['Sichtbar.\n\nMehr']);
+	});
+
+	it('takes out the characters a reader does not see, and says so', async () => {
+		const hidden = String.fromCodePoint(0x2028) + String.fromCodePoint(0xe0041) + String.fromCodePoint(0x200b);
+		await render(markdownCard('Regeltext', `Kürze${hidden} jede Beschreibung.`));
+		await clickCopy();
+		expect(written).toEqual(['Kürze jede Beschreibung.']);
+		expect(toasts.map((x) => x.text)).toEqual([expect.stringMatching(/^(Kopiert\. lynox hat unsichtbare Zeichen aus dem Text entfernt\.|Copied\. lynox removed invisible characters from the text\.)$/)]);
+	});
+
+	it('copies the file of a data card the preview shows in full', async () => {
 		await render(dataCard('sku,title\nA1,Teekanne'));
+		expect(copyButton()?.textContent).toMatch(/^(Text kopieren|Copy text)$/);
+		expect(target.querySelector('.artifact-data-more')).toBeNull();
 		await clickCopy();
 		expect(written).toEqual(['sku,title\nA1,Teekanne']);
 	});
 
-	it('copies the text an html card shows, without its tags, styles or scripts', async () => {
-		await render(htmlCard('<h1>Regel</h1><p>Drei Sätze je Beschreibung.</p><script>window.secret = 1;</script><table><tr><td>A1</td><td>Teekanne</td></tr></table>'));
+	it('says on the button and in the toast how many lines it copies when the preview shows fewer', async () => {
+		const rows = ['sku,title', ...Array.from({ length: 60 }, (_, i) => `A${i},Teekanne ${i}`)];
+		await render(dataCard(rows.join('\n')));
+		expect(copyButton()?.textContent).toMatch(new RegExp(`^(Alle 61${NBSP}Zeilen kopieren|Copy all 61${NBSP}lines)$`));
+		expect(copyButton()?.getAttribute('aria-label')).toMatch(new RegExp(`^(Alle 61${NBSP}Zeilen kopieren: Liste|Copy all 61${NBSP}lines: Liste)$`));
+		expect(target.querySelector('.artifact-data-more')?.textContent).toMatch(new RegExp(`^(60 von 61${NBSP}Zeilen angezeigt|60 of 61${NBSP}lines shown)$`));
 		await clickCopy();
-		expect(written).toEqual(['Regel\n\nDrei Sätze je Beschreibung.\n\nA1\tTeekanne']);
+		expect(written).toEqual([rows.join('\n')]);
+		expect(toasts.map((x) => x.text)).toEqual([expect.stringMatching(new RegExp(`^(Kopiert: 61${NBSP}Zeilen\\.|Copied: 61${NBSP}lines\\.)$`))]);
 	});
 
-	it('gives an html card that shows no text no copy button', async () => {
-		await render(htmlCard('<svg width="10" height="10"><rect width="10" height="10"/></svg><script>draw();</script>'));
-		expect(target.querySelector('.artifact-container'), 'positive control: the card is there').not.toBeNull();
+	it('gives an html card no copy button', async () => {
+		await render(htmlCard('<h1>Regel</h1><p>Drei Sätze je Beschreibung.</p>'));
+		expect(target.querySelector('.artifact-container button[data-action="expand"]'), 'positive control: the card and its buttons are there').not.toBeNull();
 		expect(copyButton()).toBeNull();
 	});
 
