@@ -3742,12 +3742,12 @@ async function loadChangeset(): Promise<boolean> {
 		// queued turn waits for it. A fetch the network ends lands in the catch and frees the queue.
 		const res = await fetch(`${getApiBase()}/sessions/${sid}/changeset`);
 		// The same thread opened again: its review is read again, for that opening.
-		if (stale()) return sessionId === sid ? loadChangeset() : false;
+		if (stale()) return sessionId === sid ? await loadChangeset() : false;
 		// No session on the server (restarted, or dropped): it holds no review, which is an answer.
 		if (res.status === 404) return true;
 		if (!res.ok) return false;
 		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
-		if (stale()) return sessionId === sid ? loadChangeset() : false;
+		if (stale()) return sessionId === sid ? await loadChangeset() : false;
 		if (data.hasChanges && data.files.length > 0) {
 			pendingChangeset = data.files;
 			pendingChangesetRunId = data.runId ?? null;
@@ -4517,10 +4517,32 @@ const RUN_END_MAX_ASKS = 180;
 let _runEndWait: string | null = null;
 
 /**
+ * The run was still going when the wait ran out: the turns queued in this opening are marked
+ * failed, for a tap to send again, as the busy wait leaves a turn after its six minutes. A turn
+ * without its bubble on screen gets one.
+ */
+function failWaitingTurns(): void {
+	const waiting = messageQueue;
+	messageQueue = [];
+	for (const q of waiting) {
+		const m = messages.find((x) => x.role === 'user' && x.queueId === q.id);
+		if (m) {
+			m.queued = false;
+			m.failed = true;
+		} else {
+			// The opening showed the server's transcript, without the waiting bubble: it comes
+			// back, failed, so the turn is not dropped unseen.
+			messages.push({ role: 'user', content: q.task, failed: true });
+		}
+	}
+	persistChatNow();
+}
+
+/**
  * A re-attach let go of its run before the run ended: the stream dropped, could not be reached,
  * or its reading was refused. The run may still go on on the server, so a turn queued in this
  * opening waits for its end: sent earlier, the server would answer busy. The registry is asked
- * for six minutes at most, until the run is no longer in it (or no longer running), then the turns go as after a re-attach that found its run
+ * for six minutes at most (then the turns are failed, for a tap), until the run is no longer in it (or no longer running), then the turns go as after a re-attach that found its run
  * ended (the review is asked for first). An unanswered ask is asked again. It stops when the
  * thread is left or opened again, a run of this chat starts (that run drains the queue), or
  * nothing waits any more.
@@ -4534,7 +4556,8 @@ function drainWhenRunEnds(runId: string, gen: number): void {
 	const current = (): boolean => _runEndWait === key && gen === _resumeGeneration && streamEpoch === epoch && !isStreaming && messageQueue.length > 0;
 	const stop = (): void => { if (_runEndWait === key) _runEndWait = null; };
 	const ask = async (): Promise<void> => {
-		if (!current() || ++asks > RUN_END_MAX_ASKS) { stop(); return; }
+		if (!current()) { stop(); return; }
+		if (++asks > RUN_END_MAX_ASKS) { stop(); failWaitingTurns(); return; }
 		let ended = false;
 		try {
 			const res = await fetch(`${getApiBase()}/runs/active`);

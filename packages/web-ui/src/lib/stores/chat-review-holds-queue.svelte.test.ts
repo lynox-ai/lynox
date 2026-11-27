@@ -49,6 +49,8 @@ let liveRunStatus: 'running' | 'interrupted';
 let liveTranscript: Array<{ role: string; content: string }>;
 /** How often the live run's stream was asked for. */
 let liveStreamGets: number;
+/** How often the registry of runs was asked. */
+let activeGets: number;
 let newSessions: number;
 /** How often the review was asked for. */
 let changesetGets: number;
@@ -69,6 +71,7 @@ function serve(): void {
 			// A thread opened again keeps its id; new chats get t1, then t2.
 			return json({ sessionId: body.threadId ?? (newSessions++ === 0 ? 't1' : 't2') });
 		}
+		if (url.endsWith('/runs/active')) activeGets++;
 		if (url.endsWith('/runs/active')) return json({ runs: liveRunActive ? [{ runId: 'r-live', threadId: 't1', status: liveRunStatus, lastPersistedSeq: 0 }] : [] });
 		if (url.endsWith('/run') && refuseNextRunForReview) {
 			const held = refuseNextRunForReview;
@@ -162,6 +165,7 @@ beforeEach(async () => {
 	liveRunStatus = 'running';
 	liveTranscript = [{ role: 'user', content: 'earlier' }];
 	liveStreamGets = 0;
+	activeGets = 0;
 	newSessions = 0;
 	changesetGets = 0;
 
@@ -169,7 +173,7 @@ beforeEach(async () => {
 	changesetFails = false;
 	serve();
 });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 /** A run that streams until released, with a message typed and queued behind it. */
 async function queueBehindRun(): Promise<() => void> {
@@ -716,6 +720,54 @@ describe('a turn queued before a reload waits for the review the server holds', 
 			await wait(200);
 			await settle();
 			expect(runTasks, 'the turn goes').toEqual(['edit the notes', 'then this']);
+		});
+
+		it('a run still going after six minutes: the wait stops, and the queued turn is failed for a tap, not sent', async () => {
+			vi.useFakeTimers({ shouldAdvanceTime: true }); // real time runs on; the six minutes are jumped
+			await reopenAndLose('aborted');
+			expect(store.getQueueLength(), 'positive control: the turn waits').toBe(1);
+			await vi.advanceTimersByTimeAsync(6 * 60_000 + 10_000);
+			await settle();
+			const turn = store.getMessages().find((m) => m.content === 'then this');
+			expect(turn?.failed, 'failed, for a tap to send again').toBe(true);
+			expect(turn?.queued, 'no longer shown waiting').toBeFalsy();
+			expect(store.getQueueLength(), 'nothing left in the queue').toBe(0);
+			const asked = activeGets;
+			await vi.advanceTimersByTimeAsync(60_000);
+			await settle();
+			expect(activeGets, 'the registry is asked no more').toBe(asked);
+			liveRunActive = false; // the run ends after all
+			await vi.advanceTimersByTimeAsync(10_000);
+			await settle();
+			expect(runTasks, 'nothing sent on its own').toEqual(['edit the notes']);
+		});
+
+		it('a run that ends within the six minutes: the queued turn goes as before (control)', async () => {
+			vi.useFakeTimers({ shouldAdvanceTime: true });
+			await reopenAndLose('aborted');
+			await vi.advanceTimersByTimeAsync(5 * 60_000);
+			await settle();
+			expect(runTasks, 'positive control: nothing sent while it runs').toEqual(['edit the notes']);
+			liveRunActive = false;
+			await vi.advanceTimersByTimeAsync(5_000);
+			await settle();
+			await vi.advanceTimersByTimeAsync(500);
+			await settle();
+			expect(runTasks, 'the turn goes once').toEqual(['edit the notes', 'then this']);
+		});
+
+		it('a second re-attach that also lets go while the wait runs starts no second wait', async () => {
+			vi.useFakeTimers({ shouldAdvanceTime: true });
+			await reopenAndLose('unreachable');
+			const gets = liveStreamGets;
+			liveRunIn = 't1'; // the server still lists the run for the thread
+			await store.reconcileThread(); // the chat view mounts again and re-attaches to the same run
+			await settle();
+			expect(liveStreamGets, 'positive control: it tried to re-attach again').toBeGreaterThan(gets);
+			const asked = activeGets;
+			await vi.advanceTimersByTimeAsync(20_000);
+			await settle();
+			expect(activeGets - asked, 'one wait: an ask every two seconds, not two').toBeLessThanOrEqual(11);
 		});
 
 		it('the queued turn is not sent after the run\'s end while a review is open', async () => {
