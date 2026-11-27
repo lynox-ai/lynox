@@ -55,8 +55,9 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });
@@ -106,6 +107,27 @@ describe('a target the owner took out', () => {
 		expect(target.textContent).not.toContain(t('bulk.deselect.on'));
 	});
 
+	it('lets the owner take a target out while approving an undo that is not atomic, and names the one taken out', async () => {
+		run = makeRun({ kind: 'undo', phase: 'previewed', atomic: false, sourceRunId: 'r0', applied: 0, undoable: 0, total: 2, maxTargets: 2 });
+		targets = [tgt(1, { written: false }), tgt(3, { deselected: true, written: false })];
+		await render();
+		expect(rowOf(1).textContent).toContain(t('bulk.deselect.off'));
+		expect(rowOf(3).textContent).toContain(t('bulk.deselect.taken_out'));
+		expect(rowOf(3).textContent).toContain(t('bulk.deselect.on'));
+	});
+
+	it('offers no button while approving an atomic undo, and still names the target taken out', async () => {
+		run = makeRun({ kind: 'undo', phase: 'previewed', atomic: true, sourceRunId: 'r0', applied: 0, undoable: 0, total: 2, maxTargets: 2 });
+		targets = [tgt(1, { written: false }), tgt(3, { deselected: true, written: false })];
+		await render();
+		// The page did render the targets: the taken-out one is named.
+		expect(rowOf(3).textContent).toContain(t('bulk.deselect.taken_out'));
+		expect(rowOf(1).querySelector('button')).toBeNull();
+		expect(rowOf(3).querySelector('button')).toBeNull();
+		expect(target.textContent).not.toContain(t('bulk.deselect.off'));
+		expect(target.textContent).not.toContain(t('bulk.deselect.on'));
+	});
+
 	it('names the owner to a mandate', async () => {
 		viewer = 'mandate';
 		await render();
@@ -120,6 +142,16 @@ describe('the head of a run', () => {
 		const head = tf('bulk.head.counts_taken_out', { n: '3', a: '2', d: '1', c: '0', f: '0' });
 		expect(head).toBe('3 · geschrieben 2 · herausgenommen 1 · Konflikte 0 · fehlgeschlagen 0');
 		expect(target.textContent).toContain(head);
+	});
+
+	it('leaves the count of a target taken out to the classes when the engine sends them, not the older line', async () => {
+		run = makeRun({ heads: { deselected: 1, invalid: 0, unchanged: 0, takenBack: 0, written: 2, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 } });
+		await render();
+		const older = tf('bulk.head.counts_taken_out', { n: '3', a: '2', d: '1', c: '0', f: '0' });
+		expect(target.textContent).not.toContain(older);
+		const counts = target.querySelector('[data-testid="bulk-counts"]')!.textContent!;
+		expect(counts).toContain(tf('bulk.heads.deselected', { n: '1' }));
+		expect(counts.split(tf('bulk.heads.deselected', { n: '1' })).length - 1).toBe(1);
 	});
 
 	it('has no taken-out part when nothing was taken out', async () => {

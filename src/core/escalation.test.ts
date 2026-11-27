@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 import { ThreadStore } from './thread-store.js';
-import { NotificationRouter as RealRouter, type ChannelOutcome, type DeliverySummary, type NotificationRouter, type NotificationMessage } from './notification-router.js';
+import { NotificationRouter as RealRouter, type ChannelOutcome, type DeliveryDetail, type DeliverySummary, type NotificationRouter, type NotificationMessage } from './notification-router.js';
 import { escalateToUser } from './escalation.js';
 
 function freshDb(): Database.Database {
@@ -207,6 +207,35 @@ describe('escalateToUser reports whether anyone was told', () => {
     store.createThread('escalation-k', { created_by: 'mandate:setup@example.org' });
     await expect(reported(['delivered'], (r, cb) => { escalateToUser(store, r, { key: 'k', title: 't', opener: 'What happened?', body: 'b', onReported: cb }); }))
       .resolves.toBe('delivered');
+  });
+
+  /** What onReported got as its detail, for one escalation through a real router. */
+  function detailOf(outcomes: ChannelOutcome[], store: ThreadStore | null): Promise<{ delivery: DeliverySummary; detail: DeliveryDetail | undefined; threadId: string | undefined }> {
+    const router = new RealRouter();
+    outcomes.forEach((o, i) => router.register({ name: `ch${String(i)}`, send: async () => o }));
+    return new Promise((resolve) => {
+      let threadId: string | undefined;
+      const out = escalateToUser(store, router, { key: 'k', title: 't', opener: 'What happened?', body: 'b', onReported: (delivery, detail) => { resolve({ delivery, detail, threadId }); } });
+      threadId = out?.threadId;
+    });
+  }
+
+  it('names the alert\'s chat and no case when the wakeup was delivered', async () => {
+    const got = await detailOf(['delivered'], new ThreadStore(freshDb()));
+    expect(got.delivery).toBe('delivered');
+    expect(got.detail).toEqual({ case: undefined, chat: { threadId: 'escalation-k', kind: 'alert' } });
+  });
+
+  it('says no_subscription for a push with nobody to deliver to, and send_failed for one that failed', async () => {
+    expect((await detailOf(['no_recipient'], new ThreadStore(freshDb()))).detail?.case).toBe('no_subscription');
+    expect((await detailOf(['failed'], new ThreadStore(freshDb()))).detail?.case).toBe('send_failed');
+  });
+
+  it('names no chat on the bare-push path without a thread store, nor on a mandate\'s thread', async () => {
+    expect((await detailOf(['no_recipient'], null)).detail).toEqual({ case: 'no_subscription' });
+    const store = new ThreadStore(freshDb());
+    store.createThread('escalation-k', { created_by: 'mandate:setup@example.org' });
+    expect((await detailOf(['failed'], store)).detail).toEqual({ case: 'send_failed' });
   });
 
   it('a throwing onReported is logged and does not reject anywhere', async () => {

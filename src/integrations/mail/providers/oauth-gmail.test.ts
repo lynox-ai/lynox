@@ -57,6 +57,8 @@ function metadataMessage(id: string, opts: {
   snippet?: string;
   labelIds?: string[];
   autoSubmitted?: string;
+  listId?: string;
+  listUnsubscribe?: string;
 } = {}): Record<string, unknown> {
   const headers: Array<{ name: string; value: string }> = [];
   if (opts.from) headers.push({ name: 'From', value: opts.from });
@@ -65,6 +67,8 @@ function metadataMessage(id: string, opts: {
   headers.push({ name: 'Date', value: '2026-04-26T19:46:35Z' });
   headers.push({ name: 'Message-ID', value: opts.messageId ?? `<${id}@gmail.com>` });
   if (opts.autoSubmitted) headers.push({ name: 'Auto-Submitted', value: opts.autoSubmitted });
+  if (opts.listId) headers.push({ name: 'List-Id', value: opts.listId });
+  if (opts.listUnsubscribe) headers.push({ name: 'List-Unsubscribe', value: opts.listUnsubscribe });
   return {
     id,
     threadId: opts.threadId ?? `thread-${id}`,
@@ -194,6 +198,56 @@ describe('OAuthGmailProvider — list', () => {
     const envs = await new OAuthGmailProvider(makeAccount(), makeAuth()).list();
     expect(envs[0]?.isAutoReply).toBe(true);
     expect(envs[0]?.isAutoReplied).toBe(false);
+  });
+
+  // The watcher reads `list`; Gmail returns only the metadata headers it is
+  // asked for, so the request must name List-Id.
+  it('asks for List-Id and carries the list identifier', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'm1', threadId: 't1' }, { id: 'm2', threadId: 't2' }] }));
+      if (url.includes('messages/m1')) return Promise.resolve(respondJson(metadataMessage('m1', { listId: 'Acme News <news.acme.example>' })));
+      if (url.includes('messages/m2')) return Promise.resolve(respondJson(metadataMessage('m2', { listUnsubscribe: '<mailto:unsub@acme.example>' })));
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const envs = await provider.list();
+    const metaUrl = fetchMock.mock.calls.map((c) => String(c[0])).find((u) => u.includes('messages/m1'))!;
+    expect(metaUrl).toContain('metadataHeaders=List-Id');
+    expect(envs.find((e) => e.messageId === '<m1@gmail.com>')?.listId).toBe('news.acme.example');
+    expect(envs.find((e) => e.messageId === '<m2@gmail.com>')?.listId, 'List-Unsubscribe alone is no list').toBeUndefined();
+  });
+
+  it('asks for the autoresponder headers and marks them, a bounce, and not X-Auto-Response-Suppress', async () => {
+    const extra: Record<string, { name: string; value: string }> = {
+      m1: { name: 'X-Autoreply', value: 'yes' },
+      m2: { name: 'X-Autorespond', value: 'yes' },
+      m3: { name: 'Precedence', value: 'auto_reply' },
+      m4: { name: 'Content-Type', value: 'multipart/report; report-type=delivery-status; boundary="b"' },
+      m5: { name: 'X-Auto-Response-Suppress', value: 'All' },
+    };
+    const urls: string[] = [];
+    fetchMock.mockImplementation((url: string) => {
+      urls.push(url);
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: Object.keys(extra).map((id) => ({ id, threadId: `t-${id}` })) }));
+      const id = Object.keys(extra).find((k) => url.includes(`messages/${k}?`));
+      if (id !== undefined) {
+        const msg = metadataMessage(id) as { payload: { headers: Array<{ name: string; value: string }> } };
+        msg.payload.headers.push(extra[id]!);
+        return Promise.resolve(respondJson(msg));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const envs = await new OAuthGmailProvider(makeAccount(), makeAuth()).list();
+    const mark = (id: string) => {
+      const e = envs.find((x) => x.messageId === `<${id}@gmail.com>`);
+      return e && { isAutoReply: e.isAutoReply, isAutoReplied: e.isAutoReplied };
+    };
+    for (const id of ['m1', 'm2', 'm3']) expect(mark(id), id).toEqual({ isAutoReply: true, isAutoReplied: true });
+    expect(mark('m4'), 'the bounce').toEqual({ isAutoReply: true, isAutoReplied: false });
+    expect(mark('m5'), 'X-Auto-Response-Suppress alone').toEqual({ isAutoReply: false, isAutoReplied: false });
+    const metadataUrl = urls.find((u) => u.includes('format=metadata'))!;
+    for (const h of ['X-Autoreply', 'X-Autorespond', 'Precedence', 'Content-Type']) expect(metadataUrl, h).toContain(`metadataHeaders=${h}`);
   });
 
   it('UNREAD label maps to absent \\Seen flag', async () => {

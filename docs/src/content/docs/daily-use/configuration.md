@@ -23,7 +23,7 @@ Project configs cannot override security-sensitive fields like API keys or vault
 ```json
 {
   "provider": "anthropic",
-  "api_base_url": "https://api.mistral.ai/v1",
+  "api_base_url": "https://api.eu.mistral.ai/v1",
   "openai_model_id": "mistral-medium-2604"
 }
 ```
@@ -223,7 +223,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider). Anthropic-only — does NOT serve `provider: openai`. |
-| `ANTHROPIC_BASE_URL` | Base URL for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
+| `ANTHROPIC_BASE_URL` | Base URL for `provider: openai` or `custom` (e.g. `https://api.eu.mistral.ai/v1`) |
 | `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental, not usable in the Docker image) |
 | `LYNOX_BALANCED_MODEL` | Which Claude Sonnet build serves the **balanced** tier. Set `claude-sonnet-5` to opt into the 1M-token context window; unset keeps the default. |
 

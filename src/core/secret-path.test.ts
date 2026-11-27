@@ -101,7 +101,7 @@ describe('a secret: reference never names the file a call reads or writes', () =
     const reader = stub('read_file', () => {});
     const files = stub('batch_files', () => {});
     // The user allows whatever is asked: what stops the call has to be the rule, not a denial.
-    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const promptUser = vi.fn().mockResolvedValue('allow');
     const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [reader, files], promptUser, secretStore: vault(join(dir, 'x')) });
     const read = await call(agent, 'read_file', { path: 'secret:TARGET' });
     // The destination is read after the directory; a sensitive directory must not hide it.

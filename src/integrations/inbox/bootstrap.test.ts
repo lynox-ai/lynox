@@ -137,6 +137,35 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.inboxLabelOf('acct-1', 't-unknown')).toBeNull();
   });
 
+  it('takes a follow-up from any account connected here, also one connected after the start, for our own mail', async () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    const id = runtime.state.insertItem({
+      accountId: 'acct-1', channel: 'email', threadKey: 'imap:t1', bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', messageId: '<m1@x>',
+    });
+    runtime.state.updateUserAction(id, 'replied');
+    const later = new Date(Date.now() + 60_000);
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'support@acme.example', isDefault: false });
+    await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'Support@Acme.Example' }], messageId: '<m2@x>', date: later }));
+    expect(runtime.state.getItem(id)!.userAction, 'a copy from the shared address').toBe('replied');
+    await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'mustermann@example.com' }], messageId: '<m3@x>', date: later }));
+    expect(runtime.state.getItem(id)!.userAction, 'a customer reopens').toBeUndefined();
+    await runtime.shutdown();
+  });
+
+  it('counts a list under the domain of any account connected here as our own group, also one connected after the start', async () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    const noreply = [{ address: 'noreply@shop.example' }];
+    // Before that account is connected its domain is a foreign one; read per mail, not once.
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-before', from: noreply, messageId: '<l0@x>', listId: 'info.team.example' })), 'not yet connected').toBe('list_handled');
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'office@team.example', isDefault: false });
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-after', from: noreply, messageId: '<l1@x>', listId: 'info.team.example' })), 'our own group').toBe('ignored');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-foreign', from: noreply, messageId: '<l2@x>', listId: 'news.foreign.example' })), 'CONTROL: a foreign list').toBe('list_handled');
+    await runtime.shutdown();
+  });
+
   it('the rule proposer files waiting rules in its tenant, at most ten per account, and the runtime does not apply them', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, tenantId: 't-9' });
@@ -255,6 +284,17 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
     expect(create).not.toHaveBeenCalled();
     expect(runtime.state.listItems()[0]?.bucket).toBe('auto_handled');
+  });
+
+  // The engine's resolver lists every connected account, so a group under the
+  // domain of ANOTHER mailbox here counts as the business's own mail.
+  it('a list under the domain of another connected account counts as own', async () => {
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'office@acme.ch', isDefault: false });
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    expect(await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'noreply@shop.example' }], listId: 'info.acme.ch' })), 'a newsletter the other domain\'s group relays').toBe('ignored');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', from: [{ address: 'noreply@news.example.org' }], listId: 'news.example.org' })), 'CONTROL: a foreign list').toBe('list_handled');
+    await runtime.shutdown();
   });
 
   it('shutdown drains the queue without throwing on an empty runtime', async () => {
@@ -398,8 +438,28 @@ describe('bootstrapInbox — wiring', () => {
       }
     });
 
+    it.each([[undefined], ['']] as const)('with the flag unset (%j), checks them: the feature is on by default', async (flag) => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', flag);
+      const create = vi.fn(async (req: { model: string; messages: Array<{ content: string }> }) => ({
+        content: [{ type: 'text', text: JSON.stringify({ rule_id: labelOf(req.messages[0]!.content, 'Termine') }) }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }));
+      const client = { messages: { create } } as unknown as Anthropic;
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, privacyAck: true });
+      try {
+        const ruleId = runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Termine' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(create.mock.calls[0]![0].model).toBe(getModelId('fast'));
+        expect(runtime.state.listItems()[0]?.matchedRuleId).toBe(ruleId);
+      } finally {
+        await runtime.shutdown();
+      }
+    });
+
     it('with the flag off, checks no description rule: the classifier alone decides', async () => {
-      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(mistralReply(JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'x' }), 10));
       const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: makeClient({ content: [] }), llmRegion: 'eu', mistralApiKey: 'eu-key' });
       try {
