@@ -78,7 +78,7 @@
 		type ChatMessage,
 	} from '../stores/chat.svelte.js';
 	import type { PromptOrigin } from '../utils/prompt-origin.js';
-	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
+	import { getArtifacts, getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
 	import { footerChipSeparator, footerStatParts } from '../stores/chat-usage.js';
@@ -635,11 +635,18 @@
 						// the id in its result string. Thread it into the fence so the
 						// inline card LINKS to that existing entry instead of re-saving on
 						// pin/open — the re-save added a duplicate gallery row per click.
+						const id = parseArtifactIdFromResult(tc.result);
 						const header = artifactFenceHeader({
 							title,
 							type: artifactType,
-							id: parseArtifactIdFromResult(tc.result),
+							id,
 							typed: TYPED_ARTIFACT_FENCE.has(artifactType),
+							// The store's flag, as the gallery and the chips show it. Not the call's
+							// content: an older thread can hold the placeholder there while the file
+							// holds the document. The flag is the artifact's, read from its current
+							// file, so every card of that artifact carries it, as the file its open
+							// button opens does.
+							lost: id !== '' && getArtifacts().some((a) => a.id === id && a.lostOnSave === true),
 						});
 						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 					}
