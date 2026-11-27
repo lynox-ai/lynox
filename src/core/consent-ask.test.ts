@@ -24,7 +24,7 @@ import { askUserTool } from '../tools/builtin/ask-user.js';
 // nothing, and is told apart from a plain "no" so the person learns why.
 
 /** Answers that once approved, or read like an approval, and approve nothing now. */
-const NOT_KEYS = ['y', 'yes', 'Yes', 'Allow', 'ALLOW', ' allow', 'allow ', 'Erlauben', 'ja', 'ok', '1', 'allow deep', 'run on balanced', 'Allow deep', 'Run on balanced', '["allow"]'];
+const NOT_KEYS = ['y', 'yes', 'Yes', 'no', 'No', 'Allow', 'ALLOW', ' allow', 'allow ', 'Erlauben', 'ja', 'ok', '1', 'allow deep', 'run on balanced', 'Allow deep', 'Run on balanced', '["allow"]'];
 
 describe('the contract keys', () => {
   it('approve only as themselves, exactly', () => {
