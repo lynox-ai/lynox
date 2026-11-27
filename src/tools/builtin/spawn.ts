@@ -153,31 +153,19 @@ function childRowCostUSD(agent: Agent | undefined): number {
  * child could still fit (`smallestUSD`, the least any child of this batch is held at); otherwise
  * the cap stops the work.
  */
-function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | undefined; recordedHeadroomUSD?: number | undefined; cap?: 'daily' | 'monthly' | undefined; capUSD?: number | undefined }, batchUSD: number, smallestUSD: number): string {
+function capRefusal(r: { reason?: string | undefined; headroomUSD?: number | undefined; cap?: 'daily' | 'monthly' | undefined; capUSD?: number | undefined }, batchUSD: number, smallestUSD: number): string {
   if (r.headroomUSD === undefined || r.cap === undefined || r.capUSD === undefined) {
     return `Not delegated: ${r.reason ?? 'the spending cap cannot be checked.'}`;
   }
   const usd = (n: number): string => `$${n.toFixed(2)}`;
-  // The day and the month are the UTC ones `computeRecordedSpend` sums (`toISOString`).
-  const resets = r.cap === 'daily' ? 'at 00:00 UTC' : 'on the 1st at 00:00 UTC';
   const budget = `${r.cap} budget`;
-  // Room that other work still running holds comes back when it ends. Only the amount is named,
-  // never which work: a run here need not be one that may see what else this instance runs.
-  if (r.headroomUSD < smallestUSD && (r.recordedHeadroomUSD ?? 0) >= smallestUSD) {
-    // All three from the one refusal: recorded headroom is unfloored here (it is at least a
-    // child's hold), so cap − it is what is spent, and it − headroom what is held.
-    const recorded = r.recordedHeadroomUSD ?? 0;
-    const spentUSD = r.capUSD - recorded;
-    const heldUSD = recorded - r.headroomUSD;
-    return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left right now: `
-      + `${usd(spentUSD)} is already spent and ${usd(heldUSD)} is held for work that is still running. `
-      + 'That is less than one of these sub-agents may spend. Tell the user that work still running holds '
-      + 'the budget, and that this can be delegated again once it has finished.';
-  }
+  // ⚠ No reset time and no cause: what is left may be short for spend already booked OR for work
+  // still running that holds part of it (which can be the delegating run's own hold), and the
+  // sentence has to be true for both.
   if (r.headroomUSD < smallestUSD) {
     return `Not delegated: the ${budget} of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left, `
-      + `less than one of these sub-agents may spend. No sub-agent can run before the budget resets ${resets}. `
-      + `Tell the user that the ${budget} stops this work, when it resets, and that you cannot change the budget.`;
+      + 'less than one of these sub-agents may spend. '
+      + `Tell the user that the ${budget} leaves no room for this delegation now, and that you cannot change the budget.`;
   }
   return `Not delegated: these sub-agents could together spend up to ${usd(batchUSD)}, and the ${budget} `
     + `of ${usd(r.capUSD)} has ${usd(r.headroomUSD)} left. Delegate to fewer sub-agents or give them `

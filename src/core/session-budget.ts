@@ -278,10 +278,9 @@ export function reservePersistentBudget(estimatedCostUSD: number): PersistentBud
   // negative (spend can exceed a cap lowered mid-month).
   const leftToday = _dailyCapUSD - spend.todayCost - _reservedInFlightUSD;
   const leftMonth = _monthlyCapUSD - spend.monthCost - _reservedInFlightUSD;
-  // The same cap without what is held in flight: what comes back once that work has finished.
   const tighter = leftMonth < leftToday
-    ? { cap: 'monthly' as const, capUSD: _monthlyCapUSD, headroomUSD: Math.max(0, leftMonth), recordedHeadroomUSD: Math.max(0, _monthlyCapUSD - spend.monthCost) }
-    : { cap: 'daily' as const, capUSD: _dailyCapUSD, headroomUSD: Math.max(0, leftToday), recordedHeadroomUSD: Math.max(0, _dailyCapUSD - spend.todayCost) };
+    ? { cap: 'monthly' as const, capUSD: _monthlyCapUSD, headroomUSD: Math.max(0, leftMonth) }
+    : { cap: 'daily' as const, capUSD: _dailyCapUSD, headroomUSD: Math.max(0, leftToday) };
   if (_dailyCapUSD < Infinity && projectedToday > _dailyCapUSD) {
     return {
       allowed: false, reservedUSD: 0,
