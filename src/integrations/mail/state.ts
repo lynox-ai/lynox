@@ -32,7 +32,10 @@ function defaultDbPath(): string {
  */
 const RESERVED_ACCOUNT_PREFIXES: ReadonlyArray<string> = [];
 
-const MIGRATIONS: string[] = [
+/** A migration: SQL run as one script, or a step that reads the schema before it changes it. */
+type Migration = string | ((db: Database.Database) => void);
+
+const MIGRATIONS: Migration[] = [
   // v1: Initial schema — Message-ID dedup table
   `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
    INSERT OR IGNORE INTO schema_version (version) VALUES (1);
@@ -660,11 +663,18 @@ const MIGRATIONS: string[] = [
   // `bounce`, `newsletter_domain`, `bulk_subdomain`), NULL when none did. The watcher no
   // longer drops mail on these rules, so an automated sender's mail now costs a
   // classifier call; this column lets that spend be counted per rule. Not shown
-  // to the user. One transaction, as v17.
-  `BEGIN;
-   INSERT OR IGNORE INTO schema_version (version) VALUES (25);
-   ALTER TABLE inbox_items ADD COLUMN prefilter_rule TEXT;
-   COMMIT;`,
+  // to the user. One transaction, as v17. A build of this change once ran from a branch
+  // image that added the column as v23, so the column is added only when it is missing:
+  // such a database then opens, and its values stay.
+  (db) => {
+    db.transaction(() => {
+      db.prepare('INSERT OR IGNORE INTO schema_version (version) VALUES (25)').run();
+      const columns = db.prepare<[], { name: string }>('PRAGMA table_info(inbox_items)').all();
+      if (!columns.some((c) => c.name === 'prefilter_rule')) {
+        db.exec('ALTER TABLE inbox_items ADD COLUMN prefilter_rule TEXT');
+      }
+    })();
+  },
 ];
 
 export interface MailStateDbOptions {
@@ -1745,7 +1755,9 @@ export class MailStateDb {
   private _migrate(): void {
     const current = this._getVersion();
     for (let i = current; i < MIGRATIONS.length; i++) {
-      runMultiStatement(this.db, MIGRATIONS[i]!);
+      const migration = MIGRATIONS[i]!;
+      if (typeof migration === 'string') runMultiStatement(this.db, migration);
+      else migration(this.db);
     }
   }
 

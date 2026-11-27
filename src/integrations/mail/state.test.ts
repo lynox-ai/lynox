@@ -1255,6 +1255,36 @@ describe('MailStateDb — deferred mails kept across a restart (v20)', () => {
 });
 
 describe('MailStateDb — prefilter rule on inbox items (v25)', () => {
+
+  // A branch image of this change added the column as v23. A database it ran opens at v25 with
+  // its values kept, instead of failing on a duplicate column. (Main's own v23 is skipped there,
+  // as on any database that already reads 23; that repair is separate.)
+  it('a database that already has the column at v23 opens, and its values stay', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mail-prefilter-branch-v23-'));
+    try {
+      const path = join(dir, 'mail-state.db');
+      new MailStateDb({ path }).close();
+      const raw = new BetterSqlite3(path);
+      raw.exec(`ALTER TABLE inbox_items DROP COLUMN rule_withheld_reason; ALTER TABLE inbox_items DROP COLUMN rule_withheld_name; ALTER TABLE inbox_items DROP COLUMN rule_withheld_id;
+        DROP INDEX IF EXISTS idx_mail_sent_owner_known_address; DROP TABLE mail_sent_owner_known;
+        DELETE FROM schema_version WHERE version IN (23, 24, 25); INSERT INTO schema_version (version) VALUES (23);
+        INSERT INTO inbox_items (id, tenant_id, account_id, channel, thread_key, bucket, confidence, reason_de, classified_at, classifier_version, prefilter_rule)
+        VALUES ('inb-branch', 'default', 'acct', 'email', 't-b', 'requires_user', 0.9, 'r', 1, 'v', 'bounce');`);
+      raw.close();
+      const migrated = new MailStateDb({ path });
+      try {
+        const conn = (migrated as unknown as { db: BetterSqlite3.Database }).db;
+        expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(25);
+        expect(conn.prepare("SELECT prefilter_rule, rule_withheld_reason FROM inbox_items WHERE id = 'inb-branch'").get())
+          .toEqual({ prefilter_rule: 'bounce', rule_withheld_reason: null });
+      } finally {
+        migrated.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a database at v24 gains the column on open, and an item already there keeps its fields, rule NULL', () => {
     const dir = mkdtempSync(join(tmpdir(), 'mail-prefilter-v24-'));
     try {
