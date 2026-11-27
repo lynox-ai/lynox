@@ -195,6 +195,14 @@ describe('a schedule said in words, or as a schedule of its own', () => {
 		expect(titleOf('Kurzform')).toBeNull();
 	});
 
+	it('marks a hidden character in the expression it shows on hover', async () => {
+		setLocale('de');
+		rows = [{ ...BASE, id: 'h1', title: 'Versteckt', schedule_cron: '0 3\u202E21\u202C * * *' }];
+		await render();
+		expect(scheduleOf('Versteckt')).toBe('Eigener Zeitplan');
+		expect(titleOf('Versteckt')).toBe('0 3⟨U+202E⟩21⟨U+202C⟩ * * *');
+	});
+
 	it('in English, on the 12-hour clock', async () => {
 		setLocale('en');
 		rows = forms();
