@@ -1043,7 +1043,7 @@
 
 			{#if mandate}
 				<!-- Not twice: a halt sentence that already sends the mandate to the owner stands alone. -->
-				{#if bulkOwnerNoticeShown(run.haltKey)}
+				{#if bulkOwnerNoticeShown(run, managed, startButton === null ? null : t(startButton), i18n)}
 					<p class="text-sm border-t border-border pt-4">{t('bulk.owner_only_notice')}</p>
 				{/if}
 			{:else if !ownerActs}

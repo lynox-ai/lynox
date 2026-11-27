@@ -657,27 +657,75 @@ describe('a halt only the owner can resolve, as each reader gets it (bulkHaltFor
   const R = BULK_HALT_REASONS;
   const COUNTS = { de: ' 2 von 5 Zielen geschrieben.', en: ' Wrote 2 of 5 targets.' } as const;
   const CLOSING = { de: 'Lösen kann das nur der Inhaber.', en: 'Only the owner can resolve this.' } as const;
-  // The fact for each reason, word for word (U-383).
-  const FACTS: readonly (readonly [string, 'apply' | 'judge', string, string])[] = [
-    [R.credential, 'apply', 'lynox findet keinen gespeicherten Zugang zum Zielsystem.', 'lynox finds no stored access to the target system.'],
-    [R.unauthorized, 'apply', 'Das Zielsystem hat den gespeicherten Zugang abgelehnt.', 'The target system refused the stored access.'],
-    [R.unavailable, 'apply', 'Zielsystem nicht erreichbar oder Fehler in lynox.', 'Target system not reachable, or an error in lynox.'],
-    [R.unavailable, 'judge', 'KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox.', 'AI model or target system not reachable, or an error in lynox.'],
-    [R.shopifyWriteOff, 'apply', 'Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.', 'Writing to Shopify stores in a bulk run is switched off on this instance.'],
-    [R.storeAccessEnded, 'apply', 'lynox konnte den Zugang zum Shop nicht erneuern.', 'lynox could not renew its access to the store.'],
-    [R.storeClientMisnamed, 'apply', 'In der Shopify-Verbindung liegen die App-Zugangsdaten unter anderen Namen.', 'The Shopify connection keeps the app credentials under other names.'],
-    [R.consentOutdated, 'apply', 'Diese Shopify-Verbindung lässt lynox diese Felder noch nicht ändern.', 'This Shopify connection does not yet let lynox change these fields.'],
-    [R.productWriteNotAsked, 'apply', 'Diese Shopify-Verbindung darf keine Produkte ändern.', 'This Shopify connection may not change products.'],
-  ];
+  // Every stored halt reason, sorted by hand: whose sentence names a way only the owner can take
+  // (reconnect, fix the profile, switch writing on, continue the run), and whose holds for any
+  // reader. A reason added to BULK_HALT_REASONS fails the test below until it is sorted here.
+  type Said = readonly [record: string, mandate: string];
+  const closing = (fact: string, lang: 'de' | 'en'): Said => [fact, `${fact} ${CLOSING[lang]}`];
+  const goesOn = (fact: string, mandate: string): Said => [fact, `${fact} ${mandate}`];
+  // The fact and the mandate's sentence, word for word (U-383), per reason; `judge` where that step reads otherwise.
+  const OWNER_WAY: Readonly<Record<string, { readonly de: Said; readonly en: Said; readonly judge?: { readonly de: Said; readonly en: Said } }>> = {
+    credential: { de: closing('lynox findet keinen gespeicherten Zugang zum Zielsystem.', 'de'), en: closing('lynox finds no stored access to the target system.', 'en') },
+    unauthorized: { de: closing('Das Zielsystem hat den gespeicherten Zugang abgelehnt.', 'de'), en: closing('The target system refused the stored access.', 'en') },
+    unavailable: {
+      de: goesOn('Zielsystem nicht erreichbar oder Fehler in lynox.', 'Der Inhaber kann den Lauf fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.'),
+      en: goesOn('Target system not reachable, or an error in lynox.', 'The owner can continue the run; if it halts again right away, the target system is not reachable yet.'),
+      judge: {
+        de: goesOn('KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox.', 'Der Inhaber kann den Lauf fortsetzen; hält er gleich wieder an, kann es der Inhaber später erneut versuchen.'),
+        en: goesOn('AI model or target system not reachable, or an error in lynox.', 'The owner can continue the run; if it halts again right away, the owner can try again later.'),
+      },
+    },
+    shopifyWriteOff: { de: closing('Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.', 'de'), en: closing('Writing to Shopify stores in a bulk run is switched off on this instance.', 'en') },
+    storeAccessEnded: { de: closing('lynox konnte den Zugang zum Shop nicht erneuern.', 'de'), en: closing('lynox could not renew its access to the store.', 'en') },
+    storeClientMisnamed: { de: closing('In der Shopify-Verbindung liegen die App-Zugangsdaten unter anderen Namen.', 'de'), en: closing('The Shopify connection keeps the app credentials under other names.', 'en') },
+    consentOutdated: { de: closing('Diese Shopify-Verbindung lässt lynox diese Felder noch nicht ändern.', 'de'), en: closing('This Shopify connection does not yet let lynox change these fields.', 'en') },
+    productWriteNotAsked: { de: closing('Diese Shopify-Verbindung darf keine Produkte ändern.', 'de'), en: closing('This Shopify connection may not change products.', 'en') },
+    shopifyNotSetUp: {
+      de: goesOn('Shopify ist auf dieser Instanz nicht eingerichtet. Einrichten kann das nur lynox.', 'Sobald lynox Shopify eingerichtet hat, kann der Inhaber den Lauf fortsetzen.'),
+      en: goesOn('Shopify is not set up on this instance. Only lynox can set it up.', 'Once lynox has set up Shopify, the owner can continue the run.'),
+    },
+    shopifyNotCleared: {
+      de: goesOn('Shopify ist für diese Instanz zurzeit nicht freigegeben. Freigeben kann nur lynox.', 'Sobald lynox Shopify freigegeben hat, kann der Inhaber den Lauf fortsetzen.'),
+      en: goesOn('Shopify is not cleared for this instance right now. Only lynox can clear it.', 'Once lynox has cleared Shopify, the owner can continue the run.'),
+    },
+    shopifyUnconfirmed: {
+      de: goesOn('lynox konnte nicht bestätigen, dass diese Instanz Shopify erreichen darf.', 'Der Inhaber kann den Lauf in ein paar Minuten fortsetzen.'),
+      en: goesOn('lynox could not confirm that this instance may reach Shopify.', 'The owner can continue the run in a few minutes.'),
+    },
+    containmentUnwritable: {
+      de: goesOn('lynox konnte nicht festhalten, dass dieser Lauf den Shop liest; gesendet wurde nichts.', 'Der Inhaber kann den Lauf später fortsetzen.'),
+      en: goesOn('lynox could not record that this run reads the store; nothing was sent.', 'The owner can continue the run later.'),
+    },
+  };
+  // Whose sentence holds for any reader: no way, a way lynox or the shop takes, or the run page's.
+  const NEUTRAL: ReadonlySet<string> = new Set([
+    'awaitingStart', 'failureRate', 'consecutiveFailures', 'timeBudget', 'expired', 'checksum', 'maxTargets', 'probeRequired',
+    'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete',
+    'blocked', 'contract', 'stoppedByOwner', 'mandateEnded', 'unrecorded', 'runUnrecorded', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge',
+    'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff',
+    'shopifySelfHosted', 'storeRequestRefused', 'shopifyNoApiVersion', 'markupAddedByShop', 'superseded', 'discarded', 'costCap', 'spendLimit',
+    'creditRefused', 'judgeModel',
+  ]);
 
-  it('keeps only the fact in the history and adds the owner to the mandate\'s push, for every reason in both languages', () => {
-    for (const [reason, phase, de, en] of FACTS) {
-      for (const [lang, fact] of [['de', de], ['en', en]] as const) {
-        const summary = `${BULK_NOTICES[lang].halted(phase, reason)}${COUNTS[lang]}`;
-        expect(bulkHaltForReaders(reason, summary, lang), `${reason} ${phase} ${lang}`).toEqual({
-          record: `${fact}${COUNTS[lang]}`,
-          mandate: `${fact} ${CLOSING[lang]}${COUNTS[lang]}`,
-        });
+  it('sorts every stored halt reason into one whose way only the owner takes or one that holds for any reader', () => {
+    for (const key of Object.keys(R)) expect(Object.hasOwn(OWNER_WAY, key) !== NEUTRAL.has(key), key).toBe(true);
+    for (const key of [...Object.keys(OWNER_WAY), ...NEUTRAL]) expect(Object.hasOwn(R, key), key).toBe(true);
+  });
+
+  it('keeps only the fact in the history and tells the mandate the owner, for every reason in both steps and both languages', () => {
+    for (const [key, reason] of Object.entries(R)) {
+      for (const phase of ['apply', 'judge'] as const) {
+        for (const lang of ['de', 'en'] as const) {
+          const summary = `${BULK_NOTICES[lang].halted(phase, reason)}${COUNTS[lang]}`;
+          const got = bulkHaltForReaders(reason, summary, lang);
+          const want = OWNER_WAY[key];
+          if (want === undefined) {
+            expect(got, `${key} ${phase} ${lang}`).toBeNull();
+            continue;
+          }
+          const [record, mandate] = (phase === 'judge' ? want.judge?.[lang] : undefined) ?? want[lang];
+          expect(got, `${key} ${phase} ${lang}`).toEqual({ record: `${record}${COUNTS[lang]}`, mandate: `${mandate}${COUNTS[lang]}` });
+        }
       }
     }
   });
@@ -758,10 +806,13 @@ describe('a halt only the owner can resolve, as each reader gets it (bulkHaltFor
   });
 
   it('keeps the mandate\'s push within the web-push cut for the longest summary', () => {
-    for (const [reason, phase] of FACTS.map(([r, p]) => [r, p] as const)) {
-      for (const lang of ['de', 'en'] as const) {
-        const m = bulkHaltForReaders(reason, `${BULK_NOTICES[lang].halted(phase, reason)}${COUNTS[lang]}`, lang)!;
-        expect(m.mandate.length, `${reason} ${lang}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+    for (const key of Object.keys(OWNER_WAY)) {
+      const reason = R[key as keyof typeof R];
+      for (const phase of ['apply', 'judge'] as const) {
+        for (const lang of ['de', 'en'] as const) {
+          const m = bulkHaltForReaders(reason, `${BULK_NOTICES[lang].halted(phase, reason)}${COUNTS[lang]}`, lang)!;
+          expect(m.mandate.length, `${key} ${phase} ${lang}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+        }
       }
     }
   });

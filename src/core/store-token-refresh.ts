@@ -160,7 +160,8 @@ export function claimStoreReconnectHints(
     }
     if (!claimed) continue;
     // The mandate that set the store up connects it again only while the connection is its own, or
-    // none was made yet (`mandateMayRead`); once the owner connected it, only the owner can.
+    // the grant names nobody who connected it (an older grant), as the token write allows
+    // (`mandateMayRead`); once the owner connected it, only the owner can.
     const setUpByMandate = isMandateAuthored(profile) && (grant.connected_by === undefined || grant.connected_by === profile.created_by);
     out.push(...storeReconnectHints(host, until, now, lang, setUpByMandate));
   }

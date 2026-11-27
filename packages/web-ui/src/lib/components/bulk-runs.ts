@@ -421,13 +421,26 @@ export function bulkResumeKind(
 	return BULK_RESUME_WRITE.has(run.haltKey) ? 'write' : null;
 }
 
-/** Halts whose sentence, as a mandate reads it (`_mandate`), already sends the mandate to the
- *  owner: the page adds no second "ask the owner" under it (U-374). */
-const BULK_HALT_MANDATE_NAMES_OWNER: ReadonlySet<string> = new Set(['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff']);
+/** A halt sentence in the form a mandate reads, which names the owner instead of a way it cannot
+ *  take (`bulk.halt.…_mandate`, with its `_one` singular). */
+const BULK_HALT_MANDATE_SENTENCE = /^bulk\.halt\..*_mandate(?:_one)?$/;
 
-/** Whether a mandate's page shows the notice that only the owner acts on bulk runs. */
-export function bulkOwnerNoticeShown(haltKey: string | null): boolean {
-	return haltKey === null || !BULK_HALT_MANDATE_NAMES_OWNER.has(haltKey);
+/** Whether a mandate's page shows the notice that only the owner acts on bulk runs: not under a
+ *  halt whose sentence, as this mandate reads it, already names the owner (U-374). Decided by the
+ *  sentence the page shows ({@link bulkHaltCause}), not by the halt's key: one halt reads in
+ *  different sentences by how the run goes on, and not each of them has a mandate's form. */
+export function bulkOwnerNoticeShown(
+	run: Parameters<typeof bulkHaltCause>[0],
+	managed: boolean | null,
+	startButton: string | null,
+	i18n: BulkI18n,
+): boolean {
+	if (run.haltKey === null) return true;
+	let namesOwner = false;
+	const seen = (k: string): void => { if (BULK_HALT_MANDATE_SENTENCE.test(k)) namesOwner = true; };
+	const reading: BulkI18n = { t: (k) => { seen(k); return i18n.t(k); }, tf: (k, vars) => { seen(k); return i18n.tf(k, vars); } };
+	bulkHaltCause(run, managed, startButton, bulkMandateI18n(reading), true);
+	return !namesOwner;
 }
 
 /** The page's own sentences for a write run's halt (`bulkResumeKind` not null): why it halted,

@@ -245,11 +245,11 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     const { records, notes } = await tick(id, [], 'de');
     const de = 'KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox.';
     // The history keeps the fact; the owner's push keeps the way on, every mandate's says the owner
-    // resolves it (U-383).
+    // continues the run (U-383).
     expect(records).toEqual([de]);
     expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual([
       `${de} Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.`,
-      `${de} Lösen kann das nur der Inhaber.`,
+      `${de} Der Inhaber kann den Lauf fortsetzen; hält er gleich wieder an, kann es der Inhaber später erneut versuchen.`,
     ]);
     // Its run is held halted: the title says so, the mark that it was a failure (U-324), on both.
     expect(notes.map((n) => n.slice(0, n.indexOf('\n')).split(' · ')[0])).toEqual(['\u2717 Beurteilung angehalten', '\u2717 Beurteilung angehalten']);
