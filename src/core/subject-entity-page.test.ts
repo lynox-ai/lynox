@@ -6,7 +6,7 @@ import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
 import { listSubjectEntitiesAfterOn, listSubjectEntitiesOn } from './knowledge-layer.js';
 import type { EntityRecord } from '../types/memory.js';
-import { collectGraphForExport } from './graph-export.js';
+import { collectGraphForExport, readHeldGraph } from './graph-export.js';
 
 describe('listSubjectEntitiesOn reads one page from the store per call', () => {
   let dir: string;
@@ -102,7 +102,7 @@ describe('listSubjectEntitiesOn reads one page from the store per call', () => {
   });
 
   it('still matches a search case-insensitively beyond ASCII, on name and alias', () => {
-    const doc = store.createSubject({ kind: 'organization', name: 'Ärztehaus Nord', aliases: ['Ärztehaus Nord', 'Praxis Öschberg'] });
+    const doc = store.createSubject({ kind: 'organization', name: 'Ärztehaus Nord', aliases: ['Praxis Öschberg'] });
     store.createSubject({ kind: 'person', name: 'Unrelated' });
     expect(listSubjectEntitiesOn(store, { q: 'ärztehaus', limit: 10 }).map(e => e.id), 'name').toEqual([doc]);
     expect(listSubjectEntitiesOn(store, { q: 'öschberg', limit: 10 }).map(e => e.id), 'alias').toEqual([doc]);
@@ -198,6 +198,25 @@ describe('listSubjectEntitiesOn reads one page from the store per call', () => {
     expect(store.listSubjectsAfter({ kinds: ['person', 'organization'], after: null, limit: 1e20 }).map(r => r.id), 'huge limit').toEqual(all);
     expect(store.listSubjectsAfter({ kinds: ['person', 'organization'], after: null, limit: 2.7 }).map(r => r.id), 'fraction cut down').toEqual(all.slice(0, 2));
     expect(store.listSubjectsAfter({ kinds: ['person', 'organization'], after: null, limit: Number.NaN }), 'NaN reads nothing').toEqual([]);
+  });
+
+  it('fills the mention count of each row on a key page', () => {
+    const [a, b] = seed(2) as [string, string];
+    const raw = engineDb.getDb();
+    raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('m1', 't', 'knowledge', 'global', 'global'), ('m2', 't', 'knowledge', 'global', 'global')").run();
+    raw.prepare("INSERT INTO memory_subjects (memory_id, subject_id) VALUES ('m1', ?), ('m2', ?), ('m1', ?)").run(a, a, b);
+    const counts = new Map(listSubjectEntitiesAfterOn(store, null, 10).map(e => [e.id, e.mentionCount]));
+    expect(counts.get(a)).toBe(2);
+    expect(counts.get(b)).toBe(1);
+  });
+
+  it('walks the held subject graph by key when the export reads it without the layer', async () => {
+    seed(450);
+    const byOffset = vi.spyOn(SubjectStore.prototype, 'listSubjectPage');
+    const held = await readHeldGraph({ agentMemoryFile: join(dir, 'no-agent-memory.db'), engineDb, subjectGraph: true });
+    expect(held.entities.map(e => e.id), 'every listed subject, by id').toEqual([...expectedOrder()].sort());
+    expect(byOffset, 'no offset page').not.toHaveBeenCalled();
+    expect(held.mayBeIncomplete, 'fixture: read in full').toBe(false);
   });
 
   it('lets the export walk every listed subject by key', async () => {
