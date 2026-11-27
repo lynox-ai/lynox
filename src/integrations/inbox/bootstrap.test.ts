@@ -154,6 +154,18 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
   });
 
+  it('counts a list under the domain of any account connected here as our own group, also one connected after the start', async () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    const noreply = [{ address: 'noreply@shop.example' }];
+    // Before that account is connected its domain is a foreign one; read per mail, not once.
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-before', from: noreply, messageId: '<l0@x>', listId: 'info.team.example' })), 'not yet connected').toBe('list_handled');
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'office@team.example', isDefault: false });
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-after', from: noreply, messageId: '<l1@x>', listId: 'info.team.example' })), 'our own group').toBe('ignored');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-foreign', from: noreply, messageId: '<l2@x>', listId: 'news.foreign.example' })), 'CONTROL: a foreign list').toBe('list_handled');
+    await runtime.shutdown();
+  });
+
   it('the rule proposer files waiting rules in its tenant, at most ten per account, and the runtime does not apply them', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, tenantId: 't-9' });
@@ -272,6 +284,17 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
     expect(create).not.toHaveBeenCalled();
     expect(runtime.state.listItems()[0]?.bucket).toBe('auto_handled');
+  });
+
+  // The engine's resolver lists every connected account, so a group under the
+  // domain of ANOTHER mailbox here counts as the business's own mail.
+  it('a list under the domain of another connected account counts as own', async () => {
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'office@acme.ch', isDefault: false });
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    expect(await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'noreply@shop.example' }], listId: 'info.acme.ch' })), 'a newsletter the other domain\'s group relays').toBe('ignored');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', from: [{ address: 'noreply@news.example.org' }], listId: 'news.example.org' })), 'CONTROL: a foreign list').toBe('list_handled');
+    await runtime.shutdown();
   });
 
   it('shutdown drains the queue without throwing on an empty runtime', async () => {

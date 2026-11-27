@@ -307,6 +307,9 @@ export interface BulkRunStatus {
   kind: BulkRunKind;
   atomic: boolean;
   sourceRunId: string | null;
+  /** The run the owner started in this one's place, ending it before its approval (halt
+   *  `superseded`); null for every other run, and for one superseded before the engine kept it. */
+  supersededBy: string | null;
   /** An external run's write verb, from its contract; null for a local run. */
   writeMethod: string | null;
   /** An external run may be approved for more than one target (a probe is confirmed for
@@ -799,7 +802,7 @@ export interface PreviewTarget {
 interface RunRow {
   id: string; created_at: string; target_system: string; phase: BulkPhase; undo: UndoKind | 'mixed';
   targets_total: number; targets_applied: number; targets_failed: number; halt_reason: string | null;
-  atomic: number; kind: BulkRunKind; source_run_id: string | null; target_collection: string | null;
+  atomic: number; kind: BulkRunKind; source_run_id: string | null; superseded_by: string | null; target_collection: string | null;
   rule_hash: string; approval_checksum: string | null; max_targets: number | null; expires_at: string | null;
   contract_json: string | null; created_by: string | null; principal: string | null; mandate_id: string | null;
   list_source: string | null; list_state: ListState | null; list_page: number; list_calls: number; list_bytes: number;
@@ -2040,7 +2043,7 @@ export class BulkLedger {
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
       passUnclear: pass.passUnclear ?? 0,
       failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries, resumeSends,
-      kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
+      kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id, supersededBy: row.superseded_by ?? null,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
       probeConfirmed: this.probeHolds(row),
       writeForm: this.writeFormOfRun(row),
@@ -3523,8 +3526,8 @@ export class BulkLedger {
             return 'supersede';
           }
           const ended = db.prepare(
-            `UPDATE bulk_runs SET phase = 'aborted', halt_reason = ? WHERE id = ? AND phase IN ('planned','previewed')`,
-          ).run(BULK_HALT_REASONS.superseded, other.id);
+            `UPDATE bulk_runs SET phase = 'aborted', halt_reason = ?, superseded_by = ? WHERE id = ? AND phase IN ('planned','previewed')`,
+          ).run(BULK_HALT_REASONS.superseded, runId, other.id);
           // Its read phase's trigger goes with it: it would fire into an aborted run, maybe with a
           // paid call in flight.
           if (ended.changes === 1) new TriggerStore(this.engineDb).remove(bulkPreviewTriggerId(other.id));

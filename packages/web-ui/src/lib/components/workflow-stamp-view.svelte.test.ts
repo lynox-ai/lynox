@@ -864,3 +864,62 @@ describe('the stamp says where the workflow may run, from the rule a schedule as
 		expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
 	});
 });
+
+describe('the stamp says who else may answer its questions when it runs on a schedule', () => {
+	async function asksLine(asks: unknown): Promise<HTMLElement | null> {
+		const p = preview('d1');
+		if (asks !== undefined) p['asks'] = asks;
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		return q('stamp-asks');
+	}
+	const again = (): void => {
+		if (component) unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+	};
+
+	it('one person: names them, set apart, and says the first answer steers the run', async () => {
+		const line = await asksLine({ count: 1, name: 'lena@kanzlei.example' });
+		expect(line?.textContent).toBe('Läuft er geplant, kann auch lena@kanzlei.example seine Fragen beantworten; wer zuerst antwortet, lenkt den Lauf.');
+		expect([...line!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual(['lena@kanzlei.example']);
+		again();
+		const { setLocale, getLocale } = await import('../i18n.svelte.js');
+		const was = getLocale();
+		setLocale('en');
+		try {
+			expect((await asksLine({ count: 1, name: 'lena@kanzlei.example' }))?.textContent).toBe('When it runs on a schedule, lena@kanzlei.example can answer its questions too; whoever answers first steers the run.');
+		} finally { setLocale(was); }
+	});
+
+	it('one person with an address past the display length: names it whole', async () => {
+		const long = 'k'.repeat(90) + '@kanzlei.example';
+		const line = await asksLine({ count: 1, name: long });
+		expect([...line!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual([long]);
+	});
+
+	it('more people: counts them and names no one', async () => {
+		const line = await asksLine({ count: 3, name: null });
+		expect(line?.textContent).toBe('Läuft er geplant, kann je nach Plan auch eine von 3\u00a0Personen mit Zugang seine Fragen beantworten. Wer zuerst antwortet, lenkt den Lauf.');
+		expect(line!.querySelector('[data-foreign-value]')).toBeNull();
+	});
+
+	it('no one, or an engine that sends no such field: no line, and the preview stands', async () => {
+		for (const asks of [undefined, null]) {
+			expect(await asksLine(asks)).toBeNull();
+			expect(q('stamp-step')).not.toBeNull();
+			expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
+			again();
+		}
+	});
+
+	it('a value of another shape refuses the preview: a fault never reads as only the owner answering', async () => {
+		for (const asks of [{ count: 0, name: null }, { count: 2, name: 'lena@kanzlei.example' }, { count: 1, name: null }, { count: 1.5, name: 'x' }, 'lena@kanzlei.example']) {
+			expect(await asksLine(asks)).toBeNull();
+			expect(q('stamp-step')).toBeNull();
+			expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(true);
+			expect(target.textContent).toContain('Laden fehlgeschlagen');
+			again();
+		}
+	});
+});

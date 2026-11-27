@@ -99,6 +99,8 @@ export interface BulkRun {
 	kind: 'apply' | 'undo';
 	atomic: boolean;
 	sourceRunId: string | null;
+	/** The run the owner started in this one's place (halt `superseded`); absent from an older engine. */
+	supersededBy?: string | null | undefined;
 	writeMethod: string | null;
 	probeConfirmed: boolean;
 	writeForm: 'measured' | 'unmeasured' | null;

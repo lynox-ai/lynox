@@ -36,6 +36,11 @@ export interface StampPreview {
 	 * lost access (absent from an older engine: not ended). Null for any other.
 	 */
 	workflow: { name: string | null; confirmed: boolean; ended?: boolean } | null;
+	/**
+	 * The address of the person besides the owner whom the plan's questions reach once it is
+	 * stamped (a plan that runs an interactive workflow); null or absent when no one else.
+	 */
+	asks?: string | null;
 	connections: { id: string; profile: string; provider: string; account: string | null }[];
 }
 
@@ -60,6 +65,11 @@ export function readPreview(raw: unknown): StampPreview | null {
 	if (w !== null && !(isObj(w) && strOrNull(w['name']) && typeof w['confirmed'] === 'boolean' && (w['ended'] === undefined || typeof w['ended'] === 'boolean'))) return null;
 	const c = raw['connections'];
 	if (!Array.isArray(c) || !c.every((e) => isObj(e) && typeof e['id'] === 'string' && typeof e['profile'] === 'string' && typeof e['provider'] === 'string' && strOrNull(e['account']))) return null;
+	// Who else answers is part of what the owner consents to: absent or null (an older engine, a plan
+	// that asks only the owner) is no line; any other shape refuses the preview, so a fault never
+	// reads as "only you". The preview is taken as sent, like every other field.
+	const a = raw['asks'];
+	if (a !== undefined && a !== null && !(typeof a === 'string' && a !== '')) return null;
 	return raw as unknown as StampPreview;
 }
 

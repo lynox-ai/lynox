@@ -23,7 +23,7 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
   WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
+import { BULK_NOTICES, bulkHaltForReaders, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { originRunNotice, type OriginRefusal, type SendOrigin, type TriggerSetUpBy } from './origin-notices.js';
@@ -3975,9 +3975,16 @@ export class WorkerLoop {
    */
   private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
+    // A bulk halt whose way on only the owner can take: the history, which a mandate reads too,
+    // keeps the fact; the owner's push keeps the way; every mandate's push says the owner
+    // resolves it (U-383).
+    const haltRow = this.#bulkRunRow(task);
+    const lang = noticeLanguage(this.engine.config?.language);
+    const byReader = haltRow !== null;
+    const recordAs = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, resultSummary, lang);
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      this.#recordRun(taskManager, task.id, resultSummary, look.status, undefined, opts);
+      this.#recordRun(taskManager, task.id, recordAs?.record ?? resultSummary, look.status, undefined, opts);
     }
 
     // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that
@@ -3994,12 +4001,32 @@ export class WorkerLoop {
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
       const shownEnd: BulkPushEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
+      const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
+      const readers = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
       void this.notificationRouter.notify({
-        title: `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`,
+        title,
         body: told.result,
         taskId: task.id,
         priority: toldLook.priority,
+        // Only the owner can take the way this sentence names: no other device reads it.
+        ...(readers === null ? {} : { audience: 'owner' as const }),
       });
+      // Every live grant reads the same end in the mandates' sentence, not only the planning one:
+      // a mandate gets the notices the owner gets, in the sentence that is true for it. It reads
+      // the fact without the member-connection lines: they are the owner's, naming another
+      // member's provider and profile and the owner's way to change it. They stand in the history,
+      // which a mandate reads, as recorded. The sentence is where `told.result` starts, so this
+      // finds a part only where `readers` found one too.
+      const forMandate = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, said ?? resultSummary, lang);
+      if (forMandate !== null) {
+        void this.notificationRouter.notify({
+          title,
+          body: forMandate.mandate,
+          taskId: task.id,
+          priority: toldLook.priority,
+          audience: 'all_mandates',
+        });
+      }
     }
   }
 

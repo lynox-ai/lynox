@@ -77,6 +77,13 @@
   `secrets_may_be_incomplete` is `true` when the secret store or its vault did
   not open. `secrets_note` says that only secret names are exported, never
   values.
+- With the subject graph on, `GET /api/export` reads the knowledge graph's
+  entities by key instead of by offset, so its time grows with the number of
+  subjects rather than with the square of that number;
+  `knowledge_graph.entities` is then in id order, unless a key read fails and
+  the export pages by offset instead. Without a search term, the entity list
+  of the web app on the subject graph cuts its page in the query and breaks
+  ties in its order by id.
 - `GET /api/export` now carries the remembered texts of the knowledge graph,
   under `knowledge_graph.memories`, keyed by the store that holds them:
   `agent-memory.db` with its `memories` and `mentions`, and `engine.db` with

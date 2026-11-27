@@ -40,7 +40,7 @@ import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
+import { planAsks, planOfTrigger, stampEntriesFor, workflowAsks, workflowAsksOnSchedule, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -474,8 +474,8 @@ export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'chang
  * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
  * the push had to shorten the name.
  *
- * `chatExists` decides whether the escalation's chat still stands; without it, or once the chat
- * is deleted, the trigger links to no chat.
+ * `chatExists` decides whether the escalation's chat still stands and has something in it;
+ * without it, once the chat is deleted, or while it is empty, the trigger links to no chat.
  */
 export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal, chatExists?: (threadId: string) => boolean): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome' | 'last_escalation_case' | 'last_escalation_chat'> & { last_escalation_kind?: 'question' | 'alert' | undefined; paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
   // The stored run cause leaves only as `blocked_reason`, parsed (`storedRunCause`), never as stored.
@@ -2864,6 +2864,32 @@ export class LynoxHTTPApi {
    */
   async #stampListFor(trigger: TriggerRecord): Promise<{ wf: string | null; entries: readonly StampEntry[] } | null> {
     return (await this.#stampPlanOf(trigger)).listed;
+  }
+
+  /**
+   * Who besides the owner may answer the questions of a plan once it is stamped, as the address the
+   * view names: read by `planAsks`, the run's own reading. Null for a plan that asks only the owner,
+   * or none at all.
+   */
+  async #planAsksShown(trigger: TriggerRecord): Promise<string | null> {
+    const history = this.engine?.getRunHistory();
+    if (!history) return null;
+    const p = await planAsks(trigger, history, (id) => this._mandateLive(id));
+    return p !== undefined && p.kind === 'mandate' ? p.email : null;
+  }
+
+  /**
+   * Who may be asked an interactive workflow's questions besides the owner when it runs on a
+   * schedule (`workflowAsks`, over every plan of it that may still run): how many people, and the
+   * address only when it is one — with more, each plan's own stamp says who it is. Null when that is
+   * no one, or the workflow does not ask on a schedule.
+   */
+  async #workflowAsksShown(planned: PlannedPipeline): Promise<{ count: number; name: string | null } | null> {
+    const history = this.engine?.getRunHistory();
+    if (!history || !workflowAsksOnSchedule(planned)) return null;
+    const asked = (await workflowAsks(planned.id, history.getPlansOfWorkflow(planned.id), history, (id) => this._mandateLive(id))).filter((p) => p.kind === 'mandate');
+    if (asked.length === 0) return null;
+    return { count: asked.length, name: asked.length === 1 && asked[0]!.kind === 'mandate' ? asked[0]!.email : null };
   }
 
   /**
@@ -6695,12 +6721,24 @@ export class LynoxHTTPApi {
 
     // ── Changeset review ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/sessions/:id/changeset', async (_req, res, params) => {
+      const principal = this._principalOf(_req);
       const session = this.sessionStore.get(params['id']!);
-      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      if (!session) {
+        // Someone who does not own the conversation gets the answer a live session with nothing
+        // for them gives, so it does not tell them whether a session is live there. The owner
+        // and the person who started it keep the 404, which the page reads as "no review" too;
+        // a conversation without a row is no one's, so its starter gets the empty answer there.
+        if (!isOwnerPrincipal(principal) && !ownedBy(this._threadRow(params['id']!), principal)) {
+          jsonResponse(res, 200, { hasChanges: false, files: [] });
+          return;
+        }
+        errorResponse(res, 404, 'Session not found');
+        return;
+      }
       const csm = session.getChangesetManager();
       // The card goes only to someone who may answer it: a reader of the chat who cannot would
       // see a review that holds every message they send and refuses every answer they give.
-      if (!csm || !mayAnswerReview(csm, this._principalOf(_req)) || !csm.hasChanges()) {
+      if (!csm || !mayAnswerReview(csm, principal) || !csm.hasChanges()) {
         jsonResponse(res, 200, { hasChanges: false, files: [] });
         return;
       }
@@ -9752,6 +9790,7 @@ export class LynoxHTTPApi {
         changedBy: shaped ? 'mandate' : 'owner',
         awaitsStamp: state === 'awaits_owner_stamp',
         ...stampShown(planned),
+        asks: await this.#workflowAsksShown(planned),
         steps: await stepsShown(planned),
       });
     }, ownerOnly('see what stamping a workflow would confirm')));
@@ -9876,10 +9915,14 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
-      // A trigger links to its escalation's chat only while that chat stands (a deleted one is gone).
+      // A trigger links to its escalation's chat only while that chat stands (a deleted one is gone)
+      // and holds a message of any kind: a run's question whose write failed after its thread was
+      // created leaves an empty chat, and a link there would show nothing. Whether the latest
+      // question itself is in it is not checked.
       // Only the owner is shown the chat, so only the owner's list looks it up.
       const threadsForList = isOwnerPrincipal(principal) ? engine.getThreadStore() : null;
-      const chatExists = (threadId: string): boolean => threadsForList?.getThread(threadId) !== undefined;
+      const chatExists = (threadId: string): boolean =>
+        threadsForList?.getThread(threadId) !== undefined && threadsForList.getMessageCount(threadId) > 0;
       // Who set each trigger up or changed it last, when that was a mandate: lines as on an
       // approval card, named by the same rule (in these lines a mandate sees another address's
       // grant as another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
@@ -10395,6 +10438,7 @@ export class LynoxHTTPApi {
       const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
       const { listed, by, workflow } = await this.#stampPlanOf(trigger);
+      const asks = await this.#planAsksShown(trigger);
       const entries = listed?.entries ?? [];
       const apiStore = engine.getApiStore();
       const profiles = apiStore ? stampProfiles(entries, apiStore) : [];
@@ -10404,10 +10448,11 @@ export class LynoxHTTPApi {
       // (The list row carries the ids already, `triggerForRoute`; the preview does not repeat them.)
       const { created_mandate_id: _created, mandate_editor_id: _editor, ...subject } = stampSubject(trigger, listed?.wf ?? null);
       jsonResponse(res, 200, {
-        expect: stampExpect(trigger, listed?.wf ?? null, entries),
+        expect: stampExpect(trigger, listed?.wf ?? null, entries, asks),
         subject,
         by,
         workflow,
+        asks,
         connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
       });
     }, ownerOnly('see what a schedule would be confirmed with')));
@@ -10432,11 +10477,13 @@ export class LynoxHTTPApi {
       const current = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
       const listed = await this.#stampListFor(current);
+      const asks = await this.#planAsksShown(current);
       // Read again after the await, and stamp with no await in between: what is compared is
-      // what is stamped.
+      // what is stamped. Whom the questions reach is read from `current`; a mandate's change since
+      // moves its change time, which the subject does not hold, so that refuses as well.
       const now = engine.getRunHistory()?.getTrigger(params['id']!);
-      if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
-        errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
+      if (!now || (now.mandate_edited_at ?? null) !== (current.mandate_edited_at ?? null) || stampExpect(now, listed?.wf ?? null, listed?.entries ?? [], asks) !== expected) {
+        errorResponse(res, 409, 'This schedule changed since you looked: what it runs, its connections, or who besides you answers its questions. Look at it again, then confirm.', 'changed');
         return;
       }
       if (listed !== null && listed.entries.length > 0) connections = listed;
