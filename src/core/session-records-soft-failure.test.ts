@@ -31,6 +31,7 @@ vi.mock('./process-capture.js', async (importOriginal) => ({
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import type { LynoxConfig, ProcessRecord } from '../types/index.js';
+import type { ToolCallRecord } from './run-history.js';
 
 const endTurn = (text: string) => ({
   content: [{ type: 'text' as const, text }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 },
@@ -52,13 +53,10 @@ function record(paramName: string, sourceRunId: string): ProcessRecord {
 describe('the Session writes a call its tool reports as not done as a failed row', () => {
   const dirs: string[] = [];
   const engines: Engine[] = [];
-  let prevDataDir: string | undefined;
 
   afterEach(async () => {
     for (const e of engines) { try { await e.shutdown(); } catch { /* best effort */ } }
     engines.length = 0;
-    if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
-    else process.env['LYNOX_DATA_DIR'] = prevDataDir;
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
     dirs.length = 0;
     vi.unstubAllEnvs();
@@ -67,21 +65,27 @@ describe('the Session writes a call its tool reports as not done as a failed row
     captureProcessMock.mockReset();
   });
 
-  /** One turn: a read_file call (so the session has work to save), then save_workflow, then the end. */
-  type Row = { tool_name: string; output_json: string; is_error?: number | null };
-  /** The run's tool rows, and how many session captures history.db holds (written last by a save). */
-  async function runSave(paramName: string): Promise<{ rows: Row[]; captures: number }> {
-    prevDataDir = process.env['LYNOX_DATA_DIR'];
+  /**
+   * One turn: a read_file call (so the session has work to save), then save_workflow, then the end.
+   * Returns the run's tool rows, and how many session captures history.db holds (a save writes one last).
+   */
+  async function runSave(paramName: string): Promise<{ rows: ToolCallRecord[]; captures: number }> {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-soft-failure-row-'));
     dirs.push(dir);
-    process.env['LYNOX_DATA_DIR'] = dir;
-    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test-not-sent');
+    // Nothing from the caller's shell reaches the engine: no vault key, no instance id, no other
+    // provider, no error sink.
+    for (const k of ['LYNOX_VAULT_KEY', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_BUGSINK_DSN', 'LYNOX_LLM_PROVIDER', 'MISTRAL_API_KEY']) vi.stubEnv(k, undefined);
+    vi.stubEnv('LYNOX_DATA_DIR', dir);
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-key-not-real');
+    // The run's retrieval would embed with the default ONNX provider, which downloads a model on
+    // first use; the local provider needs no network.
+    vi.stubEnv('LYNOX_EMBEDDING_PROVIDER', 'local');
     reloadConfig();
-    const engine = new Engine({ api_key: 'sk-test-not-sent' } as LynoxConfig);
+    const engine = new Engine({} as LynoxConfig);
     engines.push(engine);
     await engine.init();
-    // The record names the run it was captured from, as the real capture does.
-    captureProcessMock.mockImplementation(async () => record(paramName, engine.getRunHistory()!.getRecentRuns(1)[0]!.id));
+    // The record names the run it was captured from, as the real capture does with its first argument.
+    captureProcessMock.mockImplementation(async (runId: unknown) => record(paramName, runId as string));
     mockProcess
       .mockResolvedValueOnce(toolUse('read_file', { path: join(dir, 'missing.txt') }, 'tu-read'))
       .mockResolvedValueOnce(toolUse('save_workflow', { name: 'Report' }, 'tu-save'))
@@ -91,7 +95,7 @@ describe('the Session writes a call its tool reports as not done as a failed row
     const history = engine.getRunHistory()!;
     const runs = history.getRecentRuns(5);
     expect(runs).toHaveLength(1);
-    const rows = history.getRunToolCalls(runs[0]!.id) as unknown as Row[];
+    const rows = history.getRunToolCalls(runs[0]!.id);
     const captures = (history.getDb().prepare('SELECT COUNT(*) AS c FROM processes').get() as { c: number }).c;
     return { rows, captures };
   }
@@ -100,18 +104,22 @@ describe('the Session writes a call its tool reports as not done as a failed row
     const { rows, captures } = await runSave(SENT);
     expect(captureProcessMock).toHaveBeenCalledTimes(1);
     expect(captures).toBe(0);
-    const save = rows.find((r) => r.tool_name === 'save_workflow');
-    expect(save).toBeDefined();
-    expect(save!.is_error).toBe(1);
-    expect(save!.output_json).toBe('not saved: a parameter name outside the accepted form');
+    const saves = rows.filter((r) => r.tool_name === 'save_workflow');
+    expect(saves).toHaveLength(1);
+    const save = saves[0]!;
+    // The row is this call's, by the id the model gave it.
+    expect(save.tool_use_id).toBe('tu-save');
+    expect(save.is_error).toBe(1);
+    expect(save.output_json).toBe('not saved: a parameter name outside the accepted form');
   });
 
   it('control: a save_workflow that saved is stored with is_error 0 and an empty output', async () => {
     const { rows, captures } = await runSave('file_path');
     expect(captures).toBe(1);
-    const save = rows.find((r) => r.tool_name === 'save_workflow');
-    expect(save).toBeDefined();
-    expect(save!.is_error).toBe(0);
-    expect(save!.output_json).toBe('');
+    const saves = rows.filter((r) => r.tool_name === 'save_workflow');
+    expect(saves).toHaveLength(1);
+    expect(saves[0]!.tool_use_id).toBe('tu-save');
+    expect(saves[0]!.is_error).toBe(0);
+    expect(saves[0]!.output_json).toBe('');
   });
 });
