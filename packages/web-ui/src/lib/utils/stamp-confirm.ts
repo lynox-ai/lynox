@@ -67,10 +67,10 @@ export function readPreview(raw: unknown): StampPreview | null {
 	if (!Array.isArray(c) || !c.every((e) => isObj(e) && typeof e['id'] === 'string' && typeof e['profile'] === 'string' && typeof e['provider'] === 'string' && strOrNull(e['account']))) return null;
 	// Who else answers is part of what the owner consents to: absent or null (an older engine, a plan
 	// that asks only the owner) is no line; any other shape refuses the preview, so a fault never
-	// reads as "only you".
+	// reads as "only you". The preview is taken as sent, like every other field.
 	const a = raw['asks'];
 	if (a !== undefined && a !== null && !(typeof a === 'string' && a !== '')) return null;
-	return { ...(raw as unknown as StampPreview), asks: typeof a === 'string' ? a : null };
+	return raw as unknown as StampPreview;
 }
 
 /** The fields of a trigger row the stamp predicates read (`GET /api/triggers`). */
