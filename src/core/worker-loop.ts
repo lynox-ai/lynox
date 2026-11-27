@@ -3086,7 +3086,7 @@ export class WorkerLoop {
       // Whether the question reached anyone goes onto the trigger and, through the engine as a
       // workflow question's does, to the hooks: on a managed instance a push that reached nobody
       // then mails the owner a fixed text that names neither the question nor the task.
-      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: session.sessionId, kind: 'question' }));
+      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: session.sessionId, kind: 'question' }), 'question');
       const notices = this.#notices();
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
@@ -3890,7 +3890,7 @@ export class WorkerLoop {
       maskOffBox: (text) => this.engine.getSecretStore()?.maskAll(text) ?? text,
       notify: (msg) => this.notificationRouter.notify(msg),
       // Through the engine, as an escalation's is, so the hooks hear of a question that reached nobody.
-      recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: runId, kind: 'question' })),
+      recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id, { threadId: runId, kind: 'question' }), 'question'),
       ownerStop,
       teardown,
       tearingDown: () => active?.tearingDown === true,
