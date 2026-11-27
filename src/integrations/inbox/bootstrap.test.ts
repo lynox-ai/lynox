@@ -157,9 +157,11 @@ describe('bootstrapInbox — wiring', () => {
   it('counts a list under the domain of any account connected here as our own group, also one connected after the start', async () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
-    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'office@team.example', isDefault: false });
     const noreply = [{ address: 'noreply@shop.example' }];
-    expect(await runtime.hook(ACCOUNT.id, envelope({ from: noreply, messageId: '<l1@x>', listId: 'info.team.example' })), 'our own group').toBe('ignored');
+    // Before that account is connected its domain is a foreign one; read per mail, not once.
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-before', from: noreply, messageId: '<l0@x>', listId: 'info.team.example' })), 'not yet connected').toBe('list_handled');
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'office@team.example', isDefault: false });
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-after', from: noreply, messageId: '<l1@x>', listId: 'info.team.example' })), 'our own group').toBe('ignored');
     expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t-foreign', from: noreply, messageId: '<l2@x>', listId: 'news.foreign.example' })), 'CONTROL: a foreign list').toBe('list_handled');
     await runtime.shutdown();
   });
