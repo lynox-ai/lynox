@@ -7,6 +7,7 @@ import * as reranker from './search-reranker.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { runInCallSlot } from '../../core/call-connection.js';
 import type { IAgent, SessionCounters } from '../../types/index.js';
+import { SearchResultAddresses } from '../../core/search-result-addresses.js';
 
 function makeCounters(): SessionCounters {
   return {
@@ -368,8 +369,13 @@ describe('search edge cases', () => {
     });
     const onAfterRun = vi.fn();
     const { agent, counters } = meteredAgent(onAfterRun);
+    const charged = vi.fn();
+    (agent as unknown as { chargeExternalCost: (usd: number) => void }).chargeExternalCost = charged;
     await createWebSearchTool(mockProvider(raw)).handler({ action: 'search', query: 'x' }, agent);
 
+    // The run's cost ceiling is charged too. Kills: a rerank debit that skips the run's guard.
+    expect(charged).toHaveBeenCalledOnce();
+    expect(charged.mock.calls[0]![0] as number).toBeCloseTo(0.0006, 6);
     expect(counters.costUSD).toBeCloseTo(0.0006, 6);
     expect(onAfterRun).toHaveBeenCalledOnce();
     expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.0006, 6);
@@ -406,9 +412,16 @@ describe('search edge cases', () => {
     });
     const onAfterRun = vi.fn();
     const { agent, counters } = meteredAgent(onAfterRun);
+    const capOnly = vi.fn();
+    const charged = vi.fn();
+    Object.assign(agent, { chargeExternalCapOnlyCost: capOnly, chargeExternalCost: charged });
     await createWebSearchTool(mockProvider(raw)).handler({ action: 'search', query: 'x' }, agent);
 
     expect(rerankSpy).toHaveBeenCalledTimes(1);
+    // The run's ceiling counts the bound as cap-only, never as spend.
+    // Kills: an aborted bound that skips the run's guard, or one booked as billed spend.
+    expect(capOnly).toHaveBeenCalledWith(upperBoundUsd);
+    expect(charged).not.toHaveBeenCalled();
     // The BOUND, exactly — not the estimate.
     expect(counters.costUSD).toBe(upperBoundUsd);
     expect(onAfterRun, 'the aborted call must not reach the tenant debit').not.toHaveBeenCalled();
@@ -593,5 +606,62 @@ describe('web_research and a stop of the run', () => {
       rerankSpy.mockRestore();
       vi.useRealTimers();
     }
+  });
+});
+
+// A locked turn (a mandate's) enters no key, so its reminder says who stores it instead of
+// holding ask_secret (U-185 §4); the owner's reminder stays as it was.
+describe('API-setup reminder in a locked turn', () => {
+  const MANDATE = { kind: 'mandate', email: 'helper@example.org', mandateId: 'M-1' };
+  const OWNER_LINE = '- Hold `ask_secret` until the user explicitly signals readiness ("done", "have the token"). Don\'t open the secret prompt mid-walkthrough.';
+  const LOCKED_LINE = '- In this session no key is entered: when the walkthrough reaches the credential, tell the user that the owner of this instance has to store it.';
+  const search = (principal: unknown): Promise<string> => createWebSearchTool(mockProvider([
+    // A host that resolves nowhere: the owner's search reads the pages behind its results.
+    { title: 'Shop scopes', url: 'https://docs.example.invalid/api/access-scopes', snippet: 'read_products write_products …' },
+  ])).handler({ action: 'search', query: 'Shopify custom app access token OAuth scopes' }, { principal } as never);
+
+  it('search: the locked line in a locked turn, the owner\'s line for the owner, the rest of the reminder the same', async () => {
+    const owner = await search(OWNER_PRINCIPAL);
+    const locked = await search(MANDATE);
+    expect(owner).toContain(OWNER_LINE);
+    expect(owner).not.toContain(LOCKED_LINE);
+    expect(locked).toContain(LOCKED_LINE);
+    expect(locked).not.toContain('ask_secret');
+    // The reminder after the data block, compared: the owner's search also reads the pages
+    // behind its results, a delegated one does not, so the blocks differ by design.
+    const reminder = (r: string): string => r.slice(r.lastIndexOf('</untrusted_data>'));
+    expect(reminder(locked)).toBe(reminder(owner).replace(OWNER_LINE, LOCKED_LINE));
+  });
+
+  it('read: the locked line in a locked turn', async () => {
+    const extractMod = await import('./content-extractor.js');
+    vi.spyOn(extractMod, 'extractContent').mockResolvedValue({
+      title: 'Shopify Admin API', url: 'https://shopify.dev/docs/admin-api/getting-started', wordCount: 100, content: 'GraphQL Admin API…', truncated: false,
+    });
+    const read = (principal: unknown): Promise<string> => createWebSearchTool(mockProvider())
+      .handler({ action: 'read', url: 'https://shopify.dev/docs/admin-api/getting-started' }, { principal } as never);
+    const owner = await read(OWNER_PRINCIPAL);
+    const locked = await read(MANDATE);
+    expect(owner).toContain(OWNER_LINE);
+    expect(locked).toContain(LOCKED_LINE);
+    expect(locked).not.toContain('ask_secret');
+  });
+});
+
+describe('a search records the addresses it listed', () => {
+  async function searchWith(startedTainted: boolean | undefined, principal: unknown = OWNER_PRINCIPAL): Promise<SearchResultAddresses> {
+    const searches = new SearchResultAddresses();
+    const tool = createWebSearchTool(mockProvider([{ title: 'A', url: 'https://news.example/a', snippet: 's' }]));
+    const agent = { principal, searchResultAddresses: searches, ...(startedTainted === undefined ? {} : { batchStartedTainted: () => startedTainted }) };
+    await tool.handler({ action: 'search', query: 'q' }, agent as never);
+    return searches;
+  }
+
+  it('whatever the taint of its batch, and for a mandate too', async () => {
+    for (const started of [false, true, undefined]) {
+      expect((await searchWith(started)).has('https://news.example/a')).toBe(true);
+    }
+    const mandate = await searchWith(false, { kind: 'mandate', email: 'helfer@firma.example', mandateId: 'm-1' });
+    expect(mandate.has('https://news.example/a')).toBe(true);
   });
 });

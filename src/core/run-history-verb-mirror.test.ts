@@ -143,6 +143,17 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
     history.close();
   });
 
+  it('getPlannedPipelines lists a definition that is not valid JSON beside the others, with no steps, instead of failing', () => {
+    const { history, engine } = make();
+    history.insertPlannedPipeline({ ...planned({ id: 'wf-a', name: 'A' }), steps: [{ id: 's1', task: 't' }] }, null);
+    history.insertPlannedPipeline(planned({ id: 'wf-b', name: 'B' }), null);
+    engine.getDb().prepare("UPDATE workflows SET definition_json = '{\"steps\": [' WHERE id = 'wf-b'").run();
+    const rows = history.getPlannedPipelines(100);
+    expect(rows.map((w) => [w.id, w.step_count]).sort()).toEqual([['wf-a', 1], ['wf-b', 0]]);
+    expect(rows.find((w) => w.id === 'wf-b')!.manifest_json).toBe('{"steps": [');
+  });
+
+
   it('a write to a CLOSED engine.db THROWS — engine.db is the sole authority, no legacy fallback', () => {
     const { history, engine } = make();
     engine.close(); // every subsequent WorkflowStore op now throws
@@ -465,6 +476,26 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     history.setTriggerEnabled('off-ref', false);
     const ids = history.getTriggersByPipelineId('wf-c').map(t => t.id);
     expect(ids).toEqual(['active-ref']);
+    engine.close();
+    history.close();
+  });
+
+  it('getPlansOfWorkflow reads every plan of a workflow that may still run: switched off ones in, finished ones out, no limit', () => {
+    const { history, engine } = make();
+    seedWorkflow(history, 'wf-p');
+    seedWorkflow(history, 'wf-other');
+    history.insertTrigger(trig({ id: 'on', taskType: 'pipeline', pipelineId: 'wf-p' }));
+    // Switched on again, it runs without a new stamp: its person may be asked.
+    history.insertTrigger(trig({ id: 'off', taskType: 'pipeline', pipelineId: 'wf-p' }));
+    history.setTriggerEnabled('off', false);
+    history.insertTrigger(trig({ id: 'done', taskType: 'pipeline', pipelineId: 'wf-p', status: 'completed' }));
+    history.insertTrigger(trig({ id: 'stopped', taskType: 'pipeline', pipelineId: 'wf-p' }));
+    history.updateTrigger('stopped', { status: 'stopped' });
+    history.insertTrigger(trig({ id: 'elsewhere', taskType: 'pipeline', pipelineId: 'wf-other' }));
+    expect(history.getPlansOfWorkflow('wf-p').map(t => t.id).sort()).toEqual(['off', 'on']);
+    // More than the hundred a list reads: none falls off.
+    for (let i = 0; i < 120; i++) history.insertTrigger(trig({ id: `more-${i}`, taskType: 'pipeline', pipelineId: 'wf-p' }));
+    expect(history.getPlansOfWorkflow('wf-p')).toHaveLength(122);
     engine.close();
     history.close();
   });
@@ -843,7 +874,7 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // ran six other test files and found this only through a review. The roster above is
     // the reason to keep it that way: it is a list of what the schema IS, maintained
     // because the number beside it refuses to be wrong.
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(72);
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(74);
     // v45 landed the relocated metrics table:
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
       .toEqual({ name: 'metrics' });

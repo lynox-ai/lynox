@@ -51,7 +51,7 @@ export interface ContainedPrefill {
 
 /** Take out every character `hiddenCharIndexes` names. Those it keeps in place stay: a joiner
  *  inside an emoji, a mark inside a word. */
-function withoutHidden(text: string): { text: string; removed: boolean } {
+export function withoutHidden(text: string): { text: string; removed: boolean } {
 	const at = hiddenCharIndexes(text);
 	if (at.length === 0) return { text, removed: false };
 	const drop = new Set(at);

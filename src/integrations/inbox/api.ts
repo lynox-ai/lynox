@@ -13,6 +13,7 @@
 
 import type {
   InboxBucket,
+  InboxItem,
   InboxRuleAction,
   InboxRuleMatcherKind,
   InboxRuleSource,
@@ -22,7 +23,8 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
-import { charCount, cutChars, descriptionProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
+import { flaggedAtIntake, followUpIsSensitive, itemFollowUps } from './follow-ups.js';
+import { charCount, cutChars, descriptionProblem, fixedValueProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
 import { isFeatureEnabled } from '../../core/features.js';
 
 export interface InboxApiDeps {
@@ -157,12 +159,18 @@ export function handleListItems(deps: InboxApiDeps, query: ListItemsQuery): ApiR
     if (snoozedOnly) return bad('ruleId cannot be combined with snoozedOnly');
     opts.ruleId = query.ruleId;
   }
-  return { status: 200, body: { items: deps.state.listItems(opts) } };
+  return { status: 200, body: { items: deps.state.listItems(opts).map((item) => withFollowUps(deps, item)) } };
 }
 
 export function handleGetItem(deps: InboxApiDeps, id: string): ApiResponse {
   const item = deps.state.getItem(id);
-  return item ? { status: 200, body: { item } } : notFound('item');
+  return item ? { status: 200, body: { item: withFollowUps(deps, item) } } : notFound('item');
+}
+
+/** The item as the inbox shows it: with the mail that came into its thread after its own mail. */
+function withFollowUps(deps: InboxApiDeps, item: InboxItem): InboxItem {
+  const followUps = itemFollowUps(deps.state, item);
+  return followUps === undefined ? item : { ...item, followUps };
 }
 
 /**
@@ -190,7 +198,7 @@ export function handleGetItemFull(deps: InboxApiDeps, id: string): ApiResponse {
       ? { md: legacy.bodyMd, source: 'cache', fetchedAt: legacy.fetchedAt.toISOString() }
       : { md: '', source: 'missing' };
   }
-  return { status: 200, body: { item, body } };
+  return { status: 200, body: { item: withFollowUps(deps, item), body } };
 }
 
 /**
@@ -222,7 +230,17 @@ export function handleGetItemThread(
     const parent = deps.state.getThreadMessageByMessageId(item.accountId, item.inReplyTo, item.tenantId);
     partial = parent === null;
   }
-  return { status: 200, body: { messages, partial } };
+  // A received message whose text the inbox did not keep because it read as confidential: the
+  // history says so instead of showing an empty row. Only such a row is marked; one that kept its
+  // text (masked) shows that text.
+  const flagged = flaggedAtIntake(deps.state.listAuditForItem(item.id, item.tenantId));
+  const shown = messages.map((m) => {
+    const empty = (m.bodyMd === undefined || m.bodyMd.length === 0) && (m.snippet === undefined || m.snippet.length === 0);
+    return empty && m.direction === 'inbound' && (flagged.has(m.messageId) || followUpIsSensitive(m))
+      ? { ...m, confidential: true as const }
+      : m;
+  });
+  return { status: 200, body: { messages: shown, partial } };
 }
 
 /**
@@ -412,9 +430,15 @@ export function handleGetCounts(deps: InboxApiDeps, query: { tenantId?: string |
   // `counts` keeps its three-zone shape for back-compat with the existing
   // smoke spec and clients reading the contract. `snoozed` rides alongside
   // as a top-level field so the new Snoozed tab can render its badge.
+  // `rulesPending`: rules the agent proposed that wait for the owner, over all of the tenant's
+  // accounts, for the count next to the rule view. Counted whether or not proposing is on: a
+  // proposal made while it was on still waits after it is turned off.
   const counts = deps.state.countItemsByBucket(query.tenantId);
   const snoozed = deps.state.countSnoozedItems(query.tenantId);
-  return { status: 200, body: { counts, snoozed } };
+  const rulesPending = deps.state.countPendingRules(query.tenantId);
+  // The same per account, so the rule view can open the account the waiting rules belong to.
+  const rulesPendingByAccount = deps.state.countPendingRulesByAccount(query.tenantId);
+  return { status: 200, body: { counts, snoozed, rulesPending, rulesPendingByAccount } };
 }
 
 // ── Cold start ───────────────────────────────────────────────────────────
@@ -495,57 +519,60 @@ export function handleBulkAction(deps: InboxApiDeps, body: BulkActionBody): ApiR
   const performedAt = new Date();
   const applied: string[] = [];
   const skipped: { id: string; reason: string }[] = [];
-  for (const id of body.ids) {
-    const item = deps.state.getItem(id);
-    if (item === null) {
-      skipped.push({ id, reason: 'not_found' });
-      continue;
-    }
-    if (item.userAction === body.action) {
-      skipped.push({ id, reason: 'already_in_state' });
-      continue;
-    }
-    deps.state.insertBulkActionLog({
-      tenantId: item.tenantId,
-      bulkId,
-      itemId: id,
-      priorUserAction: item.userAction ?? null,
-      priorUserActionAt: item.userActionAt ?? null,
-      action: body.action,
-      performedAt,
-    });
-    deps.state.updateUserAction(id, body.action, performedAt, item.tenantId);
-    // 'unhandled' is a soft revert and is not in InboxAuditAction —
-    // the inbox_user_action_log row already records the per-id state
-    // change with the shared bulk_id, so we skip the audit row for it.
-    if (body.action === 'archived' || body.action === 'snoozed') {
+  // One transaction: each item's action, its log row and its audit row commit together.
+  deps.state.runInTransaction(() => {
+    for (const id of body.ids) {
+      const item = deps.state.getItem(id);
+      if (item === null) {
+        skipped.push({ id, reason: 'not_found' });
+        continue;
+      }
+      if (item.userAction === body.action) {
+        skipped.push({ id, reason: 'already_in_state' });
+        continue;
+      }
+      deps.state.insertBulkActionLog({
+        tenantId: item.tenantId,
+        bulkId,
+        itemId: id,
+        priorUserAction: item.userAction ?? null,
+        priorUserActionAt: item.userActionAt ?? null,
+        action: body.action,
+        performedAt,
+      });
+      deps.state.updateUserAction(id, body.action, performedAt, item.tenantId);
+      // Every bulk action leaves an audit row, 'unhandled' as an 'undo' as on the single route: the
+      // action log is pruned after minutes, and what the owner undid must still read as undone when
+      // the inbox later counts the mail since the owner last dealt with the thread (`follow-ups.ts`).
+      // `undo_logged`: an undo of this action writes an audit row too (see `handleUndoBulk`).
       deps.state.appendAudit({
         tenantId: item.tenantId,
         itemId: id,
-        action: body.action,
+        action: body.action === 'unhandled' ? 'undo' : body.action,
         actor: 'user',
-        payloadJson: JSON.stringify({ bulk_id: bulkId, at: performedAt.toISOString() }),
+        payloadJson: JSON.stringify(body.action === 'unhandled'
+          ? { intent: 'unhandled', bulk_id: bulkId, at: performedAt.toISOString() }
+          : { bulk_id: bulkId, at: performedAt.toISOString(), undo_logged: true }),
         createdAt: performedAt,
       });
+      applied.push(id);
     }
-    applied.push(id);
-  }
+  });
   return { status: 200, body: { bulkId, applied, skipped } };
 }
 
 /**
  * Reverse a bulk action within the UNDO window (default 60s). Returns
- * 410 once expired. The per-id `undone_at` flag on `inbox_user_action_log`
- * is the undo audit trail; we do NOT write per-item rows into
- * `inbox_audit_log` for the undo path (the FK there is per-item, and
- * the row's prior state is already snapshot in user_action_log).
+ * 410 once expired. Each item put back gets an 'undo' audit row naming the bulk
+ * (`intent: 'bulk_undo'`), written with the revert: the action log is pruned after minutes.
  */
 export function handleUndoBulk(deps: InboxApiDeps, bulkId: string): ApiResponse {
-  const reverted = deps.state.undoBulkAction(bulkId);
-  if (reverted === 0) {
+  const { total, reverted, skipped } = deps.state.undoBulkActionCounted(bulkId);
+  if (total === 0) {
     return { status: 410, body: { error: 'undo window expired or bulk_id unknown', reason: 'undo_expired' } };
   }
-  return { status: 200, body: { ok: true, reverted } };
+  // `reverted`: items put back; `skipped`: items that changed since the bulk action and stay as they are.
+  return { status: 200, body: { ok: true, reverted, skipped } };
 }
 
 /** Last 5 undoable bulks within the UNDO window (PRD §"UNDO-Toast UX"). */
@@ -619,37 +646,45 @@ export function handleSetAction(deps: InboxApiDeps, id: string, body: SetActionB
   }
   const at = body.at ? new Date(body.at) : null;
   if (body.at && Number.isNaN(at?.getTime())) return bad('invalid at: not an ISO date');
-  const ok = deps.state.updateUserAction(id, body.action, at);
+  // The action and its audit row commit together: a later count of the mail since the owner last
+  // dealt with the thread reads the audit, and an undo it cannot see would end the wrong action.
+  const ok = deps.state.runInTransaction((): boolean => {
+    // What a clear undoes, read with the write: undoing a snooze leaves a reply before it standing.
+    const undid = body.action === null ? deps.state.getItem(id)?.userAction ?? null : null;
+    if (!deps.state.updateUserAction(id, body.action, at)) return false;
+    // Audit the user action so the UNDO + GDPR-export trails are complete.
+    // 'unhandled' is the user actively un-marking a verdict; the audit
+    // schema does not have a matching action so we record it as 'undo' with
+    // the original intent preserved in the payload.
+    if (body.action === null) {
+      deps.state.appendAudit({
+        itemId: id,
+        action: 'undo',
+        actor: 'user',
+        payloadJson: JSON.stringify({ reverted_at: new Date().toISOString(), undid }),
+      });
+    } else if (body.action === 'unhandled') {
+      deps.state.appendAudit({
+        itemId: id,
+        action: 'undo',
+        actor: 'user',
+        payloadJson: JSON.stringify({
+          intent: 'unhandled',
+          at: (at ?? new Date()).toISOString(),
+        }),
+      });
+    } else {
+      deps.state.appendAudit({
+        itemId: id,
+        action: body.action,
+        actor: 'user',
+        // `undo_logged`: every undo of this action writes an audit row (here and in bulk).
+        payloadJson: JSON.stringify({ at: (at ?? new Date()).toISOString(), undo_logged: true }),
+      });
+    }
+    return true;
+  });
   if (!ok) return notFound('item');
-  // Audit the user action so the UNDO + GDPR-export trails are complete.
-  // 'unhandled' is the user actively un-marking a verdict; the audit
-  // schema does not have a matching action so we record it as 'undo' with
-  // the original intent preserved in the payload.
-  if (body.action === null) {
-    deps.state.appendAudit({
-      itemId: id,
-      action: 'undo',
-      actor: 'user',
-      payloadJson: JSON.stringify({ reverted_at: new Date().toISOString() }),
-    });
-  } else if (body.action === 'unhandled') {
-    deps.state.appendAudit({
-      itemId: id,
-      action: 'undo',
-      actor: 'user',
-      payloadJson: JSON.stringify({
-        intent: 'unhandled',
-        at: (at ?? new Date()).toISOString(),
-      }),
-    });
-  } else {
-    deps.state.appendAudit({
-      itemId: id,
-      action: body.action,
-      actor: 'user',
-      payloadJson: JSON.stringify({ at: (at ?? new Date()).toISOString() }),
-    });
-  }
   return { status: 200, body: { ok: true } };
 }
 
@@ -939,6 +974,11 @@ export interface CreateRuleBody {
   name?: string | undefined;
 }
 
+/**
+ * A rule without a name is called by what it matches. Every value a create accepts keeps a visible
+ * character, so the empty case cannot be reached today; it stays as a guard should a later check
+ * let such a value through, rather than storing an empty name.
+ */
 function fallbackName(name: string, matcherValue: string): { name?: string } {
   const chosen = name.length > 0 ? name : cutChars(ruleLine(matcherValue), MAX_RULE_NAME_CHARS);
   return chosen.length > 0 ? { name: chosen } : {};
@@ -961,6 +1001,16 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     if (deps.state.countRulesOfKind(body.accountId, 'matches_description', body.tenantId) >= MAX_DESCRIPTION_RULES) {
       return bad(`at most ${String(MAX_DESCRIPTION_RULES)} description rules per account`);
     }
+  } else {
+    // The watcher does not pass a mail's List-ID to the rule match yet, so a new list id rule would
+    // never apply. Stored ones still list and can be deleted.
+    if (body.matcherKind === 'list_id') return bad('list_id rules do not apply yet');
+    // A fixed value is checked with the same rules as the agent's proposals (`rule-text.ts`: what a
+    // reader does not see, one line, the length, one sender address, the subject minimum): the owner
+    // may open the form from a link, so what it carries has to read as stored. Checked when a rule
+    // is created only; a stored rule loads as it is.
+    const problem = fixedValueProblem(body.matcherValue, body.matcherKind);
+    if (problem !== null) return bad(problem);
   }
   // One line, as the agent's proposals are cut: the name lands in audit rows the model can read.
   const name = typeof body.name === 'string' ? ruleLine(body.name) : '';
@@ -975,7 +1025,7 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     action: body.action,
     source: body.source,
     tenantId: body.tenantId,
-    // Unnamed, a rule is called by what it matches (cut to the name's length); nothing left, no name.
+    // Unnamed, a rule is called by what it matches (cut to the name's length; see `fallbackName`).
     ...(fallbackName(name, body.matcherValue)),
   });
   deps.rules?.invalidate(body.accountId, body.tenantId);

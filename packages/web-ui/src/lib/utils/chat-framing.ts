@@ -32,7 +32,7 @@
  * considered half. They are legitimate in right-to-left text — an Arabic or
  * Hebrew contact name orders its digits and punctuation with them — and this
  * function is shared by six seed-message surfaces where the value is a real
- * person's name. Stripping them there reorders `אבי ‎+41 79 123`. The overrides
+ * person's name. Stripping them there reorders `אבי \u200E+41 79 123`. The overrides
  * buy an attacker the actual reversal; the marks only nudge neutrals, so the
  * trade goes the other way. `prompt-origin.ts` does strip the marks as well,
  * because its field is a workflow label that is never a name — that difference

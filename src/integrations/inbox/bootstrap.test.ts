@@ -83,6 +83,29 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
   });
 
+  it('a reminder for an item whose mail the sensitive check flagged names no subject', async () => {
+    const bodies: string[] = [];
+    const router = { notify: vi.fn(async (m: { body: string }) => { bodies.push(m.body); return []; }) };
+    const runtime = bootstrapInbox({
+      mailStateDb: mail, anthropicClient: makeClient({ content: [] }), reminderPollIntervalMs: 10, language: () => 'de',
+      notificationRouter: router as unknown as Parameters<typeof bootstrapInbox>[0]['notificationRouter'],
+    });
+    const insert = (threadKey: string, subject: string, sensitive: boolean): string => {
+      const id = runtime.state.insertItemWithAudit(
+        { accountId: 'acct-1', channel: 'email', threadKey, bucket: 'requires_user', confidence: 0, reasonDe: 'r',
+          classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', subject },
+        { action: 'classified', actor: 'rule_engine', payloadJson: JSON.stringify(sensitive ? { sensitive_categories: ['otp'] } : {}) },
+      );
+      runtime.state.setSnooze(id, new Date(Date.now() - 5000), null, true, true);
+      return id;
+    };
+    insert('t-flagged', 'Ihr Code 482917', true);
+    insert('t-plain', 'Vertrag prüfen', false);
+    await vi.waitFor(() => expect(bodies).toHaveLength(2));
+    await runtime.shutdown();
+    expect([...bodies].sort()).toEqual(['Eine Mail mit vertraulichem Inhalt. Absender und Betreff siehst du in lynox.', 'Vertrag prüfen']);
+  });
+
   it('returns a runtime bundle with all parts populated', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
@@ -112,6 +135,23 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.inboxLabelOf('acct-1', 't-l')).toEqual({ bucket: 'draft_ready', userAction: 'replied', reason: 'r' });
     expect(runtime.inboxLabelOf('acct-2', 't-l')).toBeNull();
     expect(runtime.inboxLabelOf('acct-1', 't-unknown')).toBeNull();
+  });
+
+  it('takes a follow-up from any account connected here, also one connected after the start, for our own mail', async () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    const id = runtime.state.insertItem({
+      accountId: 'acct-1', channel: 'email', threadKey: 'imap:t1', bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', messageId: '<m1@x>',
+    });
+    runtime.state.updateUserAction(id, 'replied');
+    const later = new Date(Date.now() + 60_000);
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'support@acme.example', isDefault: false });
+    await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'Support@Acme.Example' }], messageId: '<m2@x>', date: later }));
+    expect(runtime.state.getItem(id)!.userAction, 'a copy from the shared address').toBe('replied');
+    await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'mustermann@example.com' }], messageId: '<m3@x>', date: later }));
+    expect(runtime.state.getItem(id)!.userAction, 'a customer reopens').toBeUndefined();
+    await runtime.shutdown();
   });
 
   it('the rule proposer files waiting rules in its tenant, at most ten per account, and the runtime does not apply them', () => {
@@ -232,6 +272,25 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
     expect(create).not.toHaveBeenCalled();
     expect(runtime.state.listItems()[0]?.bucket).toBe('auto_handled');
+  });
+
+  // The rule a mail met rides through the queue onto the item the classifier
+  // writes, so what it spends on, say, no-reply mail can be counted.
+  it('a classified no-reply mail records its prefilter rule; a newsletter costs no call', async () => {
+    const client = makeClient({
+      content: [{ type: 'text', text: JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'Rechnung' }) }],
+      usage: { input_tokens: 500, output_tokens: 80 },
+    });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    expect(await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'noreply@billing.example' }] }))).toBe('enqueued');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', from: [{ address: 'promo@newsletter.shop.example' }] }))).toBe('prefilter_filed');
+    await runtime.shutdown();
+    expect((client.messages.create as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+    const rows = mail.getConnection().prepare('SELECT bucket, prefilter_rule AS rule FROM inbox_items ORDER BY thread_key').all();
+    expect(rows).toEqual([
+      { bucket: 'requires_user', rule: 'automated_sender' },
+      { bucket: 'auto_handled', rule: 'newsletter_domain' },
+    ]);
   });
 
   it('shutdown drains the queue without throwing on an empty runtime', async () => {
@@ -375,8 +434,28 @@ describe('bootstrapInbox — wiring', () => {
       }
     });
 
+    it.each([[undefined], ['']] as const)('with the flag unset (%j), checks them: the feature is on by default', async (flag) => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', flag);
+      const create = vi.fn(async (req: { model: string; messages: Array<{ content: string }> }) => ({
+        content: [{ type: 'text', text: JSON.stringify({ rule_id: labelOf(req.messages[0]!.content, 'Termine') }) }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }));
+      const client = { messages: { create } } as unknown as Anthropic;
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, privacyAck: true });
+      try {
+        const ruleId = runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Termine' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(create.mock.calls[0]![0].model).toBe(getModelId('fast'));
+        expect(runtime.state.listItems()[0]?.matchedRuleId).toBe(ruleId);
+      } finally {
+        await runtime.shutdown();
+      }
+    });
+
     it('with the flag off, checks no description rule: the classifier alone decides', async () => {
-      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(mistralReply(JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'x' }), 10));
       const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: makeClient({ content: [] }), llmRegion: 'eu', mistralApiKey: 'eu-key' });
       try {
@@ -489,6 +568,25 @@ describe('bootstrapInbox — push notifier wire', () => {
     expect(send).toHaveBeenCalledTimes(1);
     const msg = send.mock.calls[0]?.[0] as { data?: { itemId?: string } };
     expect(msg.data?.itemId).toMatch(/^inb_/);
+  });
+
+  it('words the push of a flagged mail in the language it is handed', async () => {
+    const { NotificationRouter } = await import('../../core/notification-router.js');
+    const { FLAGGED_PUSH_TEXT } = await import('./notifier.js');
+    for (const language of ['de', 'en'] as const) {
+      mail.close();
+      mail = new MailStateDb({ path: ':memory:' });
+      mail.upsertAccount(ACCOUNT);
+      const router = new NotificationRouter();
+      const send = vi.fn(async () => 'delivered' as const);
+      router.register({ name: 'web-push', send });
+      const runtime = bootstrapInbox({
+        mailStateDb: mail, anthropicClient: makeClient({ content: [] }), notificationRouter: router, language: () => language,
+      });
+      await runtime.hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'Your one-time code is 123456.' }));
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0] as unknown as [{ body: string }])[0].body).toBe(FLAGGED_PUSH_TEXT[language]);
+    }
   });
 
   it('respects inbox_push_enabled=false: notifier silently skips even with router wired', async () => {

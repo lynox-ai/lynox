@@ -219,7 +219,7 @@ describe('judgeContext: the two credential checks', () => {
   // The second check's own witness is the credential spread over two fields' JSON, below: every
   // case here the first check already finds.
   it('finds one a hidden character splits, which no reading as written shows whole', () => {
-    const split = 'key sk-​live-abc';
+    const split = 'key sk-\u200Blive-abc';
     expect(hiddenCharIndexes(split).length).toBeGreaterThan(0);
     expect(scan(split)).toBeNull();
     expect(judgeContext({ d: split }, ['d'], check)).toEqual({ secretField: 0 });
@@ -279,7 +279,7 @@ describe('judgeContext: what is sent', () => {
   });
 
   it('removes hidden characters from what it sends', () => {
-    expect(sent({ a: 'Bio​-Baumwolle', t: ['x​y'] }, ['a', 't'])).toEqual({ a: 'Bio-Baumwolle', t: ['xy'] });
+    expect(sent({ a: 'Bio\u200B-Baumwolle', t: ['x\u200By'] }, ['a', 't'])).toEqual({ a: 'Bio-Baumwolle', t: ['xy'] });
   });
 
   it('cuts a text past its bound, marked', () => {

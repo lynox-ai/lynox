@@ -29,7 +29,7 @@
 // Override host/ports via env: GREENMAIL_HOST, GREENMAIL_IMAPS_PORT,
 // GREENMAIL_SMTPS_PORT.
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { connect, type Socket } from 'node:net';
 import nodemailer from 'nodemailer';
 import { ImapSmtpProvider, type CredentialsResolver } from '../../src/integrations/mail/providers/imap-smtp.js';
@@ -37,6 +37,7 @@ import { buildCustomAccount } from '../../src/integrations/mail/providers/preset
 import type { MailAccountType, MailProvider } from '../../src/integrations/mail/provider.js';
 import { InMemoryMailRegistry, createMailReplyTool } from '../../src/integrations/mail/tools/index.js';
 import type { IAgent } from '../../src/types/index.js';
+import { OWNER_PRINCIPAL } from '../../src/core/request-principal.js';
 
 const HOST = process.env['GREENMAIL_HOST'] ?? '127.0.0.1';
 const IMAPS_PORT = Number.parseInt(process.env['GREENMAIL_IMAPS_PORT'] ?? '3993', 10);
@@ -279,10 +280,13 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — adversarial mailbox fixtures', 
     registry.add(frankProvider);
     registry.setDefault(frankProvider.accountId);
     const replyTool = createMailReplyTool(registry);
-    const yesAgent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
+    // An owner who would say yes: the block fires before anyone is asked.
+    const promptSpy = vi.fn(async () => 'send');
+    const yesAgent: IAgent = { promptUser: promptSpy, principal: OWNER_PRINCIPAL } as unknown as IAgent;
     const out = await replyTool.handler({ uid: target.uid, body: 'should not send' }, yesAgent);
     expect(out).toContain('mail_reply blocked');
     expect(out).toContain('Auto-Submitted');
+    expect(promptSpy).not.toHaveBeenCalled();
   });
 
   // ── Header injection: a DISPLAY NAME cannot add a recipient (core#1219) ──

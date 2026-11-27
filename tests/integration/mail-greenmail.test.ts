@@ -27,6 +27,7 @@ import { MailContext } from '../../src/integrations/mail/context.js';
 import { MailStateDb } from '../../src/integrations/mail/state.js';
 import type { MailCredentialBackend } from '../../src/integrations/mail/auth/app-password.js';
 import type { IAgent } from '../../src/types/index.js';
+import { OWNER_PRINCIPAL } from '../../src/core/request-principal.js';
 
 const HOST = process.env['GREENMAIL_HOST'] ?? '127.0.0.1';
 const IMAPS_PORT = Number.parseInt(process.env['GREENMAIL_IMAPS_PORT'] ?? '3993', 10);
@@ -317,8 +318,8 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — Phase 0.1 fan-out + receive-onl
 
     const ctx = makeCtx([{ id: infoProvider.accountId, address: INFO, type: 'info' }]);
     const tool = createMailSendTool(registry, ctx);
-    const promptSpy = vi.fn(async () => 'Yes');
-    const agent: IAgent = { promptUser: promptSpy } as unknown as IAgent;
+    const promptSpy = vi.fn(async () => 'send');
+    const agent: IAgent = { promptUser: promptSpy, principal: OWNER_PRINCIPAL } as unknown as IAgent;
 
     const out = await tool.handler({
       to: 'anyone@example.com',
@@ -379,8 +380,8 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — Phase 0.1 fan-out + receive-onl
       { id: infoProvider.accountId, address: INFO, type: 'info' },
     ]);
     const sendTool = createMailSendTool(registry, ctx);
-    const promptSpy = vi.fn(async () => 'Yes');
-    const agent: IAgent = { promptUser: promptSpy } as unknown as IAgent;
+    const promptSpy = vi.fn(async () => 'send');
+    const agent: IAgent = { promptUser: promptSpy, principal: OWNER_PRINCIPAL } as unknown as IAgent;
 
     const infoSendOut = await sendTool.handler({
       account: infoProvider.accountId,
@@ -572,7 +573,7 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — Phase 0.1 fan-out + receive-onl
     ]);
 
     const tool = createMailReplyTool(registry, ctx);
-    const agent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async () => 'send', principal: OWNER_PRINCIPAL } as unknown as IAgent;
     const out = await tool.handler({
       account: carolProvider.accountId, // reading from Carol's mailbox
       uid: target.uid,

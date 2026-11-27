@@ -93,6 +93,10 @@ vi.mock('./agent.js', () => ({
     this.conversationSawUntrusted = false;
     // @ts-expect-error mock constructor
     this.restoreConversationTaint = vi.fn(function (this: { conversationSawUntrusted: boolean }) { this.conversationSawUntrusted = true; });
+    // @ts-expect-error mock constructor — the provider-search flag a rebuild carries
+    this.heldProviderSearch = vi.fn().mockReturnValue(false);
+    // @ts-expect-error mock constructor
+    this.restoreProviderSearch = vi.fn();
   }),
 }));
 
@@ -255,6 +259,9 @@ vi.mock('./task-manager.js', () => ({
     this.list = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.getWeekSummary = vi.fn().mockReturnValue({ overdue: [], dueToday: [], dueThisWeek: [], inProgress: [] });
+    // Called by Engine.init() when engine.db does not open and run history does.
+    // @ts-expect-error mock constructor
+    this.refuseTaskChangesWithoutStore = vi.fn();
   }),
   setPipelineModeLookup: vi.fn(),
 }));
@@ -290,6 +297,8 @@ vi.mock('./data-store.js', () => ({
     this.dropEmptyCrmOverlaps = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.ensureSourceColumns = vi.fn().mockReturnValue({ migrated: [], missing: [], invalid: [], failed: [] });
+    // @ts-expect-error mock constructor
+    this.ensureCollectionIds = vi.fn().mockReturnValue({ assigned: 0, renumbered: [], failed: null, indexFailed: null });
   }),
 }));
 

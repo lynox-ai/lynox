@@ -37,7 +37,7 @@ function auth(): GoogleAuth {
 }
 
 function agent(): IAgent {
-  return { name: 'test', model: 'm', memory: null, tools: [], onStream: null, promptUser: vi.fn().mockResolvedValue('Yes') } as unknown as IAgent;
+  return { name: 'test', model: 'm', memory: null, tools: [], onStream: null, promptUser: vi.fn().mockResolvedValue('confirm') } as unknown as IAgent;
 }
 
 /** One answer that every action below can read without failing before its request. */
