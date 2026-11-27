@@ -3745,7 +3745,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.rules_error_hidden_chars': { de: 'Der Wert enthält ein unsichtbares Zeichen, einen Zeilenumbruch oder einen Tab. Tipp ihn von Hand ein, statt ihn einzufügen.', en: 'The value contains an invisible character, a line break or a tab. Type it by hand instead of pasting it.' },
 	'inbox.rules_error_too_long': { de: 'Der Wert ist zu lang: höchstens 200 Zeichen. Kürz ihn und speichere noch einmal.', en: 'The value is too long: 200 characters at most. Shorten it and save again.' },
 	'inbox.rules_error_list_id': { de: 'Regeln nach List-ID lassen sich derzeit nicht anlegen, weil lynox die List-ID von Mails noch nicht liest; eine solche Regel würde nie greifen. Leg stattdessen eine Regel mit „Absender ist“ an.', en: 'Rules by List-ID cannot be added at the moment, because lynox does not read the List-ID of mails yet; such a rule would never apply. Add a rule with “Sender is” instead.' },
-	'inbox.rules_list_id_inactive': { de: 'Diese Regel greift derzeit nicht, weil lynox die List-ID von Mails noch nicht liest. Willst du diese Mails jetzt schon sortieren, leg eine Regel mit „Absender ist“ an.', en: 'This rule does not apply at the moment, because lynox does not read the List-ID of mails yet. To sort these mails now, add a rule with “Sender is”.' },
 	'inbox.rules_count': { de: '{count} Regeln', en: '{count} rules' },
 	'inbox.rules_count_one': { de: '1 Regel', en: '1 rule' },
 	'inbox.rules_bucket_handled': { de: 'Erledigt', en: 'Handled' },
