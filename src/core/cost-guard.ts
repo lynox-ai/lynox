@@ -1,6 +1,8 @@
 import type { CostGuardConfig, CostSnapshot } from '../types/index.js';
 import type { BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getPricing } from './pricing.js';
+import { isHeldReservation } from './session-budget.js';
+import type { PersistentBudgetReservation } from '../types/index.js';
 
 export class CostGuard {
   private readonly maxBudgetUSD: number;
@@ -41,8 +43,12 @@ export class CostGuard {
    */
   private runCeilingUSD = Infinity;
 
+  /** See `CostGuardConfig.heldAgainstCaps`. */
+  private readonly heldAgainstCaps: PersistentBudgetReservation | undefined;
+
   constructor(config: CostGuardConfig, model: string) {
     this.maxBudgetUSD = config.maxBudgetUSD ?? Infinity;
+    this.heldAgainstCaps = config.heldAgainstCaps;
     this.warnAtUSD = config.warnAtUSD ?? this.maxBudgetUSD * 0.8;
     this.maxIterations = config.maxIterations ?? 200;
     this.pricePerM = getPricing(model);
@@ -110,6 +116,17 @@ export class CostGuard {
   setRunCeilingUSD(usd: number): void {
     const bound = Number.isNaN(usd) || usd < 0 ? 0 : usd;
     this.runCeilingUSD = Math.min(this.runCeilingUSD, bound);
+  }
+
+  /**
+   * Whether everything this run may spend is already held against the daily and monthly caps:
+   * by a reservation the cap module issued and still holds, at least as large as the limit in
+   * force. Work carved out of this run's budget (sub-agent shares) is then inside that hold.
+   * ⚠ Up to one turn over, as any limit here: a turn is recorded before it is compared.
+   */
+  budgetHeldAgainstCaps(): boolean {
+    const hold = this.heldAgainstCaps;
+    return hold !== undefined && isHeldReservation(hold) && this.limitUSD() <= hold.reservedUSD;
   }
 
   /** Whether a run ceiling is set for the current run. */
