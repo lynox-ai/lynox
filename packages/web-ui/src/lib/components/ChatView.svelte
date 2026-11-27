@@ -106,9 +106,9 @@
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
-	import { isPipelineRunning } from '../utils/pipeline-status.js';
+	import { isPipelineRunning, prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
 	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
-	import { splitPromptHead } from '../utils/prompt-head.js';
+	import { contentBottomOf, contentLeftBelow, linesLeftBelow, readOnStep, splitPromptHead } from '../utils/prompt-head.js';
 	import PromptQuestionField from './PromptQuestionField.svelte';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
@@ -703,6 +703,64 @@
 	/** Set by the confirmation's question field when too little height is left for about four of its
 	 *  lines: the card then keeps its height and the stack scrolls, buttons included. */
 	let promptTooLow = $state(false);
+	/** Lines of a question without a consent kind (the model's own, a tool's confirmation) that lie
+	 *  below its box's edge. Such a question is rendered markup in a box of fixed height; without a
+	 *  count and a fade the end of it is not seen, and it may be what the yes is for. */
+	let questionBelow = $state(0);
+	const questionBelowLabel = $derived(questionBelow === 1 ? t('chat.prompt_read_more_one') : tf('chat.prompt_read_more', { n: String(questionBelow) }));
+	function questionBox(): HTMLElement | null {
+		return typeof document === 'undefined' ? null : document.querySelector<HTMLElement>('[data-pending-prompt] [data-prompt-markdown]');
+	}
+	function measureQuestion(): void {
+		const el = questionBox();
+		if (!el) { questionBelow = 0; return; }
+		const contentBottom = contentBottomOf(el.lastChild);
+		const left = contentLeftBelow({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, scrollTop: el.scrollTop, bottom: el.getBoundingClientRect().bottom }, contentBottom);
+		questionBelow = linesLeftBelow(left, parseFloat(getComputedStyle(el).lineHeight) || 22);
+	}
+	/** On by the whole lines seen above the fade (`readOnStep`): no line is passed over. */
+	function readOnQuestion(): void {
+		const el = questionBox();
+		if (!el) return;
+		const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22;
+		const fade = el.parentElement?.querySelector<HTMLElement>(':scope > [data-prompt-fade]')?.offsetHeight ?? 32;
+		el.scrollBy({ top: readOnStep(el.clientHeight, lineHeight, fade), behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
+	}
+	$effect(() => {
+		void pendingPermission?.promptId;
+		void pendingPermission?.question;
+		void pendingPermission?.segments;
+		void inBatchMode;
+		let frame = 0;
+		const schedule = (): void => {
+			if (typeof requestAnimationFrame === 'undefined') { measureQuestion(); return; }
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(measureQuestion);
+		};
+		questionBelow = 0;
+		let ro: ResizeObserver | null = null;
+		let disposed = false;
+		// The box renders after this effect's own pass; it is looked up once the DOM is updated, and
+		// measured at once, so the count is there on the first painted frame.
+		void tick().then(() => {
+			if (disposed) return;
+			measureQuestion();
+			const el = questionBox();
+			if (el && typeof ResizeObserver !== 'undefined') {
+				ro = new ResizeObserver(schedule);
+				ro.observe(el);
+				for (const child of el.children) ro.observe(child);
+			}
+			schedule();
+		});
+		if (typeof window !== 'undefined') window.addEventListener('resize', schedule);
+		return () => {
+			disposed = true;
+			ro?.disconnect();
+			if (typeof window !== 'undefined') window.removeEventListener('resize', schedule);
+			if (typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(frame);
+		};
+	});
 	// Clear the multi-select working set whenever the ACTIVE prompt changes, so a
 	// selection from a prompt that was replaced without a click (server timeout →
 	// next ask_user, or a thread switch) can't leak pre-checked into the next
@@ -3581,12 +3639,26 @@
 						     with MarkdownRenderer's own stylesheet: without them a single
 						     long token — a tracking URL in a body preview — scrolls the
 						     prompt sideways. -->
-						<div data-prompt-question class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
+						<!-- While its end lies below the box's edge, a fade on the box and a button on its own row
+						     under it say how many lines, as the engine's own confirmation does. -->
+						<div class="flex flex-1 min-w-0 flex-col">
+						<div class="relative flex min-w-0 flex-col">
+						<div data-prompt-question data-prompt-markdown onscroll={measureQuestion} class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
 							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list; segment values are spliced in afterwards, HTML-escaped -->
 							{@html pendingPermission.segments
 								? renderPromptSegments(pendingPermission.segments)
 								: renderPromptMarkdown(pendingPermission.question)}
 						</div>
+						{#if questionBelow > 0}
+							<div data-prompt-fade class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-bg-subtle to-transparent"></div>
+						{/if}
+						</div>
+						{#if questionBelow > 0}
+							<div class="flex shrink-0 justify-end pt-1">
+								<button data-prompt-read-more type="button" onclick={readOnQuestion} class="whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-xs text-text-muted hover:text-text">{questionBelowLabel} <span aria-hidden="true">↓</span></button>
+							</div>
+						{/if}
+					</div>
 					{/if}
 					<div class="flex items-center gap-1.5 shrink-0 self-start">
 						{#if promptSecondsLeft !== null && promptSecondsLeft !== undefined}
