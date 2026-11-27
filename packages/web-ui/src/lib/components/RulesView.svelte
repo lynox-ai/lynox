@@ -106,8 +106,8 @@
 		return `/app/inbox?${params.toString()}`;
 	}
 
-	// The kinds a rule can be created with. No list id: the mail's List-ID is not read yet, so such a
-	// rule would never apply (the server refuses it too). A stored one still lists and can be deleted.
+	// The kinds a rule can be created with. No list id: a stored one applies and lists, but one is not
+	// created here (the server refuses it too; whether it should be is a separate call).
 	const MATCH_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains', 'matches_description'];
 	/** The kinds a link may prefill: the fixed ones, as the reading pane offers them. */
 	const PREFILL_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains'];
@@ -627,9 +627,6 @@
 									<p class="text-[11px] text-text-subtle mt-1">
 										→ {t(ruleDisplayLabelKey(rule))}
 									</p>
-									{#if rule.matcherKind === 'list_id'}
-										<p class="text-[11px] text-text-muted mt-1" data-testid="rules-list-id-inactive">{t('inbox.rules_list_id_inactive')}</p>
-									{/if}
 									<a
 										href={ruleItemsHref(rule)}
 										class="inline-block mt-1 text-[11px] text-accent-text hover:underline py-1"

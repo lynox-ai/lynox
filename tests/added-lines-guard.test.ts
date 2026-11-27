@@ -584,3 +584,119 @@ describe('a raw invisible character in an added line', () => {
     expect(findingsIn(ID.replace('F-', `F${RLO}-`))).toEqual(['internal register id']);
   });
 });
+
+describe('the scan as a function another repository can call', () => {
+  const RLO = '\u202E';
+  /** Runs an exported function of the guard in the test repository, as a driver in another repository would. */
+  const call = (fn: string, ...args: unknown[]) =>
+    run('node', ['--input-type=module', '-e', `import(${JSON.stringify(GUARD)}).then((m) => { process.exitCode = m.${fn}(...${JSON.stringify(args)}) ?? 99; })`]);
+  /** The same, with stdout and stderr apart. */
+  const streams = (cmd: string[]) => {
+    const r = spawnSync(cmd[0]!, cmd.slice(1), { cwd: dir, env: GIT_ENV, encoding: 'utf8' });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+
+  it('scanRange with its defaults gives the same output and exit code as the command', () => {
+    const base = git('rev-parse', 'HEAD');
+    commit('note.md', `see ${ID}\nconst s = 'a${RLO}b';\n`, 'both kinds');
+    const both = (from: string) => [
+      streams(['node', GUARD, from, 'HEAD']),
+      streams(['node', '--input-type=module', '-e', `import(${JSON.stringify(GUARD)}).then((m) => { process.exitCode = m.scanRange(${JSON.stringify(from)}, 'HEAD') ?? 99; })`]),
+    ];
+    const [cli, fn] = both(base);
+    expect(cli!.code).toBe(1);
+    // The command's own refusal, in order: the public-repo header, its advice, the id hint, the closing hint.
+    const order = ['PUBLIC repo', 'Describe the behaviour', `'${['DE', 'F-'].join('')}' + 'example'`, 'Rewrite the commit that ADDED it']
+      .map((t) => cli!.stderr.indexOf(t));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(fn).toEqual(cli);
+    const clean = git('rev-parse', 'HEAD');
+    commit('ok.md', 'plain\n', 'clean');
+    const [cliClean, fnClean] = both(clean);
+    expect(cliClean!.code).toBe(0);
+    expect(fnClean).toEqual(cliClean);
+  });
+
+  it('invisibleFindings passes an internal id and open-finding wording, each of which the command refuses', () => {
+    for (const text of [`see ${ID}`, `an ${OPEN_WORDING}`]) {
+      const base = git('rev-parse', 'HEAD');
+      commit('row.md', `${text}\n`, 'fine in another repository');
+      const r = call('invisibleFindings', base, 'HEAD');
+      expect(r.code, text).toBe(0);
+      expect(r.out).toContain('clean ✓');
+      expect(guard(base, 'HEAD').code, text).toBe(1);
+    }
+  });
+
+  it('scanRange leaves the id check out only for an explicit false', () => {
+    const base = git('rev-parse', 'HEAD');
+    commit('row.md', `see ${ID}\n`, 'an id');
+    const withOpts = (opts: string) =>
+      run('node', ['--input-type=module', '-e', `import(${JSON.stringify(GUARD)}).then((m) => { process.exitCode = m.scanRange(${JSON.stringify(base)}, 'HEAD', ${opts}) ?? 99; })`]);
+    expect(withOpts('{ ids: false }').code).toBe(0);
+    for (const opts of ['{ ids: 0 }', "{ ids: '' }", '{ ids: null }', "{ ids: 'false' }", '{}']) {
+      const r = withOpts(opts);
+      expect(r.code, opts).toBe(1);
+      expect(r.out, opts).toContain('internal register id');
+    }
+  });
+
+  it('invisibleFindings refuses a raw invisible character, in a line and in a name, without the public-repo hints', () => {
+    const base = git('rev-parse', 'HEAD');
+    commit('row.md', `see ${ID}\nconst s = 'a${RLO}b';\n`, 'one of each');
+    commit(`n${RLO}.md`, 'plain\n', 'odd name');
+    const r = call('invisibleFindings', base, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('row.md:2: raw invisible character U+202E');
+    expect(r.out).toContain('n\\u202E.md: raw invisible character U+202E in the file name');
+    expect(r.out).toContain('2 finding(s) in lines this range adds.');
+    expect(r.out).not.toContain('internal register id');
+    expect(r.out).not.toContain('PUBLIC repo');
+    expect(r.out).not.toContain('Describe the behaviour');
+    expect(r.out).not.toContain(`'${['DE', 'F-'].join('')}' + 'example'`);
+    expect(r.out).toContain('write its escape instead');
+    expect(r.out).toContain('Rewrite the commit that ADDED it');
+    expect(r.out).not.toContain(RLO);
+  });
+
+  it('invisibleFindings refuses what the command refuses: an octopus merge, an empty range, a ref that does not resolve', () => {
+    const base = git('rev-parse', 'HEAD');
+    expect(call('invisibleFindings', base, 'HEAD').code).toBe(2);
+    expect(call('invisibleFindings', base, 'HEAD', { allowEmpty: true }).code).toBe(0);
+    expect(call('invisibleFindings', 'no-such-ref', 'HEAD').code).toBe(2);
+    for (const b of ['one', 'two']) {
+      git('checkout', '-qb', b, base);
+      commit(`${b}.md`, `${b}\n`, b);
+    }
+    git('checkout', '-qb', 'three', base);
+    git('merge', '-q', '--no-ff', '-m', 'octopus', 'one', 'two');
+    const r = call('invisibleFindings', base, 'HEAD');
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('octopus merge');
+  });
+
+  it('invisibleFindings does not count a line a merge keeps from main, and does count one the merge adds', () => {
+    commit('c.ts', 'shared\n', 'shared');
+    const shared = git('rev-parse', 'HEAD');
+    commit('c.ts', `main ${RLO}\n`, 'main, before the rule');
+    const mainTip = git('rev-parse', 'HEAD');
+    const resolve = (branch: string, content: string) => {
+      git('checkout', '-qb', branch, shared);
+      commit('c.ts', 'side one\n', 'side');
+      const merging = spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'merge', '-q', mainTip],
+        { cwd: dir, env: GIT_ENV, encoding: 'utf8' });
+      expect(merging.stdout + merging.stderr).toContain('CONFLICT');
+      writeFileSync(join(dir, 'c.ts'), content);
+      git('add', '--', 'c.ts');
+      git('commit', '-qm', 'resolve');
+    };
+    resolve('keeps', `main ${RLO}\nside one\n`);
+    expect(call('invisibleFindings', mainTip, 'HEAD').code).toBe(0);
+    resolve('adds', `main ${RLO}\nside one ${RLO}\n`);
+    const r = call('invisibleFindings', mainTip, 'HEAD');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('c.ts:2: raw invisible character U+202E');
+    expect(r.out).not.toContain('c.ts:1:');
+  });
+});

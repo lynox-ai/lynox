@@ -8,7 +8,7 @@ import type { AutonomyLevel } from './modes.js';
 import type { AgentWarning } from './models.js';
 import type { ConversationGrants } from '../core/conversation-grants.js';
 import type { CallApiCost, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
-import type { ConsentKind } from '../contract/prompt.js';
+import type { ConsentKind, ConsentAction } from '../contract/prompt.js';
 
 export interface TabQuestion {
   question: string;
@@ -101,6 +101,8 @@ export interface PromptMeta extends PromptOrigin {
    * carries it, whatever its options say.
    */
   consent?: ConsentKind | undefined;
+  /** For a consent whose button names what it does (a Google write): that action. Words only. */
+  consentAction?: ConsentAction | undefined;
 }
 
 /**

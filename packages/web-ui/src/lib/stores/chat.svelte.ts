@@ -29,7 +29,7 @@ import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { containedPrefill } from './contained-way-out.js';
 import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, isConsentCard, type ClosedCode } from './closed-question.js';
-import { CONSENT_UNRECOGNISED, isConsentKind, type ConsentKind } from '../contract/prompt.js';
+import { CONSENT_UNRECOGNISED, isConsentKind, type ConsentKind, isConsentAction, type ConsentAction, consentTakesText } from '../contract/prompt.js';
 import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
@@ -232,6 +232,8 @@ export interface PermissionPrompt {
 	/** One of the engine's own confirmations, by its marker: the card is drawn from this alone,
 	 *  its options are that kind's keys, and its answer is one of them. */
 	consent?: ConsentKind;
+	/** What the card's confirming button names (a Google write); words only. */
+	consentAction?: ConsentAction;
 }
 
 /** Question descriptor inside a multi-question tabs prompt. Mirrors the
@@ -696,7 +698,9 @@ async function drainQueueNow(due: { sid: string | null; gen: number }): Promise<
 	while (_changesetFetch) await _changesetFetch;
 	if (_drainDue === due) _drainDue = null;
 	// A new chat (newChat) leaves the opening as it is: the thread says it.
-	if (sessionId !== due.sid || _resumeGeneration !== due.gen || pendingChangeset || isStreaming || messageQueue.length === 0) return;
+	if (sessionId !== due.sid || _resumeGeneration !== due.gen || isStreaming || messageQueue.length === 0) return;
+	// The open review holds the turn, checked right before it is sent.
+	if (sendBlockedByReview({ silent: true })) return;
 	const next = messageQueue.shift()!;
 	persistChatNow(); // queue shrank — keep the durable copy in sync
 	await _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
@@ -708,7 +712,7 @@ function refireFailedTurn(msg: ChatMessage): void {
 	// Runs past `sendMessage`, so it checks the open review itself. Silently: it is not the
 	// user's action, and browsers fire `online` in bursts. The turn stays failed, with its
 	// tap-to-retry and its `failedOffline` mark, so the next automatic re-send probes again.
-	if (pendingChangeset) return;
+	if (sendBlockedByReview({ silent: true })) return;
 	msg.failed = false;
 	msg.failedOffline = false;
 	msg.sendUnconfirmed = false;
@@ -957,10 +961,13 @@ export interface RunOptions {
 /**
  * Whether a send must wait for the open changeset review — and if so, says so and points at
  * the review. A caller that holds the user's text asks this BEFORE clearing it: `sendMessage`
- * returns without sending in that case, and text cleared first is lost.
+ * returns without sending in that case, and text cleared first is lost. `silent` is for a send
+ * the user did not take (the queue's drain, a re-send on reconnect): it waits without a word,
+ * as browsers fire `online` in bursts.
  */
-export function sendBlockedByReview(): boolean {
+export function sendBlockedByReview(opts?: { silent?: boolean }): boolean {
 	if (!pendingChangeset) return false;
+	if (opts?.silent === true) return true;
 	addToast(t('changeset.review_pending'), 'info', 4000);
 	// Scroll changeset into view if visible
 	setTimeout(() => {
@@ -1674,6 +1681,71 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	}
 }
 
+/** Drop the empty answer bubble a turn put right after its message. */
+function dropEmptyAnswerAfter(list: ChatMessage[], i: number): void {
+	const next = list[i + 1];
+	if (next && next.role === 'assistant' && !next.content && !(next.toolCalls && next.toolCalls.length > 0) && !(next.blocks && next.blocks.length > 0)) list.splice(i + 1, 1);
+}
+
+/**
+ * The open review held a message after its thread was left or opened again: the message waits
+ * in that thread, so it is back, waiting, when the thread is shown. Opened again, that is the list
+ * on screen; left, it is the thread's saved copy (or, with none yet, the list the turn started
+ * in), which a waiting message keeps over the server's transcript when the thread opens. A copy
+ * from before the message gets it added, as {@link markFailedInSavedThread} does. A message still
+ * in its thread's queue waits already. A message with files cannot wait in the saved copy (its
+ * queue keeps text only) and is marked failed there: a tap sends its text again, without the
+ * files, and failed says something went wrong. Held would promise the message as shown.
+ */
+function requeueHeldInThread(sid: string, turn: TurnStart, task: string, files: FileAttachment[] | undefined): void {
+	const msg = turn.userMsg;
+	if (!msg || _deletedOnServer.has(sid) || _droppedThreads.has(sid)) return;
+	const withFiles = files !== undefined && files.length > 0;
+	const place = (list: ChatMessage[]): number => {
+		const i = list.findIndex((m) => isSameTurn(m, msg));
+		if (i >= 0) return i;
+		list.push({ role: 'user', content: msg.content, ...(msg.createdAt ? { createdAt: msg.createdAt } : {}) });
+		return list.length - 1;
+	};
+	if (sessionId === sid) {
+		const i = place(messages);
+		const shown = messages[i]!;
+		dropEmptyAnswerAfter(messages, i);
+		if (!(shown.queued === true && shown.queueId !== undefined && messageQueue.some((q) => q.id === shown.queueId))) {
+			const id = newQueueId();
+			shown.queueId = id;
+			shown.queued = true;
+			shown.failed = false;
+			messageQueue.unshift({ id, task, ...(withFiles ? { files } : {}) });
+		}
+		persistChatNow();
+		// The card of the review that holds it, as `holdForReview` fetches it.
+		void fetchChangeset();
+		return;
+	}
+	const root = readPersistedRoot();
+	// The debounced save writes the thread on screen only, so a thread left mid-turn may have no
+	// saved copy yet: the list the turn started in is that thread's.
+	const list = root.threads[sid] ?? (JSON.parse(JSON.stringify(turn.messages)) as ChatMessage[]);
+	root.threads[sid] = list;
+	const i = place(list);
+	const saved = list[i]!;
+	dropEmptyAnswerAfter(list, i);
+	const savedQueue = root.queues?.[sid] ?? [];
+	const waitsAlready = saved.queued === true && saved.queueId !== undefined && savedQueue.some((q) => q.id === saved.queueId);
+	if (!waitsAlready && withFiles) {
+		saved.queued = false;
+		saved.failed = true;
+	} else if (!waitsAlready) {
+		const id = newQueueId();
+		saved.queueId = id;
+		saved.queued = true;
+		saved.failed = false;
+		root.queues = { ...(root.queues ?? {}), [sid]: [{ id, task }, ...savedQueue] };
+	}
+	writePersistedRoot(root);
+}
+
 /** Whether a refused `/run` says the open review holds the message (`code: 'review_pending'`).
  *  Reads a copy of the body, so the caller can still read the answer itself. */
 async function reviewPendingIn(res: Response): Promise<boolean> {
@@ -1858,11 +1930,13 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			_queuePollController = null;
 		}
 		// The thread was left or opened again meanwhile: the list belongs to another opening now.
+		// The message still waits for the review, in the thread it was typed in.
 		if (sessionId !== sid || _resumeGeneration !== turnGen) {
 			endStreaming(turn.assistantMsg);
 			streamingActivity = 'idle';
 			streamingToolName = null;
 			streamingToolPhase = null;
+			requeueHeldInThread(sid, turn, task, files);
 			return;
 		}
 		const held = messages[userMsgIdx];
@@ -2317,13 +2391,17 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		}
 	}
 
-	endStreaming(turn.assistantMsg);
-	streamingActivity = 'idle';
-	streamingToolName = null;
-	streamingToolPhase = null;
-	pendingPermission = null;
-	pendingTabsPrompt = null;
-	retryStatus = null;
+	// The streaming state is the open chat's. A run started since (in a new chat, or in this one
+	// opened again) owns it now, and this run's end leaves it as that run has it.
+	if (streamEpoch === turn.epoch) {
+		endStreaming(turn.assistantMsg);
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		pendingPermission = null;
+		pendingTabsPrompt = null;
+		retryStatus = null;
+	}
 
 	// Parse follow-up suggestions from assistant response. FALLBACK only: if the
 	// agent used the suggest_follow_ups tool, the tool_call handler already set
@@ -2656,6 +2734,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				multiSelect: data['multi_select'] === true,
 				origin: originFromEvent(data),
 				...(isConsentKind(data['consent']) ? { consent: data['consent'] } : {}),
+				...(isConsentAction(data['consentAction']) ? { consentAction: data['consentAction'] } : {}),
 			};
 			break;
 		case 'prompt_tabs': {
@@ -3076,7 +3155,8 @@ export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
 	// A consent card's answer is a click; as text in the message field it would approve nothing.
-	const draftable = isConsentCard(pendingPermission?.consent) ? null : answer;
+	const consent = pendingPermission?.consent;
+	const draftable = isConsentCard(consent) && !consentTakesText(consent) ? null : answer;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
@@ -3517,6 +3597,7 @@ export async function checkPendingPrompt(onAnswered?: (nothingOpen: boolean) => 
 				multiSelect: data['multiSelect'] === true,
 				origin,
 				...(isConsentKind(data['consent']) ? { consent: data['consent'] } : {}),
+				...(isConsentAction(data['consentAction']) ? { consentAction: data['consentAction'] } : {}),
 			};
 			card = isConsentCard(pendingPermission.consent) ? 'decision' : 'question';
 		} else if (promptType === 'ask_secret') {
@@ -3655,15 +3736,24 @@ function fetchChangeset(): Promise<boolean> {
 
 async function loadChangeset(): Promise<boolean> {
 	if (!sessionId) return false;
+	// The answer is about the thread open when it was asked for. Once another thread is shown (or
+	// this one was opened again) it says nothing about the view: it sets no card there, and it is
+	// no answer for that view's queue.
+	const sid = sessionId;
+	const gen = _resumeGeneration;
+	const stale = (): boolean => sessionId !== sid || _resumeGeneration !== gen;
 	changesetLoading = true;
 	try {
 		// No time limit of its own: a slow answer that carries a review must still show it, and a
 		// queued turn waits for it. A fetch the network ends lands in the catch and frees the queue.
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
+		const res = await fetch(`${getApiBase()}/sessions/${sid}/changeset`);
+		const data = res.ok ? (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] } : null;
+		// Checked once the whole answer is in. The same thread opened again: its review is read
+		// again, for that opening.
+		if (stale()) return sessionId === sid ? await loadChangeset() : false;
 		// No session on the server (restarted, or dropped): it holds no review, which is an answer.
 		if (res.status === 404) return true;
-		if (!res.ok) return false;
-		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
+		if (!data) return false;
 		if (data.hasChanges && data.files.length > 0) {
 			pendingChangeset = data.files;
 			pendingChangesetRunId = data.runId ?? null;
@@ -4425,6 +4515,76 @@ function drainAfterReattach(gen: number): void {
 	void fetchChangeset().then((answered) => { if (answered && gen === _resumeGeneration) drainQueueSoon(100); });
 }
 
+/** How long to wait between asks whether a run a re-attach lost hold of still runs. */
+const RUN_END_POLL_MS = 2000;
+/** How often it is asked, at most (six minutes, as the busy wait); then the turn waits for the user. */
+const RUN_END_MAX_ASKS = 180;
+/** The wait for a run's end in progress, by opening, stream and run: one at a time. */
+let _runEndWait: string | null = null;
+
+/**
+ * The run was still going when the wait ran out: the turns queued in this opening are marked
+ * failed, for a tap to send again, as the busy wait leaves a turn after its six minutes. A turn
+ * without its bubble on screen gets one.
+ */
+function failWaitingTurns(): void {
+	const waiting = messageQueue;
+	messageQueue = [];
+	for (const q of waiting) {
+		const m = messages.find((x) => x.role === 'user' && x.queueId === q.id);
+		if (m) {
+			m.queued = false;
+			m.failed = true;
+		} else {
+			// The opening showed the server's transcript, without the waiting bubble: it comes
+			// back, failed, so the turn is not dropped unseen.
+			messages.push({ role: 'user', content: q.task, failed: true, ...(q.runOptions?.typed === true ? { typed: true } : {}) });
+		}
+	}
+	persistChatNow();
+}
+
+/**
+ * A re-attach let go of its run before the run ended: the stream dropped, could not be reached,
+ * or its reading was refused. The run may still go on on the server, so a turn queued in this
+ * opening waits for its end: sent earlier, the server would answer busy. The registry is asked
+ * for six minutes at most (then the turns are failed, for a tap), until the run is no longer in it (or no longer running), then the turns go as after a re-attach that found its run
+ * ended (the review is asked for first). An unanswered ask is asked again. It stops when the
+ * thread is left or opened again, a run of this chat starts (that run drains the queue), or
+ * nothing waits any more.
+ */
+function drainWhenRunEnds(runId: string, gen: number): void {
+	const epoch = streamEpoch;
+	const key = `${gen}:${epoch}:${runId}`;
+	if (_runEndWait === key) return; // one wait per opening, stream and run
+	_runEndWait = key;
+	let asks = 0;
+	const current = (): boolean => _runEndWait === key && gen === _resumeGeneration && streamEpoch === epoch && !isStreaming && messageQueue.length > 0;
+	const stop = (): void => { if (_runEndWait === key) _runEndWait = null; };
+	const ask = async (): Promise<void> => {
+		if (!current()) { stop(); return; }
+		if (++asks > RUN_END_MAX_ASKS) { stop(); failWaitingTurns(); return; }
+		let ended = false;
+		try {
+			const res = await fetch(`${getApiBase()}/runs/active`);
+			if (res.ok) {
+				const runs = ((await res.json()) as { runs?: unknown } | null)?.runs;
+				// Only a running or answer-awaiting run goes on: one a restart left `interrupted`
+				// stays listed but runs no more.
+				ended = Array.isArray(runs) && !runs.some((r) => {
+					if (typeof r !== 'object' || r === null) return false;
+					const { runId: id, status } = r as { runId?: unknown; status?: unknown };
+					return id === runId && (status === 'running' || status === 'awaiting_input');
+				});
+			}
+		} catch { /* not answered: asked again */ }
+		if (!current()) { stop(); return; }
+		if (ended) { stop(); drainAfterReattach(gen); return; }
+		setTimeout(() => { void ask(); }, RUN_END_POLL_MS);
+	};
+	void ask();
+}
+
 async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<void> {
 	// userIdx for handleSSEEvent's error path = the last user message.
 	let userIdx = -1;
@@ -4443,11 +4603,14 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	try {
 		res = await fetch(`${getApiBase()}/runs/${runId}/stream?since=${since}`);
 	} catch {
-		return; // network drop — nav poll still reflects the run; user can reload
+		// Network drop — nav poll still reflects the run; user can reload. A turn queued here
+		// waits for the run's end.
+		drainWhenRunEnds(runId, gen);
+		return;
 	}
 	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
 	const refused = res.ok ? null : await containedReadKey(res);
-	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; return; }
+	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; drainWhenRunEnds(runId, gen); return; }
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
@@ -4552,6 +4715,9 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			// run left to review holds it (`drainQueueSoon`). A thread opened meanwhile has its
 			// own queue and review: not this re-attach's to drain.
 			if (gen === _resumeGeneration) drainQueueSoon(100);
+		} else if (!completedNormally && streamEpoch === myEpoch && gen === _resumeGeneration) {
+			// The stream ended without its `done`: the run may still be going.
+			drainWhenRunEnds(runId, gen);
 		}
 		persistChat();
 	}

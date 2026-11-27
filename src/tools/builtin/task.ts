@@ -6,7 +6,7 @@ import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidde
 import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
-import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PAUSED_DONE_UPDATE_REFUSAL, isPaused, pausedModelText } from '../../core/plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, isPaused, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
 import { lastRunResultFor } from '../../core/member-connection-notes.js';
 import { noticeLanguage } from '../../core/notice-language.js';
 import { WORKER_NOTICES } from '../../core/worker-notices.js';
@@ -120,11 +120,15 @@ export function triggerDetailLine(t: {
   next_run_at?: string | undefined;
   status?: string | undefined;
   paused_at?: number | undefined;
-}): string {
+  paused_for?: string | null | undefined;
+},
+// Reads the workflow of a completed plan that keeps its pause, to say whether its takeover comes
+// first (`pausedDoneWorkflow`). Without it the sentence names the condition instead.
+reader?: PausedDoneWorkflowReader | null): string {
   const parts: string[] = [];
   // A paused plan says so first; it has no next run while it is paused (`plan-pause.ts`).
   const paused = isPaused(t);
-  if (paused) parts.push(`PAUSED — ${pausedModelText(t)}`);
+  if (paused) parts.push(`PAUSED — ${pausedModelText(t, reader)}`);
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
   // 1, so `=== 0` is the test, not falsiness. A todo has no such field at all.
   if (t.enabled === 0) parts.push('SCHEDULE OFF — it will not fire');
@@ -236,11 +240,16 @@ export function triggerDetailLine(t: {
   return parts.length === 0 ? '' : `\n    ↳ ${parts.join(FIELD_SEPARATOR)}`;
 }
 
+/** What a completed paused plan's line reads its workflow's case with (`pausedDoneWorkflow`). */
+function doneReader(agent: IAgent): PausedDoneWorkflowReader | null {
+  return pausedDoneReaderOf(agent.toolContext.runHistory, agent.toolContext.mandateEnds);
+}
+
 // Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
 function formatTaskLine(
-  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_member_notes?: readonly string[] | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined },
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_member_notes?: readonly string[] | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined; paused_for?: string | null | undefined },
   // Callers used to append their own suffix to the RESULT of this function.
   // That was harmless while the result was one line; with a detail line it put
   // "— next run: …" underneath "workflow <id>", where it reads as a property of
@@ -248,6 +257,8 @@ function formatTaskLine(
   // rather than concatenated on.
   reader: TaskReader,
   suffix = '',
+  // Reads the workflow of a completed plan that keeps its pause (`triggerDetailLine`).
+  workflowReader?: PausedDoneWorkflowReader | null,
 ): string {
   // Title, assignee, scope and due date as stored, without the characters that render as nothing
   // (`hidden-text.ts`): the model's write tools refuse them, but a plan saved before, or through
@@ -256,7 +267,7 @@ function formatTaskLine(
   const due = t.due_date ? ` — due ${stripHidden(t.due_date)}` : '';
   const assign = t.assignee ? ` @${stripHidden(t.assignee)}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates()) })}`;
+  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates()) }, workflowReader)}`;
 }
 
 /**
@@ -768,7 +779,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       if (pausedTarget !== undefined && isPaused(pausedTarget)
         && !(isOwnerPrincipal(agent.principal) && input.status === 'completed')) {
         return pausedTarget.status === 'completed'
-          ? PAUSED_DONE_UPDATE_REFUSAL
+          ? pausedDoneUpdateRefusal(pausedDoneWorkflow(pausedTarget, doneReader(agent)))
           : `Error: this plan is ${pausedModelText(pausedTarget)}. It cannot be changed until then.`;
       }
       return withInstanceWrite(agent, {
@@ -791,7 +802,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (input.status === 'completed') {
           const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal, mark), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
-          return `Task completed: ${formatTaskLine(task, taskReaderOf(agent))}`;
+          return `Task completed: ${formatTaskLine(task, taskReaderOf(agent), '', doneReader(agent))}`;
         }
 
         const task = w.run('apply', () => managerRef.update(input.task_id, {
@@ -870,19 +881,19 @@ export const taskListTool: ToolEntry<TaskListInput> = {
         // Use the history directly for overdue
         const overdue = managerRef.getWeekSummary(scopes).overdue;
         if (overdue.length === 0) return 'No overdue tasks.';
-        return overdue.map(t => formatTaskLine(t, taskReaderOf(agent))).join('\n');
+        return overdue.map(t => formatTaskLine(t, taskReaderOf(agent), '', doneReader(agent))).join('\n');
       }
       if (input.due === 'today') {
         const summary = managerRef.getWeekSummary(scopes);
         const tasks = [...summary.overdue, ...summary.dueToday];
         if (tasks.length === 0) return 'No tasks due today (and none overdue).';
-        return tasks.map(t => formatTaskLine(t, taskReaderOf(agent))).join('\n');
+        return tasks.map(t => formatTaskLine(t, taskReaderOf(agent), '', doneReader(agent))).join('\n');
       }
       if (input.due === 'week') {
         const summary = managerRef.getWeekSummary(scopes);
         const tasks = [...summary.overdue, ...summary.dueToday, ...summary.dueThisWeek];
         if (tasks.length === 0) return 'No tasks due this week.';
-        return tasks.map(t => formatTaskLine(t, taskReaderOf(agent))).join('\n');
+        return tasks.map(t => formatTaskLine(t, taskReaderOf(agent), '', doneReader(agent))).join('\n');
       }
     }
 
@@ -926,7 +937,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     const limited = tasks.slice(0, input.limit ?? 20);
     if (limited.length === 0) return 'No tasks found.';
 
-    const lines = limited.map(t => formatTaskLine(t, taskReaderOf(agent)));
+    const lines = limited.map(t => formatTaskLine(t, taskReaderOf(agent), '', doneReader(agent)));
     if (tasks.length > limited.length) {
       lines.push(`... and ${tasks.length - limited.length} more`);
     }

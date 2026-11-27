@@ -10,7 +10,7 @@
 	import { escalationNotice, escalationChatLink } from '../utils/trigger-escalation.js';
 	import WatchAddress from './WatchAddress.svelte';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
-	import { endedNotices, pausedTitleLine, pausedWhoText, planTitle, refusalText, takeoverLines, writtenByMember, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { endedNotices, pausedTitleLine, pausedWhoText, planTitle, refusalText, shownWhole, takeoverLines, writtenByMember, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { blockedReasonParts, holdsNextRun, hostLabels, type BlockedReason } from '../utils/blocked-reason.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
@@ -79,6 +79,10 @@
 		// Paused because the access of someone who set up or changed it ended: it does not run
 		// until it is taken over (`GET /api/triggers`, engine `plan-pause.ts`).
 		paused?: boolean;
+		// A completed plan that keeps its pause: the workflow whose takeover comes before a new plan,
+		// or null when none does (U-275 N6). Absent when the engine could not read it, or is older:
+		// the line then gives the condition.
+		paused_done_workflow?: { name: string | null } | null;
 		// Whose ended access paused it, for the owner only (a helper is not told about another's).
 		paused_who?: string[];
 		// How and when each of those accesses ended, for the owner only: the notices above the list.
@@ -351,6 +355,21 @@
 	// reopens a paused plan, so it never runs again. So the button is not offered there (U-179).
 	function pausedDone(trigger: Trigger): boolean {
 		return trigger.paused === true && trigger.status === 'completed';
+	}
+
+	// Which line a completed, paused plan gets (U-275 N6): its workflow's takeover first, by name;
+	// no workflow sentence; or, when the engine could not say, the condition as before.
+	function pausedDoneCase(trigger: Trigger): 'workflow' | 'none' | 'unknown' {
+		return trigger.paused_done_workflow === undefined ? 'unknown' : trigger.paused_done_workflow === null ? 'none' : 'workflow';
+	}
+	function pausedDoneHint(trigger: Trigger): string {
+		const wf = trigger.paused_done_workflow;
+		const takeover = { tab: t('hub.automation.workflows'), button: t('workflow_library.takeover.button') };
+		if (wf === undefined) return ownerActs ? tf('triggers.paused_done_hint', takeover) : t('triggers.paused_done_hint_helper');
+		if (wf === null) return t('triggers.paused_done_hint_none');
+		// Without a name its workflow is "its workflow", in lynox's own words.
+		if (wf.name === null) return ownerActs ? tf('triggers.paused_done_hint_its_workflow', takeover) : t('triggers.paused_done_hint_its_workflow_helper');
+		return ownerActs ? tf('triggers.paused_done_hint_workflow', { ...takeover, workflow: shownWhole(wf.name) }) : tf('triggers.paused_done_hint_workflow_helper', { workflow: shownWhole(wf.name) });
 	}
 
 	// At a paused plan, open or completed, Delete is the owner's: the route refuses it to a helper
@@ -645,8 +664,10 @@
 								     stage and host instead (`shownTitle`); it offers no takeover. -->
 								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if (pausedOpen(trigger) || (ownerActs && writtenByMember(trigger))) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{#if shownHost(trigger) !== null}{HOST_SEP}<BulkHost value={shownHost(trigger) ?? ''} testid="trigger-bulk-host" />{/if}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
-								{#if trigger.enabled === 0}
-									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
+								<!-- Not at a completed plan: its own mark says it does not run, and it has no switch
+								     that "Paused" would offer to resume (U-275 N6). -->
+								{#if trigger.enabled === 0 && trigger.status !== 'completed'}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-switched-off>{t('triggers.paused')}</span>
 								{/if}
 								{#if held(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-held>{t('triggers.awaiting_confirmation')}</span>
@@ -659,6 +680,11 @@
 								{/if}
 								{#if pausedDone(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-trigger-paused-done>{t('triggers.paused_done')}</span>
+								{/if}
+								<!-- A completed plan runs no more: without a mark it read as active (only its schedule,
+								     no next run). One that keeps its pause has its own mark above. -->
+								{#if trigger.status === 'completed' && trigger.paused !== true}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-trigger-completed>{t('triggers.completed')}</span>
 								{/if}
 							</div>
 							<!-- Who set it up or changed it last, when that was a helper, worded as on an
@@ -709,7 +735,7 @@
 							<!-- A completed plan that keeps its pause has no way back at the plan: nothing takes it
 							     over or reopens it. The line names the way there is (U-275). -->
 							{#if pausedDone(trigger)}
-								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-done-hint>{ownerActs ? tf('triggers.paused_done_hint', { tab: t('hub.automation.workflows'), button: t('workflow_library.takeover.button') }) : t('triggers.paused_done_hint_helper')}</p>
+								<p class="mt-1 text-xs text-text-muted break-words" data-trigger-paused-done-hint={pausedDoneCase(trigger)}><MarkedLine text={pausedDoneHint(trigger)} mono={false} /></p>
 							{/if}
 							<!-- Why its run does not do its work, with the way out: a watch the policy keeps from its
 							     page, or the cause its last failed run stored. Only causes lynox itself knows, said in
@@ -817,9 +843,9 @@
 							{/if}
 							<!-- Not at a paused plan. Open, it waits for its takeover: next to its badge the switch
 							     read as a second pause, and a helper's is refused. After the takeover it comes
-							     back, and an own pause set before stays. Completed, it never runs again, whatever
-							     the switch says, as its line tells (U-275). -->
-							{#if trigger.paused !== true}
+							     back, and an own pause set before stays. Nor at a completed plan, paused or not: it never
+							     runs again, whatever the switch says, and a switch without effect contradicts its mark (U-275 N2, N6). -->
+							{#if trigger.paused !== true && trigger.status !== 'completed'}
 								<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} data-trigger-toggle class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
 							{/if}
 							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>

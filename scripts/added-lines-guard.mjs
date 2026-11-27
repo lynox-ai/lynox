@@ -6,13 +6,21 @@
  *
  *   scripts/public-repo-guard.sh check-commits <base-ref> <head-ref> [--allow-empty]
  *
- * That is the one entry point; it runs this file. Two callers: the pre-push hook,
+ * That is the one command; it runs this file. Two callers: the pre-push hook,
  * which keeps an id from being PUBLISHED at all, and the required CI job, which
  * keeps it from being MERGED. Only the hook prevents the disclosure — on a public
  * repo a pushed commit is readable on the pull request whatever CI says later, and
  * a merged pull request's commit list cannot be changed. The job is the net under
  * the hook, for a push that skipped it. `--allow-empty` is the hook's: a push that
  * adds no commit has nothing to check and must not be refused.
+ *
+ * For another repository the file also exports the scan itself: `scanRange` (what
+ * the command runs) and `invisibleFindings` (only its invisible-character half, for
+ * texts that may name ids). The command always checks both halves; only a caller
+ * that imports the file can leave the id check out. Importing the file runs nothing,
+ * except in a process started with an argument that does not resolve as a path: then
+ * the check at the end of the file reports it and sets the exit code to 2, which a
+ * driver that sets its own exit code overwrites.
  *
  * The CI step is only as protected as the workflow file: a `pull_request` run takes
  * the workflow from the pull request itself, so a pull request that edits that step
@@ -395,6 +403,19 @@ export function main(argv) {
     console.error('usage: public-repo-guard.sh check-commits <base-ref> <head-ref> [--allow-empty]');
     return 2;
   }
+  return scanRange(base, head, { allowEmpty });
+}
+
+/**
+ * The scan of base..head that main runs, callable from another repository's own
+ * driver: it reads the same commits, patches and names by the same git calls, prints
+ * the same lines and returns the same exit code (0 clean, 1 findings, 2 unreadable).
+ * With `ids: false` it checks only invisible characters, not internal ids or wording
+ * about open findings, and leaves out the hints that belong to those two checks.
+ */
+export function scanRange(base, head, { allowEmpty = false, ids = true } = {}) {
+  // Only an explicit false leaves the id check out; any other value keeps it.
+  const checkIds = ids !== false;
   let commits;
   let added;
   let pathsAdded;
@@ -433,7 +454,7 @@ export function main(argv) {
   };
   for (const a of added) {
     const where = `commit ${a.commit.slice(0, 9)} ${shown(a.path)}:${a.line}`;
-    for (const kind of findingsIn(a.text)) report(where, kind);
+    if (checkIds) for (const kind of findingsIn(a.text)) report(where, kind);
     for (const name of formatCharsIn(a.text)) {
       report(where, `raw invisible character ${name}, ${wayFor(name)}`);
       formats++;
@@ -446,20 +467,35 @@ export function main(argv) {
     }
   }
   if (total > 0) {
-    console.error(`\nadded-lines-guard: ${total} finding(s) in lines this range adds. This is the PUBLIC repo.`);
-    console.error('Describe the behaviour instead of naming an internal id; describe the change, not an open finding.');
+    if (checkIds) {
+      console.error(`\nadded-lines-guard: ${total} finding(s) in lines this range adds. This is the PUBLIC repo.`);
+      console.error('Describe the behaviour instead of naming an internal id; describe the change, not an open finding.');
+    } else {
+      console.error(`\nadded-lines-guard: ${total} finding(s) in lines this range adds.`);
+    }
     if (formats > 0) {
       console.error('A raw invisible character: write its escape instead (\\u202E, not the character); in a');
       console.error('string it is the same value at runtime. The Edit and Write tools turn an escape into the raw');
       console.error('character, so write the line through a script or check it after the edit.');
     }
+    if (!checkIds) return rewriteHint();
     console.error("An id-shaped test value: assemble an invented one, e.g. 'DEF-' + 'example'.");
-    console.error('Rewrite the commit that ADDED it (rebase, amend) before the merge — a later commit that removes');
-    console.error('it does not help: the earlier commit is still pushed and stays readable on the pull request.');
-    return 1;
+    return rewriteHint();
   }
   console.log(`added-lines-guard: clean ✓ (${commits.length} commit(s), ${added.length} added line(s) read)`);
   return 0;
+}
+
+/** The closing hint of every refusal: fix the commit that added the line. Returns the exit code 1. */
+function rewriteHint() {
+  console.error('Rewrite the commit that ADDED it (rebase, amend) before the merge — a later commit that removes');
+  console.error('it does not help: the earlier commit is still pushed and stays readable on the pull request.');
+  return 1;
+}
+
+/** The invisible-character half of scanRange on its own, for a repository whose texts may name ids. */
+export function invisibleFindings(base, head, { allowEmpty = false } = {}) {
+  return scanRange(base, head, { allowEmpty, ids: false });
 }
 
 // Through a symlinked path a lexical comparison never matches, main() never runs

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { scheduledTaskTurn } from '../../packages/web-ui/src/lib/utils/scheduled-task-turn.js';
-import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, principalFromTag, principalTag } from './request-principal.js';
 import { WORKER_NOTICES } from './worker-notices.js';
 import { currentWorkerRunStart, type WorkerRunStart } from './worker-run-start.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
@@ -10,7 +10,7 @@ import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp } from './prompt-store.js';
+import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp, consentOfPayload, consentActionOfPayload } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { AuditLog, TRAIL_FORM, newCorrelationId } from './audit-log.js';
@@ -179,6 +179,8 @@ function makeEngine(opts?: {
   promptStore?: PromptStore | null;
   /** Ids of threads the owner deleted; the worker does not continue in one. */
   deletedThreads?: readonly string[];
+  /** Who opened which thread (`created_by`); a thread not named has no row. */
+  threadOwners?: Readonly<Record<string, string>>;
   /** The actor trail; by default one that takes every row, as a booted engine's does. */
   auditLog?: { record: (entry: unknown) => void } | null;
   /** The containment store; by default none, as on an instance that never connected a store. */
@@ -191,7 +193,10 @@ function makeEngine(opts?: {
   return {
     getTaskManager: vi.fn(() => tm),
     createSession: vi.fn(() => session),
-    getThreadStore: vi.fn(() => ({ isDeleted: (id: string) => deleted.has(id) })),
+    getThreadStore: vi.fn(() => ({
+      isDeleted: (id: string) => deleted.has(id),
+      getThread: (id: string) => (opts?.threadOwners?.[id] === undefined ? undefined : { id, created_by: opts.threadOwners[id] }),
+    })),
     // The real Engine always has this; the mock lacked it, which made every
     // executeStandard test fail loud once the prompt wiring started calling it.
     // `null` is a real production shape (an engine with no store), and the
@@ -1494,6 +1499,79 @@ describe('WorkerLoop', () => {
       release();
       await vi.advanceTimersByTimeAsync(0);
       expect(loop.runningPlanTag('po-1')).toBeUndefined();
+    });
+
+    // A run for the mandate picks up an answer given in a conversation that is not the mandate's:
+    // the owner answered the trigger's question in the owner's chat. The answer is not taken.
+    describe('an answered question in a conversation that is not the mandate\'s', () => {
+      const THREADS: Record<string, string> = { 'thread-owner': 'owner', 'thread-eva': 'mandate:eva@kanzlei.example' };
+      function withAnswerIn(s: { engine: Engine }, threadId: string): { releaseTrigger: ReturnType<typeof vi.fn> } {
+        const releaseTrigger = vi.fn();
+        const answeredStore = {
+          getAnsweredForTrigger: vi.fn(() => ({
+            id: 'prompt-1', session_id: threadId, question: 'Send the report?', answer: 'Yes, send it.', created_by: 'owner',
+          })),
+          releaseTrigger,
+          getPendingForTrigger: vi.fn(() => undefined),
+        } as unknown as PromptStore;
+        const ref = s.engine as unknown as Record<string, unknown>;
+        ref['getPromptStore'] = () => answeredStore;
+        ref['getThreadStore'] = () => ({
+          isDeleted: () => false,
+          getThread: (id: string) => (THREADS[id] === undefined ? undefined : { id, created_by: THREADS[id] }),
+        });
+        return { releaseTrigger };
+      }
+      const sessionIdOf = (engine: Engine): string | undefined =>
+        (engine.createSession as unknown as { mock: { calls: Array<[{ sessionId?: string }?]> } }).mock.calls[0]?.[0]?.sessionId;
+      const promptOf = (session: Session): string =>
+        (session.run as unknown as { mock: { calls: string[][] } }).mock.calls[0]?.[0] ?? '';
+
+      it('a stamped plan of the mandate runs in a new conversation, without the answer, and releases it', async () => {
+        const s = setup(stamped());
+        const { releaseTrigger } = withAnswerIn(s, 'thread-owner');
+        await s.loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+        expect(sessionIdOf(s.engine), 'not in the owner\'s conversation').toBeUndefined();
+        expect(s.session.run, 'the run still ran').toHaveBeenCalled();
+        expect(promptOf(s.session), 'without the question').not.toContain('Send the report?');
+        expect(promptOf(s.session), 'and without the answer').not.toContain('Yes, send it.');
+        expect(releaseTrigger, 'the answer is released').toHaveBeenCalledWith('prompt-1');
+      });
+
+      it('a mandate\'s start by hand runs in a new conversation, without the answer, and releases it', async () => {
+        const task = makeTask({ id: 'po-prop', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, schedule_cron: undefined, next_run_at: undefined });
+        const s = setup(task);
+        const { releaseTrigger } = withAnswerIn(s, 'thread-owner');
+        expect(await s.loop.runTriggerNow('po-prop', s.loop.claimHandRunMinter()('po-prop', EVA))).toEqual({ ok: true });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+        expect(sessionIdOf(s.engine), 'not in the owner\'s conversation').toBeUndefined();
+        expect(s.session.run, 'the run still ran').toHaveBeenCalled();
+        expect(promptOf(s.session), 'without the question').not.toContain('Send the report?');
+        expect(promptOf(s.session), 'and without the answer').not.toContain('Yes, send it.');
+        expect(releaseTrigger, 'the answer is released').toHaveBeenCalledWith('prompt-1');
+      });
+
+      it('a conversation without a row is no one\'s: the mandate\'s run does not take its answer', async () => {
+        const s = setup(stamped());
+        const { releaseTrigger } = withAnswerIn(s, 'thread-without-row');
+        await s.loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sessionIdOf(s.engine), 'not in that conversation').toBeUndefined();
+        expect(promptOf(s.session), 'without the answer').not.toContain('Yes, send it.');
+        expect(releaseTrigger).toHaveBeenCalledWith('prompt-1');
+      });
+
+      it('control: an answer in the mandate\'s own conversation is continued there, with the answer', async () => {
+        const s = setup(stamped());
+        const { releaseTrigger } = withAnswerIn(s, 'thread-eva');
+        await s.loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sessionIdOf(s.engine)).toBe('thread-eva');
+        expect(promptOf(s.session), 'the answer reached the run').toContain('Yes, send it.');
+      });
     });
   });
 
@@ -3340,6 +3418,36 @@ describe('WorkerLoop', () => {
       // The marker, not a sentence: a cancellation must not be mistakable for
       // an answer by the model that receives it.
       expect(answer).toBe('__dismissed__');
+    } finally {
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a tool consent asked from a task goes out with its buttons in the owner\'s words, and keeps its action', async () => {
+    vi.useRealTimers();
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-consent-action-'));
+    const history = new RunHistory(join(dir, 'history.db'));
+    vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
+    const store = new PromptStore(history.getDb());
+    try {
+      const session = {
+        sessionId: 'thread-consent-action',
+        _recreateAgent: vi.fn(),
+        promptUser: undefined as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>) | undefined,
+        run: vi.fn(async () => { await session.promptUser!('Delete event e1', ['confirm', 'cancel'], { consent: 'google', consentAction: 'delete' }); return 'Done.'; }),
+      };
+      const task = makeTask();
+      const engine = makeEngine({ taskManager: makeTaskManager([task]), session: session as unknown as Session, promptStore: store });
+      const router = makeNotificationRouter();
+      const loop = new WorkerLoop(engine, router, 60_000);
+      await loop.tick();
+      for (let i = 0; i < 200 && !store.getPending('thread-consent-action'); i++) await new Promise((r) => setTimeout(r, 5));
+      expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ inquiry: { question: 'Delete event e1', options: ['Delete', 'Cancel'] } }));
+      const row = store.getPending('thread-consent-action')!;
+      expect(consentOfPayload(row.payload_json)).toBe('google');
+      expect(consentActionOfPayload(row.payload_json)).toBe('delete');
+      loop.stop();
     } finally {
       history.close();
       rmSync(dir, { recursive: true, force: true });
@@ -6010,7 +6118,8 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     if (stamped) tm.confirmTrigger(t.id, undefined, 'owner');
     const session = makeSession('Resumed.');
     const engine = Object.assign(
-      makeEngine({ taskManager: tm as unknown as TaskManager, session, promptStore: store }),
+      // The question's conversation is the one the run that asked it opened.
+      makeEngine({ taskManager: tm as unknown as TaskManager, session, promptStore: store, threadOwners: { [`ask-${t.id}`]: principalTag(stamp.principal) } }),
       { getRunHistory: () => history, getMandateEnds: () => (isLive === null ? null : { isLive }) },
     ) as unknown as Engine;
     return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), store, t, promptId, engine };

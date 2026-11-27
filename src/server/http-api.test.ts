@@ -866,6 +866,13 @@ beforeEach(() => {
 // === Tests ===
 
 describe('LynoxHTTPApi', () => {
+    // This file shares ONE per-IP rate window; a request this test adds is paid back, so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const payBack = async <T>(body: () => Promise<T>): Promise<T> => {
+      const counts = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      const before = new Map([...counts].map(([k, v]) => [k, v.count]));
+      try { return await body(); } finally { for (const [k, e] of counts) e.count = before.get(k) ?? 0; }
+    };
   describe('health', () => {
     // The stub engine answers `getEngineDb()` with null (see its constructor), which the health body
     // reads as a boot store that did not open. These cases are about a booted engine, so they get an
@@ -3904,6 +3911,10 @@ describe('LynoxHTTPApi', () => {
         expect(openBody.consent).toBe('guard');
         expect(openBody.options).toEqual(['allow', 'deny']);
         expect(openBody.mailConnect).toBeUndefined();
+        // A Google consent comes back with the action its button names.
+        store.insertQuestion({ blocked: false, attended: true }, 's-google', 'Delete event e1', ['confirm', 'cancel'], false, undefined, undefined, undefined, undefined, 'google', 'delete');
+        const google = await payBack(async () => (await jsonFetch('/api/sessions/s-google/pending-prompt')).json()) as { consent?: string; consentAction?: string };
+        expect(google).toMatchObject({ consent: 'google', consentAction: 'delete' });
         store.insertAskUser('s-before', '⚠ Command: x', ['Allow', 'Deny', '\x00']);
         const before = await jsonFetch('/api/sessions/s-before/pending-prompt');
         expect((await before.json() as { consent?: string }).consent).toBeUndefined();
@@ -10638,7 +10649,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('the live prompt frame carries the engine\'s consent marker, and a question without it carries none', async () => {
-      for (const [meta, expected] of [[{ consent: 'guard' }, 'guard'], [{ consent: 'deep' }, 'deep'], [undefined, undefined]] as const) {
+      for (const [meta, expected, action] of [[{ consent: 'guard' }, 'guard', undefined], [{ consent: 'deep' }, 'deep', undefined], [{ consent: 'google', consentAction: 'delete' }, 'google', 'delete'], [undefined, undefined, undefined]] as const) {
         await withStores(async (ps) => {
           mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
           let parked: Promise<unknown> | undefined;
@@ -10648,10 +10659,14 @@ describe('LynoxHTTPApi', () => {
             await new Promise((r) => setImmediate(r));
             return 'done';
           });
-          const text = await (await jsonFetch('/api/sessions/sse-consent/run', { method: 'POST', body: JSON.stringify({ task: 'go', protocol: 2 }) })).text();
+          const run = async (): Promise<string> => (await jsonFetch('/api/sessions/sse-consent/run', { method: 'POST', body: JSON.stringify({ task: 'go', protocol: 2 }) })).text();
+          // The Google case is this branch's addition to the loop; its run is paid back.
+          const text = action === undefined ? await run() : await payBack(run);
           const frame = text.split('\n').find((l) => l.startsWith('data:') && l.includes('"promptId"'));
           expect(frame, 'no prompt frame on the stream').toBeDefined();
           expect((JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>)['consent'], String(expected)).toBe(expected);
+          // The action a Google consent's button names rides along, words only.
+          expect((JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>)['consentAction'], String(expected)).toBe(action);
           const pending = ps.getPending('sse-consent');
           if (pending) ps.expirePrompt(pending.id, 'run_stopped');
           await parked;

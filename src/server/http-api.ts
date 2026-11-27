@@ -95,7 +95,7 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, consentOfPayload, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
+import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, consentOfPayload, consentActionOfPayload, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { CONSENT_UNRECOGNISED } from '../contract/prompt.js';
 import { decideConsent } from '../core/consent-ask.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
@@ -161,7 +161,7 @@ import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './webhook-receiver.js';
 import { requestLogUrl } from './request-log-url.js';
-import { PAUSED_DONE_WORKFLOW_FIRST, isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
+import { isPaused, pausedDoneReaderOf, pausedDoneWorkflow, pausedDoneWorkflowText, pausedForOf, planPauseOn, type PausedDoneWorkflowReader } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
@@ -507,6 +507,18 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
     paused_who: entries.map((e) => e.email),
     paused_ended: entries.map((e) => ({ email: e.email, reason: e.reason, ends_at: new Date(e.endsAt * 1000).toISOString(), warned: e.warned === true })),
   };
+}
+
+/**
+ * The trigger list's `paused_done_workflow` for a completed plan that keeps its pause (U-275 N6):
+ * `{ name }` when its workflow's takeover comes first (`name` null when its definition names none),
+ * `null` when no workflow needs one. Absent for
+ * any other plan, with the pause off, and when the case could not be read.
+ */
+export function pausedDoneWorkflowField(trigger: TriggerRecord, reader: PausedDoneWorkflowReader | null | undefined): { paused_done_workflow?: { name: string | null } | null } {
+  if (trigger.status !== 'completed' || !isPaused(trigger)) return {};
+  const c = pausedDoneWorkflow(trigger, reader);
+  return c.kind === 'workflow' ? { paused_done_workflow: { name: c.name } } : c.kind === 'none' ? { paused_done_workflow: null } : {};
 }
 
 /** A trigger's setup marks from its stored columns, as an approval card and the trigger list read them. */
@@ -2097,11 +2109,14 @@ const ERASURE_IN_PROGRESS = 'All data is being erased; start the run again once 
 const ERASED_DURING_REQUEST = 'All data was erased while this message was being prepared; start a new conversation';
 /** A paused plan's refusal (`plan-pause.ts`); `code: 'paused'` is what the view switches on. */
 const PAUSED_REFUSAL = 'paused because an access ended; it needs to be taken over';
-/** The same for a completed plan that keeps its pause: nothing takes it over or reopens it. */
-const PAUSED_DONE_REFUSAL = `completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again. ${PAUSED_DONE_WORKFLOW_FIRST}`;
-/** The refusal for this paused plan: its own sentence once it is completed. */
-const pausedRefusal = (t: { readonly status?: string | undefined } | undefined): string =>
-  t?.status === 'completed' ? PAUSED_DONE_REFUSAL : PAUSED_REFUSAL;
+/**
+ * The refusal for this paused plan: its own sentence once it is completed, where nothing takes it
+ * over or reopens it, with its workflow's takeover first when its workflow needs one (U-275 N6).
+ */
+const pausedRefusal = (t: TriggerRecord | undefined, reader: PausedDoneWorkflowReader | null | undefined): string =>
+  t?.status === 'completed'
+    ? `completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.${pausedDoneWorkflowText(pausedDoneWorkflow(t, reader))}`
+    : PAUSED_REFUSAL;
 /**
  * How long `DELETE /api/data` waits for the chat runs it stopped to release their
  * slots. Stopping is the same `takeover` the stale-run reclaim uses: a run parked on
@@ -3489,7 +3504,7 @@ export class LynoxHTTPApi {
     if (trigger === undefined || !isPaused(trigger)) return false;
     const ownerMay = action === 'enable' || action === 'complete' || action === 'delete';
     if (isOwnerPrincipal(this._principalOf(req)) && ownerMay) return false;
-    errorResponse(res, 409, pausedRefusal(trigger), 'paused');
+    errorResponse(res, 409, pausedRefusal(trigger, pausedDoneReaderOf(this.engine?.getRunHistory(), this.engine?.getMandateEnds())), 'paused');
     return true;
   }
 
@@ -5857,7 +5872,7 @@ export class LynoxHTTPApi {
         // Read in the run's own chat: live over this stream, or on reconnect through
         // /pending-prompt, which shows this session's question with the run above it. Neither
         // sends it anywhere else (no notification on this path), so a hard block may be asked here.
-        const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp, meta?.consent);
+        const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp, meta?.consent, meta?.consentAction);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
@@ -5878,6 +5893,8 @@ export class LynoxHTTPApi {
             // The engine's own confirmation: the client draws its consent card from this
             // marker alone (`src/contract/prompt.ts`), never from the option texts.
             consent: meta?.consent,
+            // What the consent's confirming button names (a Google write); words only.
+            consentAction: meta?.consentAction,
           });
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
@@ -6518,6 +6535,7 @@ export class LynoxHTTPApi {
         // this alone. A question stored before the marker existed has none and is an ordinary
         // question, whose answer no consent gate reads.
         consent: consentOfPayload(row.payload_json),
+        consentAction: consentActionOfPayload(row.payload_json),
         // Who asked (v52). A workflow's prompt can sit here for minutes, which
         // is exactly the window in which a page gets reloaded — restoring the
         // dialog without its provenance would put the user back in front of the
@@ -9917,6 +9935,7 @@ export class LynoxHTTPApi {
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
       const history = engine.getRunHistory();
+      const doneReader = pausedDoneReaderOf(history, engine.getMandateEnds());
       // `paused` is no status value: it reads `paused_at` (`plan-pause.ts`).
       const pausedFilter = (status as string | undefined) === 'paused';
       const rows = pausedFilter
@@ -9985,6 +10004,10 @@ export class LynoxHTTPApi {
             // Why the run does not do its work: a watch the instance's network_policy keeps from its
             // page now, or the cause its last failed run stored. The view says it, with the way out.
             ...(blockedReasonOf(trigger) ?? {}),
+            // A completed plan that keeps its pause: whether a new plan on its workflow needs that
+            // workflow's takeover first, and which workflow that is (U-275 N6). Not sent when it
+            // could not be read: the view then gives the condition, as before.
+            ...pausedDoneWorkflowField(trigger, doneReader),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -10248,7 +10271,7 @@ export class LynoxHTTPApi {
         // would always miss, dropping the response to the {id, enabled} stub.
         const updated = engine.getRunHistory()?.getTrigger(params['id']!);
         // Switching a paused plan on starts nothing until it is taken over, and the answer says so.
-        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: pausedRefusal(updated) } : {};
+        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: pausedRefusal(updated, pausedDoneReaderOf(engine.getRunHistory(), engine.getMandateEnds())) } : {};
         jsonResponse(res, 200, { ...(updated !== undefined ? triggerForRoute(updated, this._principalOf(_req)) : { id: params['id'], enabled: b['enabled'] ? 1 : 0 }), ...pausedNote });
         return;
       }
@@ -10671,7 +10694,7 @@ export class LynoxHTTPApi {
           return;
         }
         if (outcome.reason === 'paused') {
-          errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!)), 'paused');
+          errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!), pausedDoneReaderOf(engine.getRunHistory(), engine.getMandateEnds())), 'paused');
           return;
         }
         errorResponse(res, 404, 'Trigger not found'); return;

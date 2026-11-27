@@ -12,7 +12,7 @@
  * the person wrote.
  */
 
-import type { ConsentKey } from '../contract/prompt.js';
+import type { ConsentAction, ConsentKey } from '../contract/prompt.js';
 import type { NoticeLanguage } from '../core/notice-language.js';
 import type { SendRoleKind, SendSlot } from '../core/profile-secret-view.js';
 import { pv, singleLine } from '../core/prompt-value.js';
@@ -350,8 +350,10 @@ export interface HttpDialog {
   readonly exfil: (word: PromptText, warning: string) => PromptText;
   readonly outbound: (word: PromptText, method: string, host: string, path: string, fields: string, tail: PromptText) => PromptText;
   readonly queryTooLarge: (bytes: number) => PromptText;
+  readonly queryUnreadable: PromptText;
   readonly querySecret: PromptText;
   readonly headers: (names: string, block: PromptText) => PromptText;
+  readonly bodyUnreadable: PromptText;
   readonly bodySecret: PromptText;
   readonly bodyTooLarge: (bytes: number) => PromptText;
   readonly noteOnce: PromptText;
@@ -368,8 +370,10 @@ export const HTTP_DIALOG: Readonly<Record<DialogLanguage, HttpDialog>> = {
     exfil: (word, warning) => pv`⚠ ${word}: ${warning} — Allow?`,
     outbound: (word, method, host, path, fields, tail) => pv`⚠ ${word}: ${method} to ${host} ${path} (${fields}) — Allow outbound data?${tail}`,
     queryTooLarge: (bytes) => pv` The query (${bytes} bytes) is too large to show; the path above names its keys, cut short where it is long.`,
+    queryUnreadable: pv` The query has too many percent-encoded characters to check for a stored secret, so it is not shown here; the path above names its keys.`,
     querySecret: pv` A stored secret is sent in this query; it is shown masked (***).`,
     headers: (names, block) => pv` It sets the headers ${names}.${block}`,
+    bodyUnreadable: pv` The body has too many percent-encoded characters to check for a stored secret, so it is not shown here. If you do not know what this write sends, decline it.`,
     bodySecret: pv` The body holds a stored secret and is not shown.`,
     bodyTooLarge: (bytes) => pv` The body (${bytes} bytes) is too large to show; its field names are listed.`,
     noteOnce: pv` Allowing sends this request once, now; it will ask again next time.`,
@@ -384,8 +388,10 @@ export const HTTP_DIALOG: Readonly<Record<DialogLanguage, HttpDialog>> = {
     exfil: (word, warning) => pv`⚠ ${word}: ${warning} — Erlauben?`,
     outbound: (word, method, host, path, fields, tail) => pv`⚠ ${word}: ${method} an ${host} ${path} (${fields}) — Daten nach aussen senden?${tail}`,
     queryTooLarge: (bytes) => pv` Die Query (${bytes} Bytes) ist zu gross zum Anzeigen; der Pfad oben nennt ihre Schlüssel, lange gekürzt.`,
+    queryUnreadable: pv` Die Query hat zu viele prozentkodierte Zeichen, um sie auf ein gespeichertes Geheimnis zu prüfen, darum wird sie hier nicht angezeigt; der Pfad oben nennt ihre Schlüssel.`,
     querySecret: pv` In dieser Query steht ein gespeichertes Geheimnis; es ist maskiert (***).`,
     headers: (names, block) => pv` Sie setzt die Header ${names}.${block}`,
+    bodyUnreadable: pv` Der Body hat zu viele prozentkodierte Zeichen, um ihn auf ein gespeichertes Geheimnis zu prüfen, darum wird er hier nicht angezeigt. Wenn du nicht weisst, was diese Anfrage sendet, lehne sie ab.`,
     bodySecret: pv` Der Body enthält ein gespeichertes Geheimnis und wird nicht angezeigt.`,
     bodyTooLarge: (bytes) => pv` Der Body (${bytes} Bytes) ist zu gross zum Anzeigen; seine Feldnamen sind aufgeführt.`,
     noteOnce: pv` Erlauben sendet diese Anfrage einmal, jetzt; beim nächsten Mal fragt lynox wieder.`,
@@ -757,6 +763,241 @@ export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChan
  * equal. The keys themselves are the wire (`src/contract/prompt.ts`).
  */
 export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentKey, string>>>> = {
-  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow Deep', balanced: 'Run on Balanced', cancel: 'Cancel' },
-  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Stufe Tief erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen' },
+  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow Deep', balanced: 'Run on Balanced', cancel: 'Cancel', send: 'Send', confirm: 'Confirm', merge: 'Merge', apply: 'Apply', retire: 'Retire', proceed: 'Run', adjust: 'Adjust' },
+  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Stufe Tief erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen', send: 'Senden', confirm: 'Bestätigen', merge: 'Zusammenführen', apply: 'Übernehmen', retire: 'Zurückziehen', proceed: 'Ausführen', adjust: 'Anpassen' },
+};
+
+/** The confirming key of a consent that names its action (a Google write), in the owner's words. */
+export const CONSENT_ACTION_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentAction, string>>>> = {
+  en: { upload: 'Upload', create: 'Create', move: 'Move', share: 'Share', overwrite: 'Overwrite', append: 'Append', format: 'Format', update: 'Update', delete: 'Delete' },
+  de: { upload: 'Hochladen', create: 'Anlegen', move: 'Verschieben', share: 'Freigeben', overwrite: 'Überschreiben', append: 'Anhängen', format: 'Formatieren', update: 'Ändern', delete: 'Löschen' },
+};
+
+/**
+ * The confirmation before a mail goes out (`mail_send`, `mail_reply`). Every `${…}` is a value,
+ * as in any `pv`: addresses, subject, body and persona are shown as they are, never translated.
+ */
+export interface MailDialog {
+  readonly massSend: (count: string, account: string, persona: PromptText, recipients: string, subject: string, body: PromptText) => PromptText;
+  readonly send: (to: string, copies: PromptText, subject: string, from: string, persona: PromptText, body: PromptText) => PromptText;
+  readonly reply: (original: string, to: string, cc: PromptText, subject: string, from: string, smart: PromptText, persona: PromptText, body: PromptText) => PromptText;
+  readonly persona: (persona: string) => PromptText;
+  readonly cc: (list: string) => PromptText;
+  readonly bcc: (list: string) => PromptText;
+  readonly smartReplyFrom: (account: string) => PromptText;
+  readonly replyPersona: (persona: string) => PromptText;
+  readonly emptyBody: PromptText;
+  readonly bodyCut: (shown: string, total: string, shownChars: string) => PromptText;
+  readonly noSubject: string;
+}
+
+export const MAIL_DIALOG: Readonly<Record<DialogLanguage, MailDialog>> = {
+  en: {
+    massSend: (count, account, persona, recipients, subject, body) => pv`⚠ **MASS SEND** — ${count} recipients
+
+**Account:** ${account}${persona}
+**Recipients:**
+${recipients}
+**Subject:** ${subject}
+
+${body}`,
+    send: (to, copies, subject, from, persona, body) => pv`**Send email?**
+
+**To:** ${to}${copies}
+**Subject:** ${subject}
+**From:** ${from}${persona}
+
+${body}`,
+    reply: (original, to, cc, subject, from, smart, persona, body) => pv`**Reply to “${escapeQuoted(original)}”?**
+
+**To:** ${to}${cc}
+**Subject:** ${subject}
+**From:** ${from}${smart}${persona}
+
+${body}`,
+    persona: (persona) => pv`
+**Persona:** ${persona}`,
+    cc: (list) => pv`
+**Cc:** ${list}`,
+    bcc: (list) => pv`
+**Bcc:** ${list}`,
+    smartReplyFrom: (account) => pv` _(smart reply-from, read via ${account})_`,
+    replyPersona: (persona) => pv` · _${persona}_`,
+    emptyBody: pv`> _(empty body)_`,
+    bodyCut: (shown, total, shownChars) => pv`> ${shown}\n\n⚠ **Body is ${total} chars — only the first ${shownChars} are shown above.**`,
+    noSubject: '(no subject)',
+  },
+  de: {
+    massSend: (count, account, persona, recipients, subject, body) => pv`⚠ **MASSENVERSAND** — ${count} Empfänger
+
+**Konto:** ${account}${persona}
+**Empfänger:**
+${recipients}
+**Betreff:** ${subject}
+
+${body}`,
+    send: (to, copies, subject, from, persona, body) => pv`**E-Mail senden?**
+
+**An:** ${to}${copies}
+**Betreff:** ${subject}
+**Von:** ${from}${persona}
+
+${body}`,
+    reply: (original, to, cc, subject, from, smart, persona, body) => pv`**Auf „${escapeQuoted(original)}“ antworten?**
+
+**An:** ${to}${cc}
+**Betreff:** ${subject}
+**Von:** ${from}${smart}${persona}
+
+${body}`,
+    persona: (persona) => pv`
+**Persona:** ${persona}`,
+    cc: (list) => pv`
+**Cc:** ${list}`,
+    bcc: (list) => pv`
+**Bcc:** ${list}`,
+    smartReplyFrom: (account) => pv` _(antwortet von einem anderen Konto, gelesen über ${account})_`,
+    replyPersona: (persona) => pv` · _${persona}_`,
+    emptyBody: pv`> _(leerer Text)_`,
+    bodyCut: (shown, total, shownChars) => pv`> ${shown}\n\n⚠ **Der Text hat ${total} Zeichen — oben stehen nur die ersten ${shownChars}.**`,
+    noSubject: '(kein Betreff)',
+  },
+};
+
+/** The Google tools' confirmations (`google_drive`, `google_sheets`, `google_calendar`). */
+export interface GoogleDialog {
+  readonly upload: (name: string) => PromptText;
+  readonly createDoc: (name: string) => PromptText;
+  readonly move: (file: string, folder: string) => PromptText;
+  readonly share: (file: string, email: string, role: string) => PromptText;
+  readonly overwrite: (range: string, sheet: string) => PromptText;
+  readonly append: (range: string, sheet: string) => PromptText;
+  readonly format: (sheet: string) => PromptText;
+  readonly createEvent: (summary: string, calendar: PromptText) => PromptText;
+  readonly time: (start: string, end: string) => PromptText;
+  readonly location: (location: string) => PromptText;
+  readonly repeats: (rules: PromptText) => PromptText;
+  readonly description: (text: string) => PromptText;
+  readonly guests: (list: PromptText) => PromptText;
+  readonly guestsSee: PromptText;
+  readonly calendar: (id: string) => PromptText;
+  readonly updateEvent: (event: string, calendar: PromptText) => PromptText;
+  readonly nothingChanges: (head: PromptText) => PromptText;
+  readonly fieldsChange: (head: PromptText) => PromptText;
+  readonly guestsNone: PromptText;
+  readonly guestsReplace: (list: PromptText) => PromptText;
+  readonly field: (key: string, value: string) => PromptText;
+  readonly deleteEvent: (event: string, calendar: PromptText) => PromptText;
+  readonly unnamed: string;
+  readonly untitled: string;
+  readonly unknown: string;
+  readonly unspecified: string;
+}
+
+export const GOOGLE_DIALOG: Readonly<Record<DialogLanguage, GoogleDialog>> = {
+  en: {
+    upload: (name) => pv`Upload file “${escapeQuoted(name)}” to Drive?`,
+    createDoc: (name) => pv`Create Google Doc “${escapeQuoted(name)}”?`,
+    move: (file, folder) => pv`Move file ${file} to folder ${folder}?`,
+    share: (file, email, role) => pv`Share file ${file} with ${email} as ${role}?`,
+    overwrite: (range, sheet) => pv`Overwrite range “${escapeQuoted(range)}” in spreadsheet ${sheet}? This will replace existing data.`,
+    append: (range, sheet) => pv`Add rows to range “${escapeQuoted(range)}” in spreadsheet ${sheet}? Nothing is overwritten.`,
+    format: (sheet) => pv`Apply batch changes to spreadsheet ${sheet}? Formatting requests can delete or overwrite cells and sheets.`,
+    createEvent: (summary, calendar) => pv`Create event “${escapeQuoted(summary)}”${calendar}`,
+    time: (start, end) => pv`Time: ${start} – ${end}`,
+    location: (location) => pv`Location: ${location}`,
+    repeats: (rules) => pv`Repeats: ${rules}`,
+    description: (text) => pv`Description: ${text}`,
+    guests: (list) => pv`Guests: ${list}`,
+    guestsSee: pv`Everyone listed under Guests can see this event.`,
+    calendar: (id) => pv`\nCalendar: ${id}`,
+    updateEvent: (event, calendar) => pv`Update event ${event}${calendar}`,
+    nothingChanges: (head) => pv`${head}\nNothing changes.`,
+    fieldsChange: (head) => pv`${head}\nThese fields change:`,
+    guestsNone: pv`Guests: none — every current guest is removed`,
+    guestsReplace: (list) => pv`Guests (replace the current list): ${list}`,
+    field: (key, value) => pv`${key}: ${value}`,
+    deleteEvent: (event, calendar) => pv`Delete event ${event}${calendar}\nThis cannot be undone.`,
+    unnamed: 'unnamed',
+    untitled: 'Untitled',
+    unknown: '(unknown)',
+    unspecified: '(unspecified)',
+  },
+  de: {
+    upload: (name) => pv`Datei „${escapeQuoted(name)}“ in Drive hochladen?`,
+    createDoc: (name) => pv`Google-Dokument „${escapeQuoted(name)}“ anlegen?`,
+    move: (file, folder) => pv`Datei ${file} in den Ordner ${folder} verschieben?`,
+    share: (file, email, role) => pv`Datei ${file} für ${email} freigeben, als ${role}?`,
+    overwrite: (range, sheet) => pv`Bereich „${escapeQuoted(range)}“ in Tabelle ${sheet} überschreiben? Die Daten dort werden ersetzt.`,
+    append: (range, sheet) => pv`Zeilen zum Bereich „${escapeQuoted(range)}“ in Tabelle ${sheet} hinzufügen? Es wird nichts überschrieben.`,
+    format: (sheet) => pv`Tabelle ${sheet} formatieren? Formatierungen können Zellen und Blätter löschen oder überschreiben.`,
+    createEvent: (summary, calendar) => pv`Termin „${escapeQuoted(summary)}“ anlegen${calendar}`,
+    time: (start, end) => pv`Zeit: ${start} – ${end}`,
+    location: (location) => pv`Ort: ${location}`,
+    repeats: (rules) => pv`Wiederholung: ${rules}`,
+    description: (text) => pv`Beschreibung: ${text}`,
+    guests: (list) => pv`Gäste: ${list}`,
+    guestsSee: pv`Alle Gäste sehen diesen Termin.`,
+    calendar: (id) => pv`\nKalender: ${id}`,
+    updateEvent: (event, calendar) => pv`Termin ${event} ändern${calendar}`,
+    nothingChanges: (head) => pv`${head}\nEs ändert sich nichts.`,
+    fieldsChange: (head) => pv`${head}\nDiese Felder ändern sich:`,
+    guestsNone: pv`Gäste: keine — alle bisherigen Gäste werden entfernt`,
+    guestsReplace: (list) => pv`Gäste (ersetzt die bisherige Liste): ${list}`,
+    field: (key, value) => pv`${key}: ${value}`,
+    deleteEvent: (event, calendar) => pv`Termin ${event} löschen${calendar}\nDas lässt sich nicht rückgängig machen.`,
+    unnamed: 'ohne Namen',
+    untitled: 'Ohne Titel',
+    unknown: '(unbekannt)',
+    unspecified: '(nicht angegeben)',
+  },
+};
+
+/** The memory tools' confirmations: a merge of two subjects, a block edit, a retired entry. */
+export interface MemoryDialog {
+  readonly merge: (dup: string, canon: string) => PromptText;
+  readonly editBlock: (block: string, mode: string, preview: PromptText) => PromptText;
+  readonly blockPreview: (preview: string) => PromptText;
+  readonly retire: (entry: string, reason: PromptText) => PromptText;
+  readonly retireReason: (reason: string) => PromptText;
+}
+
+export const MEMORY_DIALOG: Readonly<Record<DialogLanguage, MemoryDialog>> = {
+  en: {
+    merge: (dup, canon) => pv`Merge “${escapeQuoted(dup)}” into “${escapeQuoted(canon)}”? Every note, task and mention of “${escapeQuoted(dup)}” moves to “${escapeQuoted(canon)}”, and “${escapeQuoted(dup)}” is archived. Undoing it needs a command-line rollback — not something you can do from chat.`,
+    editBlock: (block, mode, preview) => pv`Edit the ${block} block (${mode}${preview})? This block loads into every future turn. This is reversible by editing it again.`,
+    blockPreview: (preview) => pv`: “${escapeQuoted(preview)}”`,
+    retire: (entry, reason) => pv`Retire this memory entry? “${escapeQuoted(entry)}”${reason} It stays on record as superseded and stops surfacing. This needs a new \`remember\` if a corrected fact should replace it.`,
+    retireReason: (reason) => pv` Reason: ${reason}.`,
+  },
+  de: {
+    merge: (dup, canon) => pv`„${escapeQuoted(dup)}“ mit „${escapeQuoted(canon)}“ zusammenführen? Alle Notizen, Aufgaben und Erwähnungen von „${escapeQuoted(dup)}“ gehen zu „${escapeQuoted(canon)}“, und „${escapeQuoted(dup)}“ wird archiviert. Rückgängig geht das nur über die Kommandozeile, nicht im Chat.`,
+    editBlock: (block, mode, preview) => pv`Den Block ${block} ändern (${mode}${preview})? Dieser Block wird in jeden künftigen Schritt geladen. Du kannst ihn später wieder ändern.`,
+    blockPreview: (preview) => pv`: „${escapeQuoted(preview)}“`,
+    retire: (entry, reason) => pv`Diesen Eintrag zurückziehen? „${escapeQuoted(entry)}“${reason} Er bleibt als überholt gespeichert und taucht nicht mehr auf. Soll ein korrigierter Fakt ihn ersetzen, braucht es ein neues \`remember\`.`,
+    retireReason: (reason) => pv` Grund: ${reason}.`,
+  },
+};
+
+/** `plan_task`'s presentation: the system lines around the quoted plan. */
+export interface PlanDialog {
+  readonly inputNeeded: string;
+  readonly inputAt: (steps: string) => PromptText;
+  readonly cost: (usd: string) => PromptText;
+  readonly proceed: PromptText;
+}
+
+export const PLAN_DIALOG: Readonly<Record<DialogLanguage, PlanDialog>> = {
+  en: {
+    inputNeeded: ' [your input needed]',
+    inputAt: (steps) => pv`Your input is needed at step ${steps}.`,
+    cost: (usd) => pv`Estimated cost: ~$${usd}`,
+    proceed: pv`Shall I proceed?`,
+  },
+  de: {
+    inputNeeded: ' [deine Eingabe nötig]',
+    inputAt: (steps) => pv`Deine Eingabe ist bei Schritt ${steps} nötig.`,
+    cost: (usd) => pv`Geschätzte Kosten: ~$${usd}`,
+    proceed: pv`Soll ich loslegen?`,
+  },
 };
