@@ -3085,7 +3085,7 @@
 										aria-label={t('chat.ai_generated_aria')}
 									>{t('chat.ai_generated_badge')}</span>
 								{/if}
-								<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
+								<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} containedChat={threadContained} />
 						{/if}
 						{/each}
 						<!-- One footer per logical reply, not per text-block. A single
@@ -3121,12 +3121,12 @@
 									<!-- Artifact card (the only non-prose text group here) the
 									     pre-blocks path used to drop. Prose (=== msg.content)
 									     renders once below, so it's skipped here. -->
-									<MarkdownRenderer content={lg.text} streaming={isStreaming && msgIdx === messages.length - 1} />
+									<MarkdownRenderer content={lg.text} streaming={isStreaming && msgIdx === messages.length - 1} containedChat={threadContained} />
 								{/if}
 							{/each}
 							{#if msg.content}
 								{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
-								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
+								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} containedChat={threadContained} />
 								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 							{/if}
 						{/if}
@@ -3992,11 +3992,15 @@
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-bar>
 				<span>{containedTextKeys('bar', threadContainedUnknown).map((k) => t(k)).join(' ')}</span>
 				{#if threadContainedUnknown === null}{@render planNewChatButton()}{/if}
+				<!-- Said where the button is, before it is pressed: lynox's answers stay behind. -->
+				{#if threadContainedUnknown === null}<p class="basis-full" data-plan-new-chat-note>{t('contained.plan_new_chat_note')}</p>{/if}
 			</div>
 		{:else if containedOrigin}
 			<!-- A chat opened with "Plan in a new chat", before its first run. -->
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 space-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-origin>
 				{#if originKeys && originKeys.length > 0}<p data-contained-origin-line>{originKeys.map((k) => t(k)).join(' ')}</p>{/if}
+				<!-- Only while the input still holds what was carried over: after an edit or a paste it may not. -->
+				{#if inputText !== '' && inputText === getContainedPrefill()}<p data-contained-input-note>{t('contained.new_chat_input_note')}</p>{/if}
 				{#if containedOrigin.removedHidden}<p data-contained-removed-hidden>{t('contained.removed_hidden')}</p>{/if}
 			</div>
 		{/if}
