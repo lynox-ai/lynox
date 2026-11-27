@@ -21,9 +21,9 @@ import { askUserTool } from '../tools/builtin/ask-user.js';
 
 // The engine's own confirmations offer fixed keys and approve only on one of them. Every other
 // answer — a label, the other language's word, typed text, an older client's `y` — approves
-// nothing, and is told apart from a plain "no" so the person learns why.
+// nothing, and is told apart from the deny key so the person learns why.
 
-/** Answers that once approved, or read like an approval, and approve nothing now. */
+/** Answers that are none of the keys: some once approved or read like an approval, some read like a refusal. None approves, and none counts as the deny key. */
 const NOT_KEYS = ['y', 'yes', 'Yes', 'no', 'No', 'Allow', 'ALLOW', ' allow', 'allow ', 'Erlauben', 'ja', 'ok', '1', 'allow deep', 'run on balanced', 'Allow deep', 'Run on balanced', '["allow"]'];
 
 describe('the contract keys', () => {
