@@ -41,10 +41,13 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   takeover covers the marks, releases the paused plans, stamps the steps and
   writes one audit row in one transaction. New routes:
   `GET /api/workflows/:id/takeover-preview` and
-  `POST /api/workflows/:id/takeover` (owner only, browser session only,
-  `expect` digest from the preview required; `409` `changed` when something
-  moved, `409` `mandate_live` while the person still has access, `503` when
-  the takeover cannot be read or recorded). The library list sets
+  `POST /api/workflows/:id/takeover`. The commit (owner only, browser session
+  only, `expect` digest from the preview required) answers `409` `changed`
+  when something moved and `409` `mandate_live` while the person still has
+  access; the preview returns such a refusal in its body. Both answer `503`
+  when the instance cannot read the takeover's stores, and the commit also
+  when the plans' questions cannot be closed or the takeover cannot be
+  recorded. The library list sets
   `runs_as.undetermined` when it cannot tell who shaped a workflow. Without the
   store of ended access, the plan takeover's preview and commit now answer
   `503` instead of reading every person as ended. (#2590, #2775)
@@ -65,8 +68,9 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   size limit and so on), in lynox's words, and what to change; other failed
   runs still show only their status word. A watch's fetch failure is recorded
   in the instance language instead of the transport's raw error.
-  `GET /api/triggers` returns the stored cause as `blocked_reason`.
-  (#2807, #2810)
+  `GET /api/triggers` returns as `blocked_reason` why the watch does not run:
+  the network policy's refusal when it refuses the page now, otherwise the
+  stored cause of the last failed run. (#2807, #2810)
 - When a scheduled run's question or an escalation reached nobody by push, the
   trigger card now says whether there was no device to deliver to or a send
   failed, names it a question or an alert, and links to its chat when that
@@ -76,14 +80,16 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - The schedules list names the person with access who set up or last changed
   a trigger ("Set up by …", "Changed by …", "…, taken over by you"). A person
   with access sees another person's mark without name or address, and a mark
-  of their own address under an earlier grant as their own. `GET /api/triggers`
+  of their own address under another grant for that address as their own.
+  `GET /api/triggers`
   adds `setup` to each row. (#2671, #2687)
 - A message typed into a chat while a scheduled run's question waits there is
   held as an unsent bubble ("Not sent yet — tap to send") instead of being
   taken as the answer or failing. A tap sends it once the question is gone;
-  it survives a reload. An offline message marked failed is cleared when the
-  server shows it arrived. (#2489)
-- The approval of a bulk run with at least 20 decided verdicts lists the ones
+  it survives a reload. While such a question waits, an offline message marked
+  failed is cleared when the server shows it arrived. (#2489)
+- The approval of a judged bulk run with at least 20 decided verdicts lists the
+  ones
   that differ from the rest of the run first (up to 50), such as an added link,
   address, phone number or script. A note per kind can filter the table to
   those verdicts; approving still covers the whole run. (#2747, #2758, #2759)
@@ -91,11 +97,11 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   artifact, and stores its text byte for byte as the run's rule. Starting the
   judging answers 409 (`rule_source_changed`, `rule_source_gone`,
   `rule_source_unreadable`) when the artifact no longer matches. (#2817)
-- A judged run's rule now stands at its start, at its approval and where it
-  judges again, with a sentence that lynox wrote it or that it was taken word
-  for word from the named artifact. A judged run that a newer one replaced
-  links to that run from its page. (#2617, #2625, #2648)
-- Shopify product targets show the product title the store returned, with a
+- A judged run's rule now also stands at its approval and where it judges again,
+  and wherever it stands a sentence says that lynox wrote it or that it was
+  taken word for word from a saved artifact. A judged run that a newer one
+  replaced links to that run from its page. (#2617, #2625, #2648)
+- Shopify product targets show the product title the store returned above the
   link into the Shopify admin. The title is stored encrypted and included in
   the data export. (#2530)
 - A target whose judge answer the rule's schema refused says which field broke
@@ -112,20 +118,23 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - An undo's approval lists every target with its current and restored value.
   In the undo of a run that is not atomic, the owner can take targets out.
   (#2831)
-- The web UI has an inbox rules view: proposals to confirm, description rules,
-  a rule filter and, in the reading pane, a note when a rule was held back for
-  a mail. Inbox rules are now on by default (see Upgrade notes). (#2465)
+- The inbox rules view now lists proposals to confirm and description rules,
+  the inbox has a rule filter, and the reading pane notes when a rule was held
+  back for a mail. Inbox rules are now on by default (see Upgrade notes).
+  (#2465)
 - An inbox item says when new mail came into its thread since the owner last
   dealt with it, in the list and in the reading pane with a link to that mail.
   The item routes carry `followUps`. (#2771)
-- Mail with a `List-Id` header is no longer dropped unseen: list mail from a
-  no-reply or newsletter sender is filed as handled with the list named, other
-  list mail is classified as usual, and existing List-ID rules now match.
-  (#2111)
+- Mail from an outside mailing list (`List-Id` header) is no longer dropped
+  unseen: list mail from a no-reply or newsletter sender is filed as handled
+  with the list named, other list mail is classified as usual, and existing
+  List-ID rules now match. List mail from such a sender under a domain
+  connected to the instance is still dropped. (#2111)
 - A new Shopify connection asks for expiring offline tokens, and the engine
   renews them before they run out and once after the store answers 401. A bulk
-  run renews once and resends, and halts with a reason of its own, which can be
-  resumed, when only connecting the store again helps. (#2679)
+  run renews once and resends, and, when only connecting the store again
+  helps, halts with a reason of its own; the run can be resumed after
+  reconnecting. (#2679)
 - The owner learns before a store's access runs out: one notice 14 days ahead
   through the notification channels, a banner in the app and a line in Settings
   → API connections, each with "Reconnect". `GET /api/api-profiles` carries
@@ -148,7 +157,8 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - `GET /api/export` now carries the remembered texts of the knowledge graph
   under `knowledge_graph.memories`, keyed by the store that holds them:
   `agent-memory.db` with its `memories` and `mentions`, and `engine.db` with
-  its `memories`, `memory_subjects` and every row of `relationships`, with
+  its `memories`, `memory_subjects` and all its `relationships`, not only
+  those the graph block lists, with
   `source_deleted` and a `relationships_note`. Every stored column is included
   except the embedding, also for replaced or retired texts, with `is_active`
   and `superseded_by`. Texts, relationship descriptions and notes are masked
@@ -169,8 +179,8 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - The health body's `engine` block may carry `audit_retention` (`ok` or
   `stalled`), whether the instance log keeps its retention. It is optional and
   absent on older engines and on an engine without `engine.db`. (#2800)
-- Data cards (CSV, JSON, text) in the chat have a copy button that copies the
-  whole file, with invisible characters removed. In a chat that only reads,
+- Data cards (CSV, TSV, JSON, text) in the chat have a copy button that copies
+  the whole file, with invisible characters removed. In a chat that only reads,
   "Plan in a new chat" now says that only the user's own messages come along.
   (#2859)
 
@@ -209,8 +219,9 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   the stamp's binding sentence and the connection list. (#2551, #2688, #2748,
   #2785, #2808)
 - An open question shows once, in its card; the bar above the input appears
-  only when the question's opening line is out of view. Every question card
-  now says how many lines lie below its box. The deep-tier consent reads
+  only when the question's opening line is out of view. A question card whose
+  text runs past its box now says how many lines lie below it, as the
+  engine's own confirmation does. The deep-tier consent reads
   "Estimated model cost for this session: about $…". (#2665, #2853)
 - A workflow refused for a character that renders as nothing names the step by
   its number before its path (`step #3 (steps[2].task)`). (#2596)
@@ -234,9 +245,10 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   store can never be reached from this instance. A request the store refuses as
   it is formed halts the run with its own reason instead of as a network
   refusal, and the page no longer offers to continue it. (#2790, #2796)
-- A bulk halt push goes to the owner with the way on, and separately to the
-  people with access, saying only the owner can resolve it. The run history
-  keeps the fact only. (#2865)
+- A bulk halt that only the owner can resolve (reconnect, fix the profile,
+  switch writing on, continue) is pushed to the owner with the way on, and
+  separately to the people with access, saying only the owner can resolve it.
+  The run history keeps the fact only. (#2865)
 - On bulk pages, hosts stand boxed as code, the note on an unchecked change no
   longer repeats the line below it, a target toggle reloads only the run, and
   a 429 reads as a rate limit, not an unreachable engine.
@@ -274,10 +286,11 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   (#2616, #2634, #2751, #2778)
 - A migration transfer now has one deadline as a whole, from the bundle's size
   (20 minutes plus the bundle at about 1 Mbit/s), on top of each request's own.
-  A migration over a slower link can now be stopped. (#2623)
-- Facts lynox remembers after a turn, and those written by the `remember` tool,
-  are now written in the language the operator writes in, and no longer name
-  the operator or user as "operator" or "user". (#2522)
+  A transfer that runs past that deadline, as over a link slower than about
+  1 Mbit/s, now ends with its own error instead of waiting on. (#2623)
+- lynox now asks the model to write the facts it remembers after a turn, and
+  those written by the `remember` tool, in the language the operator writes
+  in, and not to name the operator or user as "operator" or "user". (#2522)
 - With the subject graph on, `GET /api/export` reads the knowledge graph's
   entities by key instead of by offset, so its time grows with the number of
   subjects rather than with the square of that number;
@@ -375,9 +388,9 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   longer records a credential read in the instance log. (#2419)
 - The OAuth callback's trail rows name a person the owner let in by their name,
   like their other rows. (#2773)
-- On Settings → APIs, the label of the button that replaces a saved secret no
-  longer breaks onto two lines on a narrow screen, addresses, hosts and
-  accounts no longer break inside a word, and revocation and erasure dates
+- On Settings → API connections, the label of the button that replaces a saved
+  secret no longer breaks onto two lines on a narrow screen, addresses, hosts
+  and accounts no longer break inside a word, and revocation and erasure dates
   name the month. (#2725, #2743)
 - Two `http_request` calls of one turn can no longer both pass the session's
   request limit. (#2533)
@@ -412,8 +425,9 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - A relation in the memory graph now moves to the memory that replaces its
   memory with the same fact, instead of staying on the retired one where no
   deletion could reach it later; the migration counts and logs what it moves
-  before it runs. A relation of a memory replaced by a contradiction is
-  hidden. (#2798)
+  before it runs. A relation of a memory replaced by a contradiction stays
+  with the outdated memory, is hidden, and is deleted at the next clean-up.
+  (#2798)
 - A changeset rollback that stops partway keeps the review and the backups of
   the files not restored yet. A run no longer replaces a review its sender may
   not answer; `POST /api/sessions/:id/run` answers 409 `review_pending_owner`.
@@ -421,9 +435,9 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - After a reload, the chat shows again which model it runs on.
   `GET /api/threads/:id` now carries `run_tier`. (#2762)
 - The run route now notices a client that went away: the run goes on without a
-  stream, and the next message takes it over only when its engine has been
-  silent for 60 s and no tool call is still within its own time limit.
-  (#2526, #2813)
+  stream, and the next message takes it over once its engine has been silent
+  for 60 s and no tool call is still within its own time limit. A run that
+  waits on its own question is no longer taken over. (#2526, #2813)
 - With workspace isolation (the HTTP server and the Docker image), a relative
   path in the file tools is now read from the workspace, not from the process's
   working directory. (#2727)
@@ -485,21 +499,15 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - Once a conversation holds outside content, every `web_research` read and
   `http_request` GET or HEAD to a host the owner did not name is asked about,
   and refused where nobody can be asked; so are an `api_setup` discovery read
-  and saving an OAuth token address. The provider's own web search counts as
-  outside content. (#2680, #2695, #2704, #2716)
-- In sidecar mode with the egress proxy, a `bash` call whose tool round started
-  after the conversation read outside content (a web page, a search, a mail, a
-  previous `bash` call) no longer reaches every host under `allow-all` or no
-  policy. Its proxy credential then names the built-in provider hosts, the
-  operator's `network_allowed_hosts` and the hosts the owner typed in the
-  thread; under `guarded` a connected API's host is left out. Before outside
-  content, a `bash` call under `guarded` now also reaches the hosts the owner
-  typed in the thread. `allow-list` and `deny-all` are unchanged.
-  (#2701, #2712)
-- The approval question before an outgoing write now also finds stored secrets
-  inside a value that is itself JSON text, also when written with escapes a
-  lenient parser accepts; past fixed depth and size limits such a value counts
-  as holding a secret. (#2650, #2702)
+  and saving an OAuth token address, also after the provider's own web search.
+  (#2680, #2695, #2704, #2716)
+- With the egress proxy, a `bash` call after outside content reaches only the
+  provider hosts, `network_allowed_hosts` and the hosts the owner typed. Before
+  outside content, a `bash` call under `guarded` now also reaches the hosts the
+  owner typed in the thread. (#2701, #2712)
+- The approval question before an outgoing write finds stored secrets in more
+  encodings of a value; past fixed depth and size limits a value counts as
+  holding a secret. (#2650, #2702)
 - Provider keys from the environment, credential fields inside JSON env values
   and the web push key are masked, and overlapping values are masked as one.
   (#2619)
@@ -542,6 +550,14 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
   the owner, and a rule that describes mail in words costs one cheap model call
   per mail. Set `LYNOX_FEATURE_INBOX_USER_RULES=0` to keep them off. Fixed rules
   now compare sender and subject normalized and may match more mail. (#2465)
+- `POST /api/inbox/rules` answers 400 for a new `list_id` rule and for a fixed
+  value with hidden characters, a line break, too many characters, more than
+  one sender address or a too short subject; stored rules load as they are.
+  (#2465)
+- A chat run waiting on its own question keeps the conversation after its
+  client drops until the question is answered, the run is stopped or the
+  question expires (24 h); `POST /api/sessions/:id/run` answers 409 meanwhile,
+  and the slot is no longer freed after 10 minutes. (#2526)
 - The instance log now keeps its entries for 365 days: older entries are
   deleted. Status polls the web UI makes by itself are folded into one entry
   per day once they are older than 30 days. The first sweeps after the upgrade
@@ -561,7 +577,8 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - `POST /api/workflows/:id/confirm`, `POST /api/workflows/:id/takeover` and
   `POST /api/triggers/:id/takeover` answer a token, the owner's included, with
   403 `session_only`. On another person's conversation without a live
-  session, a person the owner let in now gets 403 instead of 404. (#2820)
+  session, a person the owner let in now gets 403 instead of 404, and
+  `GET /api/sessions/:id/changeset` answers an empty review. (#2820, #2867)
 - The engine's own confirmations approve only on an offered key (`allow`,
   `deny`; `deep`, `balanced`, `cancel`); other text, or an older client's `y`,
   gets `refused: "unrecognised_answer"` from `POST /api/sessions/:id/reply`.
@@ -577,7 +594,8 @@ words, and carries the AI budget cap of 2.19.2, which was not tagged.
 - An existing watch that `network_policy` now refuses stops being read at its
   next check and records why; the Triggers view says on its row why and who
   can change that. Watches on a listed page, under `guarded` and under
-  `allow-all` are unchanged. (#2730)
+  `allow-all` are unchanged, except a plain `http://` page with
+  `enforce_https`. (#2730)
 - With the egress proxy, a `bash` call after outside content now reaches only
   the provider hosts, `network_allowed_hosts` and the hosts the owner typed,
   also under `allow-all`; a command that needs another host reaches it once the
