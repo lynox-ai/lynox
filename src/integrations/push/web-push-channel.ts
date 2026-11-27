@@ -348,7 +348,10 @@ export class WebPushNotificationChannel implements NotificationChannel {
    * subscription to try, counting one the push service answered as gone (404/410) — then
    * setting up a device would help, after `failed` it would not. A mandate's device that failed
    * does not make an owner's message `failed`. A message for the mandates' side
-   * (`audience: 'mandates'`) is meant for them, so reaching one of them is its delivery.
+   * (`audience: 'mandates'`) is meant for them, so reaching one of them is its delivery. A message
+   * for every grant (`audience: 'all_mandates'`) is the mandates' sentence of a notice the owner is
+   * told apart: with no mandate's device to try it is `skipped`, not `no_recipient`, because setting
+   * up a device of the owner's would not help it.
    */
   async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const result = await this.sendDetailed(msg);

@@ -385,6 +385,10 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockRejectedValue(Object.assign(new Error('down'), { statusCode: 500 }));
 		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toBe('failed');
+		// Their failure is never counted as the owner's, and the owner's device is not tried.
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		expect(await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toEqual({ sent: 0, sentToOwner: 0, failed: 2, failedOwner: 0, cleaned: 0 });
+		expect(sendCalls().sort()).toEqual(['https://push.example/eva', 'https://push.example/max']);
 		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockReset();
 		stderr.mockRestore();
 		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
