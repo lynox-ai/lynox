@@ -219,8 +219,13 @@ type ExportRow = Record<string, unknown>;
 
 export interface HeldMemoryTexts {
   /** The legacy store: each remembered text, which entity it mentions, which text replaced which
-   * (with its reason), which entities appear together, and the counters kept per text. */
-  'agent-memory.db': { memories: ExportRow[]; mentions: ExportRow[]; supersedes: ExportRow[]; cooccurrences: ExportRow[]; metrics: ExportRow[] };
+   * (with its reason), which entities appear together, and the counters kept per text. With the
+   * subject graph on, also its entities and relations, which the graph block then does not read;
+   * with it off they are empty here, since the graph block lists them. */
+  'agent-memory.db': {
+    memories: ExportRow[]; mentions: ExportRow[]; supersedes: ExportRow[]; cooccurrences: ExportRow[]; metrics: ExportRow[];
+    entities: ExportRow[]; relations: ExportRow[];
+  };
   /** The subject-graph store: each remembered text, which subject it is about, every relation
    * between subjects (those of a kind the graph block does not list included), which text
    * replaced which, which subjects appear together, and in which conversation each subject was
@@ -256,6 +261,9 @@ export function readMemoryTextsForExport(opts: {
   agentMemoryFile: string;
   engineDb: EngineDb | null;
   mask: (text: string) => string;
+  /** Whether the graph block is read from engine.db, as the layer reads it. Then agent-memory.db's
+   * entities and relations are in no other block and are read here. */
+  subjectGraph?: boolean;
   /** Rows per table; {@link MEMORY_TEXT_EXPORT_CAP} unless a test sets a smaller one. */
   cap?: number;
 }): HeldMemoryTexts {
@@ -290,7 +298,7 @@ export function readMemoryTextsForExport(opts: {
     return { ...row, text: UNREADABLE_MEMORY_TEXT };
   };
 
-  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [] };
+  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [] };
   let legacy: Database.Database | null = null;
   try {
     if (existsSync(opts.agentMemoryFile)) {
@@ -305,6 +313,12 @@ export function readMemoryTextsForExport(opts: {
           .map(row => maskField(row, 'reason'));
         legacyHalf.cooccurrences = read(legacy, 'cooccurrences', '', 't.last_seen_at, t.entity_a_id, t.entity_b_id', 'agent-memory.db cooccurrences');
         legacyHalf.metrics = read(legacy, 'metrics', '', 't.computed_at, t.id', 'agent-memory.db metrics');
+        if (opts.subjectGraph === true) {
+          legacyHalf.entities = read(legacy, 'entities', '', 't.first_seen_at, t.id', 'agent-memory.db entities')
+            .map(row => ['canonical_name', 'aliases', 'description', 'metadata'].reduce(maskField, row));
+          legacyHalf.relations = read(legacy, 'relations', '', 't.created_at, t.id', 'agent-memory.db relations')
+            .map(row => maskField(row, 'description'));
+        }
       }
     }
   } catch {
@@ -350,9 +364,9 @@ export function readMemoryTextsForExport(opts: {
  *    and those of a kind it maps to no entity; with it off, every subject, since the block is
  *    then read from agent-memory.db;
  *  - any row in an agent-memory.db table this build does not export (one an older schema kept);
- *  - with the subject graph on, agent-memory.db entities and relations, since the block is then
- *    read from engine.db; with it off, relations neither of whose entities is stored, since the
- *    block collects relations through their entities.
+ *  - with the subject graph off, agent-memory.db relations neither of whose entities is stored,
+ *    since the graph block collects relations through their entities (with it on, the legacy
+ *    entities and relations are carried in full by {@link readMemoryTextsForExport}).
  * The export says "complete" only when nothing stored is left out, so any such row marks the
  * graph block. A count that cannot be taken (no engine.db, a newer or unreadable
  * agent-memory.db, a failed query) cannot show there are none, and answers `true` as well.
@@ -389,10 +403,10 @@ export function graphHoldsRowsNotExported(opts: {
       const row = legacy.prepare(`SELECT EXISTS (SELECT 1 FROM "${t.name.replaceAll('"', '""')}") AS e`).get() as { e: number };
       if (row.e === 1) return true;
     }
-    const graphRows = opts.subjectGraph
-      ? '(SELECT COUNT(*) FROM entities) + (SELECT COUNT(*) FROM relations)'
-      : '(SELECT COUNT(*) FROM relations r WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE e.id IN (r.from_entity_id, r.to_entity_id)))';
-    const rows = legacy.prepare(`SELECT ${graphRows} AS n`).get() as { n: number };
+    if (opts.subjectGraph) return false;
+    const rows = legacy.prepare(
+      'SELECT COUNT(*) AS n FROM relations r WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE e.id IN (r.from_entity_id, r.to_entity_id))',
+    ).get() as { n: number };
     return rows.n > 0;
   } catch {
     return true;

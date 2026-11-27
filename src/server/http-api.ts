@@ -15085,26 +15085,28 @@ export class LynoxHTTPApi {
       // The remembered texts both stores hold, read the same way on either path and masked as the
       // durable knowledge block is; read before the graph, so a graph read that fails does not
       // take them with it.
-      // Graph rows no block carries (subjects the graph block does not list; with the subject
-      // graph on, the older store's entities and relations) are counted, and any marks the
-      // block too: the export says "complete" only when nothing stored is left out.
+      // With the subject graph on, the older store's entities and relations are carried here too.
+      // Graph rows no block carries (subjects the graph block does not list) are counted, and any
+      // marks the block too: the export says "complete" only when nothing stored is left out.
       let memoryTexts: { block: Record<string, unknown>; mayBeIncomplete: boolean };
       try {
         const { graphHoldsRowsNotExported, readMemoryTextsForExport } = await import('../core/graph-export.js');
         const exportSecrets = engine.getSecretStore();
         const agentMemoryFile = join(getLynoxDir(), 'agent-memory.db');
+        // With a layer, the setting it started with: a config reload does not rebuild it, and what
+        // this block and the count read must agree with what the layer lists.
+        const layer = engine.getKnowledgeLayer();
+        const subjectGraph = layer ? layer.readsSubjectGraph === true : engine.getUserConfig().subject_graph_enabled === true;
         const read = readMemoryTextsForExport({
           agentMemoryFile,
           engineDb: engine.getEngineDb(),
           mask: (t: string) => maskSecretPatterns(exportSecrets ? exportSecrets.maskSecrets(t) : t),
+          subjectGraph,
         });
-        // With a layer, the setting it started with: a config reload does not rebuild it, and the
-        // count must agree with what the layer lists.
-        const layer = engine.getKnowledgeLayer();
         const notExported = graphHoldsRowsNotExported({
           agentMemoryFile,
           engineDb: engine.getEngineDb(),
-          subjectGraph: layer ? layer.readsSubjectGraph === true : engine.getUserConfig().subject_graph_enabled === true,
+          subjectGraph,
         });
         memoryTexts = { block: { 'agent-memory.db': read['agent-memory.db'], 'engine.db': read['engine.db'] }, mayBeIncomplete: read.mayBeIncomplete || notExported };
       } catch {

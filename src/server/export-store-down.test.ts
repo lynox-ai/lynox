@@ -44,7 +44,7 @@ type MemoryTexts = {
 
 /** The remembered-text half of a store that holds none. */
 const NO_MEMORY_TEXTS = {
-  'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [] },
+  'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [] },
   'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE, supersedes: [], subject_cooccurrences: [], subject_mints: [] },
 };
 
@@ -357,6 +357,37 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       raw.prepare("DELETE FROM memories WHERE id IN ('e-old', 'e-new')").run();
       legacy.prepare("DELETE FROM supersedes WHERE new_memory_id = 'l-new'").run();
       legacy.prepare("DELETE FROM memories WHERE id IN ('l-old', 'l-new')").run();
+      legacy.close();
+    }
+  }, 60_000);
+
+  it('with the subject graph on, carries the older store\'s entities and relations, masked, and does not mark the graph for them', async () => {
+    const key = `sk-ant-api03-${randomBytes(24).toString('hex')}`;
+    const legacy = new Database(join(h.dir(), 'agent-memory.db'));
+    const getKnowledgeLayer = h.engine().getKnowledgeLayer;
+    const getUserConfig = h.engine().getUserConfig;
+    try {
+      legacy.prepare("INSERT INTO entities (id, canonical_name, entity_type, description, scope_type, scope_id, first_seen_at, last_seen_at) VALUES ('le-a', 'Alice', 'person', ?, 'global', 'global', '2026-01-01', '2026-01-01'), ('le-b', 'Acme', 'organization', '', 'global', 'global', '2026-01-01', '2026-01-01')").run(`key ${key}`);
+      legacy.prepare("INSERT INTO relations (id, from_entity_id, to_entity_id, relation_type, description, created_at) VALUES ('lr-1', 'le-a', 'le-b', 'works_at', ?, '2026-01-01')").run(`badge ${key}`);
+      // No layer, the subject graph on in the config: the graph block is read from engine.db.
+      h.engine().getKnowledgeLayer = () => null;
+      h.engine().getUserConfig = () => ({ ...getUserConfig.call(h.engine()), subject_graph_enabled: true });
+
+      const res = await fetch(`${h.baseUrl()}/api/export`, { headers: { Authorization: `Bearer ${h.secret}` } });
+      const text = await res.text();
+      const body = JSON.parse(text) as ExportBody;
+      const half = body.knowledge_graph.memories!['agent-memory.db'] as unknown as { entities: Array<Record<string, unknown>>; relations: Array<Record<string, unknown>> };
+      expect(half.entities.map(r => r['id']).sort(), 'the legacy entities').toEqual(['le-a', 'le-b']);
+      expect(String(half.entities.find(r => r['id'] === 'le-a')?.['description']), 'masked').toMatch(/^key (?!sk-ant-)/);
+      expect(half.relations.map(r => [r['id'], r['from_entity_id'], r['to_entity_id']]), 'the legacy relation').toEqual([['lr-1', 'le-a', 'le-b']]);
+      expect(String(half.relations[0]?.['description']), 'masked').toMatch(/^badge (?!sk-ant-)/);
+      expect(text.includes(key), 'the key is not in the export').toBe(false);
+      expect(body.knowledge_graph_may_be_incomplete, 'carried, so not marked').toBe(false);
+    } finally {
+      h.engine().getKnowledgeLayer = getKnowledgeLayer;
+      h.engine().getUserConfig = getUserConfig;
+      legacy.prepare("DELETE FROM relations WHERE id = 'lr-1'").run();
+      legacy.prepare("DELETE FROM entities WHERE id IN ('le-a', 'le-b')").run();
       legacy.close();
     }
   }, 60_000);
