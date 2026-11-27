@@ -245,6 +245,10 @@ const RUN_END_LOOK = {
   success: { status: 'success', mark: '\u2713', priority: 'normal' },
   failed: { status: 'failed', mark: '\u2717', priority: 'high' },
   halted: { status: 'halted', mark: '\u23F8', priority: 'normal' },
+  /** A run that finished and noted member-connection lines: recorded as halted, so the same
+   *  refusal is not pushed again (`memberNotesRepeat`), but nothing waits, so no ⏸ (U-420). Its
+   *  title leads with `titleWithNote`, since ⚠ also marks an interrupted run. */
+  noted: { status: 'halted', mark: '\u26A0', priority: 'normal' },
   interrupted: { status: 'interrupted', mark: '\u26A0', priority: 'high' },
   /** A run kept from starting because someone it depends on has lost access: no retry, since
    *  a retry would meet the same end. Not the owner's stop, so it says its own reason. */
@@ -524,6 +528,14 @@ export interface ActiveTask {
    * deploy takes this path.
    */
   tearingDown?: boolean | undefined;
+  /**
+   * A teardown kept this run's question for the next process (`keepsQuestionForNextProcess`):
+   * the run is not over, its question stays answerable where the owner got it, and the run
+   * tells its real end once the answer re-arms it. However this process's part then ends,
+   * on the normal end path or in the catch, it pushes nothing (U-420). On the entry, not in the
+   * run's closure, because the catch in `#runFramed` reads it too.
+   */
+  questionKept?: boolean | undefined;
   /**
    * This run's handler polls `controller.signal` itself, so for it the controller IS a
    * stop handle.
@@ -2410,7 +2422,9 @@ export class WorkerLoop {
       // failed" is the wrong offer for a run that did what it was told.
       // A webhook run's failure is told once, by the drain from its event, not here too; a paused
       // plan's stop is told by the tick's notice, once (`plan-pause.ts`).
-      if (!willRetry && entry.event === undefined && entry.endedPaused !== true && this.notificationRouter.hasChannels()) {
+      // Nor a run whose question a teardown kept for the next process: it is not over, and it
+      // tells its real end when the answer re-arms it (`ActiveTask.questionKept`, U-420).
+      if (!willRetry && entry.event === undefined && entry.endedPaused !== true && entry.questionKept !== true && this.notificationRouter.hasChannels()) {
         const stopped = status === 'stopped';
         // The push leaves the instance: a contained run's error goes out as class and status
         // only (`error-egress.ts`). A timeout keeps its text, which lynox wrote itself (above).
@@ -3163,6 +3177,7 @@ export class WorkerLoop {
         // designed — the next process re-arms the run when the answer lands.
         if (keepsQuestionForNextProcess(active)) {
           questionWentUnanswered = true;
+          active!.questionKept = true;
           return DISMISSED_ANSWER;
         }
 
@@ -3446,16 +3461,20 @@ export class WorkerLoop {
     }
 
     // A refused member connection is told as `#recordRun` recorded it: its lines under the
-    // result and ⏸ instead of ✓, and not again for a run that halted on the same lines.
+    // result and, for a run that finished, the note's title instead of ✓, and not again for a run
+    // that halted on the same lines. A run whose question went unanswered did not finish, so it
+    // does not read as finished with a note.
     // Compared as recorded (English); pushed in the owner's language (`said`).
     const memberNotes = currentMemberNotes();
     const memberSaid = currentMemberNotesIn(noticeLanguage(this.engine.config?.language));
-    const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null ? 'other' : 'success', memberSaid);
-    if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
+    // A run whose question was kept for the next process is not over: no push, not ✗ (nothing
+    // went wrong, a deploy is internal) and not ⏸ (a second notice of a question already asked).
+    // The catch in `#runFramed` holds back its push on the same mark (`ActiveTask.questionKept`).
+    if (active?.questionKept !== true && this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
       // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
       // its error does (above); the recorded run keeps the full text. Only the run's text is
       // replaced: the ceiling's reason and the member-connection lines are lynox's own and say
-      // why the title is ✗ or ⏸, so they go out as before.
+      // why the title is ✗ or ⚠, so they go out as before.
       const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
@@ -3467,19 +3486,20 @@ export class WorkerLoop {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
         //
-        // ⚠ And the LIMIT of that, stated rather than left to look deliberate: a question
-        // left unanswered by a shutdown or by its expiry records `failed` and still
-        // notifies as a ✓ at `normal`. That asymmetry is older than this change and no
-        // test pins it either way. (Left unanswered because the OWNER stopped the run, it
-        // takes the branch below.)
+        // ⚠ So does a question left unanswered by its expiry, an abort or a missing prompt store:
+        // the run records `failed`, so its push is a ✗ at `high`, with or without
+        // member-connection lines (U-420), not a ✓ over a run that did not finish. (Left
+        // unanswered because the OWNER stopped the run, it takes the branch below; kept for the
+        // next process by a shutdown, it pushes nothing, above.)
         //
         // ⛔ A run its owner ended says so, as the catch path does: neither ✓ (it did not
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
-        title: `${endedByOwner ? '\u23f9' : (budgetCut !== null ? '\u2717' : memberTold.status === 'halted' ? RUN_END_LOOK.halted.mark : '\u2713')} ${task.title}`,
+        title: endedByOwner ? `\u23f9 ${task.title}` : budgetCut !== null || questionWentUnanswered ? `\u2717 ${task.title}`
+          : memberSaid.length > 0 ? `${RUN_END_LOOK.noted.mark} ${notices.titleWithNote(task.title)}` : `\u2713 ${task.title}`,
         body: endedByOwner ? `${notices.stopped}\n\n${pushed}` : pushed,
         taskId: task.id,
-        priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
+        priority: endedByOwner || (budgetCut === null && !questionWentUnanswered) ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
         // result instead of a blank new chat (the service worker routes
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
@@ -4013,13 +4033,16 @@ export class WorkerLoop {
     // `said`: a stored sentence's version in the owner's language, pushed in its place; the
     // member-connection lines likewise (UX-065).
     const told = withMemberNotes(said ?? resultSummary, look.status, currentMemberNotesIn(noticeLanguage(this.engine.config?.language)));
-    const toldLook = RUN_END_LOOK[told.status];
+    // A run that would have ended a success halts only for its lines: it finished, nothing waits.
+    const finishedWithNote = end === true && told.status === 'halted';
+    const toldLook = finishedWithNote ? RUN_END_LOOK.noted : RUN_END_LOOK[told.status];
     // A webhook run is told by the drain, once per event and only when it did not succeed: a
     // push per order would be noise, and its success is in the run history, where the
     // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
-      const shownEnd: BulkPushEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
+      const shownEnd: BulkPushEnd = finishedWithNote ? 'noted'
+        : told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
       const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
       const readers = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
@@ -4143,7 +4166,9 @@ export class WorkerLoop {
    */
   #pushTitleOf(task: TriggerRecord, end: BulkPushEnd): string {
     const effect = task.effect;
-    if (effect !== 'bulk_preview' && effect !== 'bulk_judge' && effect !== 'bulk_apply' && effect !== 'bulk_undo') return task.title;
+    if (effect !== 'bulk_preview' && effect !== 'bulk_judge' && effect !== 'bulk_apply' && effect !== 'bulk_undo') {
+      return end === 'noted' ? WORKER_NOTICES[noticeLanguage(this.engine.config?.language)].titleWithNote(task.title) : task.title;
+    }
     // The host is a read of the ledger: a read that fails costs the title its host, never the push.
     let system: string | undefined;
     try {
