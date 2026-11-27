@@ -630,6 +630,20 @@ describe('a push that merges main scans what main does not carry, and all of it'
     expect(run('t', 'origin').stdout.trim()).toBe(`${mainTip} ${tip}`);
   }, T);
 
+  it('a main merge whose main commit carries a raw invisible format character lands; the same in an own commit is refused', () => {
+    // core#2470, 27.11.2026: three main commits that put raw format characters into tests blocked a
+    // branch that merged main. Written as an escape here, so this file carries none itself.
+    const CF = 'zero\u200Bwidth\n';
+    const c = pushedOnce();
+    onMain(c, 'm.md', CF);
+    merge(c);
+    const r = pushHead(c);
+    expect(r.head, r.out).toBe(true);
+    own(c, 'b.md', CF);
+    const own2 = pushHead(c);
+    expect(own2.head, own2.out).toBe(false);
+  }, T);
+
   it('an own dirty commit behind a main merge is refused', () => {
     const c = pushedOnce();
     onMain(c, 'm.md', DIRTY);
