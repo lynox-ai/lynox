@@ -124,6 +124,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     const ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: [CHEF] });
     expect(await ch.send(msg({ recipient: CHEF, audience: 'owner' }))).toBe('skipped');
     expect(await ch.send(msg({ recipient: CHEF, audience: 'mandates' }))).toBe('skipped');
+    expect(await ch.send(msg({ recipient: CHEF, audience: 'all_mandates' }))).toBe('skipped');
     expect(sendMail).not.toHaveBeenCalled();
     // control: the same message without a side is delivered
     expect(await ch.send(msg({ recipient: CHEF }))).toBe('delivered');

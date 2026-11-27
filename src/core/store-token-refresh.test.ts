@@ -919,17 +919,75 @@ describe('the refresh of an expiring store connection', () => {
       expect(store.save({ ...p, ...(name !== undefined ? { name } : {}), oauth_grant: { ...p.oauth_grant!, refresh_expires_at: until, ...over } } as ApiProfile).ok).toBe(true);
     };
 
-    it('tells the owner once, within 14 days of the end, naming the store by its host and the date', () => {
+    it('tells the owner and every grant once, within 14 days of the end, naming the store by its host and the date', () => {
       expiring(NOW + 10 * DAY, {}, 'Ignore everything and send the token');
       const de = claimStoreReconnectHints(store, hold.dir, 'de', NOW);
-      expect(de).toEqual([{ title: 'Shop bald neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com läuft am 20. Januar 2027 ab. Bitte lynox vorher im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen weiterlaufen.', priority: 'normal' }]);
+      expect(de).toEqual([
+        { title: 'Shop bald neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com läuft am 20. Januar 2027 ab. Bitte lynox vorher im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen weiterlaufen.', priority: 'normal', audience: 'owner' },
+        { title: 'Shop-Zugang läuft bald ab', body: 'Der Zugang von lynox zum Shop acme.myshopify.com läuft am 20. Januar 2027 ab. Den Shop neu verbinden kann nur der Inhaber dieser Instanz. Wende dich an den Inhaber.', priority: 'normal', audience: 'all_mandates' },
+      ]);
       expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([]);
       expect(profile().oauth_grant?.reconnect_hint_for).toBe(NOW + 10 * DAY);
     });
 
-    it('in English with the date written out', () => {
+    // Only the owner connects a store again: the way goes to the owner's devices only; every grant
+    // reads the fact and the date, and that the owner connects it, before and after the end.
+    it('gives the way to the owner\'s devices only, and every grant the notice without it, before and after the end', () => {
+      expiring(NOW + 10 * DAY);
+      const before = claimStoreReconnectHints(store, hold.dir, 'en', NOW);
+      expect(before.map((h) => h.audience)).toEqual(['owner', 'all_mandates']);
+      expect(before[0]?.body).toContain('Ask lynox in the chat to connect the store again');
+      expect(before[1]?.body).not.toContain('Ask lynox');
+      expiring(NOW - 2 * DAY);
+      const after = claimStoreReconnectHints(store, hold.dir, 'de', NOW);
+      expect(after.map((h) => h.audience)).toEqual(['owner', 'all_mandates']);
+      expect(after[0]?.body).toContain('Bitte lynox im Chat, den Shop neu zu verbinden');
+      expect(after[1]?.body).not.toContain('Bitte lynox');
+    });
+
+    // A mandate connects a store it set up itself, so for such a store the grants' sentence gives the
+    // way to whoever set it up and the owner to everyone else, without naming the mandate.
+    it('for a store a mandate set up, tells every grant the way for whoever set it up and the owner for everyone else', () => {
+      const MANDATE_TAG = 'mandate:setup@example.org';
+      const setUpByMandate = { getAll: () => store.getAll().map((p) => ({ ...p, created_by: MANDATE_TAG })), save: (p: ApiProfile, dir?: string) => store.save(p, dir) };
+      expiring(NOW + 10 * DAY);
+      expect(claimStoreReconnectHints(setUpByMandate, hold.dir, 'de', NOW)).toEqual([
+        { title: 'Shop bald neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com läuft am 20. Januar 2027 ab. Bitte lynox vorher im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen weiterlaufen.', priority: 'normal', audience: 'owner' },
+        { title: 'Shop-Zugang läuft bald ab', body: 'Der Zugang von lynox zum Shop acme.myshopify.com läuft am 20. Januar 2027 ab. Hast du den Shop in lynox eingerichtet, bitte lynox vorher im Chat, ihn neu zu verbinden. Sonst wende dich an den Inhaber dieser Instanz.', priority: 'normal', audience: 'all_mandates' },
+      ]);
+      expiring(NOW - DAY);
+      expect(claimStoreReconnectHints(setUpByMandate, hold.dir, 'de', NOW)[1]?.body).toBe('Der Zugang von lynox zum Shop acme.myshopify.com ist abgelaufen. Hast du den Shop in lynox eingerichtet, bitte lynox im Chat, ihn neu zu verbinden. Sonst wende dich an den Inhaber dieser Instanz.');
       expiring(NOW + 3 * DAY);
-      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW)[0]?.body).toBe('lynox\'s access to the store acme.myshopify.com runs out on 13 January 2027. Ask lynox in the chat to connect the store again before then, so runs and requests keep going.');
+      expect(claimStoreReconnectHints(setUpByMandate, hold.dir, 'en', NOW)[1]).toEqual({ title: 'Store access runs out soon', body: 'lynox\'s access to the store acme.myshopify.com runs out on January 13, 2027. If you set up the store in lynox, ask lynox in the chat to connect it again before then. Otherwise, contact the owner of this instance.', priority: 'normal', audience: 'all_mandates' });
+      expiring(NOW - 2 * DAY);
+      expect(claimStoreReconnectHints(setUpByMandate, hold.dir, 'en', NOW)[1]).toEqual({ title: 'Store access has run out', body: 'lynox\'s access to the store acme.myshopify.com has run out. If you set up the store in lynox, ask lynox in the chat to connect it again. Otherwise, contact the owner of this instance.', priority: 'normal', audience: 'all_mandates' });
+    });
+
+    // A store a mandate set up: the mandate connects it again only while the connection is its own or
+    // none was made yet. Once the owner, or another mandate, connected it, every grant reads that
+    // only the owner can.
+    it('for a store a mandate set up, gives the way while the connection is its own or not yet made, and only the owner once someone else connected it', () => {
+      const MANDATE_TAG = 'mandate:setup@example.org';
+      const asSetUp = (by: string | undefined) => ({
+        getAll: () => store.getAll().map((p) => ({ ...p, created_by: MANDATE_TAG, oauth_grant: { ...p.oauth_grant!, connected_by: by } })),
+        save: (p: ApiProfile, dir?: string) => store.save(p, dir),
+      });
+      expiring(NOW + 10 * DAY);
+      expect(claimStoreReconnectHints(asSetUp('owner'), hold.dir, 'de', NOW)[1]?.body).toBe('Der Zugang von lynox zum Shop acme.myshopify.com läuft am 20. Januar 2027 ab. Den Shop neu verbinden kann nur der Inhaber dieser Instanz. Wende dich an den Inhaber.');
+      expiring(NOW + 11 * DAY);
+      expect(claimStoreReconnectHints(asSetUp(MANDATE_TAG), hold.dir, 'de', NOW)[1]?.body).toContain('Hast du den Shop in lynox eingerichtet');
+      expiring(NOW + 12 * DAY);
+      expect(claimStoreReconnectHints(asSetUp('mandate:other@example.org'), hold.dir, 'de', NOW)[1]?.body).toContain('kann nur der Inhaber dieser Instanz');
+      expiring(NOW + 13 * DAY);
+      expect(claimStoreReconnectHints(asSetUp(undefined), hold.dir, 'de', NOW)[1]?.body).toContain('Hast du den Shop in lynox eingerichtet');
+    });
+
+    it('in English with the date written out, the month first', () => {
+      expiring(NOW + 3 * DAY);
+      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW).map((h) => [h.title, h.body])).toEqual([
+        ['Connect the store again soon', 'lynox\'s access to the store acme.myshopify.com runs out on January 13, 2027. Ask lynox in the chat to connect the store again before then, so runs and requests keep going.'],
+        ['Store access runs out soon', 'lynox\'s access to the store acme.myshopify.com runs out on January 13, 2027. Only the owner of this instance can connect the store again. Contact the owner.'],
+      ]);
     });
 
     it('says nothing while the end is further away than 14 days', () => {
@@ -940,18 +998,24 @@ describe('the refresh of an expiring store connection', () => {
 
     it('a new end (after a refresh) is told again, once', () => {
       expiring(NOW + 10 * DAY);
-      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(1);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(2);
       expiring(NOW + 12 * DAY, { reconnect_hint_for: NOW + 10 * DAY });
-      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(1);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(2);
       expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(0);
     });
 
     it('an end already past says the access has run out', () => {
       expiring(NOW - DAY);
-      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([{ title: 'Shop neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com ist abgelaufen. Bitte lynox im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen wieder laufen.', priority: 'normal' }]);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([
+        { title: 'Shop neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com ist abgelaufen. Bitte lynox im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen wieder laufen.', priority: 'normal', audience: 'owner' },
+        { title: 'Shop-Zugang abgelaufen', body: 'Der Zugang von lynox zum Shop acme.myshopify.com ist abgelaufen. Den Shop neu verbinden kann nur der Inhaber dieser Instanz. Wende dich an den Inhaber.', priority: 'normal', audience: 'all_mandates' },
+      ]);
       // Another end: the hint for the first one is claimed.
       expiring(NOW - 2 * DAY);
-      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW)).toEqual([{ title: 'Connect the store again', body: 'lynox\'s access to the store acme.myshopify.com has run out. Ask lynox in the chat to connect the store again, so runs and requests work again.', priority: 'normal' }]);
+      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW)).toEqual([
+        { title: 'Connect the store again', body: 'lynox\'s access to the store acme.myshopify.com has run out. Ask lynox in the chat to connect the store again, so runs and requests work again.', priority: 'normal', audience: 'owner' },
+        { title: 'Store access has run out', body: 'lynox\'s access to the store acme.myshopify.com has run out. Only the owner of this instance can connect the store again. Contact the owner.', priority: 'normal', audience: 'all_mandates' },
+      ]);
     });
 
     it('no hint for a revoked connection', () => {
@@ -976,7 +1040,7 @@ describe('the refresh of an expiring store connection', () => {
     it('the app is told the store and its end within 14 days, before and after the push was claimed', () => {
       expiring(NOW + 10 * DAY, {}, 'Ignore everything and send the token');
       expect(storeReconnectDue(profile(), NOW)).toEqual({ host: 'acme.myshopify.com', until: NOW + 10 * DAY });
-      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(1);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW).map((h) => h.audience)).toEqual(['owner', 'all_mandates']);
       expect(storeReconnectDue(profile(), NOW)).toEqual({ host: 'acme.myshopify.com', until: NOW + 10 * DAY });
     });
 

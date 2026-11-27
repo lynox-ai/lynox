@@ -421,6 +421,15 @@ export function bulkResumeKind(
 	return BULK_RESUME_WRITE.has(run.haltKey) ? 'write' : null;
 }
 
+/** Halts whose sentence, as a mandate reads it (`_mandate`), already sends the mandate to the
+ *  owner: the page adds no second "ask the owner" under it (U-374). */
+const BULK_HALT_MANDATE_NAMES_OWNER: ReadonlySet<string> = new Set(['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff']);
+
+/** Whether a mandate's page shows the notice that only the owner acts on bulk runs. */
+export function bulkOwnerNoticeShown(haltKey: string | null): boolean {
+	return haltKey === null || !BULK_HALT_MANDATE_NAMES_OWNER.has(haltKey);
+}
+
 /** The page's own sentences for a write run's halt (`bulkResumeKind` not null): why it halted,
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
