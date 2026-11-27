@@ -145,7 +145,7 @@ describe('the copy button on an artifact card', () => {
 
 	it('takes the line count only from its own button, not from message markup around the card', async () => {
 		await render(`<div data-lines="999">\n\n${dataCard('sku,title\nA1,Teekanne')}\n\n</div>`);
-		expect(target.querySelector('[data-lines="999"]'), 'positive control: the markup kept its attribute').not.toBeNull();
+		expect(target.querySelector('[data-lines="999"] .artifact-container'), 'positive control: the card sits inside the markup that carries the attribute').not.toBeNull();
 		await clickCopy();
 		expect(toasts.map((x) => x.text)).toEqual([expect.stringMatching(/^(Kopiert|Copied)$/)]);
 	});
@@ -153,7 +153,7 @@ describe('the copy button on an artifact card', () => {
 	it('gives a markdown card and an html card no copy button', async () => {
 		await render(`${markdownCard('Regeltext', 'Kürze jede Beschreibung.')}\n\n${htmlCard('<h1>Regel</h1><p>Drei Sätze.</p>')}`);
 		expect(target.querySelector('.artifact-md button[data-action="expand"]'), 'positive control: the markdown card and its buttons are there').not.toBeNull();
-		expect(target.querySelector('.artifact-container button[data-action="expand"]'), 'positive control: the html card and its buttons are there').not.toBeNull();
+		expect(target.querySelector('.artifact-container[data-html] button[data-action="expand"]'), 'positive control: the html card and its buttons are there').not.toBeNull();
 		expect(copyButton()).toBeNull();
 	});
 

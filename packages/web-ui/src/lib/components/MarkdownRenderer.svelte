@@ -177,13 +177,13 @@
 		return m ? m[1]!.toLowerCase() : null;
 	}
 
+	/** How many lines of a data card the preview shows. */
+	const DATA_PREVIEW_LINES = 60;
+
 	/** Build a data-file artifact: a code preview plus a download button that
 	 *  produces a real Blob with the right extension and MIME type. The full
 	 *  body is embedded as `data-raw` so the download is the exact file, not
 	 *  the truncated preview. */
-	/** How many lines of a data card the preview shows. */
-	const DATA_PREVIEW_LINES = 60;
-
 	function buildDataArtifact(code: string, type: string, artifactId = ''): string {
 		const meta = DATA_ARTIFACT_META[type] ?? DATA_ARTIFACT_META['text']!;
 		const { title, clean } = extractTitle(code);
@@ -276,16 +276,16 @@
 		return { markup, frame: fullHtml };
 	}
 
+	/** The copy button of a card: `null` for none, `lines` set when it copies more lines than the
+	 *  card shows. */
+	type CopyButton = { readonly lines: number | null } | null;
+
 	/** The shared, minimal artifact-pill actions: expand → the coherent gallery
 	 *  big-view (the ONE full view — renders every type incl. interactive HTML),
 	 *  share/export the source file, and the collapse chevron. Full print +
 	 *  download options live in the gallery view. On mobile the export button
 	 *  uses the iOS share glyph (it opens the native share sheet). Every builder
-	 *  (html/svg, markdown, data) uses this so the pill is identical everywhere. */
-	/** The copy button of a card: `null` for none, `lines` set when it copies more lines than the
-	 *  card shows. */
-	type CopyButton = { readonly lines: number | null } | null;
-
+	 *  (html/svg, markdown, data) uses this; only a data card adds the copy button. */
 	function artifactActionBtns(title: string, copy: CopyButton): string {
 		const shareIcon = isIosSafari() ? ICON_SHARE : ICON_DOWNLOAD;
 		// The copy button names what it does in words, not only with an icon: it is the way to take
@@ -430,9 +430,6 @@
 		await goto(`/app/artifacts?id=${encodeURIComponent(result.artifact.id)}`);
 	}
 
-	/** Quick export: share (mobile) / download (desktop) the artifact's SOURCE
-	 *  file, dispatched by embedded data. Full print/download live in the gallery
-	 *  big view. Reuses the iOS-aware download handlers (Web Share on iOS). */
 	/** The text a card's copy button takes: the file of a data card. Markdown and HTML cards have
 	 *  no copy button. */
 	function copyTextOf(container: HTMLElement): string {
@@ -459,6 +456,9 @@
 		addToast(parts.join(' '), 'success', parts.length > 1 ? 4000 : 1500);
 	}
 
+	/** Quick export: share (mobile) / download (desktop) the artifact's SOURCE
+	 *  file, dispatched by embedded data. Full print/download live in the gallery
+	 *  big view. Reuses the iOS-aware download handlers (Web Share on iOS). */
 	function handleShare(container: HTMLElement) {
 		if (container.dataset['md'] !== undefined) handleMarkdownDownload(container);
 		else if (container.dataset['raw'] !== undefined) handleDataDownload(container);
@@ -1355,7 +1355,8 @@
 	   icon/type/title/chevron make up the pill. */
 	div :global(.artifact-collapsed .artifact-frame),
 	div :global(.artifact-collapsed .artifact-md-body),
-	div :global(.artifact-collapsed .artifact-data-body) {
+	div :global(.artifact-collapsed .artifact-data-body),
+	div :global(.artifact-collapsed .artifact-data-more) {
 		display: none;
 	}
 	/* The copy button stays on the closed card: the way out of a chat that only reads must be
