@@ -44,8 +44,8 @@ type MemoryTexts = {
 
 /** The remembered-text half of a store that holds none. */
 const NO_MEMORY_TEXTS = {
-  'agent-memory.db': { memories: [], mentions: [] },
-  'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE },
+  'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [] },
+  'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE, supersedes: [], subject_cooccurrences: [], subject_mints: [] },
 };
 
 type EngineView = {
@@ -326,6 +326,38 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     } finally {
       h.engine().getUserConfig = getUserConfig;
       engineDb.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(id);
+    }
+  }, 60_000);
+
+  it('carries which text replaced which in both stores, the reason masked, and does not mark the graph for it', async () => {
+    const engineDb = h.engine().getEngineDb() as EngineDb;
+    const raw = engineDb.getDb();
+    const key = `sk-ant-api03-${randomBytes(24).toString('hex')}`;
+    const legacy = new Database(join(h.dir(), 'agent-memory.db'));
+    try {
+      legacy.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active, embedding, created_at, updated_at) VALUES ('l-old', 'old', 'knowledge', 'global', 'global', 0, x'00', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'), ('l-new', 'new', 'knowledge', 'global', 'global', 1, x'00', '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z')").run();
+      legacy.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason, created_at) VALUES ('l-new', 'l-old', ?, '2026-01-02')").run(`replaced, key ${key}`);
+      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active) VALUES ('e-old', ?, 'knowledge', 'global', 'global', 0), ('e-new', ?, 'knowledge', 'global', 'global', 1)").run(engineDb.enc('old'), engineDb.enc('new'));
+      raw.prepare("INSERT INTO supersedes (new_memory_id, old_memory_id, reason) VALUES ('e-new', 'e-old', ?)").run(`newer, key ${key}`);
+
+      const res = await fetch(`${h.baseUrl()}/api/export`, { headers: { Authorization: `Bearer ${h.secret}` } });
+      const text = await res.text();
+      const body = JSON.parse(text) as ExportBody;
+      const memories = body.knowledge_graph.memories!;
+      const l = (memories['agent-memory.db'] as unknown as { supersedes: Array<Record<string, unknown>> }).supersedes;
+      const e = (memories['engine.db'] as unknown as { supersedes: Array<Record<string, unknown>> }).supersedes;
+      expect(l.map(r => [r['new_memory_id'], r['old_memory_id']]), 'agent-memory.db').toEqual([['l-new', 'l-old']]);
+      expect(e.map(r => [r['new_memory_id'], r['old_memory_id']]), 'engine.db').toEqual([['e-new', 'e-old']]);
+      expect(String(l[0]?.['reason']), 'masked').toMatch(/^replaced, key (?!sk-ant-)/);
+      expect(String(e[0]?.['reason']), 'masked').toMatch(/^newer, key (?!sk-ant-)/);
+      expect(text.includes(key), 'the key is not in the export').toBe(false);
+      expect(body.knowledge_graph_may_be_incomplete, 'carried, so not marked').toBe(false);
+    } finally {
+      raw.prepare("DELETE FROM supersedes WHERE new_memory_id = 'e-new'").run();
+      raw.prepare("DELETE FROM memories WHERE id IN ('e-old', 'e-new')").run();
+      legacy.prepare("DELETE FROM supersedes WHERE new_memory_id = 'l-new'").run();
+      legacy.prepare("DELETE FROM memories WHERE id IN ('l-old', 'l-new')").run();
+      legacy.close();
     }
   }, 60_000);
 
