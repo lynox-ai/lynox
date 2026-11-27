@@ -10,6 +10,12 @@ import { BackupManager } from './backup.js';
  * Matched by the last component: the restore renames in its folder's handle, not by the full path.
  */
 const renameFault = vi.hoisted(() => ({ leaf: null as string | null }));
+/**
+ * A one-shot hook right AFTER a file of this path is opened: it replaces the file by name while
+ * the descriptor still holds the bytes it opened. A restore that reads a file once stages those
+ * bytes; one that reads it again by name gets the replacement.
+ */
+const afterOpen = vi.hoisted(() => ({ path: null as string | null, run: null as (() => void) | null }));
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>();
   return {
@@ -20,8 +26,22 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       fs.renameSync(from, to);
     },
+    openSync: ((...args: Parameters<typeof fs.openSync>) => {
+      const fd = fs.openSync(...args);
+      if (afterOpen.run !== null && String(args[0]) === afterOpen.path) {
+        const run = afterOpen.run;
+        afterOpen.run = null;
+        run();
+      }
+      return fd;
+    }) as typeof fs.openSync,
   };
 });
+/** Put `content` where `path` is, by a rename of a new file: an open descriptor keeps the old one. */
+function replaceByName(path: string, content: string): void {
+  writeFileSync(`${path}.replacement`, content);
+  renameSync(`${path}.replacement`, path);
+}
 import { reloadConfig } from './config.js';
 import { _resetWorkspaceAccess, workspaceAccess } from './workspace-access.js';
 
@@ -128,24 +148,21 @@ describe('backup — the workspace root', () => {
     const created = await signed.createBackup();
     writeFileSync(ws('http-api/a.txt'), 'ZZ-live');
     const src = join(created.path, 'workspace', 'http-api', 'a.txt');
-    const fifoDir = mkdtempSync(join(tmpdir(), 'lynox-fifo-ws-'));
-    writeFileSync(join(fifoDir, 'first'), 'ZZ-a');
-    writeFileSync(join(fifoDir, 'second'), 'ZZ-second-read');
-    let writer: ReturnType<typeof spawn> | null = null;
+    // Armed in the safety backup, after the verify pass: the restore's own open of the file is the
+    // next, and right after it the file by that name says something else.
     const spy = vi.spyOn(signed, 'createBackup').mockImplementation(async () => {
-      rmSync(src);
-      execFileSync('mkfifo', [src]);
-      // Every OPEN of the FIFO reads the next write: a second read by name would get 'second'.
-      writer = spawn('sh', ['-c', 'cat "$1" > "$3"; sleep 2; cat "$2" > "$3"', 'sh', join(fifoDir, 'first'), join(fifoDir, 'second'), src], { stdio: 'ignore' });
+      afterOpen.path = src;
+      afterOpen.run = () => { replaceByName(src, 'ZZ-second-read'); };
       return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
     });
     try {
       const restored = await signed.restoreBackup(created.path);
+      expect(afterOpen.run).toBeNull(); // the hook ran
       expect(restored.success, String(restored.error)).toBe(true);
       expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a');
     } finally {
-      (writer as ReturnType<typeof spawn> | null)?.kill('SIGKILL');
-      rmSync(fifoDir, { recursive: true, force: true });
+      afterOpen.path = null;
+      afterOpen.run = null;
       spy.mockRestore();
     }
   });

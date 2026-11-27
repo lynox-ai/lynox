@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -33,7 +34,8 @@ vi.mock('node:fs', async (importOriginal) => {
   }
 });
 
-const { BackupManager, RESTORE_RUNNING } = await import('./backup.js');
+const { BackupManager, MANIFEST_MAX_BYTES, RESTORE_RUNNING } = await import('./backup.js');
+const { BACKUP_LIST_PROOF_FILE } = await import('./data-dir-inventory.js');
 const { reloadConfig } = await import('./config.js');
 const { _resetWorkspaceAccess } = await import('./workspace-access.js');
 type WorkspaceFoldSeam = { workspaceNamesFold: (anchor: unknown, relDir: string) => boolean };
@@ -471,6 +473,63 @@ describe('a link inside the backup (the read side)', () => {
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('backed up');
   });
 
+  it('a manifest.json that is a link: a list with a vault key leaves it out, keeps no answer for it, and lists it again once it is a file', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = new BackupManager(data, { backupDir, retentionDays: 30, encrypt: false }, 'vault-key-guards');
+    const created = await m.createBackup();
+    const id = created.path.split('/').pop() as string;
+    expect(m.listBackups().map(b => b.backup_id)).toContain(id);
+    const manifest = join(created.path, 'manifest.json');
+    const elsewhere = join(outside, 'manifest.json');
+    renameSync(manifest, elsewhere);
+    symlinkSync(elsewhere, manifest);
+
+    const listed = m.listBackups();
+    expect(listed.map(b => b.backup_id)).not.toContain(id);
+    // The kept answers are written after a list that changed them: the linked one has none.
+    const kept = JSON.parse(readFileSync(join(backupDir, BACKUP_LIST_PROOF_FILE), 'utf8')) as { entries: Record<string, unknown> };
+    expect(Object.keys(kept.entries)).not.toContain(id);
+    rmSync(manifest);
+    renameSync(elsewhere, manifest);
+    expect(m.listBackups().map(b => b.backup_id)).toContain(id);
+  });
+
+  it('a manifest.json larger than the bound: refused by restore and verify by its size, noted by the list, not read', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    const id = created.path.split('/').pop() as string;
+    writeFileSync(join(data, 'memory', 'x.md'), 'live');
+    // Sparse: the size is past the bound without the bytes on disk.
+    truncateSync(join(created.path, 'manifest.json'), MANIFEST_MAX_BYTES + 1);
+    const tooLarge = `manifest.json is larger than ${String(MANIFEST_MAX_BYTES)} bytes`;
+
+    const result = await m.restoreBackup(created.path, { allowUnverified: true });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe(`Refusing to restore: ${tooLarge}. Nothing was replaced.`);
+    expect(m.verifyBackup(created.path)).toEqual({ valid: false, errors: [tooLarge], files_checked: 0 });
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      expect(m.listBackups().map(b => b.backup_id)).not.toContain(id);
+      expect(stderr).toHaveBeenCalledWith(`[lynox:backup] ${JSON.stringify(id)}: ${tooLarge} — left out of the list\n`);
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
+  });
+
+  it('control: a manifest.json at the bound is read', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    const at = join(created.path, 'manifest.json');
+    const text = readFileSync(at, 'utf8');
+    // JSON may end in whitespace: padded to exactly the bound, it parses as the same manifest.
+    writeFileSync(at, text + ' '.repeat(MANIFEST_MAX_BYTES - Buffer.byteLength(text)));
+    expect(statSync(at).size).toBe(MANIFEST_MAX_BYTES);
+    expect(m.verifyBackup(created.path)).toMatchObject({ valid: true, errors: [] });
+  });
+
   it('control: the backups folder itself may be a link', async () => {
     writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
     const m = manager();
@@ -481,5 +540,85 @@ describe('a link inside the backup (the read side)', () => {
     const result = await m.restoreBackup(via, { allowUnverified: true });
     expect(result.success, String(result.error)).toBe(true);
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('backed up');
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('a FIFO where a backup file is read', () => {
+  /**
+   * A read that waited on a FIFO would block the whole process, past any test timeout. So each
+   * test starts its own way out: a process that, after `UNBLOCK_MS`, opens the FIFO for writing,
+   * which ends a blocked open with an empty read. The test then tells by the time it took whether
+   * the read waited. The helper process is bounded itself and killed afterwards.
+   */
+  const UNBLOCK_MS = 2000;
+  /** Every helper started, ended as a whole group after each test, also one that failed. */
+  const helpers: number[] = [];
+  afterEach(() => {
+    for (const pid of helpers.splice(0)) {
+      try { process.kill(-pid, 'SIGKILL'); } catch { /* the group has ended already */ }
+    }
+  });
+  const fifoAt = (path: string): (() => void) => {
+    execFileSync('mkfifo', [path]);
+    // Its own process group, so the kill takes `timeout` and the shell under it alike.
+    const helper = spawn('timeout', ['5', 'sh', '-c', `sleep ${String(UNBLOCK_MS / 1000)}; : > "$0"`, path], { stdio: 'ignore', detached: true });
+    helper.unref();
+    if (helper.pid !== undefined) helpers.push(helper.pid);
+    return () => {
+      if (helper.pid !== undefined) try { process.kill(-helper.pid, 'SIGKILL'); } catch { /* ended already */ }
+    };
+  };
+
+  it('as manifest.json: restore, verify, the list and prune answer at once, without waiting on it', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    const id = created.path.split('/').pop() as string;
+    writeFileSync(join(data, 'memory', 'x.md'), 'live');
+    const manifest = join(created.path, 'manifest.json');
+    rmSync(manifest);
+    const stop = fifoAt(manifest);
+    try {
+      const began = Date.now();
+      const result = await m.restoreBackup(created.path, { allowUnverified: true });
+      const verified = m.verifyBackup(created.path);
+      const listed = m.listBackups();
+      const pruned = m.pruneBackups(30);
+      expect(Date.now() - began).toBeLessThan(UNBLOCK_MS / 2);
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Invalid manifest.json');
+      expect(verified).toEqual({ valid: false, errors: ['Invalid manifest.json'], files_checked: 0 });
+      expect(listed.map(b => b.backup_id)).not.toContain(id);
+      expect(pruned).toBe(0);
+    } finally {
+      stop();
+    }
+    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
+  });
+
+  it('swapped in for an entry after the check, right before the read: refused at once as changed', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    writeFileSync(join(data, 'memory', 'x.md'), 'live');
+    const entry = join(created.path, 'memory', 'x.md');
+    let stop: (() => void) | null = null;
+    readHook.path = entry;
+    readHook.skip = 1; // the verify pass
+    readHook.run = () => {
+      rmSync(entry);
+      stop = fifoAt(entry);
+    };
+    try {
+      const began = Date.now();
+      const result = await m.restoreBackup(created.path, { allowUnverified: true });
+      expect(readHook.run).toBeNull(); // the hook ran
+      expect(Date.now() - began).toBeLessThan(UNBLOCK_MS / 2);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Backup file changed after it was verified — refusing to restore: memory/x.md');
+    } finally {
+      (stop as (() => void) | null)?.();
+    }
+    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
   });
 });

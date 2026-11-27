@@ -96,25 +96,67 @@ export function backupSourceProblem(backupPath: string, entry: Pick<BackupFileEn
 }
 
 /**
+ * The largest `manifest.json` read. No backup limits how many files it holds, so the bound is
+ * generous: the largest manifest measured (937 entries, 195'189 bytes, about 210 bytes an entry)
+ * fits more than 300 times, which is about 320'000 entries. A larger one is refused by name, not
+ * read: the restore and the verify say so, and the list notes it on stderr.
+ */
+export const MANIFEST_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Open a backup file to read it once, as the list's proof file is opened: a link fails the open
+ * (`O_NOFOLLOW`), a FIFO is not waited on (`O_NONBLOCK`), and only a plain file is read. Returns
+ * the descriptor and the size it had at the open; the caller closes it.
+ */
+function openPlainFile(path: string): { fd: number; size: number } {
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw Object.assign(new Error(`${path} is not a plain file`), { code: 'ENOTPLAIN' });
+    return { fd, size: st.size };
+  } catch (err) {
+    closeSync(fd);
+    throw err;
+  }
+}
+
+/** Up to `limit` bytes from `fd`, from its start; fewer when the file ends first. */
+function readUpTo(fd: number, limit: number): Buffer {
+  const buf = Buffer.alloc(limit);
+  let length = 0;
+  for (let n = 1; n > 0 && length < limit; length += n) n = readSync(fd, buf, length, limit - length, length);
+  return buf.subarray(0, length);
+}
+
+/**
  * A backup's `manifest.json`, read without following a link: it is read before any entry, and by
  * the list, whose answer carries its fields — a link would lead that read to a file of this machine.
  */
-type ManifestRead = { ok: true; raw: Buffer } | { ok: false; why: 'missing' | 'link' | 'unreadable' };
+type ManifestRead = { ok: true; raw: Buffer } | { ok: false; why: 'missing' | 'link' | 'too-large' | 'unreadable' };
 function readManifestFile(manifestPath: string): ManifestRead {
-  let fd: number;
+  let opened: { fd: number; size: number };
   try {
-    fd = openSync(manifestPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    opened = openPlainFile(manifestPath);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return { ok: false, why: code === 'ENOENT' ? 'missing' : code === 'ELOOP' ? 'link' : 'unreadable' };
   }
   try {
-    return { ok: true, raw: readFileSync(fd) };
+    if (opened.size > MANIFEST_MAX_BYTES) return { ok: false, why: 'too-large' };
+    // The size at the open bounds the read: bytes a writer appends meanwhile are not taken.
+    return { ok: true, raw: readUpTo(opened.fd, opened.size) };
   } catch {
     return { ok: false, why: 'unreadable' };
   } finally {
-    closeSync(fd);
+    closeSync(opened.fd);
   }
+}
+
+/** What the restore and the verify say about a `manifest.json` they could not take. */
+function manifestRefusal(why: 'missing' | 'link' | 'too-large' | 'unreadable'): string {
+  if (why === 'link') return 'manifest.json is a link inside the backup';
+  if (why === 'too-large') return `manifest.json is larger than ${String(MANIFEST_MAX_BYTES)} bytes`;
+  return 'Invalid manifest.json';
 }
 
 /** The first entry `backupSourceProblem` refuses, as its reason, or null. */
@@ -135,11 +177,14 @@ function backupSourceRefusal(backupPath: string, files: readonly BackupFileEntry
 function readEntryBytes(srcFile: string, entry: BackupFileEntry, encrypted: boolean): Buffer {
   let raw: Buffer;
   try {
-    // Not following a link set after `backupSourceProblem` ran: a link here fails the open (ELOOP).
-    // A folder fails the read; any other kind is read once and must match the entry below.
-    const fd = openSync(srcFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    // Not following a link set after `backupSourceProblem` ran: a link here fails the open (ELOOP),
+    // a FIFO is not waited on, and anything but a plain file is refused. The size comes from the
+    // file, not from the manifest: one of another size is changed without a read, and the read
+    // stops at that size; the checksum below is over exactly the bytes read.
+    const { fd, size } = openPlainFile(srcFile);
     try {
-      raw = readFileSync(fd);
+      if (size !== entry.size_bytes) throw new Error('size changed');
+      raw = readUpTo(fd, size);
     } finally {
       closeSync(fd);
     }
@@ -974,6 +1019,9 @@ export class BackupManager {
     if (!read.ok && read.why === 'link') {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Refusing to restore: manifest.json is a link inside the backup. Nothing was replaced.' };
     }
+    if (!read.ok && read.why === 'too-large') {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Refusing to restore: ${manifestRefusal('too-large')}. Nothing was replaced.` };
+    }
 
     let manifest: BackupManifest;
     try {
@@ -1332,7 +1380,11 @@ export class BackupManager {
       if (!existsSync(manifestPath)) continue;
       try {
         const read = readManifestFile(manifestPath);
-        if (!read.ok) continue;
+        if (!read.ok) {
+          // Left out like any unreadable manifest, but not silently: its size is the reason.
+          if (read.why === 'too-large') process.stderr.write(`[lynox:backup] ${JSON.stringify(entry.name)}: ${manifestRefusal('too-large')} — left out of the list\n`);
+          continue;
+        }
         const raw = read.raw;
         const manifest = JSON.parse(raw.toString('utf-8')) as BackupManifest;
         seen.add(entry.name);
@@ -1419,7 +1471,7 @@ export class BackupManager {
       return { valid: false, errors: ['Missing manifest.json'], files_checked: 0 };
     }
     const read = readManifestFile(manifestPath);
-    if (!read.ok) return { valid: false, errors: [read.why === 'link' ? 'manifest.json is a link inside the backup' : 'Invalid manifest.json'], files_checked: 0 };
+    if (!read.ok) return { valid: false, errors: [manifestRefusal(read.why)], files_checked: 0 };
     try {
       const manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
       const unrestorable = unrestorableEntry(manifest.files);
