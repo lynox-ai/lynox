@@ -6721,12 +6721,24 @@ export class LynoxHTTPApi {
 
     // ── Changeset review ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/sessions/:id/changeset', async (_req, res, params) => {
+      const principal = this._principalOf(_req);
       const session = this.sessionStore.get(params['id']!);
-      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      if (!session) {
+        // Someone who does not own the conversation gets the answer a live session with nothing
+        // for them gives, so it does not tell them whether a session is live there. The owner
+        // and the person who started it keep the 404, which the page reads as "no review" too;
+        // a conversation without a row is no one's, so its starter gets the empty answer there.
+        if (!isOwnerPrincipal(principal) && !ownedBy(this._threadRow(params['id']!), principal)) {
+          jsonResponse(res, 200, { hasChanges: false, files: [] });
+          return;
+        }
+        errorResponse(res, 404, 'Session not found');
+        return;
+      }
       const csm = session.getChangesetManager();
       // The card goes only to someone who may answer it: a reader of the chat who cannot would
       // see a review that holds every message they send and refuses every answer they give.
-      if (!csm || !mayAnswerReview(csm, this._principalOf(_req)) || !csm.hasChanges()) {
+      if (!csm || !mayAnswerReview(csm, principal) || !csm.hasChanges()) {
         jsonResponse(res, 200, { hasChanges: false, files: [] });
         return;
       }

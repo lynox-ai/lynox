@@ -34,7 +34,7 @@ import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
 import { UndecryptableTextError } from './engine-db.js';
 import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution, makeSubjectExternalRefs } from './subject-store.js';
-import type { SubjectRow, SubjectExternalRefs } from './subject-store.js';
+import type { SubjectListRow, SubjectRow, SubjectExternalRefs } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
@@ -1495,6 +1495,19 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   // === Entity Operations ===
 
+  /**
+   * The next page of entities after `after`, by key, for a walk over every entity (the data export).
+   * Only the subject graph reads this way; with it off, or when the read fails (counted as a read
+   * fallback), the answer is `null` and the caller pages with {@link listEntities} instead.
+   */
+  async listEntitiesAfter(after: string | null, limit: number): Promise<EntityRecord[] | null> {
+    if (this.subjectGraphEnabled && this.subjectStore) {
+      try { return listSubjectEntitiesAfterOn(this.subjectStore, after, limit); }
+      catch (err: unknown) { this._logReadFallback('listEntitiesAfter', err); }
+    }
+    return null;
+  }
+
   async listEntities(opts?: { type?: string; limit?: number; offset?: number }): Promise<EntityRecord[]> {
     if (this.subjectGraphEnabled && this.subjectStore) {
       try { return this._listSubjectEntities(opts); }
@@ -2336,8 +2349,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 /**
  * The subject-graph read of the entity list: maps Subjects back to the stable
  * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
- * Filter order: kind (`type`) → name/alias substring (`q`) → mention-count
- * backfill → offset/limit slice. Rows come `updated_at DESC` (via `listSubjects`);
+ * Without `q` the store cuts the page (`listSubjectPage`), so no page builds every subject in
+ * memory; SQLite still orders all rows of the kinds for each page, so a walk over every entity
+ * uses {@link listSubjectEntitiesAfterOn} instead. With `q` the match runs here, on all rows of
+ * the kind, since the name and alias match is case-insensitive beyond ASCII, which the query
+ * cannot do.
+ * Filter order: kind (`type`) → name/alias substring (`q`) → offset/limit slice → mention-count
+ * backfill. Rows come `updated_at DESC`, ties by `id`;
  * the legacy path orders by `mention_count DESC`, so browse ORDER still differs from
  * legacy, but `mentionCount` is now the real memory_subjects link count (batched via
  * {@link SubjectStore.getMentionCounts}), not a hardcoded 0.
@@ -2350,20 +2368,28 @@ export function listSubjectEntitiesOn(
   // to nothing (concept/location/collection) yields no rows.
   const kindFilter = opts?.type ? entityTypeToSubjectKind(opts.type) : null;
   if (opts?.type && !kindFilter) return [];
-  const rows = store.listSubjects(kindFilter ? { kind: kindFilter } : undefined);
-  let mapped = rows
-    .map(r => subjectRowToEntityRecord(r))
-    .filter((e): e is EntityRecord => e !== null);
-  const q = opts?.q?.trim().toLowerCase();
-  if (q) {
-    mapped = mapped.filter(e =>
-      e.canonicalName.toLowerCase().includes(q) ||
-      e.aliases.some(a => a.toLowerCase().includes(q)),
-    );
-  }
   const offset = Math.max(opts?.offset ?? 0, 0);
-  const limit = opts?.limit ?? mapped.length;
-  const page = mapped.slice(offset, offset + limit);
+  const q = opts?.q?.trim().toLowerCase();
+  let page: EntityRecord[];
+  if (!q && opts?.limit !== undefined) {
+    const kinds = kindFilter ? [kindFilter] : ENTITY_MAPPABLE_SUBJECT_KINDS;
+    page = store.listSubjectPage({ kinds, limit: opts.limit, offset })
+      .map(r => subjectRowToEntityRecord(r))
+      .filter((e): e is EntityRecord => e !== null);
+  } else {
+    const rows = store.listSubjects(kindFilter ? { kind: kindFilter } : undefined);
+    let mapped = rows
+      .map(r => subjectRowToEntityRecord(r))
+      .filter((e): e is EntityRecord => e !== null);
+    if (q) {
+      mapped = mapped.filter(e =>
+        e.canonicalName.toLowerCase().includes(q) ||
+        e.aliases.some(a => a.toLowerCase().includes(q)),
+      );
+    }
+    const limit = opts?.limit ?? mapped.length;
+    page = mapped.slice(offset, offset + limit);
+  }
   // Populate the real mention count (memory_subjects links) — the subject path
   // otherwise reports 0 for every entity (the "0× Erwähnungen" bug). Counted for
   // the returned page ONLY: bounded against the SQLite variable cap on a large
@@ -2373,8 +2399,22 @@ export function listSubjectEntitiesOn(
   return page;
 }
 
+/**
+ * The subject-graph entities after the entity `after` (by id; `null` starts at the first), `limit`
+ * at most, with their mention counts: the walk the data export takes over every entity. Each call
+ * reads one page by key, so the walk is linear in the number of subjects.
+ */
+export function listSubjectEntitiesAfterOn(store: SubjectStore, after: string | null, limit: number): EntityRecord[] {
+  const page = store.listSubjectsAfter({ kinds: ENTITY_MAPPABLE_SUBJECT_KINDS, after, limit })
+    .map(r => subjectRowToEntityRecord(r))
+    .filter((e): e is EntityRecord => e !== null);
+  const counts = store.getMentionCounts(page.map(e => e.id));
+  for (const e of page) e.mentionCount = counts.get(e.id) ?? 0;
+  return page;
+}
+
 /** Map a Subject row to the stable `EntityRecord` DTO, or null when the kind has no KG equivalent. */
-export function subjectRowToEntityRecord(row: SubjectRow, mentionCount = 0): EntityRecord | null {
+export function subjectRowToEntityRecord(row: SubjectListRow, mentionCount = 0): EntityRecord | null {
   const entityType = subjectKindToEntityType(row.kind);
   if (!entityType) return null;
   let aliases: string[];
