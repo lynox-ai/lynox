@@ -19,7 +19,7 @@ import type Database from 'better-sqlite3';
 import type { NotificationMessage } from './notification-router.js';
 import type { NoticeLanguage } from './notice-language.js';
 import type { RequestPrincipal } from './request-principal.js';
-import { MANDATE_TAG_PREFIX, planMandate, planMembers } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, planAuthorshipOfWorkflow, planMandate, planMembers } from './request-principal.js';
 import { processErrorText } from './error-egress.js';
 
 /**
@@ -293,14 +293,71 @@ export function writePause(db: Database.Database, id: string, entries: readonly 
 export const PAUSED_MODEL_TEXT = "paused until the owner takes it over (the helper's access ended or was not renewed in time)";
 
 /**
- * What a completed plan that keeps its pause adds about its workflow. A new plan on the same
- * workflow pauses again while the ended mandate is that workflow's member (see `PAUSED_MODEL_TEXT`
- * above), so the way names the workflow's takeover first. It is the owner's (an owner-only route,
- * no tool reaches it), so the sentence says who does it, true for every reader. One sentence for
- * every plan: the reader checks the condition at the workflow's card, which names the ended access
- * (U-275).
+ * What a completed plan that keeps its pause adds about its workflow, when the case is not known
+ * (its workflow could not be read): the condition, for the reader to check at the workflow's card.
+ * A new plan on the same workflow pauses again while the ended mandate is that workflow's member
+ * (see `PAUSED_MODEL_TEXT` above), so the way names the workflow's takeover first. It is the
+ * owner's (an owner-only route, no tool reaches it), so the sentence says who does it (U-275).
  */
 export const PAUSED_DONE_WORKFLOW_FIRST = 'If it runs a workflow that the person whose access ended created or last changed, the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+
+/** The same when the case is known: its workflow is one the person whose access ended created or last changed (U-275 N6). */
+export const PAUSED_DONE_ITS_WORKFLOW_FIRST = 'Its workflow was created or last changed by the person whose access ended: the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+
+/**
+ * Whether a completed plan that keeps its pause runs a workflow that one of the members whose end
+ * paused it still shapes, so that a new plan on it would pause again until the owner takes that
+ * workflow over (U-275 N6):
+ * - `workflow`: its workflow's mark, the one a run reads (`planMandate`, a mark the owner took over
+ *   is skipped), is one of the mandates in `paused_for`, or a mark without a grant id, which
+ *   counts as ended. Named by the workflow's id and name, for the owner's and the helper's view.
+ * - `none`: no such mark (not a workflow plan, its workflow gone, taken over, or shaped by someone
+ *   whose access did not end with this pause).
+ * - `unknown`: the workflow or its marks could not be read; the reader is given the condition.
+ */
+export type PausedDoneWorkflow =
+  | { readonly kind: 'workflow'; readonly workflowId: string; readonly name: string | null }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'unknown' };
+
+/** The two reads `pausedDoneWorkflow` needs, as `RunHistory` answers them. */
+export interface PausedDoneWorkflowReader {
+  getWorkflowExact(id: string): { readonly name?: string | undefined } | undefined;
+  getWorkflowAuthorship(id: string): Parameters<typeof planAuthorshipOfWorkflow>[0] | undefined;
+}
+
+export function pausedDoneWorkflow(
+  t: { readonly effect?: string | null | undefined; readonly pipeline_id?: string | null | undefined; readonly paused_for?: string | null | undefined },
+  reader: PausedDoneWorkflowReader | null | undefined,
+): PausedDoneWorkflow {
+  if (t.effect !== 'run_workflow' || typeof t.pipeline_id !== 'string' || t.pipeline_id === '') return { kind: 'none' };
+  if (!reader) return { kind: 'unknown' };
+  const id = t.pipeline_id;
+  // The marks decide; the definition only names the workflow. A row whose marks cannot be read is
+  // not known, a row that is gone has nothing to take over.
+  let authorship: ReturnType<PausedDoneWorkflowReader['getWorkflowAuthorship']>;
+  let workflow: ReturnType<PausedDoneWorkflowReader['getWorkflowExact']>;
+  try {
+    authorship = reader.getWorkflowAuthorship(id);
+    workflow = reader.getWorkflowExact(id);
+  } catch {
+    return { kind: 'unknown' };
+  }
+  if (authorship === undefined) return workflow === undefined ? { kind: 'none' } : { kind: 'unknown' };
+  const member = planMandate(planAuthorshipOfWorkflow(authorship))?.principal;
+  if (member === undefined) return { kind: 'none' };
+  const ended = member.mandateId === undefined
+    || pausedForOf(t.paused_for).entries.some((e) => e.mandateId === member.mandateId);
+  if (!ended) return { kind: 'none' };
+  // A definition that cannot be read, or has no name, still needs its takeover: it is named "its workflow".
+  const name = typeof workflow?.name === 'string' && workflow.name !== '' ? workflow.name : null;
+  return { kind: 'workflow', workflowId: id, name };
+}
+
+/** What this case adds to a sentence for the model or an API reader, never with the workflow's name. */
+export function pausedDoneWorkflowText(c: PausedDoneWorkflow): string {
+  return c.kind === 'workflow' ? ` ${PAUSED_DONE_ITS_WORKFLOW_FIRST}` : c.kind === 'unknown' ? ` ${PAUSED_DONE_WORKFLOW_FIRST}` : '';
+}
 
 /**
  * The same for a completed plan that keeps its pause. Nothing takes it over (`planOf` answers
@@ -308,14 +365,21 @@ export const PAUSED_DONE_WORKFLOW_FIRST = 'If it runs a workflow that the person
  * plan; a new plan is the way to run it again, which the model offers rather than sets up unasked,
  * after the workflow's takeover where it needs one (U-275).
  */
-export const PAUSED_DONE_MODEL_TEXT = `completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan. ${PAUSED_DONE_WORKFLOW_FIRST}`;
+export function pausedDoneModelText(c: PausedDoneWorkflow): string {
+  return `completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan.${pausedDoneWorkflowText(c)}`;
+}
 
 /** `task_update`'s refusal at a completed plan that keeps its pause (U-275). */
-export const PAUSED_DONE_UPDATE_REFUSAL = `Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan. ${PAUSED_DONE_WORKFLOW_FIRST}`;
+export function pausedDoneUpdateRefusal(c: PausedDoneWorkflow): string {
+  return `Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan.${pausedDoneWorkflowText(c)}`;
+}
 
 /** What the model reads for this paused plan: its own sentence once it is completed. */
-export function pausedModelText(t: { readonly status?: string | undefined }): string {
-  return t.status === 'completed' ? PAUSED_DONE_MODEL_TEXT : PAUSED_MODEL_TEXT;
+export function pausedModelText(
+  t: { readonly status?: string | undefined; readonly effect?: string | null | undefined; readonly pipeline_id?: string | null | undefined; readonly paused_for?: string | null | undefined },
+  reader?: PausedDoneWorkflowReader | null,
+): string {
+  return t.status === 'completed' ? pausedDoneModelText(pausedDoneWorkflow(t, reader)) : PAUSED_MODEL_TEXT;
 }
 
 /** Whether a plan is paused now: the switch is on and the row says so. */

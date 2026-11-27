@@ -9,7 +9,11 @@ import { taskUpdateTool, taskListTool, triggerDetailLine } from './task.js';
 import type { IAgent } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
-import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PAUSED_DONE_MODEL_TEXT, PAUSED_DONE_UPDATE_REFUSAL, PAUSED_MODEL_TEXT, setPlanPauseForTests } from '../../core/plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PAUSED_MODEL_TEXT, pausedDoneModelText, pausedDoneUpdateRefusal, setPlanPauseForTests } from '../../core/plan-pause.js';
+
+// A completed agent plan runs no workflow: its sentence has no workflow takeover (U-275 N6).
+const PAUSED_DONE_MODEL_TEXT = pausedDoneModelText({ kind: 'none' });
+const PAUSED_DONE_UPDATE_REFUSAL = pausedDoneUpdateRefusal({ kind: 'none' });
 
 /**
  * What the model reads of a paused plan (`plan-pause.ts`), and what its tools may do to one.
@@ -90,10 +94,25 @@ describe('a paused plan in the task tools', () => {
     expect(await taskUpdateTool.handler({ task_id: 'a', status: 'completed' }, agent())).toContain('Task completed');
   });
 
-  it('the completed plan\'s model text, exactly, offers a new plan after the workflow\'s takeover where it needs one, and no takeover of the plan (U-275)', () => {
-    expect(PAUSED_DONE_MODEL_TEXT).toBe("completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan. If it runs a workflow that the person whose access ended created or last changed, the owner first takes over that workflow, under \"Workflows\" with \"Take over workflow\".");
-    expect(PAUSED_DONE_UPDATE_REFUSAL).toBe("Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan. If it runs a workflow that the person whose access ended created or last changed, the owner first takes over that workflow, under \"Workflows\" with \"Take over workflow\".");
-    for (const text of [PAUSED_DONE_MODEL_TEXT, PAUSED_DONE_UPDATE_REFUSAL]) expect(text).not.toMatch(/takes? it over|until the owner/);
+  it('the completed plan\'s model text, exactly, per case: the workflow\'s takeover first where it needs one, the condition where that is not known, and no takeover of the plan (U-275 N6)', () => {
+    const base = "completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan.";
+    const refusal = "Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan.";
+    const its = ' Its workflow was created or last changed by the person whose access ended: the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+    const condition = ' If it runs a workflow that the person whose access ended created or last changed, the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+    const workflow = { kind: 'workflow', workflowId: 'wf-1', name: 'Monatsbericht' } as const;
+    expect(pausedDoneModelText(workflow)).toBe(base + its);
+    expect(pausedDoneUpdateRefusal(workflow)).toBe(refusal + its);
+    expect(pausedDoneModelText({ kind: 'none' })).toBe(base);
+    expect(pausedDoneUpdateRefusal({ kind: 'none' })).toBe(refusal);
+    expect(pausedDoneModelText({ kind: 'unknown' })).toBe(base + condition);
+    expect(pausedDoneUpdateRefusal({ kind: 'unknown' })).toBe(refusal + condition);
+    // The model never reads the workflow's name, and no text sends anyone to a takeover of the plan.
+    for (const c of [workflow, { kind: 'none' } as const, { kind: 'unknown' } as const]) {
+      for (const text of [pausedDoneModelText(c), pausedDoneUpdateRefusal(c)]) {
+        expect(text).not.toContain('Monatsbericht');
+        expect(text).not.toMatch(/takes? it over|until the owner/);
+      }
+    }
   });
 
   it('a completed plan that keeps its pause reads its own sentence in the detail line, task_list and task_update; an open one the takeover', async () => {
