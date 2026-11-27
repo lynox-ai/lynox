@@ -160,8 +160,8 @@
 			</div>
 		{/if}
 		{#if s.schedule_cron}
-			<!-- A schedule of its own is decided on as it is: the label, then the expression set apart. -->
-			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {#if isCustomSchedule(s.schedule_cron)}{t('tasks.custom_schedule')}: <bdi class="font-mono" data-stamp-schedule-expr>{markHidden(s.schedule_cron)}</bdi>{:else}{markHidden(cronText(s.schedule_cron))}{/if}</p>
+			<!-- A schedule of its own is decided on as it is: the expression, set apart. -->
+			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {#if isCustomSchedule(s.schedule_cron)}<bdi class="font-mono" data-stamp-schedule-expr>{markHidden(s.schedule_cron)}</bdi>{:else}{markHidden(cronText(s.schedule_cron))}{/if}</p>
 		{/if}
 		{#if s.model_tier}
 			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {tierName(s.model_tier) ?? markHidden(s.model_tier)}</p>

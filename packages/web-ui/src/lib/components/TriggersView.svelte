@@ -9,7 +9,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice, escalationChatLink } from '../utils/trigger-escalation.js';
 	import WatchAddress from './WatchAddress.svelte';
-	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
+	import { awaitsConfirmation, displaySafe, instructionOf, markHidden, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, pausedTitleLine, pausedWhoText, planTitle, refusalText, takeoverLines, writtenByMember, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { blockedReasonParts, holdsNextRun, hostLabels, type BlockedReason } from '../utils/blocked-reason.js';
@@ -527,6 +527,7 @@
 		const at = (time: string): string => clockTime(time, getLocale());
 		switch (s.kind) {
 			case 'every_minute': return t('tasks.every_minute');
+			case 'interval': return s.text;
 			case 'every_minutes': return tf('tasks.every_n_minutes', { n: String(s.n) });
 			case 'hourly': return t('tasks.every_hour');
 			case 'hourly_at': return tf('tasks.every_hour_at', { t1: at(s.times[0]), t2: at(s.times[1]) });
@@ -538,7 +539,7 @@
 			case 'monthly_last': return tf('tasks.monthly_last_day', { time: at(s.time) });
 			case 'monthly_utc': return tf('tasks.monthly_on_day_utc', { day: monthDay(s.day, getLocale()), time: at(s.time) });
 			// The expression itself is no label: the card says it is a schedule of its own and shows
-			// the expression on hover; "next run" beside it says when.
+			// the expression on hover. The confirm card, where the owner decides on it, shows it in full.
 			case 'raw': return t('tasks.custom_schedule');
 		}
 	}
@@ -565,6 +566,7 @@
 	function fmtDate(iso: string): string {
 		// The time is written by `clockTime`, as on the schedule line beside it, so a card has one form.
 		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return d.toLocaleString();
 		const locale = getLocale();
 		const day = d.toLocaleDateString(locale === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric' });
 		return `${day}, ${clockTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`, locale)}`;
@@ -684,7 +686,7 @@
 							{/if}
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
-									<span class="flex items-center gap-1" data-trigger-schedule title={isCustomSchedule(trigger.schedule_cron) ? trigger.schedule_cron : undefined}>
+									<span class="flex items-center gap-1" data-trigger-schedule title={isCustomSchedule(trigger.schedule_cron) ? markHidden(trigger.schedule_cron) : undefined}>
 										<Icon name="clock" size="xs" />
 										{cronToHuman(trigger.schedule_cron)}
 									</span>

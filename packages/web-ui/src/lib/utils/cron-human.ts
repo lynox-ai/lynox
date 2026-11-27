@@ -23,6 +23,7 @@ export function monthDay(day: number, locale: 'de' | 'en'): string {
  */
 export type LocalSchedule =
 	| { kind: 'every_minute' }
+	| { kind: 'interval'; text: string }
 	| { kind: 'every_minutes'; n: number }
 	| { kind: 'hourly' }
 	| { kind: 'hourly_at'; times: [string, string] }
@@ -62,6 +63,9 @@ function firstTwo(minute: number, step: number, offset: number): [string, string
 	return [hhmm(local[0]!), hhmm(local[1]!)];
 }
 
+/** The engine's shorthand interval (`src/core/cron-parser.ts`): a number and s, m, h or d. */
+const SHORTHAND = /^\d+[smhd]$/i;
+
 /** Whether the line says the expression itself rather than words: the card shows a label instead. */
 export function isCustomSchedule(cron: string): boolean {
 	return localSchedule(cron, 0, [0]).kind === 'raw';
@@ -88,8 +92,9 @@ function browserOffsets(): { now: number; year: number[] } {
  * weekday is moved only when every one of them moves it the same way.
  */
 export function localSchedule(cron: string, offsetMinutes?: number, yearOffsets?: number[]): LocalSchedule {
-	if (cron === '0 * * * *') return { kind: 'hourly' };
 	if (cron === '* * * * *') return { kind: 'every_minute' };
+	// The engine's own shorthand (`5m`, `1h`, `1d`): an interval from the last run, readable as it is.
+	if (SHORTHAND.test(cron)) return { kind: 'interval', text: cron };
 	// Every n minutes, only where n divides the hour: otherwise the count starts again at each full
 	// hour, and the gap before it is shorter than n.
 	const minutes = /^\*\/(\d+)\s+\*\s+\*\s+\*\s+\*$/.exec(cron);
@@ -106,7 +111,9 @@ export function localSchedule(cron: string, offsetMinutes?: number, yearOffsets?
 		const n = hours[2] === '*' ? 1 : Number(hours[2]!.slice(2));
 		if (minute > 59 || n < 1 || n > 23 || 24 % n !== 0) return { kind: 'raw', cron };
 		const offset = offsetMinutes ?? -new Date().getTimezoneOffset();
-		if (n === 1) return minute === 0 ? { kind: 'hourly' } : { kind: 'hourly_at', times: firstTwo(minute, 1, offset) };
+		// Plainly "every hour" only where the runs fall on the full local hour; in a zone off the
+		// whole hour (India, +5:30) they do not, and the times say where they fall.
+		if (n === 1) return minute === 0 && offset % 60 === 0 ? { kind: 'hourly' } : { kind: 'hourly_at', times: firstTwo(minute, 1, offset) };
 		return { kind: 'every_hours', n, times: firstTwo(minute, n, offset) };
 	}
 	const m = /^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/.exec(cron);

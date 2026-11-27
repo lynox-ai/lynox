@@ -152,10 +152,10 @@ describe('a schedule a mandate set up', () => {
 		expect(q('[data-stamp-instruction]')).toBeNull();
 	});
 
-	it('shows a schedule of its own with its expression set apart, since the owner decides on it', async () => {
+	it('shows a schedule of its own as its expression, set apart, since the owner decides on it', async () => {
 		previewAnswers = [{ ...PREVIEW, subject: { ...SUBJECT, schedule_cron: '*/7 3-5 * * 1' } }];
 		await render();
-		expect(q('[data-stamp-schedule]')!.textContent!.replace(/\s+/g, ' ').trim()).toBe('Zeitplan: Eigener Zeitplan: */7 3-5 * * 1');
+		expect(q('[data-stamp-schedule]')!.textContent!.replace(/\s+/g, ' ').trim()).toBe('Zeitplan: */7 3-5 * * 1');
 		const expr = q('[data-stamp-schedule-expr]')!;
 		expect(expr.tagName).toBe('BDI');
 		expect(expr.textContent).toBe('*/7 3-5 * * 1');

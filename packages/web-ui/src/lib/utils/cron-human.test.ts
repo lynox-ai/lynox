@@ -131,3 +131,37 @@ describe('a time of day as the language writes it', () => {
 			.toEqual(['12:00 AM', '8:05 AM', '11:59 AM', '12:00 PM', '1:30 PM', '11:59 PM']);
 	});
 });
+
+describe('the edges of a worded schedule', () => {
+	it('reads a step or a minute with a leading zero as the engine does', () => {
+		expect(localSchedule('*/05 * * * *', 60)).toEqual({ kind: 'every_minutes', n: 5 });
+		expect(localSchedule('05 */02 * * *', 60)).toEqual({ kind: 'every_hours', n: 2, times: ['01:05', '03:05'] });
+	});
+
+	it('reads fields split by more than one space, as the engine splits them', () => {
+		expect(localSchedule('0  */2 * * *', 60)).toEqual({ kind: 'every_hours', n: 2, times: ['01:00', '03:00'] });
+	});
+
+	it('leaves to the expression what has more fields, or space before them, than it reads', () => {
+		for (const cron of [' * * * * *', '0 0 */2 * * *', '0-30/5 * * * *']) {
+			expect(localSchedule(cron, 60)).toEqual({ kind: 'raw', cron });
+		}
+	});
+
+	it('says the times of an hourly schedule in a zone off the whole hour, also on the full UTC hour', () => {
+		expect(localSchedule('0 * * * *', 330)).toEqual({ kind: 'hourly_at', times: ['00:30', '01:30'] });
+		expect(localSchedule('0 */1 * * *', 330)).toEqual({ kind: 'hourly_at', times: ['00:30', '01:30'] });
+		expect(localSchedule('30 * * * *', 330)).toEqual({ kind: 'hourly_at', times: ['00:00', '01:00'] });
+	});
+
+	it('moves the first times back in a zone behind UTC', () => {
+		expect(localSchedule('45 */6 * * *', -480)).toEqual({ kind: 'every_hours', n: 6, times: ['04:45', '10:45'] });
+	});
+
+	it('keeps the engine\'s shorthand readable as it is, not as a schedule of its own', () => {
+		for (const cron of ['5m', '1h', '1d', '30s']) {
+			expect(localSchedule(cron, 60)).toEqual({ kind: 'interval', text: cron });
+			expect(isCustomSchedule(cron)).toBe(false);
+		}
+	});
+});

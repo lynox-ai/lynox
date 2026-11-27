@@ -172,6 +172,8 @@ describe('a schedule said in words, or as a schedule of its own', () => {
 		{ ...BASE, id: 'f4', title: 'Stunde', schedule_cron: '20 * * * *' },
 		{ ...BASE, id: 'f5', title: 'Eigen', schedule_cron: '*/7 3-5 * * 1' },
 		{ ...BASE, id: 'f6', title: 'Täglich', schedule_cron: '0 7 * * *' },
+		{ ...BASE, id: 'f7', title: 'Schritt eins', schedule_cron: '*/1 * * * *' },
+		{ ...BASE, id: 'f8', title: 'Kurzform', schedule_cron: '5m' },
 	];
 
 	function titleOf(title: string): string | null {
@@ -189,6 +191,8 @@ describe('a schedule said in words, or as a schedule of its own', () => {
 		// The expression is not the label; it is there on hover, and only for a schedule of its own.
 		expect(titleOf('Eigen')).toBe('*/7 3-5 * * 1');
 		expect(titleOf('Täglich')).toBeNull();
+		expect(['Schritt eins', 'Kurzform'].map(scheduleOf)).toEqual(['Jede Minute', '5m']);
+		expect(titleOf('Kurzform')).toBeNull();
 	});
 
 	it('in English, on the 12-hour clock', async () => {
