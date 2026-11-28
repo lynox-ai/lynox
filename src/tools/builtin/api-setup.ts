@@ -24,7 +24,7 @@ import { currentCallSignal, currentCallTargetOrigin, joinCallSignal, noteOwnStop
 import { CROSS_HOST_REFUSAL, crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 import { carriesAddress, hostTargets, UnknownSendTargetError } from '../../core/send-target.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, ownerConnectionCarries, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE, OPAQUE_PROFILE_ID_SHAPE } from '../../core/api-store.js';
+import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, mayConnectAs, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE, OPAQUE_PROFILE_ID_SHAPE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -1975,8 +1975,9 @@ export function notConnectedNote(agent: Pick<IAgent, 'secretStore'>, profile: Ap
   return `\n\nConnection: not connected yet. When the user wants it connected, ${connectCallText(profile.id)} A link or a tool call written into your reply connects nothing.`;
 }
 
-/** What the owner's connect and token exchange answer on a profile a person with access set up. */
-function setUpByMemberRefusal(id: string): string {
+/** What connect and the token exchange answer where `mayConnectAs` says no. */
+function setUpByMemberRefusal(id: string, principal: RequestPrincipal): string {
+  if (principal.kind === 'mandate') return `Error: profile "${id}" was set up by another person with access, so a connection made in this session would not be used there. Nothing was sent.`;
   return `Error: profile "${id}" was set up by a person with access, so a connection the owner makes on it would not be used. If the user wants to take it over, save it as theirs first (action=update with this id), then ask for the link again.`;
 }
 
@@ -1994,7 +1995,7 @@ function setUpByMemberRefusal(id: string): string {
  */
 function consentOf(agent: IAgent, profile: ApiProfile): Pick<OAuthGrantRecord, 'connected_by' | 'connected_mandate_id'> | null {
   const p = agent.principal;
-  if (isMandateAuthored(profile) && (p.kind !== 'mandate' || profile.created_by !== principalTag(p))) return null;
+  if (!mayConnectAs(p, profile)) return null;
   if (p.kind !== 'mandate' || profile.created_by !== principalTag(p)) return { connected_by: 'owner' };
   return p.mandateId === undefined ? { connected_by: principalTag(p) } : { connected_by: principalTag(p), connected_mandate_id: p.mandateId };
 }
@@ -3067,7 +3068,7 @@ ${draftJson}
       }
       // The owner, on a profile a person with access set up: the connection would carry nothing
       // (`ownerConnectionCarries`) until the owner has saved it as their own.
-      if (agent.principal.kind !== 'mandate' && !ownerConnectionCarries(profile)) return setUpByMemberRefusal(id);
+      if (!mayConnectAs(agent.principal, profile)) return setUpByMemberRefusal(id, agent.principal);
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
       }
@@ -3408,10 +3409,11 @@ ${draftJson}
       // which, before anything is read, not as a slot this profile "may not write".
       const memberRefusal = refuseMemberConnection(profile, agent.principal, agent.toolContext?.mandateEnds ?? null, 'write');
       if (memberRefusal !== null) return `${memberRefusal} Nothing was sent.`;
-      // Outside a mandate's session, on a profile a person with access set up: the tokens would carry
-      // nothing (`ownerConnectionCarries`), asked as the connect start and the callback ask it, before
-      // anything is read or sent. After the refusal above, which names a member's own connection.
-      if (agent.principal.kind !== 'mandate' && !ownerConnectionCarries(profile)) return setUpByMemberRefusal(input.id);
+      // On a profile a person with access set up, anyone else's tokens would carry nothing and take
+      // the place of the author's in its slots (`mayConnectAs`), whatever its grant records: asked as
+      // the connect start and the callback ask it, before anything is read or sent. After the refusal
+      // above, which names a member's own connection.
+      if (!mayConnectAs(agent.principal, profile)) return setUpByMemberRefusal(input.id, agent.principal);
       // When this profile shares a member connection's grant through a built-in provider, it reads
       // that connection's refresh slot, and the exchange would store that login's new tokens under
       // THIS profile's names, which are not the connection's. Refused for every reader, the member
@@ -3954,8 +3956,11 @@ ${draftJson}
       const storesAccess = heldNow === undefined && !unclaimedNow;
       // A first consent nobody may record here (`consentOf`): nothing is written, not even the
       // refresh token the provider already spent, since no record could own it.
+      // Asked once, of the profile as it stands now, and the record below takes this same answer:
+      // a profile that changed hands while the exchange ran is stamped as it is now, never as it was.
       const atWrite = apiStore.get(input.id) ?? profile;
-      if (atWrite.oauth_grant?.connected_by === undefined && consentOf(agent, atWrite) === null) {
+      const consentAtWrite = consentOf(agent, atWrite);
+      if (atWrite.oauth_grant?.connected_by === undefined && consentAtWrite === null) {
         return `Error: profile "${input.id}" was set up by a person with access, so a connection made in this session would not be used there; nothing was stored. If the user wants to take it over, save it as theirs first (action=update with this id), then connect it again.`;
       }
       if (storesAccess) {
@@ -4012,7 +4017,7 @@ ${draftJson}
         const grantedNow = scopesOfAnswer(parsed.scope);
         if (grantedNow !== undefined) next.granted_scope = grantedNow;
         next.written = mergeWrites(current, writes);
-        if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile) ?? {});
+        if (next.connected_by === undefined) Object.assign(next, consentAtWrite ?? {});
         return next;
       }, storesAccess ? tokenExpiresAt : undefined, {
         // What this exchange ran on and wrote. The save mints when either the refresh token it

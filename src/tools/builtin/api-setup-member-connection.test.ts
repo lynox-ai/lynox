@@ -520,6 +520,65 @@ describe('fetch_token by the owner on a member\'s profile', () => {
     expect(store.get('crm-api')?.oauth_grant).toBeUndefined();
   });
 
+  // The record takes the answer the write itself was given: the author's exchange, while the owner
+  // takes the profile over, is stamped as the owner's, as the profile now stands.
+  it('stamps the record as the profile stands at the write when it changes hands during the exchange', async () => {
+    const { EngineDb } = await import('../../core/engine-db.js');
+    const { ConnectionStore } = await import('../../core/connection-store.js');
+    const { GrantLedger } = await import('../../core/grant-ledger.js');
+    const { AuditLog } = await import('../../core/audit-log.js');
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    try {
+      const conn = new ConnectionStore(db);
+      const store = new ApiStore();
+      store.loadFromConnections(conn);
+      store.setConnectionStore(conn);
+      store.setGrantLedger(new GrantLedger(db.getDb()));
+      store.setAuditLog(new AuditLog(db.getDb()));
+      // App credentials only, so the run reads no refresh token of the owner's.
+      const cc = (over: Partial<ApiProfile>): ApiProfile => { const p = crmProfile(over); return { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, grant_type: 'client_credentials' } } } as ApiProfile; };
+      expect(store.save(cc({ oauth_grant: undefined })).ok).toBe(true);
+      const sets: string[] = [];
+      const vault = vaultOf({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' }, sets);
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        expect(store.save(cc({ oauth_grant: undefined, created_by: undefined })).ok).toBe(true);
+        return new Response(JSON.stringify({ access_token: 'at-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+      const { releaseBinding } = await import('../../core/profile-secret-view.js');
+      const agent = agentWith(store, MANDATE, ['M-1'], vault) as unknown as { toolContext: Record<string, unknown> };
+      agent.toolContext['secretReleases'] = {
+        releaseOf: (id: string, _author: string, name: string) => {
+          const p = store.get(id);
+          const binding = p ? releaseBinding(p, name) : null;
+          return binding === null ? undefined : { binding, mandateId: 'M-1' };
+        },
+        requestOf: () => undefined, replaceRequests: () => 0, pendingReleases: () => [], activeReleases: () => [], forgetProfile: () => undefined,
+      };
+      const reply = await run(agent as never, { action: 'fetch_token', id: 'crm-api' });
+
+      expect(reply).toContain('Token exchange OK');
+      expect(store.get('crm-api')?.created_by).toBeUndefined();
+      expect(store.get('crm-api')?.oauth_grant?.connected_by).toBe('owner');
+    } finally {
+      db.close();
+    }
+  });
+
+  // A record from before these refusals, stamped as the owner's on a profile a person with access set
+  // up: no other person with access writes into that profile's slots either.
+  it('another person with access, on a member\'s profile with an older record stamped as the owner\'s: refused, slots unchanged', async () => {
+    const store = storeWith(crmProfile({ oauth_grant: { origin: 'callback', state: 'connected', connected_by: 'owner' } as OAuthGrantRecord }));
+    const sets: string[] = [];
+    const vault = vaultOf({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_API_REFRESH_TOKEN: 'rt-1', CRM_API_ACCESS_TOKEN: 'at-old' }, sets);
+    const post = vi.spyOn(globalThis, 'fetch');
+    const reply = await run(agentWith(store, OTHER, ['M-1', 'M-2'], vault), { action: 'fetch_token', id: 'crm-api' });
+
+    expect(reply).toBe('Error: profile "crm-api" was set up by another person with access, so a connection made in this session would not be used there. Nothing was sent.');
+    expect(post).not.toHaveBeenCalled();
+    expect(sets).toEqual([]);
+    expect(store.get('crm-api')?.oauth_grant?.connected_by).toBe('owner');
+  });
+
   it('control: the same exchange on a profile that stays the owner\'s is stored and stamped as the owner\'s', async () => {
     const { EngineDb } = await import('../../core/engine-db.js');
     const { ConnectionStore } = await import('../../core/connection-store.js');

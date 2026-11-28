@@ -26,7 +26,7 @@ import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { OAUTH_PRESETS, presetClientKeys, presetScopeRequest } from './oauth-presets.js';
 import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
-import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, isMandateTag, principalTag } from './request-principal.js';
 import { normalizeHostName, normalizeHostTarget } from './send-target.js';
 import { credentialBearing, credentialHosts, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
 import { processErrorText, reducedErrorText } from './error-egress.js';
@@ -670,15 +670,23 @@ export function isMandateAuthored(profile: ApiProfile): boolean {
 }
 
 /**
- * Whether a connection made outside a mandate's session (the owner's) would carry on this
- * profile. Not on one a person with access set up: its view hides a token whose `connected_by` is
- * not the profile's author from every reader, the owner included (`hiddenFromProfile`), so the
- * connection would show as connected and carry nothing. The owner takes such a profile over by
- * saving it as their own (`api_setup` create or update drops `created_by`); from then on it carries.
- * The one condition the connect start, the OAuth callback and the `connect` tool ask.
+ * Whether a connection this principal makes would carry on this profile. On one a person with
+ * access set up, only that person's: the profile's view hides a token whose `connected_by` is not
+ * the profile's author from every reader, the owner included (`hiddenFromProfile`), so anyone
+ * else's connection would show as connected and carry nothing, and could take the place of the
+ * author's tokens in the profile's slots. The owner takes such a profile over by saving it as
+ * their own (`api_setup` create or update drops `created_by`); from then on it carries.
+ * The one condition the connect start, the OAuth callback, the `connect` tool and the token
+ * exchange ask, whatever the profile's grant already records.
  */
+export function mayConnectAs(principal: RequestPrincipal, profile: ApiProfile): boolean {
+  if (!isMandateAuthored(profile)) return true;
+  return principal.kind === 'mandate' && profile.created_by === principalTag(principal);
+}
+
+/** `mayConnectAs` outside a mandate's session: whether the owner's connection would carry here. */
 export function ownerConnectionCarries(profile: ApiProfile): boolean {
-  return !isMandateAuthored(profile);
+  return mayConnectAs(OWNER_PRINCIPAL, profile);
 }
 
 /**

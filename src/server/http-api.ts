@@ -37,7 +37,7 @@ import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '..
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
 import type { StorePass } from '../core/store-pass.js';
 import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
-import { accessTokenKey, lapsedSlots, ownerConnectionCarries, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
+import { accessTokenKey, lapsedSlots, mayConnectAs, ownerConnectionCarries, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { planAsks, planOfTrigger, stampEntriesFor, workflowAsks, workflowAsksOnSchedule, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
@@ -261,7 +261,7 @@ const CONNECT_CONFIRM_PATH = /^\/api\/oauth\/connect\/[^/]+$/;
  * that names no profile the answer stays yes, so the start answers the same for every unknown id.
  */
 function mayStartConnect(principal: RequestPrincipal, profile: ApiProfile | undefined): boolean {
-  if (principal.kind !== 'mandate') return profile === undefined || ownerConnectionCarries(profile);
+  if (principal.kind !== 'mandate') return profile === undefined || mayConnectAs(principal, profile);
   return profile !== undefined && profile.created_by === principalTag(principal) && principal.mandateId !== undefined;
 }
 /** A mandate may, for this reason. */

@@ -4759,9 +4759,9 @@ describe('mandates and stored credentials', () => {
       const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec' });
       // A name released to the profile, so the view lets it through and only the own-slot rule
       // can refuse it.
-      const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CLIENT_SECRET' }, makeAgent(apiStore, v as never));
-      // The owner is refused on such a profile before the name is asked about at all.
-      expect(out).toContain('was set up by a person with access');
+      // In the author's own run: the owner is refused on such a profile before the name is asked about.
+      const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CLIENT_SECRET' }, makeAgent(apiStore, v as never, undefined, undefined, mandate));
+      expect(out).toContain('is not available for this profile');
       expect(calls).toEqual([]);
       expect(v.peek('CRM_CLIENT_SECRET')).toBe('sec');
     });
@@ -4914,7 +4914,7 @@ describe('fetch_token — whose consent a grant records', () => {
     store.register(crmProfile({ created_by: author }, 'client_credentials'));
     ok();
     const v = vault();
-    expect(await fetchToken(makeAgent(store, v, undefined, undefined, actor))).toContain('was set up by a person with access');
+    expect(await fetchToken(makeAgent(store, v, undefined, undefined, actor))).toMatch(/was set up by (a|another) person with access/);
     expect(consent(store).connected_by).toBeUndefined();
     expect(v.peek('CRM_API_ACCESS_TOKEN') ?? null).toBeNull();
   });
