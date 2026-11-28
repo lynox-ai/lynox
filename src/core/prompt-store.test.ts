@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -351,6 +351,25 @@ describe('PromptStore', () => {
         .prepare(`SELECT COUNT(*) AS c FROM pending_prompts WHERE session_id = 's1' AND status = 'pending'`)
         .get() as { c: number };
       expect(pending.c).toBe(1);
+    });
+  });
+
+  describe('a wait whose first read fails', () => {
+    afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+    it('is refused, and afterwards reads nothing more and listens to nothing', async () => {
+      vi.useFakeTimers();
+      const id = store.insertAskUser('sess-a', 'q');
+      const ac = new AbortController();
+      const unlisten = vi.spyOn(ac.signal, 'removeEventListener');
+      const read = vi.spyOn(store, 'getById').mockImplementationOnce(() => { throw new Error('database is locked'); });
+      await expect(store.waitForSettled(id, ac.signal), 'the wait is refused').rejects.toThrow('database is locked');
+      expect(read, 'positive control: the first read was made').toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(120_000); // past several expiry checks
+      expect(read, 'no read on the timer').toHaveBeenCalledTimes(1);
+      store.answerUser(id, 'a', OWNER_PRINCIPAL); // the answer's notice reaches no listener
+      expect(read, 'no read on the answer').toHaveBeenCalledTimes(1);
+      expect(unlisten, 'the abort listener is removed').toHaveBeenCalledWith('abort', expect.any(Function));
     });
   });
 

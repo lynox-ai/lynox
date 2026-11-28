@@ -17,7 +17,7 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, oneLineInBriefing, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, lapsedSlots, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, oneLineInBriefing, grantTokenNames, hasTokenSlotShape, isConnection, isMandateAuthored, isMandateConnection, lapsedSlots, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
@@ -1171,6 +1171,18 @@ export function connectionWaits(profile: ApiProfile, ends: Pick<MandateEnds, 'is
 }
 
 /**
+ * Whether the owner's save of `profile` is held back by a connection a mandate made there with its
+ * own login, while that mandate's access lasts: a save makes the profile the owner's, and over
+ * such a connection that would hand the owner its account. A record of one counts, revoked too.
+ * The one condition the save asks (`api_setup` create/update) and the profile list answers the
+ * owner with (`owner_may_take_over`), so the page offers taking a profile over only where the
+ * save goes through.
+ */
+export function ownerSaveHeldByMemberConnection(profile: ApiProfile, ends: Pick<MandateEnds, 'isLive'> | null): boolean {
+  return isMandateConnection(profile) && !connectionWaits(profile, ends);
+}
+
+/**
  * Whether `reader` is the person who made `profile`'s connection with their own login, and so the
  * one its tokens may reach. `read`: the same tag as the consent and the same grant, both known.
  * `write` (the first consent, or a later grant of the same address connecting its profile again):
@@ -1195,7 +1207,7 @@ export function memberConnectionReader(
 
 /** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` and `connected_by_reader` exist only there, never in the store. */
 export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
-  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined; connected_by_reader: boolean }) | undefined;
+  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined; connected_by_reader: boolean; connection: boolean; unused?: true | undefined }) | undefined;
 };
 
 /**
@@ -1213,6 +1225,15 @@ export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
  * cannot tell who reads it, and a tag alone does not say whether it is the reader's. The owner's
  * is the owner tag or none (a grant from before the tag was recorded); a mandate's, the same
  * test that shows it the account.
+ *
+ * A grant the profile's view hides from every reader says so (`unused`): one whose consent is not
+ * the author's on a profile a person with access set up, such as an owner's connection made there
+ * before the owner's connect was refused ({@link hiddenFromProfile}). This profile does not use its tokens, so
+ * it is not shown as a connection; once the owner has taken the profile over it carries again.
+ *
+ * And every grant says whether it is a connection at all (`connection`, {@link isConnection}): a
+ * save mints a record for every new oauth2 profile before anyone connected it, and the page must
+ * not read that as a connection. Only a connection can be `unused`.
  */
 export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ProfileForReader {
   const shown = withoutFingerprints(profile);
@@ -1228,9 +1249,11 @@ export function profileForReader(profile: ApiProfile, reader: RequestPrincipal):
     case 'cp-admin': yours = false; break;
     default: return unhandledPrincipal(reader);
   }
-  if (grant.account === undefined || reader.kind === 'owner' || yours) return { ...shown, oauth_grant: { ...grant, connected_by_reader: yours } };
+  const connection = isConnection(grant);
+  const unused = connection && isMandateAuthored(profile) && grant.connected_by !== profile.created_by ? { unused: true as const } : {};
+  if (grant.account === undefined || reader.kind === 'owner' || yours) return { ...shown, oauth_grant: { ...grant, connected_by_reader: yours, connection, ...unused } };
   const { account: _account, ...rest } = grant;
-  return { ...shown, oauth_grant: { ...rest, connected_by_reader: yours, account_withheld: true } };
+  return { ...shown, oauth_grant: { ...rest, connected_by_reader: yours, account_withheld: true, connection, ...unused } };
 }
 
 /**

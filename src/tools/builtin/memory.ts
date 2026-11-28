@@ -3,6 +3,7 @@ import { ALL_NAMESPACES } from '../../types/index.js';
 import { publishMemoryStore } from '../../core/observability.js';
 import { runOutsideCallSlot } from '../../core/call-connection.js';
 import { DATE_PREFIX_RE } from '../../core/memory-facade.js';
+import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTION } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
@@ -28,11 +29,75 @@ function actorOf(agent: IAgent): InstanceActor {
 }
 
 /** The act a derived write follows from: its site and row. Absent for the owner, who has none. */
-function trailOf(site: 'memory_store#create' | 'memory_update#fallback' | 'memory_promote#move', correlationId: string | undefined): { site: typeof site; correlationId: string } | undefined {
+function trailOf(site: 'memory_store#create' | 'memory_update#exact' | 'memory_update#fallback' | 'memory_promote#move', correlationId: string | undefined): { site: typeof site; correlationId: string } | undefined {
   return correlationId === undefined ? undefined : { site, correlationId };
 }
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
+
+/**
+ * Whether text that moves or is replaced came in untrusted. A flat-file line carries no
+ * mark, so it is read from the knowledge rows with the same text: one written on an
+ * untrusted turn, or at the `external_unverified` tier, marks the new row too, whatever
+ * the turn that moves it. A line whose origin cannot be read — no graph, no matching row,
+ * an empty body, a lookup that throws — counts as untrusted.
+ */
+function cameInUntrusted(agent: IAgent, lines: readonly string[], namespace: MemoryNamespace, scope?: MemoryScopeRef | undefined): boolean {
+  const kg = agent.toolContext.knowledgeLayer;
+  for (const line of lines) {
+    const body = line.replace(DATE_PREFIX_RE, '').trim();
+    if (!body || !kg?.sourceUntrustedOf) return true;
+    try {
+      if (kg.sourceUntrustedOf(body, namespace, scope) !== false) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+const SUPERSEDED_PREFIX_RE = /^\[SUPERSEDED \d{4}-\d{2}-\d{2}\]\s*/;
+
+/** A flat line without the prefixes the writers put before its text, in any order: the date
+ *  (`status` lines get one even in front of a `[SUPERSEDED …]` marker) and the marker. */
+function stripLinePrefixes(line: string): string {
+  let rest = line.trim();
+  // run-group-starter: a synchronous loop that ends when no prefix is left; it starts nothing.
+  for (;;) {
+    const next = rest.replace(SUPERSEDED_PREFIX_RE, '').replace(DATE_PREFIX_RE, '');
+    if (next === rest) return rest;
+    rest = next;
+  }
+}
+
+/**
+ * Which flat lines of `namespace` came in untrusted, for a path that hands them to the model.
+ * A line is marked when an active knowledge row written untrusted contains its text; such a
+ * line goes to the model wrapped as untrusted data, which marks the turn that reads it, so the
+ * text cannot be stored again as trusted. A line no row vouches either way for is not marked
+ * (no graph, no row: there is nothing to read the mark from); a lookup that fails marks every
+ * line, so a broken graph does not pass for a clean one.
+ */
+function untrustedLinesOf(agent: IAgent, namespace: MemoryNamespace): (line: string) => boolean {
+  const kg = agent.toolContext.knowledgeLayer;
+  if (!kg?.untrustedTextsIn) return () => false;
+  let texts: string[];
+  try {
+    texts = kg.untrustedTextsIn(namespace).map(t => t.toLowerCase());
+  } catch {
+    return () => true;
+  }
+  if (texts.length === 0) return () => false;
+  return (line) => {
+    const body = stripLinePrefixes(line).toLowerCase();
+    return body.length > 0 && texts.some(t => t.includes(body));
+  };
+}
+
+/** `text` with each line `isUntrusted` holds for wrapped as untrusted data. */
+function markUntrustedLines(text: string, isUntrusted: (line: string) => boolean, namespace: MemoryNamespace): string {
+  return text.split('\n').map(l => (l.trim() && isUntrusted(l) ? wrapUntrustedData(l, `memory:${namespace}`) : l)).join('\n');
+}
 
 /**
  * Token budget for memory_recall responses (applied to BOTH paths).
@@ -380,6 +445,10 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         : `No content found in ${input.namespace} namespace.`;
     }
 
+    // Lines that came in untrusted reach the model wrapped as such (untrustedLinesOf).
+    const isUntrusted = untrustedLinesOf(agent, input.namespace);
+    const mark = (text: string): string => markUntrustedLines(text, isUntrusted, input.namespace);
+
     // With a query: substring-filter, then cap at the response token budget
     // so a 20K-line namespace with a thousand matches doesn't flood context.
     // Newest matches are preferred (file order = append order = chronology).
@@ -390,25 +459,25 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         .filter(l => l.trim().length > 0)
         .filter(l => l.toLowerCase().includes(queryLower));
       if (matches.length === 0) {
-        return content; // no matches — return the whole namespace as before
+        return mark(content); // no matches — return the whole namespace as before
       }
       const { text, shown, total } = boundQueryMatches(matches, RECALL_QUERY_TOKEN_BUDGET);
       if (shown >= total) {
-        return text;
+        return mark(text);
       }
-      return `${text}\n\n[Showing ${shown} of ${total} matching ${input.namespace} entries — most recent first, capped to keep context lean.]`;
+      return `${mark(text)}\n\n[Showing ${shown} of ${total} matching ${input.namespace} entries — most recent first, capped to keep context lean.]`;
     }
 
     // No-query (namespace-only): a full dump is 15-20K tokens of context bloat.
     // Return a recency/importance-ranked subset capped at the token budget.
     const { text, shown, total } = rankNoQueryEntries(content, RECALL_NO_QUERY_TOKEN_BUDGET);
     if (shown === 0) {
-      return content; // nothing to rank (single empty line etc.) — return as-is
+      return mark(content); // nothing to rank (single empty line etc.) — return as-is
     }
     if (shown >= total) {
-      return text; // whole namespace fit within the budget — no truncation note
+      return mark(text); // whole namespace fit within the budget — no truncation note
     }
-    return `${text}\n\n[Showing ${shown} of ${total} ${input.namespace} entries — most recent first, capped to keep context lean. Pass a \`query\` to memory_recall to retrieve the full matching set.]`;
+    return `${mark(text)}\n\n[Showing ${shown} of ${total} ${input.namespace} entries — most recent first, capped to keep context lean. Pass a \`query\` to memory_recall to retrieve the full matching set.]`;
   },
 };
 
@@ -540,6 +609,10 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     // Try the exact substring path first (pre-#529 behaviour). When that
     // succeeds, KG mirror sync runs as before.
     const memory = agent.memory;
+    // On an untrusted turn the lines the edit leaves behind get an untrusted row (below); the
+    // file is read before and after the edit to tell which lines are new.
+    const readFile = async (): Promise<string> => (scopeRef ? await memory.loadScoped(input.namespace, scopeRef) : await memory.load(input.namespace)) ?? '';
+    const before = agent.toolContext.knowledgeLayer ? await readFile() : '';
     const exact = await withInstanceWrite(agent, { site: 'memory_update#exact', kind: 'change', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['update'] }, async (w) => {
       const exactOk = await w.run('update', () => (scopeRef
         ? memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef)
@@ -580,6 +653,21 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
             // The re-extraction's own failure stays swallowed as before; a refused row is said.
             if (err instanceof InstanceWriteUnrecorded) process.stderr.write('[lynox:trail] derived knowledge write refused: its row could not be written (memory_update)\n');
           });
+        } else if (kg) {
+          // On an untrusted turn the lines the edit leaves behind get a row of their own, written
+          // untrusted, as memory_store writes one: the flat file now holds text no existing row
+          // covers, and a read path marks a line only where an untrusted row contains it. The
+          // whole lines, not `new_content`: the edit replaces a substring, so a line can join
+          // attacker text to text that was there before. Read from the file as written: a write
+          // that lands between the two reads is covered too, never missed.
+          const prior = new Set(before.split('\n'));
+          const left = (await readFile()).split('\n').filter(l => l.trim() && !prior.has(l));
+          const rowScope: MemoryScopeRef = scopeRef ?? agent.activeScopes?.[0] ?? { type: 'context', id: '' };
+          publishMemoryStore({
+            namespace: input.namespace, content: left.length > 0 ? left.join('\n') : input.new_content, scopeType: rowScope.type, scopeId: rowScope.id,
+            sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: true,
+            actor: actorOf(agent), trail: trailOf('memory_update#exact', w.correlationId),
+          });
         }
         return scopeRef
           ? `Updated content in ${input.namespace} namespace (scope: ${input.scope}).`
@@ -613,6 +701,9 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
       linesToRewrite.push({ originalLine: line, markedLine });
       marked++;
     }
+    // The new line replaces the marked ones, so it keeps their mark: read from their knowledge
+    // rows in any scope of the namespace (the flat line does not say which scope its row has).
+    const replacesUntrusted = cameInUntrusted(agent, linesToRewrite.map(l => l.originalLine), input.namespace);
 
     // Persist via the same scoped/unscoped path the memory abstraction uses.
     // The IMemory interface doesn't expose a bulk "save" for scoped writes,
@@ -654,8 +745,9 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
           scopeId: defaultScope.id,
           sourceThreadId: chatThreadOf(agent),
           // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
-          // Write-trust derived from the FULL union, not the bare marker (deriveTurnUntrusted).
-          sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+          // Write-trust derived from the FULL union, not the bare marker (deriveTurnUntrusted),
+          // or from the lines it replaces when one of them came in untrusted (cameInUntrusted).
+          sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent) || replacesUntrusted,
           actor: actorOf(agent), trail: trailOf('memory_update#fallback', w.correlationId),
         });
       }
@@ -745,6 +837,8 @@ export const memoryListTool: ToolEntry<MemoryListInput> = {
       for (const ns of namespaces) {
         const content = await agent.memory.loadScoped(ns, scope);
         if (!content) continue;
+        // Lines that came in untrusted reach the model wrapped as such (untrustedLinesOf).
+        const isUntrusted = untrustedLinesOf(agent, ns);
 
         let lines = content.split('\n').filter(l => l.trim().length > 0);
         if (patternLower) {
@@ -754,7 +848,7 @@ export const memoryListTool: ToolEntry<MemoryListInput> = {
 
         const truncated = lines.slice(0, limit);
         const remaining = lines.length - truncated.length;
-        const entriesText = truncated.map(l => `  - ${l}`).join('\n');
+        const entriesText = truncated.map(l => `  - ${isUntrusted(l) ? wrapUntrustedData(l, `memory:${ns}`) : l}`).join('\n');
         nsResults.push(`[${ns}] (${lines.length} entries)\n${entriesText}${remaining > 0 ? `\n  ... and ${remaining} more` : ''}`);
       }
 
@@ -848,6 +942,10 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
     }
 
     const matchedLine = lines[matchIdx]!;
+    // Read before the original is retired below: the copy keeps the original's mark.
+    const sourceUntrusted = deriveTurnUntrusted(agent) || cameInUntrusted(agent, [matchedLine], input.namespace, fromRef);
+    // The result quotes the line, so a line that came in untrusted is quoted wrapped as such.
+    const quoteUntrusted = untrustedLinesOf(agent, input.namespace)(matchedLine);
 
     const memory = agent.memory;
     return withInstanceWrite(agent, { site: 'memory_promote#move', kind: 'move', store: 'memory', target: () => memoryTarget(input.namespace, ['from', fromRef], ['to', toRef]), main: ['append', 'delete'] }, async (w) => {
@@ -878,17 +976,17 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
         scopeType: toRef.type,
         scopeId: toRef.id,
         sourceThreadId: chatThreadOf(agent),
-        // Promotion moves an existing line across scopes. The original tier
-        // isn't available from the flat-file line without a KG lookup, so the
-        // re-embedded copy lands at the conservative default — never falsely
-        // elevated to tool_verified. Write-trust from the FULL union (deriveTurnUntrusted),
-        // not the bare marker — a promote on an external-content turn quarantines.
-        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+        // Promotion moves an existing line across scopes. The copy is untrusted when the
+        // turn is (the FULL union, deriveTurnUntrusted) OR the original came in untrusted
+        // (cameInUntrusted, read from its knowledge rows before the retire); a clean turn
+        // never washes the original's mark off. Never elevated to tool_verified.
+        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted,
         ...(movedIds.length > 0 ? { replaces: { ids: movedIds } } : {}),
         actor: actorOf(agent), trail: trailOf('memory_promote#move', w.correlationId),
       });
 
-      return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n"${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}"`;
+      const quote = `${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}`;
+      return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n${quoteUntrusted ? wrapUntrustedData(quote, `memory:${input.namespace}`) : `"${quote}"`}`;
     });
   },
 };

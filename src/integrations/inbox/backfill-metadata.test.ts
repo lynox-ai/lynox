@@ -75,7 +75,7 @@ function seedPreV11(threadKey: string): string {
     reasonDe: 'pre-v11 row',
     classifiedAt: new Date('2026-05-01T00:00:00Z'),
     classifierVersion: 'haiku-old',
-  });
+  }).id;
 }
 
 describe('backfillMetadata', () => {

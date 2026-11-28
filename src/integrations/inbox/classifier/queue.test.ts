@@ -308,3 +308,97 @@ describe('ClassifierQueue — drain', () => {
     errorSpy.mockRestore();
   });
 });
+
+describe('ClassifierQueue — serialKey', () => {
+  const byKey = (input: unknown): string | undefined => (input as { key?: string }).key;
+
+  it('runs two jobs of the same key one after the other, in the order they were queued', async () => {
+    const { classify, calls } = controllable();
+    const q = new ClassifierQueue({ classify, onSuccess, onDeadLetter, maxConcurrency: 2, serialKey: byKey });
+    q.enqueue({ key: 't1', name: 'first' });
+    q.enqueue({ key: 't1', name: 'second' });
+    await waitFor(() => calls.length === 1);
+    // A free slot is there, but the second job's key is running: it waits.
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.input).toEqual({ key: 't1', name: 'first' });
+    expect(q.activeCount).toBe(1);
+    expect(q.depth).toBe(2);
+    calls[0]!.resolve(verdict());
+    await waitFor(() => calls.length === 2);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(calls[1]!.input).toEqual({ key: 't1', name: 'second' });
+    calls[1]!.resolve(verdict());
+    await q.drain();
+    expect(onSuccess.mock.calls.map((c) => (c[0] as { name: string }).name)).toEqual(['first', 'second']);
+  });
+
+  it('runs jobs of different keys in parallel', async () => {
+    const { classify, calls } = controllable();
+    const q = new ClassifierQueue({ classify, onSuccess, onDeadLetter, maxConcurrency: 2, serialKey: byKey });
+    q.enqueue({ key: 't1' });
+    q.enqueue({ key: 't2' });
+    await waitFor(() => calls.length === 2);
+    expect(q.activeCount).toBe(2);
+    calls[0]!.resolve(verdict());
+    calls[1]!.resolve(verdict());
+    await q.drain();
+    expect(onSuccess).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives a free slot to a later job of an idle key, and starves none: every job runs and drain settles', async () => {
+    const { classify, calls } = controllable();
+    const q = new ClassifierQueue({ classify, onSuccess, onDeadLetter, maxConcurrency: 2, serialKey: byKey });
+    q.enqueue({ key: 't1', name: 'a1' });
+    q.enqueue({ key: 't1', name: 'a2' });
+    q.enqueue({ key: 't2', name: 'b1' });
+    q.enqueue({ name: 'no-key' });
+    // a2 waits for a1; b1 takes the second slot ahead of it. A queue that only ever starts its
+    // head would stop at a1: the check below then names what ran instead of the wait timing out.
+    await waitFor(() => calls.length === 2).catch(() => undefined);
+    expect(calls.map((c) => (c.input as { name: string }).name)).toEqual(['a1', 'b1']);
+    calls[1]!.resolve(verdict());
+    // b1's slot goes to the next startable job, the key-less one; a2 still waits for a1.
+    await waitFor(() => calls.length === 3);
+    expect((calls[2]!.input as { name: string }).name).toBe('no-key');
+    calls[0]!.resolve(verdict());
+    await waitFor(() => calls.length === 4);
+    expect((calls[3]!.input as { name: string }).name).toBe('a2');
+    calls[2]!.resolve(verdict());
+    calls[3]!.resolve(verdict());
+    await q.drain();
+    expect(onSuccess).toHaveBeenCalledTimes(4);
+    expect(q.depth).toBe(0);
+  });
+
+  it('a dead-lettered job frees its key for the next one', async () => {
+    const { classify, calls } = controllable();
+    const q = new ClassifierQueue({ classify, onSuccess, onDeadLetter, maxConcurrency: 2, retryOnce: false, serialKey: byKey });
+    q.enqueue({ key: 't1', name: 'fails' });
+    q.enqueue({ key: 't1', name: 'next' });
+    await waitFor(() => calls.length === 1);
+    calls[0]!.reject(new Error('llm down'));
+    await waitFor(() => calls.length === 2);
+    expect(onDeadLetter).toHaveBeenCalledTimes(1);
+    calls[1]!.resolve(verdict());
+    await q.drain();
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ClassifierQueue — serialKey under drainWithin', () => {
+  it('a job waiting on its key is dead-lettered with the waiting ones, the running one is cut off, and the drain ends', async () => {
+    const { classify, calls } = controllable();
+    const reason = new Error('shutdown');
+    const q = new ClassifierQueue({ classify, onSuccess, onDeadLetter, maxConcurrency: 2, serialKey: (i: unknown) => (i as { key: string }).key });
+    q.enqueue({ key: 't1', name: 'running' });
+    q.enqueue({ key: 't1', name: 'waiting' });
+    await waitFor(() => calls.length === 1);
+    const now = Date.now();
+    const report = await q.drainWithin({ classifyUntil: now + 30, cutOffAt: now + 60, reason });
+    expect(report).toEqual({ deadLetteredWaiting: 1, cutOffRunning: 1 });
+    expect(onDeadLetter.mock.calls.map((c) => (c[0] as { name: string }).name).sort()).toEqual(['running', 'waiting']);
+    expect(calls, 'the waiting job never reached the classifier').toHaveLength(1);
+    expect(q.depth).toBe(0);
+  });
+});

@@ -1754,6 +1754,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Whether the active memories matching `pattern` were written untrusted (or at the
+   * `external_unverified` tier): `null` when none match, so the caller cannot tell and
+   * treats the text as untrusted. Read before a move or a replacement, so the new row keeps
+   * the mark of the row it comes from.
+   */
+  sourceUntrustedOf(pattern: string, namespace: MemoryNamespace, scope?: MemoryScopeRef | undefined): boolean | null {
+    const r = this.db.sourceOfPattern(pattern, namespace, scope);
+    return r.found ? r.untrusted : null;
+  }
+
+  /** The texts of the active memories in `namespace` written untrusted (or at the
+   *  `external_unverified` tier), for a read path that marks the lines found in them. */
+  untrustedTextsIn(namespace: MemoryNamespace): string[] {
+    return this.db.untrustedTexts(namespace);
+  }
+
+  /**
    * Retire the original of a move (`memory_promote`): the memories matching `pattern`
    * in `scope` are deactivated now, like {@link deactivateByPattern}, and their ids
    * returned so {@link markMoved} can name the copy as their successor once it is

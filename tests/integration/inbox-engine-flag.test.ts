@@ -140,7 +140,7 @@ describe('Engine boot — unified-inbox flag', () => {
     const itemId = runtime.state.insertItem({
       accountId: 'acct-graph', channel: 'email', threadKey: 'graph:conv-1', bucket: 'requires_user', confidence: 0.9,
       reasonDe: 'r', classifiedAt: new Date('2026-11-03T08:00:00Z'), classifierVersion: 'v1', messageId: '<first@m365>',
-    });
+    }).id;
     runtime.state.updateUserAction(itemId, 'replied', new Date('2026-11-03T09:00:00Z'));
     const env = (messageId: string) => ({
       uid: 7, messageId, folder: 'INBOX', threadKey: 'graph:conv-1', inReplyTo: '<first@m365>',

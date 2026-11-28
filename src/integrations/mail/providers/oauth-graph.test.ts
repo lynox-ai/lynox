@@ -185,6 +185,7 @@ describe('OAuthGraphProvider — list', () => {
     expect(a.to).toEqual([{ name: 'User', address: 'user@example.org' }]);
     expect(a.cc).toEqual([{ address: 'cc@example.com' }]);
     expect(a.date.toISOString()).toBe('2026-10-17T08:00:00.000Z');
+    expect(a.arrivedAt?.toISOString(), 'the arrival is receivedDateTime').toBe('2026-10-17T08:00:00.000Z');
     expect(a.flags).toEqual(['\\Seen', '\\Flagged']);
     expect(a.snippet).toBe('preview of a');
     expect(a.hasAttachments).toBe(true);

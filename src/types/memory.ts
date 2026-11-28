@@ -358,6 +358,13 @@ export interface IKnowledgeLayer {
   deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   /** Retire the original of a move at its scope; the ids go with the copy's store, which names the copy their successor. */
   retireForMove(pattern: string, namespace: MemoryNamespace, scope: MemoryScopeRef): Promise<string[]>;
+  /** Whether the active memories matching `pattern` were written untrusted; `null` when none
+   *  match. Optional so a test double need not wire it: a caller without it, like a caller that
+   *  gets `null`, treats the text as untrusted. */
+  sourceUntrustedOf?(pattern: string, namespace: MemoryNamespace, scope?: MemoryScopeRef | undefined): boolean | null;
+  /** The texts of the active memories in `namespace` written untrusted. Optional so a test
+   *  double need not wire it: a read path without it marks no line. */
+  untrustedTextsIn?(namespace: MemoryNamespace): readonly string[];
   eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   updateMemoryText(
     oldText: string,

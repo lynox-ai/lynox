@@ -21,6 +21,7 @@ import { compose } from './data-boundary.js';
 import { diagnoseWorkflowTool } from '../tools/builtin/diagnose-workflow.js';
 import { runWorkflowTool } from '../tools/builtin/pipeline.js';
 import type { IAgent } from '../types/index.js';
+import { dropDeletedChatGuardDdl } from './deleted-chat-guard.js';
 
 // A busy machine takes longer than the default 10 s to import and open these stores.
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
@@ -357,7 +358,7 @@ describe('pipeline_runs.origin_thread_id (history.db v64)', () => {
     const path = join(dir, 'old.db');
     const before = new RunHistory(path);
     before.insertPipelineRun({ id: 'old-run', manifestName: 'x', status: 'completed', manifestJson: '{}' });
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 64; ALTER TABLE thread_messages DROP COLUMN author; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+    before.getDb().exec(dropDeletedChatGuardDdl()); before.getDb().exec('DELETE FROM schema_version WHERE version >= 64; ALTER TABLE thread_messages DROP COLUMN author; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     expect(columns(before.getDb()).map((c) => c.name)).not.toContain('origin_thread_id');
     before.close();
     const after = new RunHistory(path);
