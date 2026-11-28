@@ -157,7 +157,7 @@ describe.each(loaders)('a profile of the owner the boot held back, through %s', 
     const booted = boot([crm(), reader()]);
     expect(booted.store.get('reader')).toBeUndefined();
     expect(booted.store.storedProfile('reader')).toBeDefined();
-    return { ...booted, before: booted.stored(), vault: vaultOf(VAULT), asked: vi.fn(async () => 'Allow') };
+    return { ...booted, before: booted.stored(), vault: vaultOf(VAULT), asked: vi.fn(async () => 'allow') };
   };
 
   it.each(['create', 'update'] as const)('a mandate\'s %s over it is refused, and the stored record and the vault stay as they were', async (action) => {
@@ -185,7 +185,7 @@ describe.each(loaders)('control: a profile of the mandate the boot held back, th
     const booted = boot([crm(), reader({ created_by: MANDATE_TAG })]);
     expect(booted.store.get('reader')).toBeUndefined();
     expect(booted.store.storedProfile('reader')).toBeDefined();
-    return { ...booted, before: booted.stored(), vault: vaultOf(VAULT), asked: vi.fn(async () => 'Allow') };
+    return { ...booted, before: booted.stored(), vault: vaultOf(VAULT), asked: vi.fn(async () => 'allow') };
   };
 
   // The same payload the refused tests send: past the author check it is saved, and the vault and

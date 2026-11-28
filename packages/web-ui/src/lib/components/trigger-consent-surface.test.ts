@@ -67,7 +67,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// behaviour tests. A copy in the component would be a second rule with no
 		// test, and the source assertions here cannot see what a copy does.
 		expect(SCRIPT).toContain(
-			"import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
+			"import { awaitsConfirmation, displaySafe, instructionOf, markHidden, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
 		);
 		expect(SCRIPT).toContain("import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';");
 		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'showsInstruction', 'showsWatchAddress', 'showsWatchTarget', 'watchOf', 'awaitsOwnerStamp', 'listedLine', 'listedNote', 'stampable', 'usesConnections']) {
@@ -85,8 +85,8 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const { cond, body } = ifBlockAround('data-trigger-watch');
 		// Not while it waits: the held block names the address there (`StampConfirm` or the consent box), never twice.
 		expect(cond).toBe('showsWatchAddress(trigger) && !held(trigger)');
-		expect(body).toContain("{watchOf(trigger)?.host ?? ''}");
-		expect(body).toContain("{watchOf(trigger)?.rest ?? ''}");
+		// Host and path through the address that keeps the host whole and set off.
+		expect(body).toContain(`<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="trigger-watch-address" />`);
 	});
 
 	it('a waiting trigger carries its own badge, whole', () => {
@@ -136,7 +136,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 			'<div class="text-xs text-text-muted" data-consent-watch>',
 			`<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>`,
 			'<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
-				+ `<span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>`,
+				+ `<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="consent-watch-address" /></p>`,
 			'{#if watchOf(trigger)?.intervalMinutes}',
 			`<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>`,
 			'{/if}',
@@ -162,10 +162,12 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const next = ifBlockAround("t('tasks.next_run')");
 		// The whole condition, not `toContain`: an `|| true` appended to it leaves the
 		// expected text in place and puts the date back on a waiting trigger.
-		expect(next.cond).toBe('trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true');
+		expect(next.cond).toBe("trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.running !== true && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && !(trigger.status === 'failed' && !trigger.schedule_cron) && trigger.paused !== true");
 		const run = ifBlockAround('runNow(trigger)');
-		// Nor at a completed plan that keeps its pause (ux U-179): the refusal names no way out there.
-		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger)');
+		// Nor at a completed plan that keeps its pause (U-179): the refusal names no way out there.
+		// Nor at a plan that waits for its takeover (U-410): the takeover is the way out.
+		// Nor at a watch the policy keeps from its page (U-392): the run would read nothing.
+		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !holdsNextRun(trigger.blocked_reason)');
 		expect(run.body.trim().startsWith('<button onclick={() => runNow(trigger)}')).toBe(true);
 	});
 
@@ -197,17 +199,29 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		);
 	});
 
-	it('the controls hide on hover-capable pointers, not at a width', () => {
-		// A touch screen wider than `sm` has no hover either: keyed on the width, the
-		// controls were unreachable there with no rule left to bring them back.
-		for (const control of ['runNow(trigger)', 'togglePause(trigger)', 'manageInChat(trigger)', 'deleteTrigger(trigger)']) {
-			const tag = line(`<button onclick={() => ${control}}`);
-			expect(tag, control).toContain('[@media(hover:hover)]:opacity-0');
+	// The five controls that hide until hover, the check button only when its note does not ask for it.
+	const hiding = (): [string, string][] => [
+		...['runNow(trigger)', 'togglePause(trigger)', 'manageInChat(trigger)', 'deleteTrigger(trigger)'].map((c): [string, string] => [c, line(`<button onclick={() => ${c}}`)]),
+		['check', line('<button onclick={() => (checking[trigger.id] = !checking[trigger.id])}')],
+	];
+
+	it('below `sm` the controls stay visible with a mouse too, where their row wraps under the text', () => {
+		// The one way a control turns transparent is from `sm` up on a device that hovers. A plain
+		// or `max-sm:` hide would hide it in the wrapped row below `sm`, under the text; a hide
+		// keyed on a width alone would hide it on a touch screen wider than that width, where
+		// nothing brings it back.
+		for (const [control, tag] of hiding()) {
+			expect(tag.match(/[^\s"']*opacity-0\b/g), control).toEqual(['sm:[@media(hover:hover)]:opacity-0']);
+		}
+	});
+
+	it('the controls hide only where hovering exists, and hover or focus brings them back', () => {
+		// A touch screen wider than `sm` has no hover: a hide keyed on the width alone left
+		// the controls unreachable there with no rule to bring them back. The hide above is
+		// the only one, and it needs hover; this test holds what brings a control back.
+		for (const [control, tag] of hiding()) {
 			expect(tag, control).toContain('group-hover:opacity-100');
-			// Any width-keyed hide, not just the one that was there: `md:opacity-0`
-			// beside the pointer rule passed, and reintroduces the same dead end on a
-			// touch screen wider than that breakpoint.
-			expect(tag, control).not.toMatch(/(sm|md|lg|xl|2xl):opacity-0/);
+			expect(tag, control).toContain('focus-visible:opacity-100');
 		}
 	});
 });

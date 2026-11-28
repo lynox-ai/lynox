@@ -6,9 +6,9 @@
  * The engine decides which erasures to tell about (`GET /api/connections/records`, owner-only);
  * this only reads the answer, drops a notice whose deadline has passed while the page was open,
  * and picks the text by the profile's state (`revocationView`).
- * Dates are shown without a time, in the reader's time zone: the erasure never happens before the
- * local day of `holdUntil`, and is done by the local day of `deadline` unless a run is still going
- * or the instance is off, which the notice says.
+ * Dates are shown without a time, with the month's name (`longDay`), in the reader's time zone:
+ * the erasure never happens before the local day of `holdUntil`, and is done by the local day of
+ * `deadline` unless a run is still going or the instance is off, which the notice says.
  */
 
 import { connectionLine, type OAuthGrantView } from './oauth-connection.js';
@@ -82,7 +82,8 @@ export function noticeShows(notice: ProviderNotice | undefined, now: Date): noti
 export type RevocationView =
 	| { kind: 'revoked'; revokedAt: string | null; notice: ProviderNotice | null; avertable: boolean }
 	| { kind: 'reconnected'; who: string; notice: ProviderNotice; avertable: boolean }
-	| { kind: 'connectedAgain' | 'pending'; notice: ProviderNotice };
+	| { kind: 'connectedAgain' | 'pending'; notice: ProviderNotice }
+	| { kind: 'ended'; notice: null };
 
 export function revocationView(
 	grant: { state?: unknown; revoked_at?: unknown; connected_by?: unknown } | undefined,
@@ -92,13 +93,10 @@ export function revocationView(
 	const shown = noticeShows(notice, now) ? notice : null;
 	const held = shown !== null && Date.parse(shown.holdUntil) > now.getTime();
 	if (grant?.state === 'revoked') return { kind: 'revoked', revokedAt: shown?.revokedAt ?? revokedAt(grant), notice: shown, avertable: held };
-	if (shown === null) return null;
+	// A store connection whose refresh ended (`refresh-dead`): no revocation, nothing to delete;
+	// connecting again is the way back.
+	if (shown === null) return grant?.state === 'refresh-dead' ? { kind: 'ended', notice: null } : null;
 	const by = connectionLine(grant as OAuthGrantView | undefined)?.by;
 	if (shown.reconnected && by?.kind === 'helper') return { kind: 'reconnected', who: by.address, notice: shown, avertable: held };
 	return { kind: held ? 'connectedAgain' : 'pending', notice: shown };
-}
-
-/** A date without a time, in the reader's time zone. */
-export function localDay(iso: string, locale: 'de' | 'en'): string {
-	return new Date(iso).toLocaleDateString(locale === 'de' ? 'de-CH' : 'en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }

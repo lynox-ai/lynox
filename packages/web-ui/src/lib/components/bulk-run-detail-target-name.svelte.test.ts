@@ -52,8 +52,9 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });
@@ -253,6 +254,36 @@ describe('a field name inside a sentence (U-333)', () => {
 		expect(text?.textContent).toBe(tf('bulk.invalid.secret_in_context_field', { field: 'api_notes' }));
 	});
 
+	it('names the field and the limit an answer broke on the run page, word for word in German and English', async () => {
+		const refused = (key: string, field: string): BulkTarget =>
+			({ seq: 1, key, change: 'invalid', diff: { kind: 'none' }, error: 'verdict_invalid', refusalDetail: { field, kind: 'maxLength', limit: 60 }, deselected: false }) as unknown as BulkTarget;
+		const invalidOne = { phase: 'previewed' as const, undone: 0, undoneBy: null, total: 1, applied: 0, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } };
+		const before = getLocale();
+		try {
+			setLocale('de');
+			run = makeRun({ ...invalidOne, targetSystem: SHOP });
+			targets = [refused('gid://shopify/Product/1', 'seo_title')];
+			await render();
+			const shop = target.querySelector('[data-testid="bulk-invalid-text"]');
+			expect(boxes(shop)).toEqual([]);
+			expect(shop?.textContent).toBe('Das Modell hat für dieses Produkt keine verwertbare Antwort gegeben. Feld SEO-Titel: Der Text ist länger als 60 Zeichen. lynox schreibt nichts. Bitte lynox im Chat, den Lauf neu zu planen; hilft das nicht, pass die Regel für dieses Feld an.');
+			unmount(component!); component = undefined; target.replaceChildren();
+			setLocale('en');
+			await render();
+			expect(target.querySelector('[data-testid="bulk-invalid-text"]')?.textContent).toBe('The model gave no usable answer for this product. Field SEO title: the text is longer than 60 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.');
+			unmount(component!); component = undefined; target.replaceChildren();
+			// Any other list: the rule's own name for the field, set apart in its box.
+			run = makeRun({ ...invalidOne, targetSystem: 'workspace' });
+			targets = [refused('k1', 'summary')];
+			await render();
+			const own = target.querySelector('[data-testid="bulk-invalid-text"]');
+			expect(boxes(own)).toEqual(['summary']);
+			expect(own?.textContent).toBe('The model gave no usable answer for this target. Field summary: the text is longer than 60 characters. lynox writes nothing. Ask lynox in the chat to plan the run again; if that does not help, change the rule for this field.');
+		} finally {
+			setLocale(before);
+		}
+	});
+
 	it('names a Shopify field that held a credential by its label, without a box', async () => {
 		run = makeRun({ phase: 'previewed', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1, applied: 0,
 			changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
@@ -286,14 +317,12 @@ describe('a target key in the preview', () => {
 	// In an undo's approval list, which does not scroll, a key with no hyphen, dot or underscore gets
 	// no break point of its own but `break-words`, so the browser may cut it where it would leave its
 	// box. Where a browser then breaks the key needs a layout and is not checked here.
-	it('gives a key with no hyphen, dot or underscore in an undo list no break point of its own and the break-words class', async () => {
+	it('gives a key with no hyphen, dot or underscore in the list of what an undo deletes no break point of its own and the break-words class', async () => {
 		run = makeRun({ kind: 'undo', phase: 'previewed', undone: 0, undoneBy: null, sourceRunId: 'r0', targetSystem: 'workspace', total: 1, applied: 0,
-			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
-		const link = { kind: 'element', namespace: 'html', element: 'a', attributes: [['href', 'https://partner.example/aktion']], text: null, inTemplate: false };
-		targets = [{ seq: 1, key: handle.replace(/[-._]/g, ''), change: 'update', diff: fieldsDiff('', 'Neu'), error: null, deselected: false,
-			markupChanges: [{ field: 'notes_html', added: [], removed: [link], addsOutsideAllowlist: false }] } as unknown as BulkTarget];
+			changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: handle.replace(/[-._]/g, ''), change: 'delete', diff: null, error: null, deselected: false } as unknown as BulkTarget];
 		await render();
-		const key = target.querySelector('[data-testid="bulk-undo-markup"] [data-testid="bulk-target-key"]');
+		const key = target.querySelector('[data-testid="bulk-undo-creates"]')?.parentElement?.querySelector('[data-testid="bulk-target-key"]');
 		expect(key?.textContent).toBe('teeabendruhesommer2026');
 		expect(key?.querySelectorAll('wbr').length).toBe(0);
 		expect(key?.classList.contains('break-words')).toBe(true);

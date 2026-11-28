@@ -6,7 +6,7 @@ import type { WorkflowGrantLookup } from './run-history.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import { canonicalJson } from './bulk-ledger.js';
 import { isFeatureEnabled } from './features.js';
-import { bindWorkflowParameters } from '../orchestrator/workflow-params.js';
+import { bindWorkflowParameters, shownParamName } from '../orchestrator/workflow-params.js';
 import { buildReviewedContract, validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 
 /**
@@ -150,7 +150,7 @@ export function hiddenInBoundValues(params: Readonly<Record<string, unknown>>): 
     // space, or start what looks like another row, so names may not hold them.
     if (HIDDEN_IN_VALUE.test(name) || /[\n\t]/.test(name)) return 'A parameter name holds a character that does not show as text. Rename the parameter in the workflow.';
     const shown = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
-    if (HIDDEN_IN_VALUE.test(shown)) return `The value of parameter "${name}" holds a character that does not show as text. Enter the value again without it.`;
+    if (HIDDEN_IN_VALUE.test(shown)) return `The value of parameter ${shownParamName(name)} holds a character that does not show as text. Enter the value again without it.`;
   }
   return null;
 }

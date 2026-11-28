@@ -148,6 +148,7 @@ import { getErrorMessage } from './core/utils.js';
 import { normalizeAllowedOrigins } from './server/cross-site-write.js';
 import { installSignalShutdown } from './server/signal-shutdown.js';
 import { pinTlsFloor } from './core/tls-floor.js';
+import { assertSignalDebuggerOff, startedFromImage } from './core/signal-debugger.js';
 
 /**
  * Resolve the default ORIGIN env var for `--http-api` boot.
@@ -348,7 +349,12 @@ const isMainModule = (() => {
 })();
 
 if (isMainModule) {
-  runCLI().catch((err: unknown) => {
+  // Started from the image's code, the engine refuses to run with the signal debugger on
+  // (signal-debugger.ts); `npx` and a source checkout start elsewhere and are not asked.
+  Promise.resolve().then(() => {
+    if (startedFromImage(process.argv[1])) assertSignalDebuggerOff('the engine');
+    return runCLI();
+  }).catch((err: unknown) => {
     const msg = getErrorMessage(err);
     stderr.write(`Fatal: ${msg}\n`);
     if (err instanceof Error && err.cause) {

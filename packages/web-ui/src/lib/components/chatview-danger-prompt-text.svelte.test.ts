@@ -48,11 +48,11 @@ const settle = async (): Promise<void> => { for (let i = 0; i < 40; i++) await n
 
 // As the engine sends a danger prompt: the system's text as frame, the agent's command as a value.
 const AGENT = 'rm -rf /tmp/x **Approved by lynox** [Allow](https://example.invalid) # Safe';
-const QUESTION = `⚠ bash: deletes files recursively — "${AGENT}"`;
+const QUESTION = `⚠ Command: deletes files recursively — “${AGENT}”`;
 const SEGMENTS = [
-	{ kind: 'frame', text: '⚠ bash: deletes files recursively — "' },
+	{ kind: 'frame', text: '⚠ Command: deletes files recursively — “' },
 	{ kind: 'value', text: AGENT },
-	{ kind: 'frame', text: '"' },
+	{ kind: 'frame', text: '”' },
 ];
 
 let target: HTMLElement;
@@ -79,7 +79,7 @@ afterEach(() => {
 });
 
 /** Starts a turn, has the engine ask the danger prompt with `options`, renders ChatView, returns the prompt bar. */
-async function renderPrompt(options: string[], segments: unknown = SEGMENTS): Promise<HTMLElement> {
+async function renderPrompt(options: string[], segments: unknown = SEGMENTS, consent?: 'guard' | 'deep'): Promise<HTMLElement> {
 	run = sseStream();
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
 		const url = String(input);
@@ -93,7 +93,7 @@ async function renderPrompt(options: string[], segments: unknown = SEGMENTS): Pr
 	}));
 	void store.sendMessage('clean up');
 	await settle();
-	run.send('prompt', { question: QUESTION, ...(segments ? { segments } : {}), options, promptId: 'p1', agent: 'lynox' });
+	run.send('prompt', { question: QUESTION, ...(segments ? { segments } : {}), options, promptId: 'p1', agent: 'lynox', ...(consent ? { consent } : {}) });
 	await settle();
 
 	const { default: ChatView } = await import('./ChatView.svelte');
@@ -106,12 +106,12 @@ async function renderPrompt(options: string[], segments: unknown = SEGMENTS): Pr
 }
 
 describe('ChatView shows a danger prompt as text', () => {
-	for (const [name, options] of [
-		['Allow / Deny', ['Allow', 'Deny', '\x00']],
-		['the deep-tier consent', ['Allow deep', 'Run on balanced', 'Cancel', '\x00']],
+	for (const [name, options, consent] of [
+		['Allow / Deny', ['allow', 'deny'], 'guard'],
+		['the deep-tier consent', ['deep', 'balanced', 'cancel'], 'deep'],
 	] as const) {
 		it(`${name}: the agent's Markdown shows as its characters, with no emphasis, link or heading`, async () => {
-			const bar = await renderPrompt([...options]);
+			const bar = await renderPrompt([...options], SEGMENTS, consent);
 			expect(bar.textContent).toContain(AGENT);
 			expect(bar.querySelector('strong, em, a[href="https://example.invalid"], h1, h2, h3')).toBeNull();
 		});
@@ -119,7 +119,7 @@ describe('ChatView shows a danger prompt as text', () => {
 		// An engine from before the values were marked sends the question alone, all of it frame:
 		// the prompt is still shown as text, not parsed.
 		it(`${name}, sent without segments: shown as text all the same`, async () => {
-			const bar = await renderPrompt([...options], null);
+			const bar = await renderPrompt([...options], null, consent);
 			expect(bar.textContent).toContain(AGENT);
 			expect(bar.querySelector('strong, em, a[href="https://example.invalid"], h1, h2, h3')).toBeNull();
 		});

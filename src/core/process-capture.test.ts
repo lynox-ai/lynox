@@ -321,13 +321,18 @@ describe('captureProcess', () => {
       writeBytes: 0,
       costUSD: 0,
     };
+    const chargeRun = vi.fn();
     await captureProcess('run1', 'Report', makeToolCalls(), {
       apiKey: 'k',
       meteredHost: meteredHost as unknown as import('./metered-request.js').HookHost,
       sessionCounters: counters,
+      chargeRun,
     });
     // Local session cap saw the spend.
     expect(counters.costUSD).toBeGreaterThan(0);
+    // The calling run's ceiling is charged the same amount. Kills: a debit that skips the run's guard.
+    expect(chargeRun).toHaveBeenCalledOnce();
+    expect(chargeRun.mock.calls[0]![0]).toBeCloseTo(counters.costUSD, 10);
     // Tenant balance (CP) debited with a positive cost.
     expect(onAfterRun).toHaveBeenCalledOnce();
     expect(onAfterRun.mock.calls[0]?.[1] as number).toBeGreaterThan(0);

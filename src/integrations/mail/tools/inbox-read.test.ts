@@ -137,7 +137,7 @@ describe('inbox_read — sensitive content is withheld', () => {
   });
 
   it('in the stored body of the item it opens, also when a rule filed it', async () => {
-    const id = item({ messageId: '<m1@x>', reasonDe: 'Regel: from = kunde@example.com', subject: 'Login', snippet: 'Hallo' });
+    const id = item({ messageId: '<m1@x>', reasonDe: 'Regel: Absender = kunde@example.com', subject: 'Login', snippet: 'Hallo' });
     const stored = runtime.state.getItem(id)!;
     runtime.state.insertThreadMessage({
       accountId: 'acct-1', threadKey: stored.threadKey, messageId: '<m1@x>', fromAddress: 'kunde@example.com',
@@ -256,7 +256,7 @@ describe('inbox_read — what the inbox found at intake counts (B1)', () => {
   });
 
   it('withholds a rule-filed item from before the audit recorded the check, by the stored body the list does not show', async () => {
-    const id = item({ bucket: 'auto_handled', reasonDe: 'Regel: from = noreply@app.example.com', classifierVersion: 'rule:r1', messageId: '<old-rule@x>', subject: 'Ihr Zugang', snippet: `Hier: ${LINK}` });
+    const id = item({ bucket: 'auto_handled', reasonDe: 'Regel: Absender = noreply@app.example.com', classifierVersion: 'rule:r1', messageId: '<old-rule@x>', subject: 'Ihr Zugang', snippet: `Hier: ${LINK}` });
     runtime.state.insertThreadMessage({
       accountId: 'acct-1', threadKey: runtime.state.getItem(id)!.threadKey, messageId: '<old-rule@x>', fromAddress: 'noreply@app.example.com',
       subject: 'Ihr Zugang', bodyMd: snippet, inboxItemId: id,
