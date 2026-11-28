@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ApiProfile, ApiStore } from './api-store.js';
 import { isMandateConnection } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
+import { isPaused } from './plan-pause.js';
 import type { StampEntry } from './plan-run-context.js';
 import { bindingOf, connectionShown, connectionWaits, memberConnectionReader } from './profile-secret-view.js';
 import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from './request-principal.js';
@@ -266,14 +267,16 @@ export async function planOfTrigger(
  * Whom a plan's run acts for once the owner's stamp holds, read the way the run reads it
  * (`planOfTrigger`, then the run's access gate): the mandate, or none. None for the owner's plan,
  * for a plan whose authorship cannot be read, for a bulk effect (its run carries its own planner),
- * and for a plan one of whose members has ended or names no grant: that run does not start.
+ * for a plan one of whose members has ended or names no grant: that run does not start. None for a
+ * paused plan either: it stays paused when the person's grant is extended, until the owner takes it
+ * over, and from then on it runs as the owner (`plan-pause.ts`).
  */
 export async function planActsFor(
   task: TriggerRecord,
   runHistory: RunHistory | null,
   isLive: (mandateId: string) => boolean,
 ): Promise<RequestPrincipal | undefined> {
-  if (task.effect.startsWith('bulk_')) return undefined;
+  if (task.effect.startsWith('bulk_') || isPaused(task)) return undefined;
   const plan = await planOfTrigger(task, runHistory);
   if (plan.unreadable || plan.of === undefined) return undefined;
   if (plan.members.some((m) => principalHasEnded(m, isLive))) return undefined;

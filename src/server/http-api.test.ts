@@ -9,6 +9,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, statSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
+import { setPlanPauseForTests } from '../core/plan-pause.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
@@ -24851,6 +24852,49 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         plans = [plan('p-agent', 'mandate:eva@kanzlei.example', EVA, '2026-10-05T00:00:00.000Z', { effect: 'run_agent', pipeline_id: undefined }),
           plan('p-watch', 'mandate:eva@kanzlei.example', EVA, '2026-10-05T00:00:00.000Z', { effect: 'run_agent', source: 'watch', pipeline_id: undefined })];
         expect([await planAsks('p-agent'), await planAsks('p-watch')]).toEqual(['eva@kanzlei.example', null]);
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
+    });
+
+    it('names no one for a paused plan whose person\'s access was extended, in neither stamp: it never runs as that person again', async () => {
+      freshRateWindow();
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const asking = { id: 'wf-own', name: 'W', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, template: true, confirmedAt: '2026-10-07T00:00:00.000Z', mode: 'interactive', steps: [{ id: 's1', task: 'ask', tools: ['ask_user'] }] };
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-own' ? asking : undefined));
+      // The owner's workflow: alone, it asks only the owner.
+      const ownerWf = { createdBy: 'owner', createdMandateId: null, createdAt: '2026-10-01 00:00:00', mandateEditor: null, mandateEditorId: null, mandateEditedAt: null };
+      const eva = { id: 'p-eva', effect: 'run_workflow', pipeline_id: 'wf-own', title: 'Report', description: 'Weekly', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'M-EVA', created_at: '2026-10-05T00:00:00.000Z' };
+      const agent = { ...eva, id: 'p-agent', effect: 'run_agent', pipeline_id: undefined };
+      let plans: Array<Record<string, unknown>> = [eva, agent];
+      ref['getRunHistory'] = () => ({
+        getTrigger: (id: string) => plans.find((t) => t['id'] === id),
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => ownerWf,
+        getWorkflowExact: (id: string) => (id === 'wf-own' ? asking : undefined),
+        workflowStampDigest: () => 'd'.repeat(64),
+        workflowStampState: () => 'holds',
+        workflowMandateShaped: () => false,
+        getPlansOfWorkflow: (id: string) => plans.filter((t) => t['pipeline_id'] === id),
+      });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      // Eva's grant was extended after her plans were paused: her access is live again.
+      ref['getMandateEnds'] = () => ({ isLive: () => true, record: (): void => {} });
+      const planAsks = async (id: string): Promise<unknown> => ((await (await jsonFetch(`/api/tasks/${id}/stamp-preview`)).json()) as { asks: unknown }).asks;
+      const workflowAsks = async (): Promise<unknown> => ((await (await jsonFetch('/api/workflows/wf-own/stamp-preview')).json()) as { asks: unknown }).asks;
+      try {
+        // Not paused: both plans ask Eva, and the workflow's stamp names her.
+        expect([await planAsks('p-eva'), await planAsks('p-agent'), await workflowAsks()]).toEqual(['eva@kanzlei.example', 'eva@kanzlei.example', { count: 1, name: 'eva@kanzlei.example' }]);
+        // Paused: the plans wait for the owner's takeover, and run as the owner after it.
+        plans = [{ ...eva, paused_at: 1_760_000_000 }, { ...agent, paused_at: 1_760_000_000 }];
+        expect([await planAsks('p-eva'), await planAsks('p-agent'), await workflowAsks()]).toEqual([null, null, null]);
+        // With the pause switched off nothing reads `paused_at`, and the plans run as Eva again.
+        const restore = setPlanPauseForTests(false);
+        try {
+          expect([await planAsks('p-eva'), await workflowAsks()]).toEqual(['eva@kanzlei.example', { count: 1, name: 'eva@kanzlei.example' }]);
+        } finally { restore(); }
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();
