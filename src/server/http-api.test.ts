@@ -1161,7 +1161,8 @@ describe('LynoxHTTPApi', () => {
           body: JSON.stringify({ task: 'go' }),
         });
         expect(res.status, 'refused').toBe(503);
-        await res.text();
+        const body = await res.json() as { error?: string };
+        expect(body.error, 'the client is told the message was not run').toBe('The instance is restarting, so the message was not run. Send it again in a moment.');
         expect(slotsOf(t.own).has('late-1'), 'it took no slot').toBe(false);
         expect(mockSessionRun, 'nothing ran').not.toHaveBeenCalled();
       } finally {

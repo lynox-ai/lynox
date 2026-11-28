@@ -5761,7 +5761,7 @@ export class LynoxHTTPApi {
       // Refused once shutdown began, for the same reason: shutdown ends the runs that hold a
       // slot, and a run that took one later would go on while the stores close under it.
       if (this._stopping) {
-        errorResponse(res, 503, 'The instance is restarting; send the message again in a moment.');
+        errorResponse(res, 503, 'The instance is restarting, so the message was not run. Send it again in a moment.');
         return;
       }
       if (erasedSinceEntry()) {
