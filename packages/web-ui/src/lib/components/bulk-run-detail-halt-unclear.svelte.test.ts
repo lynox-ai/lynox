@@ -80,9 +80,11 @@ beforeEach(() => {
 			const ts = targetStatuses.shift() ?? 200;
 			if (ts !== 200) return new Response('{}', { status: ts, headers: { 'Content-Type': 'application/json', ...(retryAfter !== null ? { 'Retry-After': retryAfter } : {}) } });
 			const off = Number(/offset=(\d+)/.exec(u)?.[1]);
-			// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+			// `changed=1`: as the engine serves it, the changed targets, the written ones first, then
+			// the ones with an error from the run (a read that failed in planning among them).
+			const erred = (x: BulkTarget): number => Number(x.applied !== true && x.error !== null && (x.change !== 'invalid' || x.error === 'read_failed'));
 			const list = /&changed=1$/.test(u)
-				? allTargets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq)
+				? allTargets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || erred(b) - erred(a) || a.seq - b.seq)
 				: allTargets;
 			return reply({ targets: list.slice(off, off + targetLimits.at(-1)!) });
 		}
@@ -282,13 +284,15 @@ describe('the step to check the targets with an error', () => {
 	});
 
 	for (const haltKey of ['failureRate', 'consecutiveFailures'] as const) {
-		it(`does not load an aborted run halted on ${haltKey} whole, and opens it on the targets it wrote first`, async () => {
+		it(`does not load an aborted run halted on ${haltKey} whole, and opens it on the targets it wrote, then the failed one`, async () => {
 			run = halted(1, 0, { phase: 'aborted', haltKey, total: 12, changes: UPDATES(12), applied: 3, heads: { ...NONE, written: 3, failed: 1, open: 8 } });
 			const wrote = new Set([7, 8, 11]);
 			allTargets = [...Array.from({ length: 10 }, (_, i) => ({ ...field(i), written: wrote.has(i) })), unread(10, 'write_failed'), { ...field(11), written: true }];
 			await render();
 			const keys = [...target.querySelectorAll('tbody tr, [role="row"]')].map((row) => /\/products\/(\d+)/.exec(row.textContent ?? '')?.[1]).filter((k) => k !== undefined);
-			expect(keys.slice(0, 3)).toEqual(['7', '8', '11']);
+			// The failed target past the first page in plan order (10) stands right after the written ones.
+			expect(keys.slice(0, 4)).toEqual(['7', '8', '11', '10']);
+			expect(target.querySelector('[data-testid="bulk-target-error"]')).not.toBeNull();
 			const asked = vi.mocked(fetch).mock.calls.map(([u]) => String(u)).filter((u) => /\/targets\?/.test(u));
 			// One first page of the changed targets, the written ones first; never the whole run.
 			expect(asked).toHaveLength(1);
