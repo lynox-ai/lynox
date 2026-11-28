@@ -20,6 +20,8 @@ export interface OAuthGrantView {
 	account_withheld?: unknown;
 	connected_by_reader?: unknown;
 	unused?: unknown;
+	/** Whether the grant is a connection at all, not the record a save makes before anyone connected (the engine's `isConnection`). */
+	connection?: unknown;
 }
 
 export type ConnectedBy = { kind: 'you' } | { kind: 'owner' } | { kind: 'helper'; address: string } | { kind: 'other'; tag: string };

@@ -78,9 +78,11 @@
 
 	// Never connected: the first connect is still to make, unless a revocation view already offers
 	// its own reconnect link, so the two never show together. An erasure past its hold shows no
-	// link of its own, and the first connect is then the way back.
+	// link of its own, and the first connect is then the way back. Whether a grant is a connection
+	// is the engine's answer (`connection`): a save records a grant for every new profile before
+	// anyone connected it.
 	function notYetConnected(p: ApiProfile): boolean {
-		return onBuiltInProvider(p) && (p.oauth_grant === undefined || p.oauth_grant === null)
+		return onBuiltInProvider(p) && p.oauth_grant?.connection !== true
 			&& !viewLinks(revocationView(p.oauth_grant, notices.get(p.id), now));
 	}
 

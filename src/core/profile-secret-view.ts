@@ -17,7 +17,7 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, oneLineInBriefing, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, lapsedSlots, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, oneLineInBriefing, grantTokenNames, hasTokenSlotShape, isConnection, isMandateAuthored, isMandateConnection, lapsedSlots, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
@@ -1195,7 +1195,7 @@ export function memberConnectionReader(
 
 /** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` and `connected_by_reader` exist only there, never in the store. */
 export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
-  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined; connected_by_reader: boolean; unused?: true | undefined }) | undefined;
+  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined; connected_by_reader: boolean; connection: boolean; unused?: true | undefined }) | undefined;
 };
 
 /**
@@ -1218,6 +1218,10 @@ export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
  * the author's on a profile a person with access set up, such as an owner's connection made there
  * before the owner's connect was refused ({@link hiddenFromProfile}). This profile does not use its tokens, so
  * it is not shown as a connection; once the owner has taken the profile over it carries again.
+ *
+ * And every grant says whether it is a connection at all (`connection`, {@link isConnection}): a
+ * save mints a record for every new oauth2 profile before anyone connected it, and the page must
+ * not read that as a connection. Only a connection can be `unused`.
  */
 export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ProfileForReader {
   const shown = withoutFingerprints(profile);
@@ -1233,10 +1237,11 @@ export function profileForReader(profile: ApiProfile, reader: RequestPrincipal):
     case 'cp-admin': yours = false; break;
     default: return unhandledPrincipal(reader);
   }
-  const unused = isMandateAuthored(profile) && grant.connected_by !== profile.created_by ? { unused: true as const } : {};
-  if (grant.account === undefined || reader.kind === 'owner' || yours) return { ...shown, oauth_grant: { ...grant, connected_by_reader: yours, ...unused } };
+  const connection = isConnection(grant);
+  const unused = connection && isMandateAuthored(profile) && grant.connected_by !== profile.created_by ? { unused: true as const } : {};
+  if (grant.account === undefined || reader.kind === 'owner' || yours) return { ...shown, oauth_grant: { ...grant, connected_by_reader: yours, connection, ...unused } };
   const { account: _account, ...rest } = grant;
-  return { ...shown, oauth_grant: { ...rest, connected_by_reader: yours, account_withheld: true, ...unused } };
+  return { ...shown, oauth_grant: { ...rest, connected_by_reader: yours, account_withheld: true, connection, ...unused } };
 }
 
 /**

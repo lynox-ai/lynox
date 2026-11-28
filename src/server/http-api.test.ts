@@ -6965,9 +6965,9 @@ describe('LynoxHTTPApi', () => {
       mockGetApiStore.mockReturnValue({ getAll: () => [profile], importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
       try {
         const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
-        expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true });
+        expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true, connection: false });
         const one = await (await jsonFetch('/api/api-profiles/shop')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
-        expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true });
+        expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true, connection: false });
       } finally {
         mockGetApiStore.mockReturnValue(null);
       }
@@ -7074,7 +7074,7 @@ describe('LynoxHTTPApi', () => {
         mockGetApiStore.mockReturnValue({ getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES, get: () => PROFILES[3] });
         api.setPrincipalResolverForTesting(() => EVA);
         const body = await (await jsonFetch('/api/api-profiles/toms')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
-        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', connected_by_reader: false, account_withheld: true });
+        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', connected_by_reader: false, account_withheld: true, connection: true });
       });
 
       // The page cannot tell who reads it, so the engine says whether this reader gave the
@@ -23871,6 +23871,22 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       oauthProfileMayBeRenewedUnattended(saved!, false),
       'a user-authorized profile with no refresh token was cleared for an unattended client-credentials swap',
     ).toBe(false);
+  });
+
+  // Each path that connects a profile leaves a record `isConnection` reads as one; the record a
+  // save mints before anyone connected does not. A new connecting path that sets none of the
+  // fields it reads fails its own case here (and in the tool's).
+  it.each([
+    ['connected', JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 })],
+    ['no-refresh', JSON.stringify({ access_token: 'at-1', expires_in: 3600 })],
+  ])('a callback that leaves %s reads as a connection', async (state, tokenBody) => {
+    const { isConnection } = await import('../core/api-store.js');
+    const { cookie, store } = await arrange({ tokenBody });
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+    expect(res.status).toBe(200);
+    const grant = store.get(PROFILE)?.oauth_grant;
+    expect(grant?.state).toBe(state);
+    expect(isConnection(grant)).toBe(true);
   });
 
   /**

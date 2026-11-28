@@ -89,7 +89,7 @@ describe('the first connect of a profile on a built-in provider', () => {
 	});
 
 	it('the owner, a profile a person with access set up, revoked: no reconnect, the line once', async () => {
-		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false, oauth_grant: { state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString(), connected_by: 'mandate:anna@example.com' } }]);
+		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false, oauth_grant: { connection: true, state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString(), connected_by: 'mandate:anna@example.com' } }]);
 		await render();
 		expect(q('api-reconnect')).toBeNull();
 		expect(q('api-reconnect-not-yours')).toBeNull();
@@ -97,14 +97,14 @@ describe('the first connect of a profile on a built-in provider', () => {
 	});
 
 	it('the owner, an own connection on a profile a person with access set up: not shown as connected', async () => {
-		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false, oauth_grant: { state: 'connected', connected_by: 'owner', connected_by_reader: true, unused: true } }]);
+		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false, oauth_grant: { connection: true, state: 'connected', connected_by: 'owner', connected_by_reader: true, unused: true } }]);
 		await render();
 		expect(q('api-connection')).toBeNull();
 		expect(all('api-set-up-by-member')).toBe(1);
 	});
 
 	it('control: the owner\'s connection on the owner\'s profile is shown as connected', async () => {
-		serve('owner', [{ ...shop, oauth_grant: { state: 'connected', connected_by: 'owner', connected_by_reader: true } }]);
+		serve('owner', [{ ...shop, oauth_grant: { connection: true, state: 'connected', connected_by: 'owner', connected_by_reader: true } }]);
 		await render();
 		expect(q('api-connection')).not.toBeNull();
 		expect(q('api-set-up-by-member')).toBeNull();
@@ -148,14 +148,46 @@ describe('the first connect of a profile on a built-in provider', () => {
 	});
 
 	it('the owner, already connected: no first connect', async () => {
-		serve('owner', [{ ...shop, oauth_grant: { state: 'connected', connected_by: 'owner' } }]);
+		serve('owner', [{ ...shop, oauth_grant: { connection: true, state: 'connected', connected_by: 'owner' } }]);
 		await render();
 		expect(q('preset-client-form')).not.toBeNull();
 		expect(q('api-connect-first-link')).toBeNull();
 	});
 
+	// A save records a grant for every new oauth2 profile before anyone connected it: the engine
+	// says it is no connection (`connection: false`), and the profile is still to connect.
+	const minted = { grant_id: 'g-1', connected_by_reader: true, connection: false };
+
+	it('the owner, a never-connected profile carrying the record a save makes: the first connect', async () => {
+		serve('owner', [{ ...shop, oauth_grant: minted }]);
+		await render();
+		expect(q('api-connect-first-link')?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+		expect(q('api-connection')).toBeNull();
+	});
+
+	it('the person who set it up, client pair released, the record a save makes: the first connect', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: true, reader_client_withheld: false, oauth_grant: { ...minted, connected_by_reader: false } }]);
+		await render();
+		expect(q('api-connect-first-member')?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+	});
+
+	it('the person who set it up, client pair not released, the record a save makes: who has to act', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: true, reader_client_withheld: true, oauth_grant: { ...minted, connected_by_reader: false } }]);
+		await render();
+		expect(q('api-connect-first-withheld')).not.toBeNull();
+		expect(q('api-connect-first-member')).toBeNull();
+	});
+
+	// What a revoked grant shows does not depend on `connection`: its own reconnect link, never the first connect.
+	it.each([[true], [false]])('the owner, grant revoked (connection %s): the reconnect link only', async (connection) => {
+		serve('owner', [{ ...shop, oauth_grant: { connection, state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
+		await render();
+		expect(all('api-reconnect')).toBe(1);
+		expect(q('api-connect-first-link')).toBeNull();
+	});
+
 	it('the owner, grant revoked: the reconnect link only, not a second one', async () => {
-		serve('owner', [{ ...shop, oauth_grant: { state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
+		serve('owner', [{ ...shop, oauth_grant: { connection: true, state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
 		await render();
 		expect(all('api-reconnect')).toBe(1);
 		expect(q('api-connect-first-link')).toBeNull();
@@ -199,7 +231,7 @@ describe('the first connect of a profile on a built-in provider', () => {
 	});
 
 	it('a session the server lets not connect it, profile revoked: the reconnect refusal only, not the first-connect sentence', async () => {
-		serve('mandate', [{ ...shop, reader_may_connect: false, oauth_grant: { state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
+		serve('mandate', [{ ...shop, reader_may_connect: false, oauth_grant: { connection: true, state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
 		await render();
 		expect(q('api-reconnect-not-yours')).not.toBeNull();
 		expect(q('api-connect-first-not-yours')).toBeNull();

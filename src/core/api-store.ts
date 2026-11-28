@@ -690,6 +690,24 @@ export function ownerConnectionCarries(profile: ApiProfile): boolean {
 }
 
 /**
+ * Whether a grant record stands for a connection, as opposed to the record a save mints for
+ * every new oauth2 profile (`withGrant`: a grant id and the credential fingerprints, nothing
+ * else). Read from the fields only a connection writes, each by a path of its own:
+ * - `state`: the OAuth callback (`connected`, `no-refresh`), a revocation, a refresh that died;
+ * - `connected_by`: the consent of every exchange since the tag is recorded;
+ * - `written`: what an exchange stored (a successful `fetch_token` drops `state`, so this is
+ *   what marks its connection);
+ * - `minted_for`: an exchange's refresh-token stamp, also on records from before the tag.
+ * A path that connects without setting any of the four would read as never connected; the
+ * tests name each path so that a new one shows there.
+ */
+export function isConnection(grant: OAuthGrantRecord | undefined): boolean {
+  if (grant === undefined) return false;
+  return grant.state !== undefined || grant.connected_by !== undefined
+    || (Array.isArray(grant.written) && grant.written.length > 0) || grant.minted_for !== undefined;
+}
+
+/**
  * The vault names that hold a profile's tokens: the derived pair of an oauth2 profile and what
  * its exchanges wrote. Its client pair and other configured credentials are not among them.
  */
