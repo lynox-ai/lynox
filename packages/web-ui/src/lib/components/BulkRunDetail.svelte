@@ -51,8 +51,8 @@
 	// Unchanged targets fold away: the owner checks what is written and what lynox leaves out.
 	let showUnchanged = $state(false);
 	// A run not loaded whole that leaves targets unchanged, or has written, opens on the targets its
-	// plan changes, the written ones first, so what it wrote is on the page however late in the run
-	// it comes (U-437). The unchanged ones and the rest load, in plan order, on the owner's ask.
+	// plan changes, the written ones first and then the ones with an error, so what it wrote and what
+	// failed is on the page however late in the run it comes (U-437). The unchanged ones and the rest load, in plan order, on the owner's ask.
 	let changedOnly = $state(false);
 	let probeOk = $state(false);
 	let maxTargets = $state(1);

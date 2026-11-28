@@ -11000,7 +11000,7 @@ export class LynoxHTTPApi {
         const v = Number(url.searchParams.get(name));
         return url.searchParams.has(name) && Number.isInteger(v) && v >= 0 ? v : undefined;
       };
-      // `changed=1`: only the targets the plan changes, for a page that names what a run wrote first.
+      // `changed=1`: only the targets the plan changes, for a page that names what a run wrote, then what failed in it, first.
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit'), changed: url.searchParams.get('changed') === '1' }) });
     }, READS));
 
