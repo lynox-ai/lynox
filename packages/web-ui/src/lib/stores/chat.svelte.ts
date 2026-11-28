@@ -1156,10 +1156,23 @@ export function removeHeldMessage(msg: ChatMessage): void {
 	persistChatNow();
 }
 
-/** After a server transcript replaced the list: the held messages of the list it replaced go on
- *  at its end, since the server never had them. */
+/** A message the server never had and a taken server transcript keeps: a held one, or one still
+ *  waiting in the send-queue (a bubble whose entry is gone has been sent or dropped). */
+function carriedOver(m: ChatMessage): boolean {
+	if (m.role !== 'user') return false;
+	return m.held === true || (m.queued === true && m.queueId !== undefined && messageQueue.some((q) => q.id === m.queueId));
+}
+
+/** How many messages of a local list the server can have: the ones {@link carryHeld} carries
+ *  over are not counted when a server transcript is compared with it. */
+function serverLength(list: ChatMessage[]): number {
+	return list.filter((m) => !carriedOver(m)).length;
+}
+
+/** After a server transcript replaced the list: the messages the server never had (held, or
+ *  still waiting in the send-queue) go on at its end. */
 function carryHeld(from: ChatMessage[], to: ChatMessage[]): void {
-	for (const m of from) if (m.role === 'user' && m.held === true && !to.includes(m)) to.push(m);
+	for (const m of from) if (carriedOver(m) && !to.includes(m)) to.push(m);
 }
 
 /** The run refused because no AI provider is set up (`code: 'llm_not_configured'`): the
@@ -1381,21 +1394,32 @@ async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<R
 	// `since` = what THIS client already rendered, so no event double-renders.
 	const since = lastAppliedSeq > 0 ? lastAppliedSeq : target.lastPersistedSeq;
 	const epochBefore = streamEpoch;
-	await reattachRun(sid, target.runId, since, _resumeGeneration);
+	const gen = _resumeGeneration;
+	const reattach = await reattachRun(sid, target.runId, since, gen);
 	if (streamEpoch !== epochBefore) return 'took-over'; // reattachRun took over + owns teardown
 	// Non-takeover: the run finished in the tiny /runs/active → /stream gap
-	// (reattachRun 404'd before claiming the stream). We already spliced the empty
+	// (reattachRun 404'd before claiming the stream), or the stream could not be
+	// reached or read and the run may still go on. We already spliced the empty
 	// bubble and may have restored a now-stale prompt, so reconcile to the
-	// authoritative persisted transcript instead of leaving the just-finished turn
-	// invisible until a manual reload. Return true so the caller skips its own
+	// authoritative persisted transcript instead of leaving the turn invisible
+	// until a manual reload. Return true so the caller skips its own
 	// (now stale-indexed) cleanup + tail.
-	endStreaming();
-	streamingActivity = 'idle';
-	streamingToolName = null;
-	streamingToolPhase = null;
-	pendingPermission = null;
-	pendingTabsPrompt = null;
-	await reconcileThread();
+	// Another thread opened meanwhile has its own state (the card of a question waiting there):
+	// it is left as it is, and it is not this turn's to reconcile.
+	if (sessionId === sid) {
+		endStreaming();
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		pendingPermission = null;
+		pendingTabsPrompt = null;
+		await reconcileThread();
+	}
+	// The stream could not be reached or its reading was refused: the run may still go on. When
+	// this turn still streamed, the wait for its end that reattachRun started stopped at once; now
+	// that it does not, a turn queued behind it waits for the run's end from here (a wait that
+	// already runs for this run is not started twice).
+	if (reattach === 'let-go') drainWhenRunEnds(target.runId, gen);
 	return 'took-over';
 }
 
@@ -1563,7 +1587,7 @@ let _resendProbeInFlight = false;
  * attached. A scheduled run's question waiting there holds it back too: the user is told and
  * the question's card is brought back. Resolves whether to send; never rejects.
  */
-async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promise<boolean> {
+async function askBeforeResend(opts: { unreachableSends?: boolean; sayTurnStarted?: boolean } = {}): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
 	const sid = sessionId;
 	// No session yet: the failed turn never reached one, so nothing can be running.
@@ -1588,8 +1612,16 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 	} finally {
 		_resendProbeInFlight = false;
 	}
-	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
-	if (sessionId !== sid || isStreaming) return false;
+	// The thread changed meanwhile: the message belongs to a chat no longer shown, so nothing is said.
+	if (sessionId !== sid) return false;
+	// A turn started meanwhile: that is now the turn in charge, and the message is not sent again.
+	// A tap or a Retry the user made is told why it did nothing (`sayTurnStarted`); the re-send on
+	// reconnect is not the user's action, and the turn running is usually the one they just sent;
+	// the failed message keeps its tap either way.
+	if (isStreaming) {
+		if (opts.sayTurnStarted === true) addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
+		return false;
+	}
 	if (live === null && scheduledQuestion) {
 		// A scheduled run's question has no stream to attach: the way on is to answer it, so
 		// its card is brought back rather than a turn sent past it.
@@ -1644,7 +1676,7 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 		return;
 	}
 	if (sendBlockedByReview()) return;
-	if (!await askBeforeResend()) return;
+	if (!await askBeforeResend({ sayTurnStarted: true })) return;
 	const shown = messages.includes(msg);
 	if (!shown) {
 		msg.failed = false;
@@ -1656,9 +1688,10 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	// The message on screen is the one sent again, not a copy added under it: it goes out as a
 	// queued turn, which the run finds by its id, as the automatic re-send does. The checks
 	// sendMessage makes are made again here, after the question to the server: a review may
-	// have opened meanwhile.
+	// have opened meanwhile. A turn that started during the question is already said by
+	// askBeforeResend; this guards the step between its answer and here.
 	if (isStreaming) {
-		addToast(t('chat.still_running'), 'info', 6000);
+		addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
 		return;
 	}
 	if (sendBlockedByReview()) return;
@@ -2392,8 +2425,10 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 
 	// The streaming state is the open chat's. A run started since (in a new chat, or in this one
-	// opened again) owns it now, and this run's end leaves it as that run has it.
-	if (streamEpoch === turn.epoch) {
+	// opened again) owns it now, and this run's end leaves it as that run has it. Another thread
+	// opened since without a run of its own has its own state too (the card of a question waiting
+	// there): this run's end leaves it.
+	if (streamEpoch === turn.epoch && sessionId === sid) {
 		endStreaming(turn.assistantMsg);
 		streamingActivity = 'idle';
 		streamingToolName = null;
@@ -4486,7 +4521,7 @@ export async function retryInterruptedRun(): Promise<void> {
 	// keeps the banner and its Retry, and nothing is sent. The chat is checked after each await,
 	// so the retry never goes into a chat opened meanwhile.
 	const sid = sessionId;
-	if (lastUserText && !await askBeforeResend()) return;
+	if (lastUserText && !await askBeforeResend({ sayTurnStarted: true })) return;
 	await dismissInterruptedRun();
 	if (sessionId !== sid) return;
 	if (lastUserText) await sendMessage(lastUserText);
@@ -4585,7 +4620,11 @@ function drainWhenRunEnds(runId: string, gen: number): void {
 	void ask();
 }
 
-async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<void> {
+/**
+ * How a re-attach that did not take over the stream ended: `let-go` when the stream could not be
+ * reached or its reading was refused (the run may still go on), `other` otherwise.
+ */
+async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<'let-go' | 'other'> {
 	// userIdx for handleSSEEvent's error path = the last user message.
 	let userIdx = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -4606,16 +4645,16 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 		// Network drop — nav poll still reflects the run; user can reload. A turn queued here
 		// waits for the run's end.
 		drainWhenRunEnds(runId, gen);
-		return;
+		return 'let-go';
 	}
 	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
 	const refused = res.ok ? null : await containedReadKey(res);
-	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; drainWhenRunEnds(runId, gen); return; }
+	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; drainWhenRunEnds(runId, gen); return 'let-go'; }
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
-	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); drainAfterReattach(gen); return; }
-	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return; }
+	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); drainAfterReattach(gen); return 'other'; }
+	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return 'other'; }
 
 	const myEpoch = ++streamEpoch;
 	isStreaming = true;
@@ -4721,6 +4760,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 		}
 		persistChat();
 	}
+	return 'other';
 }
 
 /**
@@ -4972,7 +5012,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// adopting the shorter server list would wipe the in-flight user bubble +
 			// placeholder. The `>=` path stays unguarded — a thread switch that legitimately
 			// loads an equal-or-longer transcript is unaffected.
-			if (serverMessages.length >= shown.length
+			if (serverMessages.length >= serverLength(shown)
 				|| (!isStreaming && !resumeActiveRun && !hasUnpersistedLocal)) {
 				// Server messages never carry chips — without this, adoption wipes a
 				// pending-review chip at run end (the observed end-of-run flicker) and
@@ -5175,7 +5215,7 @@ export async function reconcileThread(): Promise<void> {
 		// server transcript and WIPE the just-sent user bubble + streaming placeholder.
 		// Never adopt while a turn is in flight.
 		if (tid === sessionId && !isStreaming
-			&& (serverMessages.length >= messages.length || (!data.activeRun && !hasUnpersistedLocal))) {
+			&& (serverMessages.length >= serverLength(messages) || (!data.activeRun && !hasUnpersistedLocal))) {
 			// Same carry-over as resumeThread — a reconcile on remount must not wipe
 			// a pending-review chip either.
 			carryKnowledgeWrites(messages, serverMessages);

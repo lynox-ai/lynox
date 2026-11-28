@@ -39,6 +39,7 @@ import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 import type { ContainmentMirror } from './history-markers.js';
 import { isSharedSuffix } from './public-suffix.js';
+import { UNKNOWN_GRANT } from './conversation-grants.js';
 import { SCHEMA_REFUSAL_KINDS, type SchemaRefusalKind } from './llm-helper.js';
 
 /** A target's stored `read_*` or `write_*` pair (engine.db v43). */
@@ -71,7 +72,12 @@ export type BeforeImage = { absent: true } | { absent: false; value: unknown };
 
 /** One target as planned. `invalid` targets carry an `error` category and no after. */
 export type PlannedTarget =
-  | { key: string; before: BeforeImage; after: unknown }
+  | {
+    key: string; before: BeforeImage; after: unknown;
+    /** A data-store target's `_source_grants` before the run writes it: what an undo writes back
+     *  ({@link BulkLedger.planUndo}). Null or absent is unknown, and so is every absent row. */
+    beforeGrants?: readonly string[] | null | undefined;
+  }
   | { key: string; invalid: BulkInvalidReason };
 
 /**
@@ -803,6 +809,13 @@ export interface PreviewTarget {
    *  The same targets {@link BulkLedger.countUndoOpenTargets} counts, taken out or not. Set only
    *  where it holds. */
   undoOpen?: true | undefined;
+  /** Beside an error on a target that is not `invalid` only: the target is recorded as applied
+   *  (`applied_at`). Its error is then one a loop that lost its claim left, not this target's. */
+  applied?: boolean | undefined;
+  /** Beside an error on a target that is not `invalid` only: a send to it has no clear answer
+   *  (`unknown_sends > 0`), so the change may have arrived. A refusal takes its send back; a
+   *  redirect, a server error or no answer does not. */
+  sendUnclear?: boolean | undefined;
 }
 
 interface RunRow {
@@ -817,7 +830,7 @@ interface RunRow {
   list_last_id: number;
   cost_usd: number; cost_cap_usd: number | null;
   judge_rule: string | null; judge_rule_hash: string | null; judge_started_at: string | null;
-  start_domains: string | null;
+  start_domains: string | null; planner_grants: string | null;
 }
 
 /** Where the read of a run's list stands: `pending` while it is read, `done` once its targets
@@ -1074,6 +1087,11 @@ export interface BulkRunForApply {
   contractJson: string | null;
   /** As {@link BulkRunForPreview.delegatedPlanner}. */
   delegatedPlanner: RequestPrincipal | null;
+  /** The grant set the run's data-store writes are stamped with (`_source_grants`), since the
+   *  worker that writes holds none: the planning conversation's set together with its source's —
+   *  the source rows' own stamps, or `unknown` for a file (`bulk_plan`). Null is unknown, and so
+   *  is every undo's — the owner plans it with no conversation; its targets carry their own. */
+  plannerGrants: string[] | null;
 }
 
 /** One target as the effect loop writes it: the state it must find, the state it writes. */
@@ -1086,7 +1104,20 @@ export interface ApplyTarget {
   /** The state the write produces; absent for a `delete`. */
   after: BeforeImage;
   sourceSeq: number | null;
+  /** The data-store stamp the target held before this run wrote it; null is unknown. What an
+   *  atomic rollback writes back with {@link expected}. */
+  beforeGrants: string[] | null;
+  /** The stamp this target's write carries in place of the run's {@link BulkRunForApply.plannerGrants}:
+   *  an undo writes back the stamp its source found. Undefined: the run's. */
+  writeGrants: string[] | null | undefined;
 }
+
+/** The columns {@link BulkLedger.toApplyTarget} reads. */
+const APPLY_TARGET_COLUMNS = 'seq, target_key, change, before, after_planned, source_seq, before_grants, write_grants';
+type ApplyTargetRow = {
+  seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null;
+  before_grants: string | null; write_grants: string | null;
+};
 
 /** Changes that write. `unchanged` and `invalid` targets are never touched. */
 const WRITING_CHANGES = "('update','create','delete')";
@@ -1124,6 +1155,33 @@ function undoEligible(external: boolean): string {
  *  overwriting needs the before-image. */
 function undoFor(before: BeforeImage): UndoKind {
   return before.absent ? 'compensatable' : 'restorable';
+}
+
+/**
+ * The stamp a bulk write gives a row it RE-CREATES after a bulk write removed it (an undo of a
+ * delete, the atomic rollback of one): the recorded set with `unknown` beside it. The recorded
+ * set was read at planning, not when the row was removed, and a write in between may have added
+ * a grant to the row that the record does not hold; `unknown` keeps every connection's erasure
+ * asking about the row. Null is unknown already.
+ */
+export function recreatedGrants(grants: readonly string[] | null): string[] | null {
+  return grants === null ? null : [...new Set([...grants, UNKNOWN_GRANT])].sort();
+}
+
+/** A grant set as a `planner_grants`, `before_grants` or `write_grants` cell: a JSON array of
+ *  grant ids, sorted and without duplicates. Null (unknown) stays NULL. */
+function grantsCell(grants: readonly string[] | null | undefined): string | null {
+  return grants === null || grants === undefined ? null : JSON.stringify([...new Set(grants)].sort());
+}
+
+/** A grant-set cell as {@link grantsCell} wrote it. A cell that does not parse as an array of
+ *  strings is unknown, as NULL is. */
+function grantsOfCell(cell: string | null): string[] | null {
+  if (cell === null) return null;
+  try {
+    const parsed = JSON.parse(cell) as unknown;
+    return Array.isArray(parsed) && parsed.every((g) => typeof g === 'string') ? parsed as string[] : null;
+  } catch { return null; }
 }
 
 /** Canonical JSON: object keys sorted, so equal values hash and compare equal. */
@@ -1245,6 +1303,10 @@ export class BulkLedger {
      *  `planned` and halted until the owner starts it, every target planned with
      *  {@link judgeTemplate} as its after-state until its verdict; a data-store run only. */
     judge?: JudgeRule | undefined;
+    /** The grant set the run's data-store writes are stamped with: the planning conversation's
+     *  (`ConversationGrants.members()`) together with its source's — the source rows' own stamps,
+     *  or `unknown` for a file. The caller forms the union. Null or absent: unknown. */
+    plannerGrants?: readonly string[] | null | undefined;
   }): BulkRunStatus {
     if (params.judge !== undefined && params.targetSystem !== 'data_store') {
       // A workspace target is text, not fields: a verdict over F has nothing to replace in it.
@@ -1266,12 +1328,12 @@ export class BulkLedger {
     const judged = params.judge !== undefined;
     const insertRun = db.prepare(
       `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, target_collection,
-         principal, mandate_id, halt_reason, judge_rule, judge_rule_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         principal, mandate_id, halt_reason, judge_rule, judge_rule_hash, planner_grants)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertTarget = db.prepare(
-      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error, before_grants)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     db.transaction(() => {
       const own = this.capRoomFor(params.principal);
@@ -1288,17 +1350,19 @@ export class BulkLedger {
         ...planner(params.principal),
         judged ? BULK_HALT_REASONS.awaitingStart : null,
         ...this.judgeColumns(params.judge),
+        grantsCell(params.plannerGrants),
       );
       params.targets.forEach((t, seq) => {
         const key = this.engineDb.enc(t.key);
         if ('invalid' in t) {
-          insertTarget.run(id, seq, key, 'invalid', null, null, null, t.invalid);
+          insertTarget.run(id, seq, key, 'invalid', null, null, null, t.invalid, null);
           return;
         }
         insertTarget.run(
           // Until its verdict, a judged target's change is not known: `update`, as an unread one.
           id, seq, key, judged ? 'update' : classifyChange(t.before, t.after), undoFor(t.before),
           this.engineDb.enc(JSON.stringify(t.before)), this.engineDb.enc(JSON.stringify(t.after ?? null)), null,
+          grantsCell(t.beforeGrants),
         );
       });
       this.pruneUnapproved(params.principal, own, id);
@@ -1771,8 +1835,9 @@ export class BulkLedger {
   /**
    * The owner's view of a run: per target the before-image, the planned after-state and
    * their diff, in plan order; with `changed`, only the targets the plan changes (every one
-   * but `unchanged`), the written ones first, so a page can name what a run wrote without loading
-   * what it left alone or the plan before it.
+   * but `unchanged`), the written ones first, then the ones with an error from the run (not a
+   * reason the plan left a target out for, except a read that failed), so a page can name what a
+   * run wrote and what failed in it without loading what it left alone or the plan before it.
    * Its one caller is the human-facing route
    * `GET /api/bulk/runs/:id/targets`. NEVER wire this to a model-facing tool (see the
    * module comment).
@@ -1784,13 +1849,13 @@ export class BulkLedger {
       // settled it: the run may have changed it, and a rollback that left it must mark it.
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (((applied_at IS NOT NULL AND found_unsent = 0) OR (applied_at IS NULL AND write_sent = 1 AND undone_at IS NULL)) AND ${WRITING_SQL}) AS written,
-         undone_at IS NOT NULL AS undone,
+         undone_at IS NOT NULL AS undone, applied_at IS NOT NULL AS applied, unknown_sends > 0 AS send_unclear,
          shop_added_markup, host_rewrote, context_secret_field, link_domain, target_title, refusal_detail
-       FROM bulk_targets WHERE run_id = ?${opts.changed === true ? " AND change != 'unchanged' ORDER BY written DESC, seq" : ' ORDER BY seq'} LIMIT ? OFFSET ?`,
+       FROM bulk_targets WHERE run_id = ?${opts.changed === true ? " AND change != 'unchanged' ORDER BY written DESC, (applied_at IS NULL AND error IS NOT NULL AND (change != 'invalid' OR error = 'read_failed')) DESC, seq" : ' ORDER BY seq'} LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
-      deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
+      deselected_at: string | null; written: number; undone: number; applied: number; send_unclear: number; shop_added_markup: number; host_rewrote: number;
       context_secret_field: number | null; link_domain: string | null; target_title: string | null; refusal_detail: string | null;
     }[];
     const run = this.runRow(runId);
@@ -1854,6 +1919,8 @@ export class BulkLedger {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
         error: r.error, deselected: r.deselected_at !== null, written: r.written === 1, undone: r.undone === 1,
+        // Only beside an error a target still to write can carry: what the page says about it.
+        ...(r.error !== null && r.change !== 'invalid' ? { applied: r.applied === 1, sendUnclear: r.send_unclear === 1 } : {}),
         ...(r.shop_added_markup === 1 ? { shopAddedMarkup: true as const } : {}),
         ...(r.host_rewrote === 1 ? { hostRewrote: true as const } : {}),
         ...(r.error === 'secret_in_context' && r.context_secret_field !== null && contextNames[r.context_secret_field] !== undefined
@@ -2960,11 +3027,11 @@ export class BulkLedger {
     }
     const external = externalHostOf(src.target_system) !== null;
     const rows = db.prepare(
-      `SELECT seq, target_key, change, before, after_planned, after_actual, target_title,
+      `SELECT seq, target_key, change, before, after_planned, after_actual, target_title, before_grants, write_grants,
          read_connection_id, read_grant_id, write_connection_id, write_grant_id FROM bulk_targets
        WHERE run_id = ? AND ${undoEligible(external)}
        ORDER BY seq DESC`,
-    ).all(sourceRunId) as ({ seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null; target_title: string | null } & ConnectionColumns)[];
+    ).all(sourceRunId) as ({ seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null; target_title: string | null; before_grants: string | null; write_grants: string | null } & ConnectionColumns)[];
     if (rows.length === 0) return { ok: false, reason: 'nothing_to_undo' };
 
     const htmlFields = this.htmlFieldsOf(sourceRunId);
@@ -2994,9 +3061,15 @@ export class BulkLedger {
       // before-image while that write was still unmarked or before the refusal existed.
       const tainted = !after.absent && ((htmlFields.length > 0 && this.restoresShopAddedMarkup(sourceRunId, r.seq, after.value, htmlFields))
         || this.shopMarkedWriteOf(t.key, after.value, sourceRunId) !== null);
+      // The data-store stamps (`_source_grants`): the undo writes back the stamp the row held
+      // before its source wrote it, and expects the one that write carried — so an undo of this
+      // undo writes that one back in turn. The source's own target stamp is set only on an undo.
+      // Where the source deleted the row, the undo re-creates it: {@link recreatedGrants}.
+      const writeGrants = r.change === 'delete' ? recreatedGrants(t.beforeGrants) : t.beforeGrants;
+      const beforeGrants = t.writeGrants !== undefined ? t.writeGrants : grantsOfCell(src.planner_grants);
       // The title the source's read stored goes along as it is (the same key encrypts both rows), so
       // the owner taking a run back sees each product by its name; NULL stays NULL.
-      return { key: t.key, sourceSeq: r.seq, expected, after, change, read, tainted, title: r.target_title };
+      return { key: t.key, sourceSeq: r.seq, expected, after, change, read, tainted, title: r.target_title, writeGrants, beforeGrants };
     });
     const id = randomUUID();
     const undoKinds = new Set(planned.map((t) => undoFor(t.expected)));
@@ -3007,8 +3080,9 @@ export class BulkLedger {
       for (const t of planned) { yield String(t.sourceSeq); yield t.key; }
     }
     const insertTarget = db.prepare(
-      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, source_seq, read_connection_id, read_grant_id, target_title)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, source_seq, read_connection_id, read_grant_id, target_title,
+         before_grants, write_grants)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertInvalid = db.prepare(
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, source_seq, error, target_title) VALUES (?, ?, ?, 'invalid', ?, ?, ?)`,
@@ -3037,6 +3111,7 @@ export class BulkLedger {
           t.sourceSeq,
           t.read?.id ?? null, t.read?.grantId ?? null,
           t.title,
+          grantsCell(t.beforeGrants), grantsCell(t.writeGrants),
         );
       });
       // An undo is the owner's: the owner's rule, over all planners.
@@ -3812,6 +3887,7 @@ export class BulkLedger {
       atomic: r.atomic === 1, phase: r.phase, approvalChecksum: r.approval_checksum, maxTargets: r.max_targets,
       expiresAt: r.expires_at, applied: r.targets_applied, failed: r.targets_failed, haltReason: r.halt_reason,
       sourceRunId: r.source_run_id, contractJson: r.contract_json, delegatedPlanner: delegatedPlannerOf(r),
+      plannerGrants: grantsOfCell(r.planner_grants),
     };
   }
 
@@ -3868,18 +3944,23 @@ export class BulkLedger {
 
   loadTarget(runId: string, seq: number): ApplyTarget | null {
     const r = this.engineDb.getDb().prepare(
-      'SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets WHERE run_id = ? AND seq = ?',
-    ).get(runId, seq) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null } | undefined;
+      `SELECT ${APPLY_TARGET_COLUMNS} FROM bulk_targets WHERE run_id = ? AND seq = ?`,
+    ).get(runId, seq) as ApplyTargetRow | undefined;
     return r ? this.toApplyTarget(r) : null;
   }
 
-  private toApplyTarget(r: { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }): ApplyTarget {
+  private toApplyTarget(r: ApplyTargetRow): ApplyTarget {
     if (r.change !== 'update' && r.change !== 'create' && r.change !== 'delete') throw new Error('not a writing target');
     const expected = r.before === null ? { absent: true as const } : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
     const after: BeforeImage = r.change === 'delete' || r.after_planned === null
       ? { absent: true }
       : { absent: false, value: JSON.parse(this.engineDb.dec(r.after_planned)) as unknown };
-    return { seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, expected, after, sourceSeq: r.source_seq };
+    return {
+      seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, expected, after, sourceSeq: r.source_seq,
+      beforeGrants: grantsOfCell(r.before_grants),
+      // NULL is the run's stamp: an undo, the only run that sets the column, plans with none.
+      writeGrants: r.write_grants === null ? undefined : grantsOfCell(r.write_grants),
+    };
   }
 
   /**
@@ -4041,10 +4122,10 @@ export class BulkLedger {
    *  back would overwrite whoever did. */
   listAppliedDesc(runId: string): ApplyTarget[] {
     const rows = this.engineDb.getDb().prepare(
-      `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
+      `SELECT ${APPLY_TARGET_COLUMNS} FROM bulk_targets
        WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 AND undone_at IS NULL AND ${WRITING_SQL}
        ORDER BY seq DESC`,
-    ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
+    ).all(runId) as ApplyTargetRow[];
     return rows.map((r) => this.toApplyTarget(r));
   }
 
@@ -4055,10 +4136,10 @@ export class BulkLedger {
    *  {@link listAppliedDesc}. */
   listSentUnrecordedDesc(runId: string): ApplyTarget[] {
     const rows = this.engineDb.getDb().prepare(
-      `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
+      `SELECT ${APPLY_TARGET_COLUMNS} FROM bulk_targets
        WHERE run_id = ? AND write_sent = 1 AND applied_at IS NULL AND undone_at IS NULL AND ${WRITING_SQL}
        ORDER BY seq DESC`,
-    ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
+    ).all(runId) as ApplyTargetRow[];
     return rows.map((r) => this.toApplyTarget(r));
   }
 

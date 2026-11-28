@@ -9,9 +9,11 @@ import { MandateEnds } from './mandate-ends.js';
 import { TriggerStore } from './trigger-store.js';
 import { ADVANCE_WARNING_S, PAUSE_NOTICE_BODY_MAX, PAUSE_NOTICE_TITLE_MAX, advanceWarning, claimAdvanceWarnings, deliveredWarning, markWarningsDelivered, pauseNotice, pausePlanNow, type PausedFor } from './plan-pause.js';
 import {
-  claimPauseNotices, pauseEndedPlans, pausedDoneReaderOf, pausedDoneWorkflow, pausedForOf, planEndedMembers, rowPlanMembers, setPlanPauseForTests,
+  claimPauseNotices, pauseEndedPlans, pausedDoneModelText, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedForOf, planEndedMembers, rowPlanMembers, setPlanPauseForTests,
   writePause, PLAN_PAUSE_DEFAULT, type PausePlanRow,
 } from './plan-pause.js';
+import { foreignWorkflowScheduleRefusalKind } from './plan-stamp.js';
+import type { RequestPrincipal } from './request-principal.js';
 
 /**
  * The plan pause (`plan-pause.ts`) on a real engine.db: the store's terms, the sweep, the login
@@ -1011,7 +1013,7 @@ describe('the advance warning\'s claiming transaction', () => {
 describe('the migration', () => {
   it('v57 adds the four pause columns, NULL on every existing row', () => {
     const b = box();
-    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(80);
+    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(81);
     const cols = (b.db.prepare('PRAGMA table_info(triggers)').all() as Array<{ name: string; dflt_value: unknown }>)
       .filter((c) => c.name.startsWith('pause'));
     // `paused_db_at` is v60's (the takeover's clock), not v57's.
@@ -1211,5 +1213,94 @@ describe('whether a completed, paused plan needs its workflow taken over first (
     expect(pausedDoneWorkflow(t, { ...base, isLive: () => { throw new Error('locked'); } })).toEqual({ kind: 'unknown' });
     // The name is read after the decision: a definition read that fails keeps the case.
     expect(pausedDoneWorkflow(t, { ...base, getWorkflowExact: () => { throw new Error('locked'); } })).toEqual({ kind: 'workflow', workflowId: 'wf', name: null });
+  });
+});
+
+describe('a completed, paused plan as a person with access reads it, whose new plan on its workflow would be refused (U-489)', () => {
+  const NOW_S = Math.floor(Date.now() / 1000);
+  const live = (b: Box, email: string): void => login(b, email, NOW_S + H, NOW_S - H);
+  const ended = (b: Box, email: string): void => login(b, email, NOW_S - H, NOW_S - 2 * H);
+  const named = (b: Box, id: string, by?: { email: string; grant: string | null }): string => {
+    workflow(b, id, by);
+    b.db.prepare('UPDATE workflows SET definition_json = ? WHERE id = ?').run(JSON.stringify({ id, name: 'Monatsbericht', steps: [] }), id);
+    return id;
+  };
+  const donePlan = (b: Box, id: string, wf: string): ReturnType<RunHistory['getTrigger']> => {
+    plan(b, id, { effect: 'run_workflow', workflow: wf });
+    writePause(b.db, id, [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: NOW_S - H, roles: ['created'], closedPrompt: false }]);
+    b.db.prepare("UPDATE triggers SET status = 'completed' WHERE id = ?").run(id);
+    return b.history.getTrigger(id);
+  };
+  const ANNA = { kind: 'mandate', email: 'anna@x.ch', mandateId: 'g-anna@x.ch' } as RequestPrincipal;
+  // The reader as the routes and the tool build it for a person with access: the rule `task_create` refuses by.
+  const asAnna = (b: Box): ReturnType<typeof pausedDoneReaderOf> =>
+    pausedDoneReaderOf(b.history, b.ends, (id) => foreignWorkflowScheduleRefusalKind(ANNA, id, b.history));
+
+  it('a workflow another live person set up is `foreign` to her, named; the owner reads none there', () => {
+    const b = box();
+    live(b, 'anna@x.ch');
+    live(b, 'otto@x.ch');
+    named(b, 'wf-o', { email: 'otto@x.ch', grant: 'g-otto@x.ch' });
+    const t = donePlan(b, 'p', 'wf-o')!;
+    expect(pausedDoneWorkflow(t, asAnna(b))).toEqual({ kind: 'foreign', workflowId: 'wf-o', name: 'Monatsbericht' });
+    // CONTROL: the owner may plan on it, so the owner reads none.
+    expect(pausedDoneWorkflow(t, pausedDoneReaderOf(b.history, b.ends))).toEqual({ kind: 'none' });
+  });
+
+  it('on her own workflow or the owner\'s she reads none: a new plan is her way', () => {
+    const b = box();
+    live(b, 'anna@x.ch');
+    named(b, 'wf-a', { email: 'anna@x.ch', grant: 'g-anna@x.ch' });
+    named(b, 'wf-own');
+    expect(pausedDoneWorkflow(donePlan(b, 'own-a', 'wf-a')!, asAnna(b))).toEqual({ kind: 'none' });
+    expect(pausedDoneWorkflow(donePlan(b, 'own-o', 'wf-own')!, asAnna(b))).toEqual({ kind: 'none' });
+  });
+
+  it('an ended mark keeps its case for her: the owner takes the workflow over first', () => {
+    const b = box();
+    live(b, 'anna@x.ch');
+    ended(b, 'h@x.ch');
+    named(b, 'wf-h', { email: 'h@x.ch', grant: 'g-h@x.ch' });
+    expect(pausedDoneWorkflow(donePlan(b, 'p', 'wf-h')!, asAnna(b))).toEqual({ kind: 'workflow', workflowId: 'wf-h', name: 'Monatsbericht' });
+  });
+
+  it('marks that cannot be read are `unreadable` to her, where the owner reads unknown', () => {
+    const b = box();
+    live(b, 'anna@x.ch');
+    live(b, 'otto@x.ch');
+    named(b, 'wf-o', { email: 'otto@x.ch', grant: 'g-otto@x.ch' });
+    const t = donePlan(b, 'p', 'wf-o')!;
+    // The store answers no marks: the reader and the rule `task_create` refuses by both read it.
+    const spy = vi.spyOn(b.history, 'getWorkflowAuthorship').mockReturnValue(undefined);
+    try {
+      expect(foreignWorkflowScheduleRefusalKind(ANNA, 'wf-o', b.history), 'the rule refuses her').toBe('unreadable');
+      expect(pausedDoneWorkflow(t, asAnna(b))).toEqual({ kind: 'unreadable', workflowId: 'wf-o', name: 'Monatsbericht' });
+      expect(pausedDoneWorkflow(t, pausedDoneReaderOf(b.history, b.ends)), 'control: the owner').toEqual({ kind: 'unknown' });
+    } finally {
+      spy.mockRestore();
+    }
+    // A rule that throws refuses, as `task_create` would not let it through.
+    expect(pausedDoneWorkflow(t, { ...asAnna(b)!, scheduleRefusal: () => { throw new Error('locked'); } })).toEqual({ kind: 'unreadable', workflowId: 'wf-o', name: 'Monatsbericht' });
+  });
+
+  it('a store of access ends that cannot be read leaves her case unknown, not foreign: an ended mark would need the takeover first', () => {
+    const b = box();
+    live(b, 'anna@x.ch');
+    ended(b, 'h@x.ch');
+    named(b, 'wf-h', { email: 'h@x.ch', grant: 'g-h@x.ch' });
+    const t = donePlan(b, 'p', 'wf-h')!;
+    expect(pausedDoneWorkflow(t, asAnna(b))!.kind, 'control: readable, the takeover first').toBe('workflow');
+    expect(pausedDoneWorkflow(t, { ...asAnna(b)!, isLive: () => { throw new Error('locked'); } })).toEqual({ kind: 'unknown' });
+  });
+
+  it('the model and task_update read her way word for word, never with the workflow\'s name', () => {
+    const foreign = { kind: 'foreign', workflowId: 'wf', name: 'Monatsbericht' } as const;
+    const unreadable = { kind: 'unreadable', workflowId: 'wf', name: 'Monatsbericht' } as const;
+    expect(pausedDoneModelText(foreign)).toBe("completed, and paused because the helper's access ended. It cannot be taken over or run again. Its workflow was set up or last changed by another person with delegated access, so a new plan on it cannot be scheduled for this user; if it should run again, tell them to ask the owner to set up a new plan, or offer to write a new workflow of their own for this task.");
+    expect(pausedDoneUpdateRefusal(foreign)).toBe("Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again. Its workflow was set up or last changed by another person with delegated access, so a new plan on it cannot be scheduled for this user; if it should run again, tell them to ask the owner to set up a new plan, or offer to write a new workflow of their own for this task.");
+    expect(pausedDoneModelText(unreadable)).toBe("completed, and paused because the helper's access ended. It cannot be taken over or run again. lynox could not read who set up its workflow, so only the owner may schedule a new plan on it; if it should run again, tell them to ask the owner, or offer to write a new workflow of their own for this task.");
+    expect(pausedDoneUpdateRefusal(unreadable)).toBe("Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again. lynox could not read who set up its workflow, so only the owner may schedule a new plan on it; if it should run again, tell them to ask the owner, or offer to write a new workflow of their own for this task.");
+    // CONTROL: the case without a refusal keeps "offer to set up a new plan".
+    expect(pausedDoneModelText({ kind: 'none' })).toBe("completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan.");
   });
 });

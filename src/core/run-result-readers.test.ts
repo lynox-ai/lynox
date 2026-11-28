@@ -81,12 +81,12 @@ describe("a run's end with member lines, by reader", () => {
   });
 
   it('the migration splits only a halted result with its lines: the owner reads it as before, a mandate the sentence; other ends stay as before', () => {
-    // A database from before: the column and its version taken back out, a result with its lines under it.
+    // A database from before: the column and its version taken back out, and those after it, a result with its lines under it.
     const path = join(dir, 'old.db');
     new EngineDb(path, '').close();
     const raw = new Database(path);
     const legacy = `${REPLY}\n• ${LINE}\n• Another line.`;
-    raw.exec('ALTER TABLE triggers DROP COLUMN last_run_member_notes; DELETE FROM schema_version WHERE version >= 80;');
+    raw.exec('ALTER TABLE bulk_runs DROP COLUMN planner_grants; ALTER TABLE bulk_targets DROP COLUMN before_grants; ALTER TABLE bulk_targets DROP COLUMN write_grants; ALTER TABLE triggers DROP COLUMN last_run_member_notes; DELETE FROM schema_version WHERE version >= 80;');
     raw.prepare("INSERT INTO triggers (id, title, source, effect, last_run_result, last_run_status) VALUES ('old', 'Old', 'cron', 'run_agent', ?, 'halted')").run(legacy);
     const listed = 'Done:\n• first item\n• second item';
     const failedWithList = `Found:\n• one\n• ${LINE}`;

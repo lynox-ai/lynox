@@ -171,6 +171,26 @@ describe('a paused plan in the task tools', () => {
     expect(list).not.toContain('FX-wim');
   });
 
+  it('a person with access reads her own way at a completed paused plan on another live person\'s workflow, in task_list and task_update; the owner the new plan (U-489)', async () => {
+    const OTTO = { kind: 'mandate' as const, email: 'otto@example.invalid', mandateId: 'G-O' };
+    history.insertPlannedPipeline({ id: 'wf-o', name: 'FX-otto', goal: 'g', steps: [{ id: 's1', task: 't' }], reasoning: '', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', template: true }, OTTO);
+    // Otto's access is live: a record with an end ahead.
+    const nowS = Math.floor(Date.now() / 1000);
+    new MandateEnds(engine.getDb()).record({ ...OTTO, mandateExp: nowS + 3600 }, nowS - 60);
+    history.insertTrigger({ id: 'o1', title: 'Plan o1', source: 'cron', effect: 'run_workflow', pipelineId: 'wf-o', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z', confirmedAt: '2026-01-01T00:00:00.000Z' });
+    engine.getDb().prepare("UPDATE triggers SET paused_at = 1, status = 'completed' WHERE id = 'o1'").run();
+    const foreign = { kind: 'foreign', workflowId: 'wf-o', name: null } as const;
+    expect(await taskUpdateTool.handler({ task_id: 'o1', title: 'Renamed' }, agent(MANDATE))).toBe(pausedDoneUpdateRefusal(foreign));
+    const list = await taskListTool.handler({ status: 'paused' }, agent(MANDATE));
+    expect(list).toContain(pausedDoneModelText(foreign));
+    expect(list).not.toContain('FX-otto');
+    // CONTROL: the owner may plan on any workflow, so a new plan is the owner's way, in both.
+    expect(await taskUpdateTool.handler({ task_id: 'o1', title: 'Renamed' }, agent())).toBe(pausedDoneUpdateRefusal({ kind: 'none' }));
+    const ownerList = await taskListTool.handler({ status: 'paused' }, agent());
+    expect(ownerList).toContain(pausedDoneModelText({ kind: 'none' }));
+    expect(ownerList).not.toContain(pausedDoneModelText(foreign));
+  });
+
   it('with the switch off a paused_at is not read', async () => {
     restore();
     restore = setPlanPauseForTests(false);

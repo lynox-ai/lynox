@@ -793,11 +793,12 @@ export class PromptStore {
    * could no longer be answered; the run waiting on one is released now, and reads the reason,
    * instead of waiting for the TTL. Only this thread's questions, and only live waits
    * (`trigger_id IS NULL`): a parked question belongs to its trigger's wait, which ends on its
-   * own deadline.
+   * own deadline. `includeParked` closes a parked one too, for a delete that blanked its text:
+   * nobody should answer a question they can no longer read.
    */
-  withdrawForDeletedThread(sessionId: string): number {
+  withdrawForDeletedThread(sessionId: string, includeParked = false): number {
     const rows = this.db
-      .prepare(`SELECT id FROM pending_prompts WHERE session_id = ? AND status = 'pending' AND trigger_id IS NULL`)
+      .prepare(`SELECT id FROM pending_prompts WHERE session_id = ? AND status = 'pending'${includeParked ? '' : ' AND trigger_id IS NULL'}`)
       .all(sessionId) as { id: string }[];
     const close = this.db.prepare(
       `UPDATE pending_prompts SET status = 'expired', closed_reason = 'thread_deleted' WHERE id = ? AND status = 'pending'`,
@@ -994,18 +995,22 @@ export class PromptStore {
 
   /** Like waitForAnswer but distinguishes why the wait ended. */
   waitForSettled(promptId: string, signal?: AbortSignal): Promise<PromptOutcome> {
-    return new Promise<PromptOutcome>((resolve) => {
+    return new Promise<PromptOutcome>((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setInterval> | undefined;
       const eventName = `settled:${promptId}`;
 
-      const settle = (outcome: PromptOutcome): void => {
-        if (settled) return;
+      /** The wait ends: no listener, no abort listener, no timer stays behind. */
+      const stop = (): boolean => {
+        if (settled) return false;
         settled = true;
         this.emitter.off(eventName, onSettled);
         signal?.removeEventListener('abort', onAbort);
         if (timer) clearInterval(timer);
-        resolve(outcome);
+        return true;
+      };
+      const settle = (outcome: PromptOutcome): void => {
+        if (stop()) resolve(outcome);
       };
 
       const evaluate = (): void => {
@@ -1032,8 +1037,14 @@ export class PromptStore {
       }
       timer = setInterval(evaluate, EXPIRY_CHECK_MS);
 
-      // Fast path: prompt already settled.
-      evaluate();
+      // Fast path: prompt already settled. A first read that fails ends the wait as refused,
+      // and like any end it leaves nothing behind: otherwise the timer would keep reading, in a
+      // callback whose failure nobody catches.
+      try {
+        evaluate();
+      } catch (err) {
+        if (stop()) reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 
