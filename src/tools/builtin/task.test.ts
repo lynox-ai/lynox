@@ -2320,5 +2320,6 @@ describe('the worker notices that are functions, for the results lynox shows as 
       }
     }
     expect(FIXED_NOTICE_SENTENCES.memberEndForMandates?.(WORKER_NOTICES.en)).toHaveLength(MEMBER_ENDS.length);
+    expect(new Set(FIXED_NOTICE_SENTENCES.resumedRunNotContained?.(WORKER_NOTICES.de))).toEqual(new Set([WORKER_NOTICES.de.resumedRunNotContained(true), WORKER_NOTICES.de.resumedRunNotContained(false)]));
   });
 });

@@ -253,21 +253,14 @@ otherRun?: string | undefined): string {
 }
 
 /**
- * The results lynox itself stores on a plan's run: its own sentences, shown as they are. Only
- * fixed sentences, matched whole: every fixed notice of the worker in every language (it records
- * them in the instance's language, and one of another language is lynox's own just the same),
- * and the fixed English results. A notice that puts in a name, an id or any other value is not
- * here, so a result built from one stays in the block. Built on first use, after the modules it
- * reads have loaded.
- */
-/**
  * The worker's notices that are functions. Each is either listed with every sentence it can
- * return, all fixed (an end out of a closed set, never a value from a run), or named as one that
+ * return, all fixed (out of a closed set, never a value from a run), or named as one that
  * puts in a value and so stays out of the results lynox shows freely. A new notice that is a
  * function must be put in one of the two; a test fails until it is.
  */
 export const FIXED_NOTICE_SENTENCES: { readonly [K in keyof WorkerNotices]?: (notices: WorkerNotices) => readonly string[] } = {
   memberEndForMandates: (notices) => MEMBER_ENDS.map((end) => notices.memberEndForMandates(end)),
+  resumedRunNotContained: (notices) => [true, false].map((provisioned) => notices.resumedRunNotContained(provisioned)),
 };
 export const VALUE_NOTICES: ReadonlySet<keyof WorkerNotices> = new Set<keyof WorkerNotices>([
   'consentManyTitle', 'consentOneBody', 'failed', 'workflowRefUnresolved',
@@ -277,10 +270,18 @@ export const VALUE_NOTICES: ReadonlySet<keyof WorkerNotices> = new Set<keyof Wor
   'stepReportedUnnamed', 'stepFailedUnnamed', 'stepDeclinedUnnamed', 'stepFailed',
   'stepFailedItem', 'stepDeclined', 'stepDeclinedItem', 'workflowRef', 'workflowReply',
   'workflowCompleted', 'workflowGone', 'eventReason', 'eventsNotRun', 'unknownEffect',
-  'resumedRunNotContained', 'watchChanged', 'watchFetchFailed', 'watchFetchReason',
+  'watchChanged', 'watchFetchFailed', 'watchFetchReason',
   'watchPolicyRefused',
 ]);
 
+/**
+ * The results lynox itself stores on a plan's run: its own sentences, shown as they are. Only
+ * fixed sentences, matched whole: every fixed notice of the worker in every language (it records
+ * them in the instance's language, and one of another language is lynox's own just the same),
+ * and the fixed English results. A notice that puts in a name, an id or any other value is not
+ * here, so a result built from one stays in the block. Built on first use, after the modules it
+ * reads have loaded.
+ */
 let engineResults: ReadonlySet<string> | undefined;
 export function engineRunResults(): ReadonlySet<string> {
   engineResults ??= new Set([
