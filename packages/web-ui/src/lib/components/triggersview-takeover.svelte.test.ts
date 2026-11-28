@@ -868,6 +868,7 @@ describe('a completed plan says so, and a completed paused one its workflow case
 	it('CONTROL: the owner reads "create a new one" where the engine marks a refusal, which is never the owner\'s', async () => {
 		rows = [{ ...DONE_WF, paused_done_workflow: { name: 'FX-monat', refused: 'foreign' } }];
 		await render();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('none');
 		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.');
 	});
 });
