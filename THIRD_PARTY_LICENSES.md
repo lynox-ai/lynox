@@ -22,7 +22,6 @@ The following dependencies are licensed under the MIT License.
 - **uqr** - Copyright Anthony Fu (QR rendering in `MobileAccess.svelte`)
 - **better-sqlite3** - Copyright Joshua Wise
 - **zod** - Copyright Colin McDonnell
-- **html2canvas** - Copyright Niklas von Hertzen
 - **marked** - Copyright Christopher Jeffrey
 - **mermaid** - Copyright Knut Sveidqvist
 - **shiki** - Copyright Pine Wu

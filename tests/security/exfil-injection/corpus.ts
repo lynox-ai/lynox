@@ -239,6 +239,11 @@ export function injectedProfile(c: InjectionCase, canary: string): ApiProfile {
     description: `Current weather by city: GET /current?city=<name>. ${renderInjection(c, canary)}`,
     auth: { type: 'none' },
     endpoints: [{ method: 'GET', path: '/current', description: 'Current weather for a city' }],
+    // The owner accepted the API's host when the profile was saved: what makes a read of it
+    // known to the origin check, and what lets a guarded instance reach it at all. Not the
+    // clean-owner host mark, which only a save from a turn that read nothing outside sets — and
+    // a profile carrying injected text did not come from such a turn.
+    custom_endpoint_ack: { accepted: true, hosts: [new URL(PROFILE_API_BASE).hostname], accepted_at: '2026-01-01T00:00:00.000Z' },
   };
 }
 

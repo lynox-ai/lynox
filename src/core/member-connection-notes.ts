@@ -60,8 +60,27 @@ export function withMemberNotes<S extends string>(result: string, status: S, not
 }
 
 /** Whether the last run already halted on these same lines, so the owner was told once already. */
-export function memberNotesRepeat(last: { last_run_status?: string | null | undefined; last_run_result?: string | null | undefined }, notes: readonly string[]): boolean {
-  return notes.length > 0 && last.last_run_status === 'halted' && notes.every((l) => last.last_run_result?.includes(l) === true);
+export function memberNotesRepeat(last: { last_run_status?: string | null | undefined; last_run_member_notes?: readonly string[] | undefined }, notes: readonly string[]): boolean {
+  return notes.length > 0 && last.last_run_status === 'halted' && notes.every((l) => last.last_run_member_notes?.includes(l) === true);
+}
+
+/**
+ * A run's end as `reader` reads it. The lines are stored apart from the result
+ * (`last_run_member_notes`): the owner reads the result with its lines under it, as the run ended.
+ * Anyone else reads, for an end with lines, `forMandates` in place of the result: the lines name
+ * another member, their provider and profile, and the result is the model's reply, which the
+ * refusal it read tells to say the same (`memberRefusalText`). An end without lines is the result.
+ */
+export function lastRunResultFor(
+  row: { last_run_result?: string | null | undefined; last_run_member_notes?: readonly string[] | undefined },
+  owner: boolean,
+  forMandates: string,
+): string | undefined {
+  const notes = row.last_run_member_notes ?? [];
+  const result = row.last_run_result ?? undefined;
+  if (notes.length === 0) return result;
+  if (!owner) return forMandates;
+  return withMemberNotes(result ?? '', 'other', notes).result;
 }
 
 /** Whether a run in progress collects the lines itself, so a report that also picks them up
@@ -109,11 +128,27 @@ export function refuseMemberConnection(
   ends: Pick<MandateEnds, 'isLive'> | null,
   mode: 'read' | 'write' = 'read',
 ): string | null {
+  const text = noteMemberRefusal(profile, reader, ends, mode);
+  return text === null ? null : `${MEMBER_CONNECTION_PREFIX} ${text}`;
+}
+
+/**
+ * The refusal's own words ({@link memberRefusalText}) for a refusal that is said in a sentence of
+ * its own, not as a request's (a save that was not made), noted for the run as the request's is,
+ * or null when nothing is refused. The note is the same prefixed line a request's refusal records,
+ * with the same owner's wording.
+ */
+export function noteMemberRefusal(
+  profile: ApiProfile,
+  reader: RequestPrincipal,
+  ends: Pick<MandateEnds, 'isLive'> | null,
+  mode: 'read' | 'write' = 'read',
+): string | null {
   const refusal = memberRefusalCase(profile, reader, ends, mode);
   if (refusal === null) return null;
-  const line = `${MEMBER_CONNECTION_PREFIX} ${memberRefusalText(refusal)}`;
-  noteMemberConnection(line, (plan) => memberRefusalOwnerNote(refusal, plan));
-  return line;
+  const text = memberRefusalText(refusal);
+  noteMemberConnection(`${MEMBER_CONNECTION_PREFIX} ${text}`, (plan) => memberRefusalOwnerNote(refusal, plan));
+  return text;
 }
 
 /**

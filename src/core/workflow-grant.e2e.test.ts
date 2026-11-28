@@ -323,6 +323,32 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     expect(tm.getTrigger(trigger.id)?.enabled).toBeTruthy();
   });
 
+  // The grant's checksum does not cover the limits or the failure strategy; the owner's stamp does
+  // (`workflowStampDigest`), and every run asks the stamp first. A change to either after the
+  // acceptance, without a new stamp, holds the run like a change to the steps.
+  it.each([
+    ['the spending limit', "json_set(definition_json, '$.limits.maxSpendUsd', 500)"],
+    ['the failure strategy', "json_set(definition_json, '$.on_failure', 'continue')"],
+  ])('%s changed after the acceptance without a new stamp: the run does not start, and the reason names the stamp', async (_what, change) => {
+    const planned = saveWorkflow();
+    const trigger = accept(planned);
+    engineDb.getDb().prepare(`UPDATE workflows SET definition_json = ${change} WHERE id = ?`).run(planned.id);
+    forgetPipeline(planned.id);
+    mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
+    await fire(trigger);
+    expect(posts()).toEqual([]);
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(lastRun(trigger.id)).toMatch(/waits for its owner to review its steps/);
+  });
+
+  it('CONTROL: the same granted workflow, unchanged, runs and its POST reaches the host', async () => {
+    const trigger = accept(saveWorkflow());
+    mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
+    await fire(trigger);
+    expect(posts().map((p) => p.url)).toEqual([TARGET]);
+    expect(lastRun(trigger.id)).toContain('Workflow completed');
+  });
+
   it('a schedule the model adds with task_create runs without the grant, even with the same values', async () => {
     const planned = saveWorkflow();
     accept(planned);

@@ -14,7 +14,7 @@ if { exec 3<&0; } 2>/dev/null; then exec 3<&-; else
   echo "corpus-structure-guard-commits: stdin is closed, so what this push transfers is unknown." >&2; exit 2
 fi
 cd "$(git rev-parse --show-toplevel)" || exit 2
-ranges=$(bash .lefthook/pre-push/pushed-ranges.sh corpus-structure-guard-commits) || exit $?
+ranges=$(bash .lefthook/pre-push/pushed-ranges.sh corpus-structure-guard-commits "${1-}") || exit $?
 while read -r base tip; do
   [ -n "$base" ] || continue  # no line at all: the push only deletes refs
   node scripts/corpus-structure-guard.mjs "$base" "$tip" --allow-empty || exit $?
