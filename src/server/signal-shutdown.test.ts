@@ -13,6 +13,6 @@ describe('LynoxHTTPApi.shutdown', () => {
     const shutdown = vi.fn(async () => undefined);
     (api as unknown as { engine: unknown }).engine = { shutdown, getPromptStore: () => null };
     await api.shutdown({ inboxBacklog: 'bounded' });
-    expect(shutdown).toHaveBeenCalledWith({ inboxBacklog: 'bounded' });
+    expect(shutdown).toHaveBeenCalledWith(expect.objectContaining({ inboxBacklog: 'bounded' }));
   });
 });

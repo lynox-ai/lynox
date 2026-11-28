@@ -39,7 +39,7 @@ beforeEach(() => {
     accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'requires_user', confidence: 0.9,
     reasonDe: 'Offertanfrage', classifiedAt: new Date('2026-11-23T08:00:00Z'), classifierVersion: 'v1',
     messageId: '<first@x>', subject: 'Offerte', fromAddress: 'kunde@example.com', fromName: 'Kundin',
-  });
+  }).id;
   inbox.insertThreadMessage({
     accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com',
     subject: 'Offerte', direction: 'inbound', inboxItemId: id,

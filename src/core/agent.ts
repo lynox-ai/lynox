@@ -4637,6 +4637,9 @@ export class Agent implements IAgent {
       const profile = this.toolContext.apiStore?.getByHostname(host);
       const type = profile?.auth?.type;
       if (profile === undefined || (type !== 'bearer' && type !== 'header' && type !== 'oauth2')) return '';
+      // A member's own oauth2 connection is no way out for this reader: the attach refuses it with its
+      // own text. Only oauth2: the attach refuses no member's connection for a bearer or header profile.
+      if (type === 'oauth2' && memberRefusalCase(profile, this.principal, this.toolContext.mandateEnds ?? null) !== null) return '';
       // A missing name that IS the profile's own credential is missing for the attach too: then
       // collecting it (or minting it) is the way out, and this note would say the opposite.
       // Only the names the attach READS for this profile: `collectVaultKeys` is wider (it keeps the
@@ -4796,12 +4799,14 @@ export class Agent implements IAgent {
           // Only an oauth2 holder: its access token is the one its own request gets. Any other profile
           // can hold a recorded name too, and its derived name is free, which `slotMayReach` allows
           // anywhere. `slotMayReach` is false for a held-back owner too (`profile-secret-view.ts`).
+          // A member's own connection is no way out either: sending there again meets the member refusal.
           holder = only !== undefined && only.auth?.type === 'oauth2'
+            && memberRefusalCase(only, this.principal, this.toolContext.mandateEnds ?? null) === null
             && slotMayReach(apiStore!, accessTokenKey(only.id), 'request', only.base_url, undefined, bindCtx)
             ? String(only.id) : undefined;
         } catch { holder = undefined; }
         const wayOut = holder !== undefined
-          ? `Send the request to profile "${holder}"'s base_url again without that reference and without an Authorization header of your own: the engine attaches the profile's token and renews it when it can, so no token request is needed either.`
+          ? `Send the request to profile "${holder}"'s base_url again without ${offGrant.length === 1 ? 'that reference' : 'those references'} and without an Authorization header of your own: the engine attaches the profile's token and renews it when it can, so no token request is needed either.`
           : 'Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.';
         return refused(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. ${wayOut}`, offGrant);
       }

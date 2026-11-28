@@ -184,10 +184,11 @@ const BULK_EFFECTS: ReadonlySet<string> = new Set(Object.keys(BULK_EFFECT_KEYS))
  * which is why the lease is long. A lease that lapses under a live run is reported as
  * interrupted by whichever process finds it, and the run is not started a second time —
  * except for an effect that resumes after loss ({@link RESUMES_AFTER_LOSS}), which another
- * process then runs beside the live one. A bulk run's per-target claim keeps the two apart
- * only while that claim is younger than `BULK_CLAIM_STALE_MS` (30 s): a run stalled long
- * enough to lose its lease has stale target claims too, so a target it is still writing can
- * be written a second time.
+ * process then runs beside the live one. A bulk run's per-target claim keeps the two apart:
+ * a run stalled long enough to lose its lease has stale target claims too, and the other
+ * process may take its targets over. Once the stalled run runs again it sends no further write
+ * to a target taken from it and records nothing on it (`BulkLedger.renewClaim`); a send it had
+ * already started when it stalled can still land, and between targets it goes on as before.
  */
 const LEASE_HEARTBEAT_MS = 30_000;
 const LEASE_TTL_MS = 15 * 60_000;
@@ -4069,9 +4070,11 @@ export class WorkerLoop {
     // push per order would be noise, and its success is in the run history, where the
     // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
-    // Not again for a halt on the same lines as the run before (also one that finished with them);
-    // an end that failed or was interrupted is told even then.
-    if (this.notificationRouter.hasChannels() && !(told.status === 'halted' && memberNotesRepeat(task, notes))) {
+    // Not again for a run that finished on the same lines as the run before: the refusal is all
+    // that run has to say, and the owner was told it once. Any other end is told even then: a
+    // real halt has a reason of its own, which the lines only come along with, so the same lines
+    // do not make it the same halt; a failed or interrupted end did not finish.
+    if (this.notificationRouter.hasChannels() && !(finishedWithNote && memberNotesRepeat(task, notes))) {
       const shownEnd: BulkPushEnd = finishedWithNote ? 'noted'
         : told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
