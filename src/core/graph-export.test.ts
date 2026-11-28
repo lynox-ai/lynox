@@ -304,6 +304,26 @@ describe('readMemoryTextsForExport', () => {
     const rows = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask })['agent-memory.db'].untrusted_lines;
     expect(rows.map((r) => [r['namespace'], r['key']])).toEqual([['knowledge', 'k-1'], ['knowledge', 'k-2']]);
     expect(rows.every((r) => typeof r['created_at'] === 'string'), 'each with its time').toBe(true);
+    expect(Object.keys(rows[0] ?? {}).sort(), 'a fingerprint, no text').toEqual(['created_at', 'key', 'namespace']);
+  });
+
+  it('reads a file from before that table, not yet migrated, as complete: it holds no marked lines', () => {
+    new AgentMemoryDb(file).close();
+    const raw = new Database(file);
+    raw.exec('DROP TABLE untrusted_lines');
+    raw.prepare('DELETE FROM schema_version WHERE version = 9').run();
+    raw.close();
+    const read = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(read['agent-memory.db'].untrusted_lines).toEqual([]);
+    expect(read.mayBeIncomplete).toBe(false);
+  });
+
+  it('a current file without that table is read as incomplete', () => {
+    new AgentMemoryDb(file).close();
+    const raw = new Database(file);
+    raw.exec('DROP TABLE untrusted_lines');
+    raw.close();
+    expect(readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask }).mayBeIncomplete).toBe(true);
   });
 
   it('with the subject graph on, carries the agent-memory.db entities and relations, masked, and with it off leaves them to the graph block', () => {
