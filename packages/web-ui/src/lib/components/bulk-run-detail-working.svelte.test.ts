@@ -280,10 +280,10 @@ describe('a run the engine works on', () => {
 	it('takes the cost and a pause with each ask while the run works', async () => {
 		run = makeRun({ total: 4, costUsd: 0.1, costCapUsd: 1, judge: { tier: 'standard', unjudged: 3, judged: 1 } });
 		await render();
-		expect(shown()).toContain('0.10 USD / 1.00 USD');
+		expect(shown()).toContain('0.10\u00a0USD / 1.00\u00a0USD');
 		run = { ...run, costUsd: 0.4, judge: { tier: 'standard', unjudged: 2, judged: 2 } };
 		await pass(BULK_FOLLOW_MS);
-		expect(shown()).toContain('0.40 USD / 1.00 USD');
+		expect(shown()).toContain('0.40\u00a0USD / 1.00\u00a0USD');
 		run = { ...run, resumesAt: '2026-11-14T12:00:00.000Z' };
 		await pass(BULK_FOLLOW_MS);
 		expect(line()).toBeNull();

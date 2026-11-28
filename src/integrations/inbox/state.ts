@@ -68,8 +68,8 @@ export interface InboxItemInput {
   /** The rule that filed the item (v20). */
   matchedRuleId?: string | undefined;
   /**
-   * The prefilter rule the mail met, if any (v25). Written, never shown: it
-   * lets the classifier's spend be counted per rule.
+   * The prefilter rule the mail met, if any (v25): it lets the classifier's spend be counted per
+   * rule, and the inbox tells a delivery failure notice's item by it.
    */
   prefilterRule?: PrefilterRule | undefined;
   /** The rule that named the item but was not applied (v24). Never set with `matchedRuleId`. */
@@ -277,6 +277,8 @@ interface ItemRow {
   rule_withheld_id: string | null;
   rule_withheld_name: string | null;
   rule_withheld_reason: string | null;
+  // v25 — null on items whose mail met no prefilter rule
+  prefilter_rule: string | null;
 }
 
 interface AuditRow {
@@ -368,6 +370,7 @@ function rowToItem(row: ItemRow): InboxItem {
     notifiedAt: row.notified_at !== null ? new Date(row.notified_at) : undefined,
     ...(row.matched_rule_id !== null && row.matched_rule_id !== undefined ? { matchedRuleId: row.matched_rule_id } : {}),
     ruleWithheld: rowToRuleWithheld(row),
+    ...(row.prefilter_rule !== null ? { prefilterRule: row.prefilter_rule as PrefilterRule } : {}),
   };
 }
 

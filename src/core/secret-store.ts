@@ -253,13 +253,16 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
  */
 const SECRET_PATTERNS: RegExp[] = SECRET_SHAPES.filter((s) => s.kind !== 'egress-wide').map((s) => s.pattern);
 
+/** Shortest text {@link matchesSecretPattern} reads with the generic long-token shape as well. */
+export const GENERIC_SHAPE_MIN_TEXT = 100;
+
 /**
  * Check if text likely contains a secret based on common key patterns.
  * Returns the first match or null.
  */
 export function matchesSecretPattern(text: string): string | null {
   // Skip the generic long-string pattern (last one) for short texts to reduce false positives
-  const patterns = text.length < 100 ? SECRET_PATTERNS.slice(0, -1) : SECRET_PATTERNS;
+  const patterns = text.length < GENERIC_SHAPE_MIN_TEXT ? SECRET_PATTERNS.slice(0, -1) : SECRET_PATTERNS;
   for (const pattern of patterns) {
     const match = pattern.exec(text);
     if (match) return match[0];

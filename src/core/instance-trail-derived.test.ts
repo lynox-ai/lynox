@@ -565,7 +565,7 @@ describe('K1: every memory:store publish goes through publishMemoryStore', () =>
     ]);
   });
 
-  it('the six publishers use the helper (positive control), and the scan sees a raw one (planted)', () => {
+  it('the seven publishers use the helper (positive control), and the scan sees a raw one (planted)', () => {
     const helperCalls = SOURCES.flatMap(sf => {
       const out: string[] = [];
       const visit = (n: ts.Node): void => {
@@ -575,7 +575,7 @@ describe('K1: every memory:store publish goes through publishMemoryStore', () =>
       visit(sf);
       return out;
     });
-    expect(helperCalls.sort()).toEqual(['core/memory.ts', 'core/memory.ts', 'tools/builtin/memory.ts', 'tools/builtin/memory.ts', 'tools/builtin/memory.ts', 'tools/builtin/memory.ts']);
+    expect(helperCalls.sort()).toEqual(['core/memory.ts', 'core/memory.ts', 'tools/builtin/memory.ts', 'tools/builtin/memory.ts', 'tools/builtin/memory.ts', 'tools/builtin/memory.ts', 'tools/builtin/memory.ts']);
     expect(rawPublishes(parse(join(SRC, 'planted.ts'), 'channels.memoryStore.publish({ namespace: "k" }); a.memoryStore.publish(x); channels.other.publish(y);'), 'memoryStore')).toHaveLength(2);
   });
 });

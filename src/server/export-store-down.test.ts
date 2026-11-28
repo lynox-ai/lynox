@@ -11,6 +11,7 @@ import { MEMORY_TEXTS_RELATIONSHIPS_NOTE } from '../core/graph-export.js';
 import { SecretStore } from '../core/secret-store.js';
 import { EngineDb } from '../core/engine-db.js';
 import { SubjectStore } from '../core/subject-store.js';
+import { RelationshipStore } from '../core/relationship-store.js';
 import { KnowledgeStore } from '../core/knowledge-store.js';
 import Database from 'better-sqlite3';
 import { AgentMemoryDb } from '../core/agent-memory-db.js';
@@ -44,7 +45,7 @@ type MemoryTexts = {
 
 /** The remembered-text half of a store that holds none. */
 const NO_MEMORY_TEXTS = {
-  'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [] },
+  'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [], untrusted_lines: [] },
   'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE, supersedes: [], subject_cooccurrences: [], subject_mints: [] },
 };
 
@@ -400,6 +401,85 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       h.engine().getUserConfig = getUserConfig;
       legacy.prepare("DELETE FROM relations WHERE id = 'lr-1'").run();
       legacy.prepare("DELETE FROM entities WHERE id IN ('le-a', 'le-b')").run();
+      legacy.close();
+    }
+  }, 60_000);
+
+  it('masks the graph block\'s entities and relations as it masks the remembered texts, a vault value written escaped in a JSON text included, with the layer, without it and from the subject graph', async () => {
+    const store = h.engine().getSecretStore() as SecretStore | null;
+    expect(store, 'fixture: the secret store opened').not.toBeNull();
+    const engineDb = h.engine().getEngineDb() as EngineDb | null;
+    expect(engineDb, 'fixture: engine.db opened').not.toBeNull();
+    // A quote and a backslash, so the value has a second form once written inside a JSON text.
+    const value = `q"${randomBytes(12).toString('hex')}\\z`;
+    const escaped = JSON.stringify(value).slice(1, -1);
+    expect(escaped, 'fixture: the escaped form differs').not.toBe(value);
+    store!.set('GRAPH_MASK_PROBE', value);
+    const legacy = new Database(join(h.dir(), 'agent-memory.db'));
+    const subjects = new SubjectStore(engineDb!);
+    const sa = subjects.createSubject({ kind: 'person', name: 'Trudy' });
+    const sb = subjects.createSubject({ kind: 'organization', name: 'Globex' });
+    const edge = new RelationshipStore(engineDb!).createRelationship({
+      fromSubjectId: sa, toSubjectId: sb, kind: `audits ${value}`, description: `edge ${value}`,
+      since: `from ${value}`, until: `to ${value}`, notes: `note ${value}`,
+    });
+    const getKnowledgeLayer = h.engine().getKnowledgeLayer;
+    const getUserConfig = h.engine().getUserConfig;
+    try {
+      legacy.prepare("INSERT INTO entities (id, canonical_name, entity_type, aliases, description, scope_type, scope_id, first_seen_at, last_seen_at) VALUES ('gm-a', ?, ?, ?, ?, 'global', 'global', '2026-01-01', '2026-01-01'), ('gm-b', 'Acme', 'organization', '[]', '', 'global', 'global', '2026-01-01', '2026-01-01'), ('gm-c', 'Eve', 'person', ?, '', 'global', 'global', '2026-01-01', '2026-01-01')")
+        .run(`Mallory ${value}`, `kind ${value}`, JSON.stringify([`alias ${value}`]), `pin ${value}`, JSON.stringify(`solo ${value}`));
+      legacy.prepare("INSERT INTO relations (id, from_entity_id, to_entity_id, relation_type, description, created_at) VALUES ('gm-r', 'gm-a', 'gm-b', ?, ?, '2026-01-01')")
+        .run(`owns ${value}`, `json {"pw":"${escaped}"}`);
+      legacy.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active, embedding, created_at, updated_at) VALUES ('gm-m', ?, 'knowledge', 'global', 'global', 0, x'00', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')")
+        .run(JSON.stringify({ pw: value }));
+
+      for (const path of ['layer', 'no layer', 'subject graph'] as const) {
+        if (path === 'layer') expect(h.engine().getKnowledgeLayer(), 'fixture: the knowledge graph opened').not.toBeNull();
+        else h.engine().getKnowledgeLayer = () => null;
+        if (path === 'subject graph') h.engine().getUserConfig = () => ({ ...getUserConfig.call(h.engine()), subject_graph_enabled: true });
+        const body = await h.exportBody();
+        const graph = body.knowledge_graph as unknown as {
+          entities: Array<{ id: string; canonicalName: string; entityType: string; aliases: string[]; description: string }>;
+          relationships: Array<{ fromEntityId: string; relationType: string; description: string }>;
+        };
+        if (path === 'subject graph') {
+          const relation = graph.relationships.find(r => r.fromEntityId === sa);
+          expect(relation, `${path}: the subjects' relation is listed`).toBeDefined();
+          expect(relation!.relationType, `${path}: its type, masked`).toMatch(/^audits \*\*\*/);
+          expect(relation!.description, `${path}: its description, masked`).toMatch(/^edge \*\*\*/);
+        } else {
+          const entity = graph.entities.find(e => e.id === 'gm-a');
+          expect(entity, `${path}: the entity is listed`).toBeDefined();
+          expect(entity!.canonicalName, `${path}: its name, masked`).toMatch(/^Mallory \*\*\*/);
+          expect(entity!.entityType, `${path}: its type, masked`).toMatch(/^kind \*\*\*/);
+          expect(entity!.aliases.join(' '), `${path}: its aliases, masked`).toMatch(/^alias \*\*\*/);
+          expect(entity!.description, `${path}: its description, masked`).toMatch(/^pin \*\*\*/);
+          const single = graph.entities.find(e => e.id === 'gm-c') as unknown as { aliases: unknown } | undefined;
+          expect(String(single?.aliases), `${path}: aliases an older row holds as one text, masked`).toMatch(/^solo \*\*\*/);
+          const relation = graph.relationships.find(r => r.fromEntityId === 'gm-a');
+          expect(relation, `${path}: the relation is listed`).toBeDefined();
+          expect(relation!.relationType, `${path}: its type, masked`).toMatch(/^owns \*\*\*/);
+          expect(relation!.description, `${path}: its description, the escaped form masked`).toMatch(/^json \{"pw":"\*\*\*/);
+        }
+        const memory = body.knowledge_graph.memories!['agent-memory.db']!.memories.find(m => m['id'] === 'gm-m');
+        expect(String(memory?.['text']), `${path}: the remembered JSON text, the escaped form masked`).toMatch(/^\{"pw":"\*\*\*/);
+        const row = body.knowledge_graph.memories!['engine.db']!.relationships.find(r => r['id'] === edge);
+        expect([row?.['kind'], row?.['description'], row?.['since'], row?.['until'], row?.['notes']].map(v => String(v).split(' ')[1]?.slice(0, 3)),
+          `${path}: engine.db's relation among the remembered texts, each free text masked`).toEqual(['***', '***', '***', '***', '***']);
+        const all = JSON.stringify(body.knowledge_graph);
+        for (const form of [value, escaped]) {
+          expect(all.includes(JSON.stringify(form).slice(1, -1)), `${path}: no form of the value is in the block`).toBe(false);
+        }
+      }
+    } finally {
+      h.engine().getKnowledgeLayer = getKnowledgeLayer;
+      h.engine().getUserConfig = getUserConfig;
+      store!.deleteSecret('GRAPH_MASK_PROBE');
+      engineDb!.getDb().prepare('DELETE FROM relationships WHERE id = ?').run(edge);
+      engineDb!.getDb().prepare('DELETE FROM subjects WHERE id IN (?, ?)').run(sa, sb);
+      legacy.prepare("DELETE FROM relations WHERE id = 'gm-r'").run();
+      legacy.prepare("DELETE FROM entities WHERE id IN ('gm-a', 'gm-b', 'gm-c')").run();
+      legacy.prepare("DELETE FROM memories WHERE id = 'gm-m'").run();
       legacy.close();
     }
   }, 60_000);

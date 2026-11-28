@@ -5,13 +5,15 @@ import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
 import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
-import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
-import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, isPaused, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
+import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag, setUpByOther, shownMandate } from '../../core/request-principal.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, isPaused, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
 import { foreignWorkflowScheduleRefusalKind } from '../../core/plan-stamp.js';
 import { lastRunResultFor } from '../../core/member-connection-notes.js';
 import { noticeLanguage } from '../../core/notice-language.js';
-import { WORKER_NOTICES } from '../../core/worker-notices.js';
+import { MANDATE_ENDED_RESULT, MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WAIT_EXPIRED_RESULT, WATCH_READ_UNRECORDED_RESULT, WATCH_URL_MISSING_RESULT, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, MEMBER_ENDS, memberEndOfStatus, type WorkerNotices } from '../../core/worker-notices.js';
 import { withoutForeignMarks } from '../../core/foreign-marks.js';
+import { otherRunTextBlock, setUpByPhrase } from '../../core/other-run-text.js';
+import { planMakerOf } from './diagnose-workflow.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type BeforeTriggerWrite } from '../../core/task-manager.js';
@@ -126,7 +128,11 @@ export function triggerDetailLine(t: {
 },
 // Reads the workflow of a completed plan that keeps its pause, to say whether its takeover comes
 // first (`pausedDoneWorkflow`). Without it the sentence names the condition instead.
-reader?: PausedDoneWorkflowReader | null): string {
+reader?: PausedDoneWorkflowReader | null,
+// Set when someone else set up or changed the plan (`otherRunOf`): it names that run, and the
+// stored result is shown in a fenced block under the line instead of in it.
+otherRun?: string | undefined): string {
+  let fenced: string | undefined;
   const parts: string[] = [];
   // A paused plan says so first; it has no next run while it is paused (`plan-pause.ts`).
   const paused = isPaused(t);
@@ -174,7 +180,10 @@ reader?: PausedDoneWorkflowReader | null): string {
       : t.last_run_result;
     const raw = clean(stored ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
     const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
-    parts.push(`last run ${ENDED_LABEL.get(t.last_run_status ?? '') ?? 'FAILED'}${when}: ${reason}`);
+    // Someone else's plan: its run's text is that person's or from outside. It goes into the fenced
+    // block, so it does not read as a fact of this listing; a sentence lynox itself stores stays here.
+    if (otherRun !== undefined && raw.length > 0 && !engineRunResults().has(stored ?? '')) fenced = reason;
+    parts.push(`last run ${ENDED_LABEL.get(t.last_run_status ?? '') ?? 'FAILED'}${when}: ${fenced !== undefined ? 'its text is in the block below' : reason}`);
     // …and whether that failure was the last word. `last run FAILED` alone does
     // not say: a cron row keeps its next run through a failure and tries again, a
     // one-shot loses it (`task-manager.ts` nulls the column) and does not. That is
@@ -239,7 +248,69 @@ reader?: PausedDoneWorkflowReader | null): string {
   // broken one and something about the healthy ones.
   else if (t.effect === 'run_workflow') parts.push('NO WORKFLOW LINKED — it dispatches to one and has none');
   if (t.pipeline_params) parts.push(`params ${cut(clean(t.pipeline_params), PARAMS_CHARS)}`);
-  return parts.length === 0 ? '' : `\n    ↳ ${parts.join(FIELD_SEPARATOR)}`;
+  if (parts.length === 0) return '';
+  return `\n    ↳ ${parts.join(FIELD_SEPARATOR)}${fenced !== undefined && otherRun !== undefined ? `\n${otherRunTextBlock(otherRun, fenced)}` : ''}`;
+}
+
+/**
+ * The worker's notices that are functions. Each is either listed with every sentence it can
+ * return, all fixed (out of a closed set, never a value from a run), or named as one that
+ * puts in a value and so stays out of the results lynox shows freely. A new notice that is a
+ * function must be put in one of the two; a test fails until it is.
+ */
+export const FIXED_NOTICE_SENTENCES: { readonly [K in keyof WorkerNotices]?: (notices: WorkerNotices) => readonly string[] } = {
+  memberEndForMandates: (notices) => MEMBER_ENDS.map((end) => notices.memberEndForMandates(end)),
+  resumedRunNotContained: (notices) => [true, false].map((provisioned) => notices.resumedRunNotContained(provisioned)),
+};
+export const VALUE_NOTICES: ReadonlySet<keyof WorkerNotices> = new Set<keyof WorkerNotices>([
+  'consentManyTitle', 'consentOneBody', 'failed', 'workflowRefUnresolved',
+  'workflowStepIdReserved', 'stoppedWith', 'titleWithNote', 'workflowIncomplete',
+  'helperPlanFailedTitle', 'helperWorkflowIncomplete', 'helperWatchTitle', 'questionFrom',
+  'helperQuestionTitle', 'budgetCut', 'stepReported', 'stepReportedItem', 'unnamedStep',
+  'stepReportedUnnamed', 'stepFailedUnnamed', 'stepDeclinedUnnamed', 'stepFailed',
+  'stepFailedItem', 'stepDeclined', 'stepDeclinedItem', 'workflowRef', 'workflowReply',
+  'workflowCompleted', 'workflowGone', 'eventReason', 'eventsNotRun', 'unknownEffect',
+  'watchChanged', 'watchFetchFailed', 'watchFetchReason',
+  'watchPolicyRefused',
+]);
+
+/**
+ * The results lynox itself stores on a plan's run: its own sentences, shown as they are. Only
+ * fixed sentences, matched whole: every fixed notice of the worker in every language (it records
+ * them in the instance's language, and one of another language is lynox's own just the same),
+ * and the fixed English results. A notice that puts in a name, an id or any other value is not
+ * here, so a result built from one stays in the block. Built on first use, after the modules it
+ * reads have loaded.
+ */
+let engineResults: ReadonlySet<string> | undefined;
+export function engineRunResults(): ReadonlySet<string> {
+  engineResults ??= new Set([
+    ...Object.values(WORKER_NOTICES).flatMap((notices) => Object.values(notices).filter((v): v is string => typeof v === 'string')),
+    ...Object.values(WORKER_NOTICES).flatMap((notices) => Object.values(FIXED_NOTICE_SENTENCES).flatMap((sentences) => sentences?.(notices) ?? [])),
+    ACCESS_ENDED_RESULT, ACCESS_ENDED_PAUSED_RESULT, PLAN_ENDED_RESULT,
+    MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WEBHOOK_ASKS_RESULT,
+    WAIT_EXPIRED_RESULT, MANDATE_ENDED_RESULT, WATCH_URL_MISSING_RESULT, WATCH_READ_UNRECORDED_RESULT,
+  ]);
+  return engineResults;
+}
+
+/**
+ * Which run a trigger's stored result comes from, when someone other than the owner set up or
+ * changed the plan: the trigger itself (`setUpByOther`, the test the failure escalation applies),
+ * else the workflow it runs (`planMakerOf`, the test the diagnosis applies; a record that cannot
+ * be read counts too). `undefined` for the owner's plan, whose line stays as it is.
+ */
+export function otherRunOf(
+  t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined; pipeline_id?: string | undefined },
+  workflowAuthorship?: ((id: string) => { createdBy?: string | null | undefined; mandateEditor?: string | null | undefined } | undefined) | undefined,
+): string | undefined {
+  if (setUpByOther(t)) return `the last run of a trigger ${setUpByPhrase(shownMandate(t))}`;
+  if (t.pipeline_id === undefined || workflowAuthorship === undefined) return undefined;
+  const id = t.pipeline_id;
+  const maker = planMakerOf(() => workflowAuthorship(id));
+  if (maker.kind === 'other') return `the last run of a trigger whose workflow was ${setUpByPhrase(maker.by)}`;
+  if (maker.kind === 'unknown') return 'the last run of a trigger whose workflow\'s author cannot be read';
+  return undefined;
 }
 
 /**
@@ -259,7 +330,7 @@ function doneReader(agent: IAgent): PausedDoneWorkflowReader | null {
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
 function formatTaskLine(
-  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_member_notes?: readonly string[] | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined; paused_for?: string | null | undefined },
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_member_notes?: readonly string[] | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined; paused_for?: string | null | undefined; created_by?: string | null | undefined; mandate_editor?: string | null | undefined },
   // Callers used to append their own suffix to the RESULT of this function.
   // That was harmless while the result was one line; with a detail line it put
   // "— next run: …" underneath "workflow <id>", where it reads as a property of
@@ -277,7 +348,9 @@ function formatTaskLine(
   const due = t.due_date ? ` — due ${stripHidden(t.due_date)}` : '';
   const assign = t.assignee ? ` @${stripHidden(t.assignee)}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates()) }, workflowReader)}`;
+  // Whose plan the run's text comes from is read only for a run whose result the line shows.
+  const ended = t.last_run_status !== undefined && t.last_run_status !== 'success';
+  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates(t.last_run_status)) }, workflowReader, ended ? otherRunOf(t, reader.workflowAuthorship) : undefined)}`;
 }
 
 /**
@@ -286,14 +359,35 @@ function formatTaskLine(
  */
 interface TaskReader {
   readonly owner: () => boolean;
-  readonly forMandates: () => string;
+  /** The sentence for the last run's end, by its stored status (`memberEndOfStatus`). */
+  readonly forMandates: (status: string | null | undefined) => string;
+  /** Who made a workflow, for a trigger that runs one (`otherRunOf`); absent without a run history. */
+  readonly workflowAuthorship?: ((id: string) => { createdBy?: string | null | undefined; mandateEditor?: string | null | undefined } | undefined) | undefined;
 }
 
 /** Asked only for a row whose last run has lines. */
 function taskReaderOf(agent: IAgent): TaskReader {
   return {
     owner: () => isOwnerPrincipal(agent.principal),
-    forMandates: () => WORKER_NOTICES[agent.noticeLanguage ?? noticeLanguage(undefined)].memberEndForMandates,
+    forMandates: (status) => WORKER_NOTICES[agent.noticeLanguage ?? noticeLanguage(undefined)].memberEndForMandates(memberEndOfStatus(status)),
+    workflowAuthorship: workflowAuthorshipOf(agent),
+  };
+}
+
+/**
+ * The run history's workflow record reader, when the context has one that reads it. A person with
+ * access reads a workflow's marks as they read a trigger's (`withoutForeignMarks`): another
+ * mandate's tag says only that a mandate made it, never which one.
+ */
+function workflowAuthorshipOf(agent: IAgent): TaskReader['workflowAuthorship'] {
+  const history = agent.toolContext.runHistory;
+  if (!history || typeof history.getWorkflowAuthorship !== 'function') return undefined;
+  const principal = agent.principal ?? OWNER_PRINCIPAL;
+  return (id) => {
+    const a = history.getWorkflowAuthorship(id);
+    if (a === undefined) return undefined;
+    const shown = withoutForeignMarks({ created_by: a.createdBy, mandate_editor: a.mandateEditor }, principal);
+    return { createdBy: shown.created_by, mandateEditor: shown.mandate_editor };
   };
 }
 

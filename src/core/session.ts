@@ -77,7 +77,7 @@ import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
 import { ReadOutsideUnrecordedError } from './thread-store.js';
-import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, persistRefusedTurn, capStopNote } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, persistRefusedTurn, capStopNote, CONTENT_REFUSED_NOTE, type EngineNoticeCode } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
 import { buildCompactionSummaryPrompt } from './compaction-prompt.js';
@@ -659,6 +659,9 @@ export class Session {
   /** Token/cost totals of the most recently completed run; null until the
    *  first run finishes. Echoed in the `done` SSE event — see getLastRunUsage(). */
   private _lastRunUsage: RunUsageSummary | null = null;
+  /** Set when the last run ended with a sentence of lynox's own instead of a model reply; see
+   *  getLastRunNotice(). */
+  private _lastRunNotice: EngineNoticeCode | undefined;
   private _systemPrompt: string | undefined;
 
   readonly usage: AccumulatedUsage = {
@@ -1006,6 +1009,9 @@ export class Session {
       this._originRefusals.length = 0;
     }
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
+    // Cleared for every run the person started, before any of its returns: only the returns
+    // below that end the run with lynox's own sentence set it again.
+    if (runOptions?.internal !== true) this._lastRunNotice = undefined;
     // Before anything that could rebuild the agent below, like the principal: every rebuild
     // of this run marks its agent by what this run's client said, never by an earlier run.
     if (runOptions?.internal !== true) this._runShowsReview = runOptions?.showsChangesetReview === true;
@@ -1101,6 +1107,7 @@ export class Session {
       // An internal (compaction) run must NOT return the block string — it would
       // be injected as the thread's authoritative summary. Throw instead.
       if (runOptions?.internal === true) throw new InternalRunBlockedError(reason);
+      this._lastRunNotice = 'run_blocked';
       return reason;
     }
 
@@ -1150,6 +1157,7 @@ export class Session {
         type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox',
         ...(holdExhausted ? { reason: RUN_BLOCKED_HOLD_EXHAUSTED } : {}),
       });
+      this._lastRunNotice = 'run_blocked';
       return `Run blocked: ${reason}`;
     }
 
@@ -1162,6 +1170,7 @@ export class Session {
         const msg = `⚠ Request blocked by content policy: ${inputCheck.reason ?? 'prohibited content'}. This request was not sent to the AI model.`;
         if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
         persistRefusedTurn(threadStore, this.sessionId, task, msg);
+        this._lastRunNotice = CONTENT_REFUSED_NOTE;
         return msg;
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
@@ -1182,6 +1191,7 @@ export class Session {
           const msg = `⚠ Request flagged by content policy: ${inputCheck.reason ?? 'suspicious content'}. There is no one to allow it, so it was not sent to the AI model.`;
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           persistRefusedTurn(threadStore, this.sessionId, task, msg);
+          this._lastRunNotice = CONTENT_REFUSED_NOTE;
           return msg;
         }
         const outcome = decideConsent('guard', answer);
@@ -1193,6 +1203,7 @@ export class Session {
           const msg = contentFlagRefusal(language, why, inputCheck.reason);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           persistRefusedTurn(threadStore, this.sessionId, task, msg);
+          this._lastRunNotice = CONTENT_REFUSED_NOTE;
           return msg;
         }
       }
@@ -2670,6 +2681,14 @@ export class Session {
    *  live per-message footer survives a lost `turn_end` frame. */
   getLastRunUsage(): RunUsageSummary | null {
     return this._lastRunUsage;
+  }
+
+  /** Whether the last run the person started ended with a sentence of lynox's own — a request
+   *  the content check refused, or one the budget or a run hook blocked — rather than with a model reply, and
+   *  which. Set only by the engine at those returns; the HTTP API echoes it in the `done` event
+   *  so the chat does not mark that sentence as written by the AI model. */
+  getLastRunNotice(): EngineNoticeCode | undefined {
+    return this._lastRunNotice;
   }
 
   setEffort(level: EffortLevel): void {

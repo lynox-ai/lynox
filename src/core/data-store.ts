@@ -1015,6 +1015,27 @@ export class DataStore {
   }
 
   /**
+   * Whether any of the rows with these `_id`s carries the outside-content mark
+   * (`_written_untrusted`) — what a bulk run that copies them carries forward. Read in chunks of
+   * `chunk` ids, as {@link sourceGrantsOfIds}; the collection is checked as there.
+   */
+  sourceUntrustedOfIds(collection: string, ids: readonly number[], chunk = 500): boolean {
+    if (ids.length === 0) return false;
+    if (!COLLECTION_NAME_RE.test(collection) || RESERVED_NAMES.has(collection)) throw new Error(`Collection "${collection}" not found.`);
+    if (!this._getCollectionMeta(collection)) throw new Error(`Collection "${collection}" not found.`);
+    this._assertSourceColumns(collection);
+    const size = Math.max(1, chunk);
+    for (let i = 0; i < ids.length; i += size) {
+      const part = ids.slice(i, i + size);
+      const hit = this.db.prepare(
+        `SELECT 1 FROM "ds_${collection}" WHERE "_written_untrusted" = '1' AND "_id" IN (${part.map(() => '?').join(', ')}) LIMIT 1`,
+      ).get(...part);
+      if (hit !== undefined) return true;
+    }
+    return false;
+  }
+
+  /**
    * The `_source_grants` each row whose `keyColumn` value is among `values` holds, keyed by that
    * value as a string — the stamp a bulk run must write back on an undo. A row whose stamp is
    * NULL, empty or does not parse maps to null: unknown, as {@link sourceOfRow} reads it. A value
