@@ -1901,7 +1901,7 @@ describe('the start of a judged run, in words', () => {
 	it('calls the step „Beurteilung“ on the start and restart buttons and in the start sentences that name it, in English "judging" and never "a judge"', async () => {
 		const before = getLocale();
 		onTestFinished(() => setLocale(before));
-		const keys = ['bulk.start.judge', 'bulk.restart.judge', 'bulk.start.listed_judge', 'bulk.start.judge_own_key', 'bulk.start.supersede',
+		const keys = ['bulk.start.judge', 'bulk.restart.judge', 'bulk.start.judge_own_key', 'bulk.start.supersede',
 			'bulk.start.hint_cap', 'bulk.start.hint_domains', 'bulk.start.hint_both', 'bulk.start_domains.frozen',
 			'bulk.invalid.new_link_domain_judged', 'bulk.invalid.new_link_domain_judged_named'];
 		setLocale('de');
@@ -1947,6 +1947,44 @@ describe('the start of a judged run, in words', () => {
 	});
 
 	const headTerms = (): string[] => [...target.querySelectorAll('dl dt')].map((dt) => dt.textContent?.trim() ?? '');
+	const count = (part: string): number => (target.textContent ?? '').split(part).length - 1;
+
+	// A read list waiting for its start says the step once, in the head's „Nächster Schritt“ with the
+	// button to press; the list sentence under it names only the state (U-246).
+	it('says the step of an owner\'s read list once, in the head, and the state once, in the list sentence', async () => {
+		run = judged();
+		await render();
+		expect(headTerms()).toContain(t('bulk.head.next'));
+		expect(headTerms()).not.toContain(t('bulk.head.halted'));
+		expect(count(tf('bulk.halt.listed_start', { button: t('bulk.start.judge') }))).toBe(1);
+		expect(count(tf('bulk.start.listed', { n: '3' }))).toBe(1);
+		expect(target.textContent).not.toContain(t('bulk.awaiting_start'));
+	});
+
+	it('reads one listed target as one, in the singular', async () => {
+		run = judged({ total: 1 });
+		await render();
+		expect(count(tf('bulk.start.listed_one', { n: '1' }))).toBe(1);
+		expect(target.textContent).not.toContain(tf('bulk.start.listed', { n: '1' }));
+	});
+
+	it('says only the state under a read list that cannot start now, never to start it', async () => {
+		run = judged({ judgeServedBy: null });
+		await render();
+		expect(headTerms()).toContain(t('bulk.head.waiting'));
+		expect(count(tf('bulk.start.listed', { n: '3' }))).toBe(1);
+		expect(count(t('bulk.halt.wait_no_start'))).toBe(1);
+		expect(target.textContent).not.toContain(tf('bulk.halt.listed_start', { button: t('bulk.start.judge') }));
+	});
+
+	it('words the list sentence as its state only, in both languages', () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		setLocale('de');
+		expect([t('bulk.start.listed'), t('bulk.start.listed_one'), t('bulk.halt.listed_start')]).toEqual(['Die Liste ist gelesen: {n} Ziele.', 'Die Liste ist gelesen: {n} Ziel.', 'Prüf die Ziele, dann starte mit „{button}“.']);
+		setLocale('en');
+		expect([t('bulk.start.listed'), t('bulk.start.listed_one'), t('bulk.halt.listed_start')]).toEqual(['The list is read: {n} targets.', 'The list is read: {n} target.', 'Review the targets, then start with “{button}”.']);
+	});
 
 	it('keeps the halt row for a run that halted after it started', async () => {
 		run = judged({ haltKey: 'unavailable' });

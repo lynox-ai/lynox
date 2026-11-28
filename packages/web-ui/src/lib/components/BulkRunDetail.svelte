@@ -884,7 +884,7 @@
 			{/if}
 			{#if run.phase === 'planned' && run.haltKey === 'listed'}
 				{#if ownerActs}
-					<p class="text-sm">{tf(run.judge !== null ? 'bulk.start.listed_judge' : 'bulk.start.listed', { n: String(run.total) })}</p>
+					<p class="text-sm">{tf(bulkOne('bulk.start.listed', run.total), { n: String(run.total) })}</p>
 				{/if}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.list_note')}</p>
 			{/if}
