@@ -383,14 +383,21 @@ export function pausedDoneWorkflow(
   };
   // The marks decide; the definition only names the workflow, so it is read after the decision.
   // Marks that are not there (no row, or no store to read them from) are not known.
-  let ended: boolean;
+  let member: RequestPrincipal | undefined;
   try {
     const authorship = reader.getWorkflowAuthorship(id);
     if (authorship === undefined) return refusedOr({ kind: 'unknown' });
-    const member = planMandate(planAuthorshipOfWorkflow(authorship))?.principal;
-    ended = member !== undefined && principalHasEnded(member, (m) => reader.isLive(m));
+    member = planMandate(planAuthorshipOfWorkflow(authorship))?.principal;
   } catch {
     return refusedOr({ kind: 'unknown' });
+  }
+  // A store of access ends that cannot be read leaves the case unknown, for her too: a mark that has
+  // ended would need the owner's takeover first, not a new plan the owner sets up.
+  let ended: boolean;
+  try {
+    ended = member !== undefined && principalHasEnded(member, (m) => reader.isLive(m));
+  } catch {
+    return { kind: 'unknown' };
   }
   if (!ended) return refusedOr({ kind: 'none' });
   return { kind: 'workflow', workflowId: id, name: nameOf() };
@@ -399,6 +406,10 @@ export function pausedDoneWorkflow(
 /** The end of the sentence for a person with access whose new plan on the workflow would be refused (U-489). */
 const PAUSED_DONE_FOREIGN_WAY = 'Its workflow was set up or last changed by another person with delegated access, so a new plan on it cannot be scheduled for this user; if it should run again, tell them to ask the owner to set up a new plan, or offer to write a new workflow of their own for this task.';
 const PAUSED_DONE_UNREADABLE_WAY = 'lynox could not read who set up its workflow, so only the owner may schedule a new plan on it; if it should run again, tell them to ask the owner, or offer to write a new workflow of their own for this task.';
+
+/** The API's refusal for those cases: the person reads it themselves (U-489 N). */
+export const PAUSED_DONE_FOREIGN_API = 'completed and paused because an access ended; it cannot be taken over or run again. Its workflow was set up or last changed by another person with access, so you cannot create a new plan on it; to run it again, ask the owner to create one, or have lynox write a workflow of your own for this task in chat.';
+export const PAUSED_DONE_UNREADABLE_API = 'completed and paused because an access ended; it cannot be taken over or run again. lynox cannot read who set up its workflow, so only the owner may create a new plan on it; to run it again, ask them to, or have lynox write a workflow of your own for this task in chat.';
 
 /** That end for a refused case, or null when a new plan is the way (U-489). */
 export function pausedDoneRefusedWay(c: PausedDoneWorkflow): string | null {

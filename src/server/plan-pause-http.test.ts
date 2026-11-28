@@ -295,8 +295,26 @@ describe('the pause is held to its takeover (real engine)', () => {
       expect((await row(mandateCookie))?.['paused_done_workflow']).toEqual({ name: 'FX-otto', refused: 'foreign' });
       const res = await ask('PATCH', '/api/tasks/done-wf-otto', mandateCookie, { title: 'Renamed' });
       expect([res.status, res.json['code'], res.json['error']]).toEqual([409, 'paused',
-        "completed and paused because an access ended; it cannot be taken over or run again. Its workflow was set up or last changed by another person with delegated access, so a new plan on it cannot be scheduled for this user; if it should run again, tell them to ask the owner to set up a new plan, or offer to write a new workflow of their own for this task."]);
+        'completed and paused because an access ended; it cannot be taken over or run again. Its workflow was set up or last changed by another person with access, so you cannot create a new plan on it; to run it again, ask the owner to create one, or have lynox write a workflow of your own for this task in chat.']);
       expect(String(res.json['error'])).not.toContain('FX-');
+      // Run now is the owner's at a plan someone else set up: she is refused before the pause is read.
+      const run = await ask('POST', '/api/triggers/done-wf-otto/run', mandateCookie);
+      expect([run.status, run.json['error']]).toEqual([403, 'Only the owner of this instance can start a schedule by hand that someone else set up.']);
+      // What she reads is what happens: a new plan of hers on that workflow is refused.
+      const create = await ask('POST', '/api/tasks', mandateCookie, { title: 'Again', scheduleCron: '0 9 * * 1', pipelineId: 'wf-otto' });
+      expect([create.status, create.json['code']]).toEqual([403, 'foreign_workflow']);
+      // Marks that cannot be read: refused to her as unreadable, in the list and the answer.
+      const spy = vi.spyOn(history, 'getWorkflowAuthorship').mockReturnValue(undefined);
+      try {
+        expect((await row(mandateCookie))?.['paused_done_workflow']).toEqual({ name: 'FX-otto', refused: 'unreadable' });
+        const unread = await ask('PATCH', '/api/tasks/done-wf-otto', mandateCookie, { title: 'Renamed' });
+        expect([unread.status, unread.json['code'], unread.json['error']]).toEqual([409, 'paused',
+          'completed and paused because an access ended; it cannot be taken over or run again. lynox cannot read who set up its workflow, so only the owner may create a new plan on it; to run it again, ask them to, or have lynox write a workflow of your own for this task in chat.']);
+        const again = await ask('POST', '/api/tasks', mandateCookie, { title: 'Again', scheduleCron: '0 9 * * 1', pipelineId: 'wf-otto' });
+        expect([again.status, again.json['code']]).toEqual([403, 'unreadable_workflow']);
+      } finally {
+        spy.mockRestore();
+      }
       // CONTROL: the owner may plan on any workflow.
       expect((await row(ownerCookie))?.['paused_done_workflow']).toBeNull();
       expect((await ask('POST', '/api/triggers/done-wf-otto/run', ownerCookie)).json['error']).toBe('completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.');

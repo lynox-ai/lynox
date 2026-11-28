@@ -161,7 +161,7 @@ import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './webhook-receiver.js';
 import { requestLogUrl } from './request-log-url.js';
-import { isPaused, pausedDoneReaderOf, pausedDoneRefusedWay, pausedDoneWorkflow, pausedDoneWorkflowText, pausedForOf, planPauseOn, type PausedDoneWorkflowReader } from '../core/plan-pause.js';
+import { PAUSED_DONE_FOREIGN_API, PAUSED_DONE_UNREADABLE_API, isPaused, pausedDoneReaderOf, pausedDoneWorkflow, pausedDoneWorkflowText, pausedForOf, planPauseOn, type PausedDoneWorkflowReader } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
@@ -512,7 +512,9 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
 /**
  * The trigger list's `paused_done_workflow` for a completed plan that keeps its pause (U-275 N6):
  * `{ name }` when its workflow's takeover comes first (`name` null when its definition names none),
- * `null` when no workflow needs one. Absent for
+ * `null` when no workflow needs one. `{ name, refused }` only for a person with access whose new plan
+ * on that workflow would be refused (`foreign`: another live person's; `unreadable`: its marks cannot
+ * be read), whatever a takeover would say (U-489). Absent for
  * any other plan, with the pause off, and when the case could not be read.
  */
 export function pausedDoneWorkflowField(trigger: TriggerRecord, reader: PausedDoneWorkflowReader | null | undefined): { paused_done_workflow?: { name: string | null; refused?: 'foreign' | 'unreadable' } | null } {
@@ -2130,9 +2132,10 @@ const PAUSED_REFUSAL = 'paused because an access ended; it needs to be taken ove
 const pausedRefusal = (t: TriggerRecord | undefined, reader: PausedDoneWorkflowReader | null | undefined): string => {
   if (t?.status !== 'completed') return PAUSED_REFUSAL;
   const c = pausedDoneWorkflow(t, reader);
-  // A person with access whose new plan on its workflow would be refused reads that way instead (U-489).
-  const way = pausedDoneRefusedWay(c);
-  if (way !== null) return `completed and paused because an access ended; it cannot be taken over or run again. ${way}`;
+  // A person with access whose new plan on its workflow would be refused reads that way instead, as
+  // the reader of the answer (U-489 N).
+  if (c.kind === 'foreign') return PAUSED_DONE_FOREIGN_API;
+  if (c.kind === 'unreadable') return PAUSED_DONE_UNREADABLE_API;
   return `completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.${pausedDoneWorkflowText(c)}`;
 };
 /**

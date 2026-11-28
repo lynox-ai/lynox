@@ -184,8 +184,11 @@ describe('a paused plan in the task tools', () => {
     const list = await taskListTool.handler({ status: 'paused' }, agent(MANDATE));
     expect(list).toContain(pausedDoneModelText(foreign));
     expect(list).not.toContain('FX-otto');
-    // CONTROL: the owner may plan on any workflow, so a new plan is the owner's way.
+    // CONTROL: the owner may plan on any workflow, so a new plan is the owner's way, in both.
     expect(await taskUpdateTool.handler({ task_id: 'o1', title: 'Renamed' }, agent())).toBe(pausedDoneUpdateRefusal({ kind: 'none' }));
+    const ownerList = await taskListTool.handler({ status: 'paused' }, agent());
+    expect(ownerList).toContain(pausedDoneModelText({ kind: 'none' }));
+    expect(ownerList).not.toContain(pausedDoneModelText(foreign));
   });
 
   it('with the switch off a paused_at is not read', async () => {

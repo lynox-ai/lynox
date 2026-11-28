@@ -1270,12 +1270,27 @@ describe('a completed, paused plan as a person with access reads it, whose new p
     live(b, 'otto@x.ch');
     named(b, 'wf-o', { email: 'otto@x.ch', grant: 'g-otto@x.ch' });
     const t = donePlan(b, 'p', 'wf-o')!;
-    const base = asAnna(b)!;
-    const unread = { ...base, getWorkflowAuthorship: (): undefined => undefined };
-    expect(pausedDoneWorkflow(t, { ...unread, scheduleRefusal: () => 'unreadable' })).toEqual({ kind: 'unreadable', workflowId: 'wf-o', name: 'Monatsbericht' });
-    expect(pausedDoneWorkflow(t, { ...unread, scheduleRefusal: undefined }), 'control: the owner').toEqual({ kind: 'unknown' });
+    // The store answers no marks: the reader and the rule `task_create` refuses by both read it.
+    const spy = vi.spyOn(b.history, 'getWorkflowAuthorship').mockReturnValue(undefined);
+    try {
+      expect(foreignWorkflowScheduleRefusalKind(ANNA, 'wf-o', b.history), 'the rule refuses her').toBe('unreadable');
+      expect(pausedDoneWorkflow(t, asAnna(b))).toEqual({ kind: 'unreadable', workflowId: 'wf-o', name: 'Monatsbericht' });
+      expect(pausedDoneWorkflow(t, pausedDoneReaderOf(b.history, b.ends)), 'control: the owner').toEqual({ kind: 'unknown' });
+    } finally {
+      spy.mockRestore();
+    }
     // A rule that throws refuses, as `task_create` would not let it through.
-    expect(pausedDoneWorkflow(t, { ...base, scheduleRefusal: () => { throw new Error('locked'); } })).toEqual({ kind: 'unreadable', workflowId: 'wf-o', name: 'Monatsbericht' });
+    expect(pausedDoneWorkflow(t, { ...asAnna(b)!, scheduleRefusal: () => { throw new Error('locked'); } })).toEqual({ kind: 'unreadable', workflowId: 'wf-o', name: 'Monatsbericht' });
+  });
+
+  it('a store of access ends that cannot be read leaves her case unknown, not foreign: an ended mark would need the takeover first', () => {
+    const b = box();
+    live(b, 'anna@x.ch');
+    ended(b, 'h@x.ch');
+    named(b, 'wf-h', { email: 'h@x.ch', grant: 'g-h@x.ch' });
+    const t = donePlan(b, 'p', 'wf-h')!;
+    expect(pausedDoneWorkflow(t, asAnna(b))!.kind, 'control: readable, the takeover first').toBe('workflow');
+    expect(pausedDoneWorkflow(t, { ...asAnna(b)!, isLive: () => { throw new Error('locked'); } })).toEqual({ kind: 'unknown' });
   });
 
   it('the model and task_update read her way word for word, never with the workflow\'s name', () => {

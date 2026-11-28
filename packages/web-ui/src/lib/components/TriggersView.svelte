@@ -363,6 +363,7 @@
 	// plan on that workflow it would refuse; the owner reads `none` there.
 	function pausedDoneCase(trigger: Trigger): 'workflow' | 'none' | 'unknown' | 'foreign' | 'unreadable' {
 		const wf = trigger.paused_done_workflow;
+		if (wf !== undefined && wf !== null && wf.refused !== undefined && ownerActs) return 'none';
 		return wf === undefined ? 'unknown' : wf === null ? 'none' : wf.refused ?? 'workflow';
 	}
 	function pausedDoneHint(trigger: Trigger): string {
