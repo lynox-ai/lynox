@@ -14,7 +14,8 @@ const I18N = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 const ROUTE = readFileSync(`${HERE}../../../../../src/server/http-api.ts`, 'utf8');
 
 const both = (key: string): void => {
-  const line = new RegExp(`'${key.replace('.', '\\.')}':\\s*\\{([\\s\\S]*?)\\},`).exec(I18N);
+  // To the end of the entry's line: a text may hold `{workflow},` itself.
+  const line = new RegExp(`'${key.replace('.', '\\.')}':\\s*\\{([\\s\\S]*?)\\},\\n`).exec(I18N);
   expect(line, `${key} has to exist`).not.toBeNull();
   expect(line![1]).toMatch(/\bde:\s*'[^']{10,}'/);
   expect(line![1]).toMatch(/\ben:\s*'[^']{10,}'/);
@@ -25,22 +26,24 @@ describe('a paused plan in the Triggers view', () => {
     const CORE = readFileSync(`${HERE}../../../../../src/core/plan-pause.ts`, 'utf8');
     const TOOL = readFileSync(`${HERE}../../../../../src/tools/builtin/task.ts`, 'utf8');
     // The model's line, task_update's refusal and the API's refusal add the same case sentence.
-    expect(CORE).toMatch(/export function pausedDoneModelText\(c: PausedDoneWorkflow\): string \{[\s\S]{0,300}?\$\{pausedDoneWorkflowText\(c\)\}/);
-    expect(CORE).toMatch(/export function pausedDoneUpdateRefusal\(c: PausedDoneWorkflow\): string \{[\s\S]{0,300}?\$\{pausedDoneWorkflowText\(c\)\}/);
+    expect(CORE).toMatch(/export function pausedDoneModelText\(c: PausedDoneWorkflow\): string \{[\s\S]{0,700}?\$\{pausedDoneWorkflowText\(c\)\}/);
+    expect(CORE).toMatch(/export function pausedDoneUpdateRefusal\(c: PausedDoneWorkflow\): string \{[\s\S]{0,700}?\$\{pausedDoneWorkflowText\(c\)\}/);
     expect(TOOL).toContain('pausedDoneUpdateRefusal(pausedDoneWorkflow(pausedTarget, doneReader(agent)))');
-    expect(TOOL).toContain('return pausedDoneReaderOf(agent.toolContext.runHistory, agent.toolContext.mandateEnds);');
-    expect(ROUTE).toContain('${pausedDoneWorkflowText(pausedDoneWorkflow(t, reader))}');
+    expect(TOOL).toContain('return pausedDoneReaderOf(history, agent.toolContext.mandateEnds,\n    isOwnerPrincipal(principal) ? undefined : (id) => foreignWorkflowScheduleRefusalKind(principal, id, history));');
+    expect(ROUTE).toContain('Create a new plan to run it again.${pausedDoneWorkflowText(c)}');
     expect(ROUTE).toContain('...pausedDoneWorkflowField(trigger, doneReader),');
-    expect(ROUTE).toContain('const doneReader = pausedDoneReaderOf(history, engine.getMandateEnds());');
+    expect(ROUTE).toContain('const doneReader = pausedDoneReaderFor(history, engine.getMandateEnds(), principal);');
     // The view, one line per case, both languages.
     expect(VIEW).toContain('data-trigger-paused-done-hint={pausedDoneCase(trigger)}><MarkedLine text={pausedDoneHint(trigger)} mono={false} />');
     for (const key of ['triggers.paused_done_hint', 'triggers.paused_done_hint_helper', 'triggers.paused_done_hint_workflow', 'triggers.paused_done_hint_workflow_helper',
-      'triggers.paused_done_hint_its_workflow', 'triggers.paused_done_hint_its_workflow_helper', 'triggers.paused_done_hint_none']) both(key);
+      'triggers.paused_done_hint_its_workflow', 'triggers.paused_done_hint_its_workflow_helper', 'triggers.paused_done_hint_none',
+      'triggers.paused_done_hint_foreign_workflow_helper', 'triggers.paused_done_hint_foreign_its_workflow_helper',
+      'triggers.paused_done_hint_unreadable_workflow_helper', 'triggers.paused_done_hint_unreadable_its_workflow_helper']) both(key);
   });
 
   it('Run now: the engine sends `paused`, the view switches on it, and both languages have the line', () => {
-    expect(ROUTE).toContain("errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!), pausedDoneReaderOf(engine.getRunHistory(), engine.getMandateEnds())), 'paused');");
-    expect(ROUTE).toContain("errorResponse(res, 409, pausedRefusal(trigger, pausedDoneReaderOf(this.engine?.getRunHistory(), this.engine?.getMandateEnds())), 'paused');");
+    expect(ROUTE).toContain("errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!), pausedDoneReaderFor(engine.getRunHistory(), engine.getMandateEnds(), principal)), 'paused');");
+    expect(ROUTE).toContain("errorResponse(res, 409, pausedRefusal(trigger, pausedDoneReaderFor(this.engine?.getRunHistory(), this.engine?.getMandateEnds(), this._principalOf(req))), 'paused');");
     expect(VIEW).toMatch(/code === 'paused'\s*\?\s*\(who !== '' \? tf\('triggers\.run_paused', \{ who \}\) : t\('triggers\.run_paused_anon'\)\)/);
     both('triggers.run_paused_anon');
   });

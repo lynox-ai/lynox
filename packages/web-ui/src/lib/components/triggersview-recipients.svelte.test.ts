@@ -117,6 +117,20 @@ describe('a trigger whose recipients the owner has not confirmed', () => {
 		expect(q('[data-recipients-unconfirmed]')).not.toBeNull();
 	});
 
+	it('a completed plan with unconfirmed recipients shows neither hint nor button, an open one both', async () => {
+		rows = [{ ...OLD, id: 'done-1', title: 'Abgeschlossen', status: 'completed' }, { ...OLD, id: 'open-1', title: 'Offen' }];
+		await render();
+		// Each card is the `group` div around its title.
+		const card = (title: string): HTMLElement => [...target.querySelectorAll<HTMLElement>('[data-trigger-title]')].find((t) => t.textContent?.includes(title))!.closest<HTMLElement>('div.group')!;
+		const done = card('Abgeschlossen');
+		const open = card('Offen');
+		expect(done).not.toBe(open);
+		expect(done.querySelector('[data-recipients-unconfirmed]')).toBeNull();
+		expect(done.querySelector('[data-recipients-open]')).toBeNull();
+		expect(open.querySelector('[data-recipients-unconfirmed]')!.textContent).toContain('Empfänger nicht bestätigt, sendet nicht');
+		expect(open.querySelector('[data-recipients-open]')).not.toBeNull();
+	});
+
 	it('CONTROL: a trigger the engine does not flag shows neither hint nor button', async () => {
 		rows = [{ ...OLD, recipients_unconfirmed: false }];
 		await render();
