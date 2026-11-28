@@ -5,10 +5,12 @@
 	import { secretWriteRefusal } from '../utils/secret-write-refusal.js';
 	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
-	// Only the client secret of a built-in provider gets its own advice here; every other
+	// Only the client secret of a built-in provider (live or no longer offered) gets its own advice here; every other
 	// refusal keeps the generic message this view always showed.
 	async function refusalText(res: Response): Promise<string> {
-		return (await secretWriteRefusal(res)) === 'preset_client' ? t('secrets.preset_client_use_form') : t('common.save_failed');
+		const why = await secretWriteRefusal(res);
+		if (why === 'preset_client') return t('secrets.preset_client_use_form');
+		return why === 'retired_preset_client' ? t('secrets.retired_preset_client') : t('common.save_failed');
 	}
 
 	let names = $state<string[]>([]);

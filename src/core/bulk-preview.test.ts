@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_MAX_PREVIEWED_RUNS, canonicalJson, delegatedPlannerOf, type PlannedTarget } from './bulk-ledger.js';
+import { SHOPIFY_PAGES, type StoreAttachRefusal } from './shopify-host.js';
 import { BULK_NOTICES } from './bulk-notices.js';
 import {
   BULK_RETRY_AFTER_CAP_MS, BulkHostBudget, beforeOverFields, canonicalHost, externalClient, externalTargetKey,
@@ -18,7 +19,7 @@ import {
 } from './bulk-external.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import type { AttachedConnection } from './bulk-connection.js';
-import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
+import { setPinnedTransportForTests, StoreRequestRefusedError, type PinnedTransportInput } from './network-guard.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { WorkerLoop } from './worker-loop.js';
 import { ApiStore } from './api-store.js';
@@ -83,14 +84,15 @@ function contractFor(keys: string[]): ReturnType<typeof mintBulkContract> {
 }
 
 /** A client wired like the worker's, with an attach that fills the header. */
-function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all'; recordRead?: (url: string) => boolean; connection?: () => AttachedConnection | null } = {}): ExternalClient {
+function client(opts: { attach?: boolean; refuse?: StoreAttachRefusal; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all'; recordRead?: (url: string) => boolean; connection?: () => AttachedConnection | null } = {}): ExternalClient {
   const ctx = createToolContext({});
   if (opts.policy) applyNetworkPolicy(ctx, opts.policy, undefined);
   return externalClient({
     contract: contractFor(opts.keys ?? [0, 1, 2, 3, 4, 5, 9, 'x'].map(url)),
     hostPolicy: ctx,
     ackHosts: undefined,
-    attach: async (_u, headers) => {
+    attach: async (_u, headers, _m, out) => {
+      if (opts.refuse !== undefined) { if (out) out.refusal = opts.refuse; return null; }
       if (opts.attach === false) return null;
       headers['authorization'] = `Bearer ${TOKEN}`;
       return opts.connection?.() ?? { id: 'fixture', grantId: 'grant-1' };
@@ -380,6 +382,62 @@ describe('the preview effect', () => {
       expect((await runBulkPreview(local.id, previewDeps(client()))).status).toBe('refused');
       expect((await runBulkPreview('nope', previewDeps(client()))).status).toBe('refused');
       expect(s.requests).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a store\'s own refusal reads as its cause, and the preview halts on it, not on credential', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      expect(await client({ refuse: 'shopifyNotCleared' }).get(url(0))).toEqual({ kind: 'store_refused', reason: 'shopifyNotCleared' });
+      for (const cause of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable'] as const) {
+        engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+        const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+        expect((await runBulkPreview(runId, previewDeps(client({ refuse: cause })))).status, cause).toBe('halted');
+        expect(ledger.getStatus(runId)!.haltReason, cause).toBe(BULK_HALT_REASONS[cause]);
+      }
+      expect(s.requests).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a pass\'s refusal at the send is its own kind, the network policy\'s stays blocked, a broken connection failed: none names a cause of the store\'s', async () => {
+    // The send-time refusals of a store request depend on the request (its path, body, headers),
+    // so they name no cause of the store's and offer no resume as one; the pass's are told
+    // apart by their class, not their words.
+    const passRefusal = 'Blocked: request to a Shopify store refused: a store pass reaches only its own store. Do not retry it with changed headers or a changed address.';
+    for (const [thrown, kind] of [
+      [new StoreRequestRefusedError(passRefusal), { kind: 'store_request_refused' }],
+      [new Error(passRefusal), { kind: 'blocked' }],
+      [new Error(`Blocked: ${SHOPIFY_PAGES}`), { kind: 'blocked' }],
+      [new Error('Blocked: hostname "shop.example" not in network allow-list'), { kind: 'blocked' }],
+      [new Error('socket hang up'), { kind: 'failed' }],
+    ] as const) {
+      const restore = setPinnedTransportForTests(async () => { throw thrown; });
+      try {
+        vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+        expect(await client().get(url(0)), thrown.message).toEqual(kind);
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it('halts on a pass\'s refusal at the send with its own reason, not as blocked, and reads nothing past it', async () => {
+    let sends = 0;
+    const restore = setPinnedTransportForTests(async () => {
+      sends++;
+      throw new StoreRequestRefusedError('Blocked: request to a Shopify store refused: the body names an access token. Do not retry it with a changed body.');
+    });
+    try {
+      vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+      const runId = planRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '1' } })));
+      expect((await runBulkPreview(runId, previewDeps(client()))).status).toBe('halted');
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.storeRequestRefused);
+      expect(sends).toBe(1);
     } finally {
       restore();
     }
@@ -699,7 +757,7 @@ describe('the preview effect', () => {
       expect(none.summary).not.toMatch(/API calls/);
       ledger.resumePreview(refused);
       const out = await runBulkPreview(refused, previewDeps(client(), { costPerCallUsd: 0.002 }));
-      expect(out.summary).toContain('2 API calls this pass, estimated $0.0040 ($0.002 each from the profile rate).');
+      expect(out.summary).toContain('2 API calls this pass, estimated $0.0040 ($0.002 each, as set in the API connection).');
       expect(s.requests).toHaveLength(2);
     } finally {
       restore();
@@ -1005,7 +1063,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
       const w = workerFor({ costUsd: 0.01 });
       await w.tick();
-      expect(w.recordTaskRun.mock.calls[0]![1]).toContain('2 API calls this pass, estimated $0.0200 ($0.01 each from the profile rate).');
+      expect(w.recordTaskRun.mock.calls[0]![1]).toContain('2 API calls this pass, estimated $0.0200 ($0.01 each, as set in the API connection).');
     } finally {
       restore();
     }
@@ -1015,8 +1073,8 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
   // records and pushes is the owner's language — the counts and the estimate included.
   it('records and pushes the outcome in German on an instance set to German, in English without', async () => {
     for (const [language, done, counts, costs] of [
-      ['de', 'Vorschau fertig. Der Massenlauf wartet auf deine Prüfung.', 'Gelesen 2, ungültig 0, nicht gelesen 0 von 2 Zielen.', '2 API-Abrufe in diesem Durchgang, geschätzt $0.0200 (je $0.01 laut Profil).'],
-      [undefined, 'Bulk preview done. The run is ready for review.', 'Read 2, invalid 0, unread 0 of 2 targets.', '2 API calls this pass, estimated $0.0200 ($0.01 each from the profile rate).'],
+      ['de', 'Vorschau fertig. Der Massenlauf wartet auf deine Prüfung.', 'Gelesen 2, ungültig 0, nicht gelesen 0 von 2 Zielen.', '2 API-Abrufe in diesem Durchgang, geschätzt $0.0200 (je $0.01, wie in der API-Verbindung eingetragen).'],
+      [undefined, 'Bulk preview done. The run is ready for review.', 'Read 2, invalid 0, unread 0 of 2 targets.', '2 API calls this pass, estimated $0.0200 ($0.01 each, as set in the API connection).'],
     ] as const) {
       const s = shop();
       const restore = serve(s);
@@ -1247,10 +1305,35 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       await w.tick();
       // The handler's own sentence: the throw reached its catch, which halted the run. Read
       // past `getStatus`, which would also halt a run left with no trigger.
-      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, the target system is not reachable yet.');
+      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Target system not reachable, or an error in lynox.');
       expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId))
         .toEqual({ halt_reason: BULK_HALT_REASONS.unavailable });
     } finally {
+      read.mockRestore();
+      restore();
+    }
+  });
+
+  // The halt in the catch is one UPDATE and can throw itself: the owner still hears the handler's
+  // fixed sentence, never the raw error the dispatch would report.
+  it('a halt that throws in the catch still records the handler\'s fixed sentence', async () => {
+    const s = shop();
+    const restore = serve(s);
+    const read = vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error('boom'); });
+    const halt = vi.spyOn(ledger, 'haltPreview').mockImplementation(() => { throw new Error('SQLITE_BUSY'); });
+    try {
+      const runId = planRun([{ target: url(0), after: { price: '1' } }]);
+      const w = workerFor();
+      await w.tick();
+      expect(w.recordTaskRun.mock.calls.map((c) => c[1])).toEqual(['Bulk preview stopped.']);
+      await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
+      expect((w.notify.mock.calls[0] as unknown as [{ body: string }])[0].body).toBe('Bulk preview stopped.');
+      // Unhalted as the catch left it; the next status read halts it, so the owner can resume it.
+      expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId)).toEqual({ halt_reason: null });
+      halt.mockRestore();
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+    } finally {
+      halt.mockRestore();
       read.mockRestore();
       restore();
     }
@@ -1264,7 +1347,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       const runId = planRun([{ target: url(0), after: { price: '1' } }]);
       const w = workerFor({ language: 'de' });
       await w.tick();
-      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Zielsystem nicht erreichbar oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.');
+      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Zielsystem nicht erreichbar oder Fehler in lynox.');
       expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId))
         .toEqual({ halt_reason: BULK_HALT_REASONS.unavailable });
     } finally {

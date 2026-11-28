@@ -91,7 +91,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       pending_prompts: { about: 'questions the assistant asked you and is waiting on' },
       approval_entries: { about: 'actions that waited for your approval, and your answers', strip: ['checksum', 'dedup_key', 'family_key'], encrypted: ['payload_json', 'result_json'] },
       bulk_runs: { about: 'list jobs the assistant ran over many items', strip: ['rule_hash', 'judge_rule_hash', 'approval_checksum'], encrypted: ['list_source', 'judge_rule', 'start_domains'] },
-      bulk_targets: { about: 'each item of a list job and what was changed', encrypted: ['target_key', 'before', 'after_planned', 'after_actual', 'result', 'context'] },
+      bulk_targets: { about: 'each item of a list job and what was changed', encrypted: ['target_key', 'before', 'after_planned', 'after_actual', 'result', 'context', 'link_domain', 'target_title', 'refusal_detail'] },
       inbound_events: { about: 'events other services sent to this installation', encrypted: ['values_json'] },
       audit_log: { about: 'a log of what the assistant changed, and when' },
       connections: { about: 'the services you connected (without their passwords or keys)', stripJson: { config_json: GRANT_RECORD_PATHS } },
@@ -108,6 +108,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       secret_release_requests: ACCESS,
       vault_name_bindings: ACCESS,
       mandate_ends: ACCESS,
+      owner_sessions: OPERATING,
       // Each row names an end in `mandate_ends`, which stays here too: on another instance no
       // warning was sent, and a pause there says so.
       plan_advance_warnings: OPERATING,
@@ -141,6 +142,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       security_events: { about: 'security checks that stopped or flagged something' },
       threads: { about: 'older copy of your conversations, from before a software update' },
       thread_messages: { about: 'older copy of conversation messages, from before a software update' },
+      thread_typed_text: { about: 'the words you typed in each message, apart from what was loaded around them' },
       tasks: { about: 'older copy of your tasks' },
       triggers: { about: 'older copy of your schedules' },
       scopes: { about: 'older copy of memory areas' },
@@ -154,6 +156,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       // history.db's copies of engine.db's `contained` and `exact_marker`, labelled like them.
       contained_threads: MARKER,
       exact_marker_mirror: MARKER,
+      thread_read_outside: 'a note per conversation that it read content from outside, and when; it holds none of that content',
       schema_version: MARKER,
     },
   },
@@ -165,9 +168,9 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       memories: { about: 'remembered facts in the knowledge graph' },
       cooccurrences: { about: 'which ones appear together' },
       supersedes: { about: 'which fact replaced an older one' },
+      metrics: { about: 'counters the software kept, for example how often reading people and companies from a remembered fact was refused' },
     },
     name: {
-      metrics: OPERATING,
       schema_version: MARKER,
     },
   },
@@ -181,6 +184,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       mail_followups: { about: 'mails you wanted a reminder about' },
       mail_scheduled: { about: 'mails scheduled to be sent later' },
       mail_sent_log: { about: 'mails that were sent' },
+      mail_sent_owner_known: { about: 'the recipients of sent mails that went only to addresses you had named' },
       inbox_audit_log: { about: 'a log of what happened to each mail' },
       inbox_user_action_log: { about: 'what you did with each mail' },
       // No credentials: an account's passwords and tokens live in the vault.

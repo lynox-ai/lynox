@@ -46,10 +46,31 @@ export type StampEffort = (typeof STAMP_EFFORTS)[number];
 export const STAMP_THINKING = ['enabled', 'adaptive', 'disabled'] as const;
 export type StampThinking = (typeof STAMP_THINKING)[number];
 
+/**
+ * What a contract allows for one parameter (`allowed` in the stamp preview), read the way the run
+ * enforces it at bind: every facet that is present holds. An empty list admits nothing.
+ */
+export interface StampAllowed {
+  enum: Array<string | number | boolean> | null;
+  regex: string | null;
+  min: number | null;
+  max: number | null;
+}
+
 export interface StampParameter {
   name: string;
   required: boolean;
   default: unknown;
+  /** What the contract allows for it (`stamp-contract.ts`), or null when it sets nothing. */
+  allowed: StampAllowed | null;
+}
+
+export const STAMP_RUNS = ['anywhere', 'chat_and_schedule', 'chat'] as const;
+export type StampRuns = (typeof STAMP_RUNS)[number];
+
+export interface StampAsks {
+  count: number;
+  name: string | null;
 }
 
 export interface StampPreview {
@@ -58,10 +79,18 @@ export interface StampPreview {
   changedBy: 'mandate' | 'owner' | null;
   awaitsStamp: boolean;
   mode: string | null;
+  /** Where it may run, by the engine's rule (`isSchedulableWorkflow`), or null when not sent. */
+  runs: StampRuns | null;
+  /**
+   * Who may be asked its questions besides the owner when it runs on a schedule: how many people,
+   * and the address only when it is one. Null when no one, or when not sent.
+   */
+  asks: StampAsks | null;
   parameters: StampParameter[];
   onFailure: string | null;
   limits: unknown;
-  /** The contract tuples, one line per (method, URL), or null without a contract. */
+  /** The contract tuples, one line per (method, URL), or null without a contract. Empty for a
+   *  contract that grants nothing (no `http_request`, no host or no path). */
   contract: string[] | null;
   steps: StampStep[];
 }
@@ -77,6 +106,35 @@ const optOneOf = <T extends string>(v: unknown, values: readonly T[]): T | null 
 /** Absent or null is none; a finite, non-negative number is itself; anything else is BAD. */
 const optMs = (v: unknown): number | null | typeof BAD =>
   v === undefined || v === null ? null : typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : BAD;
+/** `asks` read whole: absent or null is none; one person with an address, or two and more with none; anything else is BAD. */
+function readAsks(v: unknown): StampAsks | null | typeof BAD {
+  if (v === undefined || v === null) return null;
+  if (!isRecord(v) || typeof v['count'] !== 'number' || !Number.isInteger(v['count'])) return BAD;
+  const count = v['count'];
+  const name = v['name'];
+  if (count === 1 && typeof name === 'string' && name !== '') return { count, name };
+  if (count >= 2 && (name === null || name === undefined)) return { count, name: null };
+  return BAD;
+}
+/**
+ * Absent or null is none; what a contract allows read whole is itself; anything else is BAD. A list
+ * holds only values a parameter can equal (text, a number, true or false), a bound is a finite
+ * number, and at least one facet is set: the server sends none for a parameter the contract sets
+ * nothing for.
+ */
+const optAllowed = (v: unknown): StampAllowed | null | typeof BAD => {
+  if (v === undefined || v === null) return null;
+  if (!isRecord(v)) return BAD;
+  const values = v['enum'] ?? null;
+  if (values !== null && (!Array.isArray(values) || !values.every((x) => typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean'))) return BAD;
+  const regex = optStr(v['regex']);
+  const bound = (b: unknown): number | null | typeof BAD => (b === undefined || b === null ? null : typeof b === 'number' && Number.isFinite(b) ? b : BAD);
+  const min = bound(v['min']);
+  const max = bound(v['max']);
+  if (regex === BAD || min === BAD || max === BAD) return BAD;
+  if (values === null && regex === null && min === null && max === null) return BAD;
+  return { enum: values as Array<string | number | boolean> | null, regex, min, max };
+};
 /** Absent or null is none; a grant read whole is itself; anything else is BAD. */
 const optGrant = (v: unknown): StampRoleGrant | null | typeof BAD => {
   if (v === undefined || v === null) return null;
@@ -137,11 +195,20 @@ export function parseStampPreview(body: unknown): StampPreview | null {
   const parameters: StampParameter[] = [];
   for (const p of rawParams) {
     if (!isRecord(p) || typeof p['name'] !== 'string') return null;
-    parameters.push({ name: p['name'], required: p['required'] === true, default: p['default'] ?? null });
+    const allowed = optAllowed(p['allowed']);
+    if (allowed === BAD) return null;
+    parameters.push({ name: p['name'], required: p['required'] === true, default: p['default'] ?? null, allowed });
   }
   const mode = optStr(body['mode']);
   const onFailure = optStr(body['onFailure']);
   const stampedAt = optStr(body['stampedAt']);
+  // Where it may run only informs: a value this view does not know shows no line, and the preview stands.
+  const runsRead = optOneOf(body['runs'], STAMP_RUNS);
+  const runs = runsRead === BAD ? null : runsRead;
+  // Who else may answer is part of what the owner consents to: absent (an older engine) is no line,
+  // present in any other shape refuses the preview, so a fault never reads as "only you".
+  const asks = readAsks(body['asks']);
+  if (asks === BAD) return null;
   if (mode === BAD || onFailure === BAD || stampedAt === BAD) return null;
   const changedBy = body['changedBy'];
   return {
@@ -150,6 +217,8 @@ export function parseStampPreview(body: unknown): StampPreview | null {
     changedBy: changedBy === 'mandate' || changedBy === 'owner' ? changedBy : null,
     awaitsStamp: body['awaitsStamp'] === true,
     mode,
+    runs,
+    asks,
     parameters,
     onFailure,
     limits: body['limits'] ?? null,
@@ -165,20 +234,78 @@ export function parseStampPreview(body: unknown): StampPreview | null {
  */
 // Tag characters (U+E0000–E007F) are invisible when rendered but read by a model: text hidden in a
 // harmless task. Variation selectors (U+FE00–FE0F, U+E0100–E01EF) can carry data the same way.
-// Whole code points (`u`), so the astral ranges match.
-const HIDDEN = /[\u034F\u061C\u115F\u1160\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFE00-\uFE0F\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+// Every format character (`\p{Cf}`: the soft hyphen, the Arabic letter mark, the invisible
+// operators and the rest of the class) and every default-ignorable code point (the Hangul and
+// Mongolian fillers and variation selectors, the combining grapheme joiner, the unassigned
+// ignorables) reads as nothing or as something else, so the whole classes are printed, not a list
+// of their members; the class `hidden-chars.ts` uses, without its exceptions for emoji and letters.
+// So are noncharacters, the line and paragraph separators, the Braille pattern blank (U+2800) and
+// the control characters other than tab, line feed and carriage return, which a multi-line task
+// text keeps as written. Whole code points (`u`), so the astral ranges match.
+const HIDDEN = /[\p{Cf}\p{Default_Ignorable_Code_Point}\p{Noncharacter_Code_Point}\p{Zl}\p{Zp}\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2800]/gu;
 export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }
 
-/** How long the start of a step's task text runs in the step's heading (there is no step name). */
-export const STEP_TASK_HEAD = 80;
+// The name of each mode and failure strategy the engine knows. A mode is named as the setting is
+// and says nothing about asking: an interactive workflow can be saved without a step that asks, so
+// a name that described asking would be false for some workflow. A failure strategy is named by
+// what a run does. Under a stop no step of a later phase starts; after a step fails or a gate
+// rejects, the steps of its own phase still start and finish (the view says so under the name).
+// `notify` carries the name of `continue`: it runs the same and tells no one but a debug log, so a
+// name that promised a report would promise what no run does. A value outside these is printed as
+// it came (with hidden characters shown): no name is guessed.
+const MODE_KEYS: ReadonlyMap<string, string> = new Map([
+  ['interactive', 'workflow_library.stamp.mode_interactive'],
+  ['autonomous', 'workflow_library.stamp.mode_autonomous'],
+]);
+const ON_FAILURE_KEYS: ReadonlyMap<string, string> = new Map([
+  ['stop', 'workflow_library.stamp.on_failure_stop'],
+  ['continue', 'workflow_library.stamp.on_failure_continue'],
+  ['notify', 'workflow_library.stamp.on_failure_continue'],
+]);
+/** The key of a mode's name, or null for a mode this view does not know. */
+export function modeKey(mode: string): string | null {
+  return MODE_KEYS.get(mode) ?? null;
+}
+/** The key of a failure strategy's name, or null for one this view does not know. */
+export function onFailureKey(onFailure: string): string | null {
+  return ON_FAILURE_KEYS.get(onFailure) ?? null;
+}
 
-/** The heading of a step: its id and the start of its task text, cut on a whole character. */
-export function stepHeading(step: { id: string; task: string }): { id: string; head: string } {
-  const flat = step.task.replace(/\s+/g, ' ').trim();
-  const chars = Array.from(flat);
-  return { id: visible(step.id), head: visible(chars.length > STEP_TASK_HEAD ? `${chars.slice(0, STEP_TASK_HEAD).join('')}…` : flat) };
+/** What moved between the preview that was shown and the one loaded after a refusal. */
+export interface StampChanges {
+  /** Mode, failure strategy, limits, parameters (with what the contract allows for each) or contract. */
+  settings: boolean;
+  /** Positions in the new preview of steps that are new or differ from the step of that id before. */
+  steps: ReadonlySet<number>;
+  /** Ids of steps that were shown before and are gone now. */
+  removed: string[];
+}
+
+/**
+ * Compares two previews of the same workflow, step by step id. `stepKey` is what a step shows: by
+ * default the step itself; the takeover adds the note it prints at a step. A step that only moved
+ * is not marked.
+ */
+export function stampChanges<P extends StampPreview>(before: P, after: P, stepKey: (p: P, i: number) => string = (p, i) => JSON.stringify(p.steps[i])): StampChanges {
+  // Mode and failure strategy by what the view shows for them: two values with one name (notify and
+  // continue) are no change the owner could find.
+  const shown = (key: string | null, raw: string | null): string | null => key ?? raw;
+  const settingsOf = (p: P): string => JSON.stringify([
+    p.mode === null ? null : shown(modeKey(p.mode), p.mode),
+    p.onFailure === null ? null : shown(onFailureKey(p.onFailure), p.onFailure),
+    p.limits, p.parameters, p.contract,
+  ]);
+  const was = new Map<string, string>();
+  before.steps.forEach((s, i) => { if (!was.has(s.id)) was.set(s.id, stepKey(before, i)); });
+  const steps = new Set<number>();
+  const now = new Set<string>();
+  after.steps.forEach((s, i) => {
+    now.add(s.id);
+    if (was.get(s.id) !== stepKey(after, i)) steps.add(i);
+  });
+  return { settings: settingsOf(before) !== settingsOf(after), steps, removed: [...was.keys()].filter((id) => !now.has(id)) };
 }
 
 /** A recorded step's input template as the view prints it: the literal call, nothing hidden. */
@@ -187,9 +314,12 @@ export function templateText(template: unknown): string {
   return visible(typeof template === 'string' ? template : JSON.stringify(template, null, 2));
 }
 
-/** Whether the library offers the owner the stamp of this workflow. */
-export function offersStamp(wf: { awaitsStamp?: boolean | undefined }, viewer: string | undefined): boolean {
-  return wf.awaitsStamp === true && viewer === 'owner';
+/**
+ * Whether the library offers the owner the stamp of this workflow. Not where its person's access
+ * ended: the takeover stamps it as well, and is the one thing offered there.
+ */
+export function offersStamp(wf: { awaitsStamp?: boolean | undefined; runs_as?: { ended: boolean } | null | undefined }, viewer: string | undefined): boolean {
+  return wf.awaitsStamp === true && viewer === 'owner' && wf.runs_as?.ended !== true;
 }
 
 export type ConfirmOutcome =

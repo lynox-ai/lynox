@@ -229,12 +229,34 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
 }
 
 /**
+ * Every reservation {@link reservePersistentBudget} handed out that still holds money, by
+ * identity. A run's cost guard is told its budget is already held against the caps only by an
+ * object in here (see {@link isHeldReservation}), so a plain object with the same fields, built
+ * anywhere else or decoded from a request, is not one. ⚠ Only {@link releaseReservation} takes one
+ * out; a release by amount ({@link releasePersistentBudget}) gives the money back and leaves the
+ * object in, so an object that is handed on must be given back through `releaseReservation`.
+ */
+const _held = new WeakSet<PersistentBudgetReservation>();
+
+/** Whether `r` is a reservation this module issued and that `releaseReservation` has not given back. */
+export function isHeldReservation(r: unknown): r is PersistentBudgetReservation {
+  return typeof r === 'object' && r !== null && _held.has(r as PersistentBudgetReservation);
+}
+
+/** Give back a reservation by the object it was issued as; a second call is a no-op. */
+export function releaseReservation(r: PersistentBudgetReservation): void {
+  if (!_held.delete(r)) return;
+  releasePersistentBudget(r.reservedUSD);
+}
+
+/**
  * Admission control for parallel background dispatch. Projects `estimatedCostUSD`
  * (a run's WORST case) on top of recorded spend AND already-reserved in-flight
  * cost, then admits only if the projection stays within the caps — so a tick
  * that fires N due tasks at once can't collectively overshoot. On admission the
  * estimate is held in the module accumulator (visible to the next task in the
- * same synchronous tick); the caller MUST {@link releasePersistentBudget} it
+ * same synchronous tick); the caller MUST give it back — with {@link releaseReservation} when the
+ * object is handed on, else {@link releasePersistentBudget} —
  * once the run's actual cost has landed in the provider.
  *
  * Worst-case reservation is deliberate: it can defer a would-be-cheap task when
@@ -253,20 +275,32 @@ export function reservePersistentBudget(estimatedCostUSD: number): PersistentBud
   }
   const projectedToday = spend.todayCost + _reservedInFlightUSD + estimatedCostUSD;
   const projectedMonth = spend.monthCost + _reservedInFlightUSD + estimatedCostUSD;
+  // What a refused caller is told is left: from these same figures, the tighter cap's, never
+  // negative (spend can exceed a cap lowered mid-month).
+  const leftToday = _dailyCapUSD - spend.todayCost - _reservedInFlightUSD;
+  const leftMonth = _monthlyCapUSD - spend.monthCost - _reservedInFlightUSD;
+  const tighter = leftMonth < leftToday
+    ? { cap: 'monthly' as const, capUSD: _monthlyCapUSD, headroomUSD: Math.max(0, leftMonth) }
+    : { cap: 'daily' as const, capUSD: _dailyCapUSD, headroomUSD: Math.max(0, leftToday) };
   if (_dailyCapUSD < Infinity && projectedToday > _dailyCapUSD) {
     return {
       allowed: false, reservedUSD: 0,
       reason: `Daily spending cap ($${_dailyCapUSD}) would be exceeded by in-flight tasks.`,
+      ...tighter,
     };
   }
   if (_monthlyCapUSD < Infinity && projectedMonth > _monthlyCapUSD) {
     return {
       allowed: false, reservedUSD: 0,
       reason: `Monthly spending cap ($${_monthlyCapUSD}) would be exceeded by in-flight tasks.`,
+      ...tighter,
     };
   }
   _reservedInFlightUSD += estimatedCostUSD;
-  return { allowed: true, reservedUSD: estimatedCostUSD };
+  // Frozen: the amount a guard compares against and `releaseReservation` gives back is fixed.
+  const reservation: PersistentBudgetReservation = Object.freeze({ allowed: true, reservedUSD: estimatedCostUSD });
+  _held.add(reservation);
+  return reservation;
 }
 
 /**
