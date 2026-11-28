@@ -1588,8 +1588,14 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 	} finally {
 		_resendProbeInFlight = false;
 	}
-	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
-	if (sessionId !== sid || isStreaming) return false;
+	// The thread changed meanwhile: the message belongs to a chat no longer shown, so nothing is said.
+	if (sessionId !== sid) return false;
+	// A turn started meanwhile: that is now the turn in charge, and the message is not sent again.
+	// Said as when a turn was already running before the question.
+	if (isStreaming) {
+		addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
+		return false;
+	}
 	if (live === null && scheduledQuestion) {
 		// A scheduled run's question has no stream to attach: the way on is to answer it, so
 		// its card is brought back rather than a turn sent past it.
@@ -1656,9 +1662,10 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	// The message on screen is the one sent again, not a copy added under it: it goes out as a
 	// queued turn, which the run finds by its id, as the automatic re-send does. The checks
 	// sendMessage makes are made again here, after the question to the server: a review may
-	// have opened meanwhile.
+	// have opened meanwhile. A turn that started during the question is already said by
+	// askBeforeResend; this guards the step between its answer and here.
 	if (isStreaming) {
-		addToast(t('chat.still_running'), 'info', 6000);
+		addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
 		return;
 	}
 	if (sendBlockedByReview()) return;

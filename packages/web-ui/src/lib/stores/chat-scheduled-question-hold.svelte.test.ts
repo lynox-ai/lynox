@@ -211,6 +211,48 @@ describe('the tap on a failed message', () => {
 		await settle();
 	});
 
+	it('when a turn starts while the server is being asked: not sent again, and the running sentence once, at least 8 s', async () => {
+		await store.sendMessage('first');
+		await settle();
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const tap = store.retryFailedTurn(store.getMessages().find((m) => m.content === 'again')!, 'again');
+		await settle();
+		expect(calls.filter((c) => c.endsWith('/runs/active')), 'positive control: the server is being asked').toHaveLength(1);
+		holdActive = null;
+		openRun = true;
+		void store.sendMessage('working');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: a turn streams').toBe(true);
+		release();
+		await tap;
+		await settle();
+		expect(failedOne('again').map((m) => m.failed)).toEqual([true]);
+		expect(runPosts(), 'only the first message and the turn that started').toBe(2);
+		expect(toasts.map((x) => [x.message, x.ms])).toEqual([[i18n.t('chat.still_running'), 8000]]);
+		finishRun?.();
+		await settle();
+	});
+
+	it('when another chat is opened while the server is being asked: not sent, and nothing is said', async () => {
+		await store.sendMessage('first');
+		await settle();
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		const msg = store.getMessages().find((m) => m.content === 'again')!;
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const tap = store.retryFailedTurn(msg, 'again');
+		await settle();
+		expect(calls.filter((c) => c.endsWith('/runs/active')), 'positive control: the server is being asked').toHaveLength(1);
+		store.newChat();
+		release();
+		await tap;
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(toasts).toEqual([]);
+	});
+
 	it('with the chat’s own run working: the running sentence, long enough to read (at least 8 s)', async () => {
 		await questionWaits(QUESTION);
 		active = { runs: [{ runId: 'own', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] };
