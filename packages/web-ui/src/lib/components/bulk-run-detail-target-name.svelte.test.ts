@@ -328,6 +328,19 @@ describe('a target key in the preview', () => {
 		expect(key?.classList.contains('break-words')).toBe(true);
 	});
 
+	// A key wraps after its separators only where the page shows the key; a product with a title the
+	// store answered stands by that title, as text, with its link below, and no key part at all.
+	it('shows a product with a title by its title and link, with no key and no break point of the key', async () => {
+		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1 });
+		targets = [{ ...seoTarget(1), title: handle } as unknown as BulkTarget];
+		await render();
+		const title = target.querySelector('[data-testid="bulk-target-title"]');
+		expect(title?.textContent).toBe(handle);
+		expect(title?.querySelectorAll('wbr').length).toBe(0);
+		expect(target.querySelector('[data-testid="bulk-target-key"]')).toBeNull();
+		expect(adminLinks().map((x) => x.getAttribute('href'))).toEqual(['https://demo.myshopify.com/admin/products/1']);
+	});
+
 	it('gives the target column a minimum width', async () => {
 		run = makeRun({ phase: 'previewed', undone: 0, undoneBy: null, targetSystem: 'workspace', total: 1, applied: 0,
 			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
