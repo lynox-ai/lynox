@@ -1106,11 +1106,6 @@ export class TaskManager {
     return this.history.triggerLeaseUntil(id);
   }
 
-  /** When the run that holds or last held a trigger's lease took it; null once a run's end gave it back. */
-  leaseSince(id: string): string | null {
-    return this.history.triggerLeaseSince(id);
-  }
-
   /** Who holds a trigger's run lease and until when; null when the trigger is gone. */
   leaseOf(id: string): { holder: string | null; until: string | null } | null {
     return this.history.triggerLease(id);
