@@ -148,6 +148,20 @@ describe('the words added at the design gate (U-306 N1)', () => {
 		expect(text(plan)).toContain('Versuch: Vorschau der Freigabe eines Plans (verweigert)');
 	});
 
+	it('says the contents a list or a result carries: task and answer, instruction and result, outputs, before and after', async () => {
+		const cases: Array<[string, string, string]> = [
+			['GET /api/history/runs', '/api/history/runs', 'Liste der Läufe mit Auftrag und Antwort'],
+			['GET /api/triggers', '/api/triggers', 'Liste der Pläne mit Auftrag und letztem Ergebnis'],
+			['GET /api/workflows/:id/steps', '/api/workflows/w-1/steps', 'Ergebnisse der Schritte eines Workflow-Laufs'],
+			['GET /api/history/runs/:id/tool-calls', '/api/history/runs/r-1/tool-calls', 'Werkzeugaufrufe eines Laufs mit Ein- und Ausgaben'],
+			['GET /api/bulk/runs/:id/targets', '/api/bulk/runs/b-1/targets', 'Ziele eines Massenlaufs mit Werten vorher und nachher'],
+			['GET /api/subjects/:id/footprint', '/api/subjects/s-1/footprint', 'Alles zu einem Eintrag: Tabellenzeilen, Chats, Gedächtnis, Aufgaben'],
+			['GET /api/inbox/items/:id/context', '/api/inbox/items/i-1/context', 'Weitere Mails von und an den Absender einer Mail'],
+		];
+		await render(cases.map(([action, path], i) => read(action, path, i + 1)));
+		expect(items().map((li) => text(li.querySelector('[data-word]')))).toEqual(cases.map((c) => c[2]));
+	});
+
 	it('says the inbox as the app does', async () => {
 		await render([read('GET /api/inbox/cold-start', '/api/inbox/cold-start'), read('GET /api/inbox/rules', '/api/inbox/rules', 2)]);
 		expect(items().map((li) => text(li.querySelector('[data-word]')))).toEqual(['Stand des Nachladens des Posteingangs', 'Regeln des Posteingangs']);

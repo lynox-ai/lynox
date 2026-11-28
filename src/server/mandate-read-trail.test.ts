@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -426,5 +426,28 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
       expect(await res.text()).toContain('another site sent this request');
       expect(newReadRows()).toHaveLength(0);
     });
+  });
+
+  // The owner's view says a read of the run list as what it returns (U-306 N1): every run's task
+  // and answer, in their words. Measured on the real route, held against the declaration and the
+  // word the view shows for it, so neither can drift back to "a list of runs".
+  it('the run list a mandate reads carries task and answer, and its word in the owner\'s view says so', async () => {
+    const history = (api as unknown as { engine: { getRunHistory: () => { insertRun: (p: { sessionId: string; taskText: string; modelTier: string; modelId: string }) => string; updateRun: (id: string, p: { responseText: string; status: 'completed' }) => void } } }).engine.getRunHistory();
+    // A run names its chat: one that names none is left out of a mandate's list (fail-closed).
+    const id = history.insertRun({ sessionId: 't-runs-word', taskText: 'Offerte an Brunner vorbereiten', modelTier: 'sonnet', modelId: 'test-model' });
+    history.updateRun(id, { responseText: 'Entwurf mit Preisen erstellt', status: 'completed' });
+    const res = await ask('GET', '/api/history/runs?limit=500', mandateCookie);
+    expect(res.status).toBe(200);
+    const { runs } = await res.json() as { runs: Array<{ id: string; task_text: string; response_text: string }> };
+    expect(runs.find((r) => r.id === id)).toMatchObject({ task_text: 'Offerte an Brunner vorbereiten', response_text: 'Entwurf mit Preisen erstellt' });
+    expect(newReadRows().map((r) => r.action)).toContain('GET /api/history/runs');
+
+    const words = readFileSync(new URL('../../packages/web-ui/src/lib/access-trail-words.ts', import.meta.url), 'utf8');
+    expect(words).toContain("'GET /api/history/runs': ['task', 'answer'],");
+    expect(words).toContain("'GET /api/history/runs': 'history_runs',");
+    const i18n = readFileSync(new URL('../../packages/web-ui/src/lib/i18n.svelte.ts', import.meta.url), 'utf8');
+    const line = i18n.split('\n').find((l) => l.includes("'access_trail.read.history_runs':")) ?? '';
+    expect(line).toMatch(/de: '[^']*Auftrag[^']*Antwort[^']*'/);
+    expect(line).toMatch(/en: '[^']*task[^']*answer[^']*'/);
   });
 });

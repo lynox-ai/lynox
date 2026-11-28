@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { readWord, routeText, WORDED_ACTIONS } from './access-trail-words.js';
+import { readWord, routeText, WORDED_ACTIONS, CARRIES, CARRY_TERMS, type Carry } from './access-trail-words.js';
 import { t, setLocale, getLocale } from './i18n.svelte.js';
 
 // The words are keyed by the action the engine writes for a read (`GET <route as registered>`). A
@@ -63,5 +63,50 @@ describe('the route, once (U-306 B1(a))', () => {
 		expect(routeText('http_request:read', 'GET example.invalid/')).toBe('http_request:read · GET example.invalid/');
 		expect(routeText('GET /api/config', null)).toBe('GET /api/config');
 		expect(routeText('mail_send:send', '')).toBe('mail_send:send');
+	});
+});
+
+describe('the word names what the read returns (U-306 N1)', () => {
+	/** The word of an action in a language: the settings form fills in its page. */
+	const wordIn = (action: string, lang: 'de' | 'en'): string => {
+		setLocale(lang);
+		const w = readWord(action)!;
+		return 'key' in w ? t(w.key) : t('access_trail.read.settings').replace('{page}', t(w.settings));
+	};
+	/** The kinds a word does not name, as `kind (lang)`. */
+	const unnamed = (action: string, carries: readonly Carry[], word: (lang: 'de' | 'en') => string): string[] =>
+		carries.flatMap((c) => (c === 'state' ? [] : (['de', 'en'] as const).filter((l) => !CARRY_TERMS[c][l].test(word(l))).map((l) => `${action}: ${c} (${l})`)));
+
+	it('declares what every worded route returns, and nothing else', () => {
+		expect(Object.keys(CARRIES).sort()).toEqual([...WORDED_ACTIONS].sort());
+		for (const [action, carries] of Object.entries(CARRIES)) {
+			expect(carries.length, action).toBeGreaterThan(0);
+			// `state` is said alone: a route that returns content is not also a status.
+			if (carries.includes('state')) expect(carries, action).toEqual(['state']);
+		}
+	});
+
+	it('has every kind of content a route returns in its word, in both languages', () => {
+		const before = getLocale();
+		try {
+			const missing = Object.entries(CARRIES).flatMap(([action, carries]) => unnamed(action, carries, (l) => wordIn(action, l)));
+			expect(missing).toEqual([]);
+		} finally {
+			setLocale(before);
+		}
+	});
+
+	it('finds a word that says less than the route returns (control)', () => {
+		// The run list before U-306 N1: up to 500 runs with task and answer, said as a list of runs.
+		const old = { de: 'Liste der Läufe', en: 'List of runs' };
+		expect(unnamed('GET /api/history/runs', CARRIES['GET /api/history/runs']!, (l) => old[l])).toEqual([
+			'GET /api/history/runs: task (de)', 'GET /api/history/runs: task (en)', 'GET /api/history/runs: answer (de)', 'GET /api/history/runs: answer (en)',
+		]);
+	});
+
+	it('gives a HEAD read the word of its GET route', () => {
+		expect(readWord('HEAD /api/threads')).toEqual(readWord('GET /api/threads'));
+		expect(readWord('HEAD /api/backups')).toEqual(readWord('GET /api/backups'));
+		expect(readWord('HEAD /api/not-worded')).toBeNull();
 	});
 });

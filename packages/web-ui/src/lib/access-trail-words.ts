@@ -119,14 +119,162 @@ export type ReadWord = { readonly key: string } | { readonly settings: string };
 
 /** The word of a read's action, or null for a route that has none (it then shows its route only). */
 export function readWord(action: string): ReadWord | null {
-	const own = WORDS[action];
+	// A HEAD read is the GET route's, without the body: the engine writes `HEAD <route>` for it.
+	const get = action.startsWith('HEAD ') ? `GET ${action.slice('HEAD '.length)}` : action;
+	const own = WORDS[get];
 	if (own !== undefined) return { key: `access_trail.read.${own}` };
-	const page = SETTINGS_PAGES[action];
+	const page = SETTINGS_PAGES[get];
 	return page === undefined ? null : { settings: page };
 }
 
 /** Every action with a word, for the test that holds the list to the engine's routes. */
 export const WORDED_ACTIONS: readonly string[] = [...Object.keys(WORDS), ...Object.keys(SETTINGS_PAGES)];
+
+/**
+ * What a read returns, declared per route (U-306 N1): the word must not say less than the route
+ * gives. `state` is a status, a count, a setting or a definition the person could not act on
+ * alone; every other kind is content the owner must be told was read, and the word must name it
+ * in both languages (`CARRY_TERMS`, held by `access-trail-words-routes.svelte.test.ts`). A new
+ * route without a declaration fails that test, so it cannot arrive with a word that plays it down.
+ */
+export type Carry =
+	| 'state' | 'messages' | 'mail' | 'other_mails' | 'task' | 'answer' | 'result' | 'io' | 'values'
+	| 'content' | 'summary' | 'title' | 'interaction' | 'cost' | 'rows' | 'memory' | 'contact'
+	| 'changes' | 'deals' | 'graph' | 'artifact' | 'file' | 'export' | 'names' | 'tasks' | 'rules'
+	| 'steps' | 'workflow';
+
+/** The term a word must hold for each kind of content, DE and EN. */
+export const CARRY_TERMS: Readonly<Record<Exclude<Carry, 'state'>, { readonly de: RegExp; readonly en: RegExp }>> = {
+	messages: { de: /Nachrichten/, en: /messages/i },
+	mail: { de: /Mail/, en: /email/i },
+	other_mails: { de: /Weitere Mails/, en: /Other emails/ },
+	task: { de: /Auftrag/, en: /task|instruction/i },
+	answer: { de: /Antwort/, en: /answer/i },
+	result: { de: /Ergebnis/, en: /result/i },
+	io: { de: /Ein- und Ausgaben/, en: /inputs and outputs/ },
+	values: { de: /Werte/, en: /values/ },
+	content: { de: /Inhalt/, en: /content/i },
+	summary: { de: /Zusammenfassung/, en: /summary/i },
+	title: { de: /Titel/, en: /title/i },
+	interaction: { de: /Interaktion|Verlauf/, en: /interaction|history|thread/i },
+	cost: { de: /Kosten|Verbrauch/, en: /cost|usage/i },
+	rows: { de: /Tabelle/, en: /table/i },
+	memory: { de: /Gedächtnis/, en: /memor/i },
+	contact: { de: /Kontakt/, en: /contact/i },
+	changes: { de: /[äÄ]nderungen/, en: /change/i },
+	deals: { de: /Geschäfte/, en: /deals/i },
+	graph: { de: /Wissensgraph/, en: /knowledge graph/i },
+	artifact: { de: /Artefakt/, en: /artifact/i },
+	file: { de: /Datei/, en: /file/i },
+	export: { de: /Export/, en: /export/i },
+	names: { de: /Namen|Personen, Firmen/, en: /names|people, companies/i },
+	tasks: { de: /Aufgaben/, en: /tasks/i },
+	rules: { de: /Regeln/, en: /rules/i },
+	steps: { de: /Schritte/, en: /step/i },
+	workflow: { de: /Workflow/, en: /workflow/i },
+};
+
+/** What each worded route returns (U-306 N1). Every key of `WORDS` and `SETTINGS_PAGES`, no other. */
+export const CARRIES: Readonly<Record<string, readonly Carry[]>> = {
+	'GET /api/triggers/paused-count': ['state'],
+	'GET /api/voice/info': ['state'],
+	'GET /api/sessions/:id/pending-prompt': ['answer'],
+	'GET /api/onboarding/status': ['state'],
+	'GET /api/threads/:id/messages': ['messages'],
+	'GET /api/threads': ['title', 'summary'],
+	'GET /api/threads/:id': ['title', 'summary'],
+	'GET /api/knowledge/queue': ['memory'],
+	'GET /api/knowledge/queue/count': ['state'],
+	'GET /api/runs/:runId/stream': ['answer'],
+	'GET /api/sessions/:id/changeset': ['changes', 'file'],
+	'GET /api/artifacts': ['artifact'],
+	'GET /api/usage/summary': ['cost'],
+	'GET /api/vault/key': ['state'],
+	'GET /api/history/stats': ['cost'],
+	'GET /api/history/runs': ['task', 'answer'],
+	'GET /api/workflows': ['workflow', 'cost'],
+	'GET /api/bulk/runs': ['state'],
+	'GET /api/merges': ['state'],
+	'GET /api/bulk/runs/:id': ['state'],
+	'GET /api/bulk/runs/:id/targets': ['values'],
+	'GET /api/approvals': ['mail'],
+	'GET /api/workflows/library': ['workflow'],
+	'GET /api/triggers': ['task', 'result'],
+	'GET /api/inbox/items': ['mail'],
+	'GET /api/inbox/cold-start': ['state'],
+	'GET /api/inbox/rules': ['rules'],
+	'GET /api/mail/accounts': ['state'],
+	'GET /api/knowledge/entries': ['memory'],
+	'GET /api/knowledge/blocks': ['memory'],
+	'GET /api/memory/:ns': ['content', 'memory'],
+	'GET /api/kg/stats': ['state'],
+	'GET /api/kg/entities': ['graph'],
+	'GET /api/kg/graph': ['graph'],
+	'GET /api/metrics': ['state'],
+	'GET /api/crm/contacts': ['contact'],
+	'GET /api/crm/deals': ['deals'],
+	'GET /api/subjects': ['names'],
+	'GET /api/datastore/collections': ['state'],
+	'GET /api/files': ['file'],
+	'GET /api/inbox/items/:id': ['mail'],
+	'GET /api/inbox/items/:id/audit': ['mail'],
+	'GET /api/inbox/items/:id/full': ['mail'],
+	'GET /api/inbox/items/:id/thread': ['mail', 'interaction'],
+	'GET /api/inbox/items/:id/context': ['other_mails'],
+	'GET /api/threads/:id/debug-export': ['export'],
+	'GET /api/history/runs/:id/tool-calls': ['io'],
+	'GET /api/files/read': ['content', 'file'],
+	'GET /api/files/download': ['file'],
+	'GET /api/workflows/:id': ['workflow'],
+	'GET /api/workflows/:id/steps': ['result', 'steps'],
+	'GET /api/artifacts/:id': ['artifact'],
+	'GET /api/kg/entities/:id': ['graph'],
+	'GET /api/crm/contacts/:name/interactions': ['contact', 'interaction'],
+	'GET /api/crm/contacts/:name/deals': ['contact', 'deals'],
+	'GET /api/subjects/:id/footprint': ['rows', 'memory'],
+	'GET /api/datastore/:collection': ['content', 'rows'],
+	'GET /api/auth/token': ['state'],
+	'GET /api/push/vapid-key': ['state'],
+	'GET /api/access-trail': ['state'],
+	'GET /api/config': ['state'],
+	'GET /api/runs/active': ['state'],
+	'GET /api/tasks': ['tasks'],
+	'GET /api/providers/status': ['state'],
+	'GET /api/provider/status': ['state'],
+	'GET /api/history/cost/daily': ['cost'],
+	'GET /api/secrets/status': ['state'],
+	'GET /api/secrets': ['names'],
+	'GET /api/inbox/counts': ['state'],
+	'GET /api/approvals/count': ['state'],
+	'GET /api/inbox/undo/recent': ['state'],
+	'GET /api/inbox/contacts/:email': ['contact', 'interaction'],
+	'GET /api/history/runs/:id': ['task', 'answer'],
+	'GET /api/usage/current': ['cost'],
+	'GET /api/thread-insights': ['title', 'cost'],
+	'GET /api/transcribe/info': ['state'],
+	'GET /api/crm/stats': ['state'],
+	'GET /api/workflows/stats/cost': ['cost'],
+	'GET /api/workflows/stats/steps': ['state'],
+	'GET /api/workflows/:id/stamp-preview': ['steps'],
+	'GET /api/workflows/:id/takeover-preview': ['steps'],
+	'GET /api/tasks/:id/stamp-preview': ['state'],
+	'GET /api/triggers/:id/takeover-preview': ['task', 'result'],
+	'GET /api/triggers/:id/confirm-recipients-preview': ['task'],
+	'GET /api/api-profiles/:id': ['state'],
+	'GET /api/api-profiles/:id/client': ['state'],
+	'GET /api/connections/records': ['state'],
+	'GET /api/oauth/connect/:id': ['state'],
+	'GET /api/google/oauth-url': ['state'],
+	'GET /api/llm/catalog': ['state'],
+	'GET /api/tools/available': ['state'],
+	'GET /api/mail/presets': ['state'],
+	'GET /api/google/status': ['state'],
+	'GET /api/search/reranker/capability': ['state'],
+	'GET /api/inbox/notification-prefs': ['state'],
+	'GET /api/api-profiles': ['state'],
+	'GET /api/backups': ['state'],
+	'GET /api/migration/preview': ['state'],
+};
 
 const HTTP_METHOD = /^(GET|HEAD|POST|PUT|PATCH|DELETE) /;
 
