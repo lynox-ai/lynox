@@ -9,7 +9,7 @@ import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateId
 import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, isPaused, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
 import { lastRunResultFor } from '../../core/member-connection-notes.js';
 import { noticeLanguage } from '../../core/notice-language.js';
-import { WORKER_NOTICES } from '../../core/worker-notices.js';
+import { WORKER_NOTICES, memberEndOfStatus } from '../../core/worker-notices.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type BeforeTriggerWrite } from '../../core/task-manager.js';
@@ -267,7 +267,7 @@ function formatTaskLine(
   const due = t.due_date ? ` — due ${stripHidden(t.due_date)}` : '';
   const assign = t.assignee ? ` @${stripHidden(t.assignee)}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates()) }, workflowReader)}`;
+  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates(t.last_run_status)) }, workflowReader)}`;
 }
 
 /**
@@ -276,14 +276,15 @@ function formatTaskLine(
  */
 interface TaskReader {
   readonly owner: () => boolean;
-  readonly forMandates: () => string;
+  /** The sentence for the last run's end, by its stored status (`memberEndOfStatus`). */
+  readonly forMandates: (status: string | null | undefined) => string;
 }
 
 /** Asked only for a row whose last run has lines. */
 function taskReaderOf(agent: IAgent): TaskReader {
   return {
     owner: () => isOwnerPrincipal(agent.principal),
-    forMandates: () => WORKER_NOTICES[agent.noticeLanguage ?? noticeLanguage(undefined)].memberEndForMandates,
+    forMandates: (status) => WORKER_NOTICES[agent.noticeLanguage ?? noticeLanguage(undefined)].memberEndForMandates(memberEndOfStatus(status)),
   };
 }
 

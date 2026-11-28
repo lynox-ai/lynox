@@ -11,7 +11,7 @@ import type { IAgent } from '../types/index.js';
 import { createToolContext } from './tool-context.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { lastRunResultFor, memberNotesRepeat } from './member-connection-notes.js';
-import { WORKER_NOTICES } from './worker-notices.js';
+import { WORKER_NOTICES, type MemberEnd } from './worker-notices.js';
 import { noticeLanguage } from './notice-language.js';
 import { loadConfig } from './config.js';
 import { triggerForRoute, rowForRoute } from '../server/http-api.js';
@@ -46,8 +46,8 @@ describe("a run's end with member lines, by reader", () => {
   };
   const stored = (id: string): { last_run_result: string | null; last_run_member_notes: string | null } =>
     engine.getDb().prepare('SELECT last_run_result, last_run_member_notes FROM triggers WHERE id = ?').get(id) as { last_run_result: string | null; last_run_member_notes: string | null };
-  const forMandatesHere = (): string => WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates;
-  const forMandatesTool = (): string => WORKER_NOTICES[noticeLanguage(undefined)].memberEndForMandates;
+  const forMandatesHere = (end: MemberEnd = 'finished'): string => WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates(end);
+  const forMandatesTool = (end: MemberEnd = 'finished'): string => WORKER_NOTICES[noticeLanguage(undefined)].memberEndForMandates(end);
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-run-result-readers-'));
@@ -195,6 +195,17 @@ describe("a run's end with member lines, by reader", () => {
     // The task routes answer a trigger through the same shaping.
     expect((rowForRoute(row, MANDATE) as Record<string, unknown>)['last_run_result']).toBe(forMandatesHere());
     expect((rowForRoute(row, OWNER_PRINCIPAL) as Record<string, unknown>)['last_run_result']).toBe(`${REPLY}\n• ${LINE}`);
+  });
+
+  it('a mandate reads why the last run ended, as its stored status tells it, on the trigger routes and in task_list', async () => {
+    for (const [id, status] of [['s', 'stopped'], ['f', 'failed'], ['h', 'halted']] as const) {
+      seed(id);
+      tm.recordTaskRun(id, REPLY, status, { memberNotes: [LINE] });
+    }
+    const read = (id: string): unknown => (triggerForRoute(history.getTrigger(id)!, MANDATE) as Record<string, unknown>)['last_run_result'];
+    expect(['s', 'f', 'h'].map(read)).toEqual([forMandatesHere('stopped'), forMandatesHere('failed'), forMandatesHere('finished')]);
+    const listed = await taskListTool.handler({}, agent(MANDATE));
+    for (const end of ['stopped', 'failed', 'finished'] as const) expect(listed).toContain(forMandatesTool(end));
   });
 
   it('task_list: the owner reads the lines, a mandate the sentence and neither the name nor the profile', async () => {

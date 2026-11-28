@@ -113,6 +113,23 @@ function saidWorkflowId(id: string): string {
 
 export type { ShownMandate };
 
+/**
+ * How a run that noted the owner's member-connection lines ended, as a grant is told it: the class
+ * of the end only, never its error text or a number from the owner's context (U-411 N).
+ */
+export type MemberEnd = 'finished' | 'stopped' | 'cost' | 'turns' | 'unanswered' | 'failed';
+export const MEMBER_ENDS: readonly MemberEnd[] = ['finished', 'stopped', 'cost', 'turns', 'unanswered', 'failed'];
+
+/**
+ * The end as a run's stored status tells it, for a reader of the trigger's last run: the status
+ * does not tell a ceiling or an unanswered question from a failure, so each reads as failed, as
+ * the status beside it does. Any other status reads as finished: a run that finished with lines is
+ * stored `halted`.
+ */
+export function memberEndOfStatus(status: string | null | undefined): MemberEnd {
+  return status === 'stopped' ? 'stopped' : status === 'failed' ? 'failed' : 'finished';
+}
+
 export interface WorkerNotices {
   /** The summary of more than a few triggers waiting for confirmation. */
   consentManyTitle(count: number): string;
@@ -141,9 +158,10 @@ export interface WorkerNotices {
    * Every grant's push of a run's end that noted the owner's member-connection lines: a fixed
    * sentence in place of the run's result, which the model words after a refusal that names
    * another member, their provider and the owner's way (U-411). True for every mandate, so no
-   * "only the owner": a mandate under a later access can connect its own connection again.
+   * "only the owner": a mandate under a later access can connect its own connection again. The
+   * reason the run ended leads, as its class only (`MemberEnd`, U-411 N3).
    */
-  readonly memberEndForMandates: string;
+  memberEndForMandates(end: MemberEnd): string;
   /**
    * The push title of a run that finished and noted member-connection lines, after its ⚠: the run
    * is over and nothing waits, so the title must not say it is paused (U-420). The note leads: it
@@ -329,7 +347,14 @@ const EN: WorkerNotices = Object.freeze({
   workflowStepIdReserved: (step: number) => `Step ${String(step)} of this workflow has a name lynox uses for something else, so the workflow did not run, and it will not run until that step is renamed or removed. Ask lynox in a chat to rename that step.`,
   stoppedWith: (message: string) => `Stopped on your instruction: ${message}`,
   stopped: 'Stopped on your instruction.',
-  memberEndForMandates: 'The run finished without a connection it may not use, so its result may be incomplete. Contact the owner of this instance.',
+  memberEndForMandates: (end: MemberEnd) => `${({
+    finished: 'The run finished.',
+    stopped: 'The owner stopped the run.',
+    cost: 'The run reached its cost ceiling and stopped.',
+    turns: 'The run reached its turn limit and stopped.',
+    unanswered: 'A question of the run went unanswered, so it ended.',
+    failed: 'The run failed.',
+  } satisfies Record<MemberEnd, string>)[end]} It was not allowed to use one of the connections, so its result may be incomplete. Contact the owner of this instance.`,
   titleWithNote: (name: string) => `With a note: ${name}`,
   chipRunAgain: 'Run again',
   chipRetry: 'Retry',
@@ -470,7 +495,14 @@ const DE: WorkerNotices = Object.freeze({
   workflowStepIdReserved: (step: number) => `Schritt ${String(step)} dieses Workflows trägt einen Namen, den lynox für etwas anderes braucht. Darum lief der Workflow nicht, und er läuft erst wieder, wenn der Schritt anders heisst oder entfernt ist. Bitte lynox im Chat, diesen Schritt umzubenennen.`,
   stoppedWith: (message: string) => `Auf deine Anweisung gestoppt: ${message}`,
   stopped: 'Auf deine Anweisung gestoppt.',
-  memberEndForMandates: 'Der Lauf ist zu Ende, ohne eine Verbindung, die er nicht nutzen darf. Sein Ergebnis kann darum unvollständig sein. Wende dich an den Inhaber dieser Instanz.',
+  memberEndForMandates: (end: MemberEnd) => `${({
+    finished: 'Der Lauf ist fertig.',
+    stopped: 'Der Inhaber hat den Lauf gestoppt.',
+    cost: 'Der Lauf hat seine Kostengrenze erreicht und ist angehalten.',
+    turns: 'Der Lauf hat sein Rundenlimit erreicht und ist angehalten.',
+    unanswered: 'Eine Frage des Laufs blieb unbeantwortet, darum ist er beendet.',
+    failed: 'Der Lauf ist fehlgeschlagen.',
+  } satisfies Record<MemberEnd, string>)[end]} Eine Verbindung durfte er nicht nutzen, darum kann sein Ergebnis unvollständig sein. Wende dich an den Inhaber dieser Instanz.`,
   titleWithNote: (name: string) => `Mit Hinweis: ${name}`,
   chipRunAgain: 'Erneut ausführen',
   chipRetry: 'Erneut versuchen',
