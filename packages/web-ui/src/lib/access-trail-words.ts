@@ -148,7 +148,7 @@ export const CARRY_TERMS: Readonly<Record<Exclude<Carry, 'state'>, { readonly de
 	messages: { de: /Nachrichten/, en: /messages/i },
 	mail: { de: /Mail/, en: /email/i },
 	other_mails: { de: /Weitere Mails/, en: /Other emails/ },
-	task: { de: /Auftr(ag|äge)/, en: /task|instruction/i },
+	task: { de: /Auftr(ag|äge)/, en: /instruction/i },
 	answer: { de: /Antwort/, en: /answer/i },
 	result: { de: /Ergebnis/, en: /result/i },
 	io: { de: /Ein- und Ausgaben/, en: /inputs and outputs/ },

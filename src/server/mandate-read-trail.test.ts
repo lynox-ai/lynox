@@ -446,7 +446,7 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
 
     // The kinds this answer carries, by the fields that hold them, with the term each needs.
     const KINDS: Array<{ kind: string; field: string; de: RegExp; en: RegExp }> = [
-      { kind: 'task', field: 'task_text', de: /Auftrag/, en: /task/i },
+      { kind: 'task', field: 'task_text', de: /Auftrag/, en: /instruction/i },
       { kind: 'answer', field: 'response_text', de: /Antwort/, en: /answer/i },
       { kind: 'cost', field: 'cost_usd', de: /Kosten/, en: /cost/i },
     ];
