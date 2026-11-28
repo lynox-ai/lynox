@@ -273,8 +273,9 @@ export interface HeldMemoryTexts {
  * Every remembered text both stores hold, and what links it to the graph, for the data export.
  * Active or not: a text that was replaced or retired is still stored, and Art. 15 asks what is
  * held. Each row carries its stored columns except the embedding (numbers, no content of their
- * own), which is not even read. Every text, and a relationship's free-text description and
- * notes, and the reason one text replaced another, goes through `mask`, as the other blocks do;
+ * own), which is not even read. Every text, an entity's free-text columns, a relationship's kind,
+ * description, dates and notes, and the reason one text replaced another, go through `mask`, as
+ * the other blocks do;
  * engine.db texts are decrypted first, and
  * one that cannot be, or is not stored as text at all, is written as
  * {@link UNREADABLE_MEMORY_TEXT}, never as what is stored.

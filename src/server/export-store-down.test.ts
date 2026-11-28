@@ -426,8 +426,8 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     const getKnowledgeLayer = h.engine().getKnowledgeLayer;
     const getUserConfig = h.engine().getUserConfig;
     try {
-      legacy.prepare("INSERT INTO entities (id, canonical_name, entity_type, aliases, description, scope_type, scope_id, first_seen_at, last_seen_at) VALUES ('gm-a', ?, ?, ?, ?, 'global', 'global', '2026-01-01', '2026-01-01'), ('gm-b', 'Acme', 'organization', '[]', '', 'global', 'global', '2026-01-01', '2026-01-01')")
-        .run(`Mallory ${value}`, `kind ${value}`, JSON.stringify([`alias ${value}`]), `pin ${value}`);
+      legacy.prepare("INSERT INTO entities (id, canonical_name, entity_type, aliases, description, scope_type, scope_id, first_seen_at, last_seen_at) VALUES ('gm-a', ?, ?, ?, ?, 'global', 'global', '2026-01-01', '2026-01-01'), ('gm-b', 'Acme', 'organization', '[]', '', 'global', 'global', '2026-01-01', '2026-01-01'), ('gm-c', 'Eve', 'person', ?, '', 'global', 'global', '2026-01-01', '2026-01-01')")
+        .run(`Mallory ${value}`, `kind ${value}`, JSON.stringify([`alias ${value}`]), `pin ${value}`, JSON.stringify(`solo ${value}`));
       legacy.prepare("INSERT INTO relations (id, from_entity_id, to_entity_id, relation_type, description, created_at) VALUES ('gm-r', 'gm-a', 'gm-b', ?, ?, '2026-01-01')")
         .run(`owns ${value}`, `json {"pw":"${escaped}"}`);
       legacy.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active, embedding, created_at, updated_at) VALUES ('gm-m', ?, 'knowledge', 'global', 'global', 0, x'00', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')")
@@ -454,6 +454,8 @@ describe('export with every store open, durable memory off, then the CRM gone (r
           expect(entity!.entityType, `${path}: its type, masked`).toMatch(/^kind \*\*\*/);
           expect(entity!.aliases.join(' '), `${path}: its aliases, masked`).toMatch(/^alias \*\*\*/);
           expect(entity!.description, `${path}: its description, masked`).toMatch(/^pin \*\*\*/);
+          const single = graph.entities.find(e => e.id === 'gm-c') as unknown as { aliases: unknown } | undefined;
+          expect(String(single?.aliases), `${path}: aliases an older row holds as one text, masked`).toMatch(/^solo \*\*\*/);
           const relation = graph.relationships.find(r => r.fromEntityId === 'gm-a');
           expect(relation, `${path}: the relation is listed`).toBeDefined();
           expect(relation!.relationType, `${path}: its type, masked`).toMatch(/^owns \*\*\*/);
@@ -476,7 +478,7 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       engineDb!.getDb().prepare('DELETE FROM relationships WHERE id = ?').run(edge);
       engineDb!.getDb().prepare('DELETE FROM subjects WHERE id IN (?, ?)').run(sa, sb);
       legacy.prepare("DELETE FROM relations WHERE id = 'gm-r'").run();
-      legacy.prepare("DELETE FROM entities WHERE id IN ('gm-a', 'gm-b')").run();
+      legacy.prepare("DELETE FROM entities WHERE id IN ('gm-a', 'gm-b', 'gm-c')").run();
       legacy.prepare("DELETE FROM memories WHERE id = 'gm-m'").run();
       legacy.close();
     }
