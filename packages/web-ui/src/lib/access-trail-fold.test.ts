@@ -30,6 +30,14 @@ describe('foldInterfacePolls', () => {
 		expect(group).toMatchObject({ kind: 'polls', reads: 41, from: '2026-10-20T07:00:00.000Z', to: '2026-10-20T17:00:00.000Z' });
 	});
 
+	it('leaves one marked read as an entry, a day row too: one entry is no group (U-306 N1)', () => {
+		const step: E = { id: 's', kind: 'step', at: '2026-10-28T10:03:00.000Z', who: 'ida' };
+		const day: E = { id: 'd', kind: 'event', at: '2026-10-20T08:00:00.000Z', until: '2026-10-20T17:00:00.000Z', count: 40, auto: true, who: 'ida' };
+		const out = foldInterfacePolls([poll('a', '2026-10-28T10:04:00.000Z'), step, day], (e) => e.who);
+		expect(out.map((i) => i.kind)).toEqual(['entry', 'entry', 'entry']);
+		expect(foldInterfacePolls([poll('a', '2026-10-28T10:04:00.000Z'), poll('b', '2026-10-28T10:03:00.000Z')], (e) => e.who).map((i) => i.kind)).toEqual(['polls']);
+	});
+
 	it('counts single reads one each', () => {
 		const [group] = foldInterfacePolls([poll('a', '2026-10-28T10:05:00.000Z'), poll('b', '2026-10-28T10:09:00.000Z')], (e) => e.who);
 		expect(group).toMatchObject({ kind: 'polls', reads: 2 });

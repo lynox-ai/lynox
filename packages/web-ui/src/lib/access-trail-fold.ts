@@ -66,7 +66,7 @@ function isOwnRead<E extends FoldableEntry>(e: E): e is Extract<E, { kind: 'even
 }
 
 /**
- * Consecutive marked reads of the same person become one group; consecutive identical reads the
+ * Two or more consecutive marked reads of the same person become one group; consecutive identical reads the
  * person made become one repeat line; every other entry stays as it is.
  * `entries` are in the view's order, newest first; `personOf` gives the key the person filter uses.
  */
@@ -75,6 +75,12 @@ export function foldInterfacePolls<E extends FoldableEntry>(entries: readonly E[
 	let run: Array<Extract<E, { kind: 'event' }>> = [];
 	const close = (): void => {
 		if (run.length === 0) return;
+		// One entry is no group (U-306 N1): it stands as its own line, with its word, and nothing to expand.
+		if (run.length === 1) {
+			out.push({ kind: 'entry', entry: run[0]! });
+			run = [];
+			return;
+		}
 		// By time, not by position: pages that were loaded later are appended, so the order is not
 		// guaranteed across a page edge.
 		const times = run.flatMap((e) => (e.until === undefined ? [e.at] : [e.at, e.until])).sort((a, b) => Date.parse(a) - Date.parse(b));

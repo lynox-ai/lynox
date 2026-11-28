@@ -124,6 +124,47 @@ describe('a read in words, the route once (U-306 B1)', () => {
 	});
 });
 
+describe('the words added at the design gate (U-306 N1)', () => {
+	it('says the instance settings, and a refused read of the log as an attempt on the log', async () => {
+		await render([read('GET /api/config', '/api/config'), read('GET /api/access-trail', '/api/access-trail', 2, 'refused')]);
+		const [config, refused] = items();
+		expect(text(config?.querySelector('[data-word]'))).toBe('Einstellungen der Instanz');
+		expect(text(refused)).toContain('Versuch: Instanz-Protokoll (verweigert)');
+		setLocale('en');
+		flushSync();
+		expect(text(items()[0]?.querySelector('[data-word]'))).toBe('Instance settings');
+		expect(text(items()[1])).toContain('Attempt: Instance log (refused)');
+	});
+
+	it('says the inbox as the app does', async () => {
+		await render([read('GET /api/inbox/cold-start', '/api/inbox/cold-start'), read('GET /api/inbox/rules', '/api/inbox/rules', 2)]);
+		expect(items().map((li) => text(li.querySelector('[data-word]')))).toEqual(['Stand des Nachladens des Posteingangs', 'Regeln des Posteingangs']);
+	});
+});
+
+describe('a span within one second is one time (U-306 N1)', () => {
+	const same = (ms: number): string => new Date(Math.floor(NOW / 1000) * 1000 - 120_000 + ms).toISOString();
+	const fixed = (action: string, target: string, ms: number, auto = false): Record<string, unknown> =>
+		({ kind: 'event', id: `ev${String(nextId++)}`, action, target, phase: 'read', at: same(ms), person: IDA, ...(auto ? { auto: true } : {}) });
+
+	it('in a repeat line and in a group, and keeps a span across seconds', async () => {
+		await render([
+			fixed('GET /api/bulk/runs/:id', '/api/bulk/runs/b-1', 900),
+			fixed('GET /api/bulk/runs/:id', '/api/bulk/runs/b-1', 100),
+			fixed('GET /api/runs/active', '/api/runs/active', 50, true),
+			fixed('GET /api/tasks', '/api/tasks', 10, true),
+			fixed('GET /api/workflows/:id', '/api/workflows/w-1', -1500),
+			fixed('GET /api/workflows/:id', '/api/workflows/w-1', -3000),
+		]);
+		const [repeat, group, across] = items();
+		const one = new Date(same(100)).toLocaleString('de-CH');
+		expect(text(repeat?.querySelector('[data-repeat-summary]'))).toContain(`(2×, ${one})`);
+		expect(text(repeat)).not.toContain('–');
+		expect(text(group?.querySelector('[data-polls-summary]'))).toBe(`2 Statusabfragen (${one})`);
+		expect(text(across?.querySelector('[data-repeat-summary]'))).toMatch(/\(2×, .+–.+\)/);
+	});
+});
+
 describe('the name of what was read', () => {
 	it('stands muted after the word, the route with its id after it', async () => {
 		await render([{ ...read('GET /api/threads/:id/messages', '/api/threads/t-1/messages'), name: 'Angebot Testfirma' }]);

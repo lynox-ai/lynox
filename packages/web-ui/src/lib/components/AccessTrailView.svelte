@@ -113,12 +113,16 @@
 	// After the filters: a group holds only what they show (ux U-047).
 	const items = $derived(foldInterfacePolls(shown, (e) => personKey(e.person)));
 
-	/** "{from}–{to}" of a group; the date once when both ends fall on the same day. */
+	/**
+	 * "{from}–{to}" of a group; the date once when both ends fall on the same day, and one time when
+	 * both fall in the same second (U-306 N1), as they are shown to the second.
+	 */
 	function span(from: string, to: string): string {
 		const a = new Date(from);
 		const b = new Date(to);
 		if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return `${from}–${to}`;
 		const locale = getLocale() === 'de' ? 'de-CH' : 'en-GB';
+		if (Math.floor(a.getTime() / 1000) === Math.floor(b.getTime() / 1000)) return a.toLocaleString(locale);
 		const sameDay = a.toDateString() === b.toDateString();
 		return `${a.toLocaleString(locale)}–${sameDay ? b.toLocaleTimeString(locale) : b.toLocaleString(locale)}`;
 	}
@@ -286,9 +290,7 @@
 							{#if item.entries[0]!.person.email && item.entries[0]!.person.display}<span class="text-xs text-text-subtle">{item.entries[0]!.person.email}</span>{/if}
 						</div>
 						<details>
-							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{item.reads === 1
-								? tf('access_trail.polls_one', { time: when(item.to) })
-								: tf('access_trail.polls_many', { n: String(item.reads), span: span(item.from, item.to) })}</summary>
+							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{tf('access_trail.polls_many', { n: String(item.reads), span: span(item.from, item.to) })}</summary>
 							<div class="space-y-1 pt-1 pl-4">
 								{#each item.entries as p (p.id)}{@render line(p)}{/each}
 							</div>
