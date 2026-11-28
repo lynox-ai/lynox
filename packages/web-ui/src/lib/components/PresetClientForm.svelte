@@ -14,9 +14,7 @@
 	// `connectHref`: the engine's connect route for this profile, given by the page only while the
 	// profile has no grant and no revocation of one to show; with the secret saved, the form then
 	// offers the first connect right below the app credentials.
-	// `connectNote`: a sentence for that place instead, when the page gives no connect route and says
-	// why (the owner on a profile a person with access set up, U-490).
-	let { profileId, connectHref = null, connectNote = null }: { profileId: string; connectHref?: string | null; connectNote?: string | null } = $props();
+	let { profileId, connectHref = null }: { profileId: string; connectHref?: string | null } = $props();
 
 	interface ClientState {
 		preset: string;
@@ -202,10 +200,6 @@
 				<p class="text-sm text-text-muted">{tf('apis.connect_first_intro', { provider })}</p>
 				<a href={connectHref} data-sveltekit-reload data-testid="api-connect-first-link"
 					class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.connect_first')}</a>
-			</div>
-		{:else if connectNote !== null}
-			<div class="border-t border-border pt-3">
-				<p class="text-sm text-text-muted" data-testid="api-set-up-by-member">{connectNote}</p>
 			</div>
 		{/if}
 	</div>

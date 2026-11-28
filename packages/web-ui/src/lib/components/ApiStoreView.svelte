@@ -358,17 +358,19 @@
 						<!-- No connect for the owner on a profile a person with access set up: the view hides a
 						     connection the owner makes there from every reader, the owner included, so it would show as
 						     connected and carry nothing (`hiddenFromProfile`); the engine refuses the start too. The line
-						     names the way, taking it over in the chat, where the first connect would stand, and only where
-						     the engine says that save goes through (`owner_may_take_over`): not over that person's
-						     connection while their access lasts. The client pair can still be set for that person. -->
-						{@const takeOver = profile.owner_may_take_over === true ? t('apis.set_up_by_member_owner') : null}
+						     names the way, taking it over in the chat, below the app credentials where the first connect
+						     would stand, and only where the engine says that save goes through (`owner_may_take_over`): not
+						     over that person's connection while their access lasts. Its own row, outside the form, so it
+						     stands whatever state the form is in (loading, failed, other names). The client pair can still
+						     be set for that person. -->
 						{#if onBuiltInProvider(profile)}
 							<div class="border-t border-border px-4 py-3">
-								<PresetClientForm profileId={profile.id} connectHref={null} connectNote={takeOver} />
+								<PresetClientForm profileId={profile.id} connectHref={null} />
 							</div>
-						{:else if takeOver !== null}
-							<div class="border-t border-border px-4 py-3">
-								<p class="text-sm text-text-muted" data-testid="api-set-up-by-member">{takeOver}</p>
+						{/if}
+						{#if profile.owner_may_take_over === true}
+							<div class="border-t border-border px-4 py-3" data-testid="api-set-up-by-member-row">
+								<p class="text-sm text-text-muted" data-testid="api-set-up-by-member">{t('apis.set_up_by_member_owner')}</p>
 							</div>
 						{/if}
 					{:else if onBuiltInProvider(profile) && isOwnerSession()}

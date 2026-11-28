@@ -94,10 +94,33 @@ describe('the first connect of a profile on a built-in provider', () => {
 		const line = q('api-set-up-by-member');
 		expect(line?.textContent).toBe(TAKE_OVER);
 		expect(all('api-set-up-by-member')).toBe(1);
-		expect(form?.contains(line)).toBe(true);
+		// Its own row right after the form, so below Save, whatever state the form is in.
+		expect(form?.contains(line)).toBe(false);
 		const save = [...form!.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Speichern');
 		expect(save).toBeDefined();
 		expect(save!.compareDocumentPosition(line!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
+	// The form's states other than loaded: the way stays, once.
+	function serveClient(client: () => Promise<Response>): void {
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+			const u = String(url);
+			if (u.endsWith('/config')) return Response.json({ viewer: 'owner' });
+			if (u.endsWith('/connections/records')) return Response.json({ notices: [] });
+			if (u.endsWith('/client')) return client();
+			return Response.json({ profiles: [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true }] });
+		}));
+	}
+	it.each([
+		['its app credentials failed to load', () => Promise.resolve(Response.json({ error: 'x' }, { status: 500 }))],
+		['it reads other names', () => Promise.resolve(Response.json({ preset: 'shopify', client_id_key: 'K', client_secret_key: 'S', client_id: 'c', client_secret_set: true, redirect_uri: 'https://tenant.example/api/oauth/callback', reads_other_names: true }))],
+		['its app credentials are still loading', () => new Promise<Response>(() => {})],
+	])('the owner, never connected, the form showing that %s: the way to take it over, once', async (_state, client) => {
+		serveClient(client);
+		await render();
+		expect(q('preset-client-form')).toBeNull();
+		expect(q('api-set-up-by-member')?.textContent).toBe(TAKE_OVER);
+		expect(all('api-set-up-by-member')).toBe(1);
 	});
 
 	it('the owner, the person who set it up connected it and their access lasts: no way to take it over, their connection shown', async () => {
@@ -130,10 +153,12 @@ describe('the first connect of a profile on a built-in provider', () => {
 		expect(all('api-set-up-by-member')).toBe(1);
 	});
 
-	it('the owner, such a profile signing in without a built-in provider: the way on its own line', async () => {
+	it('the owner, such a profile signing in without a built-in provider: no form, the way in its own row', async () => {
 		serve('owner', [{ id: 'crm', name: 'CRM', base_url: 'https://crm.example', description: '', auth: { type: 'oauth2', oauth: {} }, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true }]);
 		await render();
 		expect(q('preset-client-form')).toBeNull();
+		const row = q('api-set-up-by-member-row');
+		expect(row?.contains(q('api-set-up-by-member'))).toBe(true);
 		expect(q('api-set-up-by-member')?.textContent).toBe(TAKE_OVER);
 	});
 
