@@ -52,7 +52,22 @@ export interface JoinVerdict {
   deadLetter?: 'classifier_failed' | 'restore_drain' | 'shutdown_drain' | undefined;
   /** False: a raise sends no push (the process is ending, as for a drained item). Default true. */
   push?: boolean | undefined;
+  /**
+   * More of the verdict for its audit entry: the rule that filed or was withheld on the mail, and
+   * what the sensitive check found in it, under keys of their own (never `sensitive_categories`,
+   * which marks the item's own mail).
+   */
+  audit?: Readonly<Record<string, unknown>> | undefined;
 }
+
+/**
+ * Classifier versions of items created without a push: a delivery failure notice the prefilter
+ * filed (`prefilter`), and mails filed while the queue was drained. A joined mail that needs the
+ * owner announces such an item once, even when the item is open in "requires you" already.
+ * A sensitive-prefilter item pushes when it is created (the hook's sensitive branch), so it is
+ * not among them.
+ */
+const CREATED_WITHOUT_PUSH: ReadonlySet<string> = new Set(['prefilter', 'restore-drain', 'shutdown-drain']);
 
 export type RecordFollowUp = (
   existing: InboxItem,
@@ -110,7 +125,10 @@ export function createFollowUpRecorder(opts: FollowUpRecorderOptions): RecordFol
       if (env.isAutoReply) {
         autoReply = true;
       } else if (account.authType !== undefined && AUTO_REPLY_NOT_IN_ENVELOPE.has(account.authType)) {
-        if (opts.confirmAutoReply) {
+        // A mail drained while the process stops does not wait for the provider: the answer stays
+        // unknown, as when the fetch fails.
+        const draining = join?.deadLetter === 'restore_drain' || join?.deadLetter === 'shutdown_drain';
+        if (opts.confirmAutoReply && !draining) {
           try {
             autoReply = await opts.confirmAutoReply(existing.accountId, env);
           } catch {
@@ -155,7 +173,22 @@ export function createFollowUpRecorder(opts: FollowUpRecorderOptions): RecordFol
     const mayWake = autoReply !== true && !own && !beforeUserAction;
     // What the check found in the item's own mail, before this message.
     const itemCategories = opts.state.sensitiveCategoriesAtIngest(existing);
-    const outcome = opts.state.runInTransaction((): 'raised' | 'reopened' | 'none' => {
+    // Open in "requires you" without the owner having been told: created on a path without a push,
+    // or raised by a joined mail that sent none (a drain), and announced by no joined mail since.
+    const unannounced = (item: InboxItem): boolean => {
+      let silent = CREATED_WITHOUT_PUSH.has(item.classifierVersion);
+      for (const a of opts.state.listAuditForItem(item.id, item.tenantId)) {
+        if (a.action !== 'joined_thread') continue;
+        let p: unknown;
+        try { p = JSON.parse(a.payloadJson); } catch { continue; }
+        if (typeof p !== 'object' || p === null) continue;
+        const entry = p as { raised?: unknown; announced?: unknown };
+        if (entry.announced === true) return false;
+        if (entry.raised === true) silent = true;
+      }
+      return silent;
+    };
+    const outcome = opts.state.runInTransaction((): 'raised' | 'announced' | 'reopened' | 'none' => {
       opts.state.insertThreadMessage(input);
       // Whether the item sleeps with wake-on-reply is read here, inside the write, not from the row
       // read before the auto-reply check above: the owner may have snoozed it again since, or another
@@ -184,7 +217,7 @@ export function createFollowUpRecorder(opts: FollowUpRecorderOptions): RecordFol
       const openNow = current !== undefined && current !== null && current.bucket === 'requires_user'
         && current.userAction === undefined
         && !(current.snoozeUntil !== undefined && current.snoozeUntil.getTime() > now);
-      const decided = ((): 'raised' | 'reopened' | 'none' => {
+      const decided = ((): 'raised' | 'announced' | 'reopened' | 'none' => {
         if (raises && !openNow) {
           opts.state.raiseToRequiresUser(existing.id, existing.tenantId, fields.mailDate ?? new Date(now), new Date(now));
           opts.state.appendAudit({
@@ -224,12 +257,13 @@ export function createFollowUpRecorder(opts: FollowUpRecorderOptions): RecordFol
           return 'none';
         }
         if (verdictRaises && join !== undefined) {
-          if (openNow) return 'none';
-          // The item takes this mail's verdict and reason, so the list says why it is there. Its
-          // mail date stays: the joined mail's Date header is its sender's word.
-          return opts.state.raiseForJoinedMail(existing.id, existing.tenantId, join.reasonDe, join.classifierVersion, new Date(now))
-            ? 'raised'
-            : 'none';
+          // Open in "requires you" already: no second push, unless the item was created without one
+          // and no joined mail has announced it since. Read from the audit inside this write, so
+          // two joined mails announce it once, also across a restart.
+          if (openNow) return current !== undefined && current !== null && unannounced(current) ? 'announced' : 'none';
+          // The item keeps its own reason and version; this mail's verdict is in its audit entry.
+          // Its mail date stays too: the joined mail's Date header is its sender's word.
+          return opts.state.raiseForJoinedMail(existing.id, existing.tenantId, new Date(now)) ? 'raised' : 'none';
         }
         if (!opens) return 'none';
         if (!opts.state.reopenReplied(existing.id, existing.tenantId, fields.mailDate ?? new Date())) return 'none';
@@ -257,18 +291,26 @@ export function createFollowUpRecorder(opts: FollowUpRecorderOptions): RecordFol
             bucket: join.bucket,
             confidence: join.confidence,
             fail_reason: join.failReason,
+            reason_de: join.reasonDe,
+            classifier_version: join.classifierVersion,
             ...(join.deadLetter !== undefined ? { dead_letter: join.deadLetter } : {}),
+            ...(join.audit ?? {}),
             raised: decided === 'raised',
+            // Whether this mail is the one the owner is told about: it raised the item with a push,
+            // or announced an item that was created without one.
+            announced: decided === 'announced' || (decided === 'raised' && join.push !== false),
             ...(decided === 'raised'
               ? {
                   prior_bucket: (current ?? existing).bucket,
                   prior_user_action: (current ?? existing).userAction ?? null,
+                  prior_reason_de: (current ?? existing).reasonDe,
+                  prior_classifier_version: (current ?? existing).classifierVersion,
                 }
               : {}),
           }),
         });
       }
-      return decided;
+      return decided === 'announced' ? 'raised' : decided;
     });
     if (outcome === 'none' || !opts.notifier) return;
     if (outcome === 'raised' && join?.push === false) return;
@@ -285,7 +327,10 @@ export function createFollowUpRecorder(opts: FollowUpRecorderOptions): RecordFol
     const otherSender = fields.fromAddress !== undefined && fields.fromAddress !== ''
       && fields.fromAddress.toLowerCase() !== existing.fromAddress.toLowerCase();
     const notifyOpts: InboxNotifyOptions = { flagged };
-    if (otherSender) {
+    // A joined mail's push is about that mail, never about the one that created the item (it may
+    // be a delivery failure notice): its sender and subject, as stored above.
+    if (join !== undefined) notifyOpts.subject = subject;
+    if (otherSender || join !== undefined) {
       // Compared as read: one Unicode form, without characters that show nothing (a soft hyphen).
       // Folded both before the push's length cut (padding cannot push the name past it) and after
       // it (the label as shown); a match either way, or a name that reads as nothing, shows the
@@ -296,7 +341,8 @@ export function createFollowUpRecorder(opts: FollowUpRecorderOptions): RecordFol
       const ownName = readings(fields.fromName);
       const theirs = [...readings(existing.fromName), ...readings(existing.fromAddress)];
       const showAddress = ownName.includes('') || ownName.some((r) => theirs.includes(r));
-      notifyOpts.sender = { address: fields.fromAddress ?? '', name: showAddress ? undefined : fields.fromName };
+      // The item's own sender writing again needs no such care: its name is its own.
+      notifyOpts.sender = { address: fields.fromAddress ?? '', name: showAddress && otherSender ? undefined : fields.fromName };
     }
     if (item && !snoozed) void opts.notifier.notifyNewItem(item, notifyOpts);
   };

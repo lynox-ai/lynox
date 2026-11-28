@@ -98,7 +98,18 @@ export function itemFollowUps<M extends FollowUpMessage & { id: string }>(
   if (item.userAction !== undefined) return undefined;
   const audit = reader.listAuditForItem(item.id, item.tenantId);
   const handledAt = lastHandledAt(reader, item, audit);
+  // A joined mail's Date header is its sender's word (see `followUpsOf`): it counts by when the
+  // inbox stored it, so a mail joined after the owner dealt with the item is not taken as answered.
+  const joined = new Set<string>();
+  for (const a of audit) {
+    if (a.action !== 'joined_thread') continue;
+    const id = payloadOf(a)['message_id'];
+    if (typeof id === 'string') joined.add(id);
+  }
   const found = followUpsOf(reader, item).filter((m) => {
+    if (joined.has(m.messageId)) {
+      return handledAt === undefined || m.fetchedAt === undefined || m.fetchedAt.getTime() >= handledAt;
+    }
     const at = m.mailDate ?? m.fetchedAt;
     return handledAt === undefined || at === undefined || at.getTime() > handledAt;
   });

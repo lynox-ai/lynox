@@ -708,24 +708,24 @@ export class InboxStateDb {
 
   /**
    * Brings an item to "requires you" for a mail of its thread whose own verdict needs the owner,
-   * filed after the item was created by another mail of the thread: no user action, not snoozed,
-   * with that mail's reason and classifier version, so the list says why it is there. The item's
-   * mail date stays as it is. Only ever raises, as `raiseToRequiresUser`. Returns whether the row
-   * changed.
+   * filed after the item was created by another mail of the thread: no user action, not snoozed.
+   * The item keeps its own reason, classifier version and mail date, so it never shows another
+   * mail's verdict under its own sender; the joined mail's verdict is in its audit entry. Only ever
+   * raises, as `raiseToRequiresUser`. Returns whether the row changed.
    */
-  raiseForJoinedMail(id: string, tenantId: string, reasonDe: string, classifierVersion: string, at: Date = new Date()): boolean {
+  raiseForJoinedMail(id: string, tenantId: string, at: Date = new Date()): boolean {
     const now = at.getTime();
     const result = this.db
-      .prepare<[string, string, number, string, string, number], unknown>(
+      .prepare<[number, string, string, number], unknown>(
         `UPDATE inbox_items
             SET bucket = 'requires_user', user_action = NULL, user_action_at = NULL,
                 snooze_until = NULL, snooze_condition = NULL, notify_on_unsnooze = 0,
-                reason_de = ?, classifier_version = ?, classified_at = ?
+                classified_at = ?
           WHERE id = ? AND tenant_id = ?
             AND NOT (bucket = 'requires_user' AND user_action IS NULL
                      AND (snooze_until IS NULL OR snooze_until <= ?))`,
       )
-      .run(reasonDe, classifierVersion, now, id, tenantId, now) as { changes: number };
+      .run(now, id, tenantId, now) as { changes: number };
     return result.changes > 0;
   }
 

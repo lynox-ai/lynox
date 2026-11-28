@@ -110,6 +110,20 @@ export function sensitiveAudit(payload: Pick<InboxQueuePayload, 'sensitive'>): R
     : {};
 }
 
+/**
+ * `sensitiveAudit` for a joined mail's entry. Under keys of its own: `sensitive_categories` on any
+ * entry of an item marks the item's own mail (`sensitiveCategoriesAtIngest`), and this is another.
+ */
+function joinedSensitiveAudit(payload: Pick<InboxQueuePayload, 'sensitive'>): Record<string, unknown> {
+  return payload.sensitive
+    ? {
+        joined_sensitive_categories: payload.sensitive.categories,
+        joined_sensitive_masked: payload.sensitive.masked,
+        joined_sensitive_redactions: payload.sensitive.redactionCount,
+      }
+    : {};
+}
+
 /** Shown for a mail the classifier would have filed as handled although the sensitive check
  *  flagged it. */
 export const SENSITIVE_WITHHELD_REASON_DE = 'Sensibler Inhalt — nicht als erledigt abgelegt, bitte ansehen.';
@@ -389,6 +403,15 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           reasonDe: result.reasonDe,
           classifierVersion: result.classifierVersion,
           failReason: result.failReason,
+          audit: {
+            // The rule that filed this mail, or was withheld on it, as on the item's own audit.
+            ...(rule !== undefined && rule.withheld === false ? { rule_id: rule.id } : {}),
+            ...(rule !== undefined && rule.withheld !== false ? { rule_withheld: rule.id, rule_withheld_reason: rule.withheld } : {}),
+            ...(rule !== undefined && rule.name !== undefined ? { rule_name: rule.name } : {}),
+            ...(result.classifierFailReason !== undefined ? { classifier_fail_reason: result.classifierFailReason } : {}),
+            ...(result !== classified ? { classifier_bucket: classified.bucket } : {}),
+            ...joinedSensitiveAudit(payload),
+          },
         });
         return;
       }
@@ -454,6 +477,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
             failReason: forRestore ? 'restore_drain' : 'shutdown_drain',
             deadLetter: forRestore ? 'restore_drain' : 'shutdown_drain',
             push: false,
+            audit: joinedSensitiveAudit(payload),
           });
           return;
         }
@@ -499,6 +523,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           classifierVersion: failedVersion,
           failReason: 'dead_letter',
           deadLetter: 'classifier_failed',
+          audit: { error_message: _scrubErrorMessage(error.message), ...joinedSensitiveAudit(payload) },
         });
         return;
       }

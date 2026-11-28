@@ -384,3 +384,20 @@ describe('ClassifierQueue — serialKey', () => {
     expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('ClassifierQueue — serialKey under drainWithin', () => {
+  it('a job waiting on its key is dead-lettered with the waiting ones, the running one is cut off, and the drain ends', async () => {
+    const { classify, calls } = controllable();
+    const reason = new Error('shutdown');
+    const q = new ClassifierQueue({ classify, onSuccess, onDeadLetter, maxConcurrency: 2, serialKey: (i: unknown) => (i as { key: string }).key });
+    q.enqueue({ key: 't1', name: 'running' });
+    q.enqueue({ key: 't1', name: 'waiting' });
+    await waitFor(() => calls.length === 1);
+    const now = Date.now();
+    const report = await q.drainWithin({ classifyUntil: now + 30, cutOffAt: now + 60, reason });
+    expect(report).toEqual({ deadLetteredWaiting: 1, cutOffRunning: 1 });
+    expect(onDeadLetter.mock.calls.map((c) => (c[0] as { name: string }).name).sort()).toEqual(['running', 'waiting']);
+    expect(calls, 'the waiting job never reached the classifier').toHaveLength(1);
+    expect(q.depth).toBe(0);
+  });
+});
