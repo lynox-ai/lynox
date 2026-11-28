@@ -230,6 +230,45 @@ export function persistCompactionMarker(
   }
 }
 
+/**
+ * Keep a message the content check refused, and the sentence saying why, in the thread as
+ * display-only rows. The run ends before the model is called and before the user's turn is
+ * stored, so without these rows a reload shows neither what the person wrote nor why nothing
+ * came. display_only keeps both out of the model's context: the next turn does not read the
+ * refused request, nor the refusal as something it said.
+ *
+ * The message is stored as written, as an ordinary turn would be. The sentence goes in the
+ * note's `detail`, the words the chat showed when the run ended. Returns whether the rows were
+ * written; a write that fails leaves the thread as it was, and the run still ends with its
+ * sentence.
+ */
+export function persistRefusedTurn(
+  threadStore: ThreadStore | null,
+  sessionId: string,
+  task: string,
+  sentence: string,
+): boolean {
+  if (!threadStore) return false;
+  try {
+    const totalCount = threadStore.getMessageCount(sessionId);
+    threadStore.appendDisplayNotes(
+      sessionId,
+      [
+        { role: 'user', content: task },
+        { role: 'assistant', content: buildDisplayNoteContent(CONTENT_REFUSED_NOTE, sanitizeNoteDetail(sentence)) },
+      ],
+      threadStore.getNextSeq(sessionId),
+    );
+    threadStore.updateThread(sessionId, { message_count: totalCount + 2 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The note code of a message the content check refused. */
+export const CONTENT_REFUSED_NOTE = 'content_refused';
+
 /** What `Agent.getLastStop()` reports, narrowed to what the note decision needs. */
 export interface CapStopLike {
   readonly cause: SendStopCause;
