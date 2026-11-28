@@ -2329,7 +2329,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.read.trigger_takeover_preview': { de: 'Vorschau der Übernahme eines Plans, mit Auftrag und letztem Ergebnis', en: 'Preview of taking over a plan, with its instruction and last result' },
 	'access_trail.read.trigger_recipients_preview': { de: 'Vorschau der Empfänger und des Auftrags eines Plans', en: 'Preview of a plan\'s recipients and instruction' },
 	'access_trail.read.api_profile': { de: 'Eine API-Verbindung', en: 'An API connection' },
-	'access_trail.read.api_profile_client': { de: 'App-Zugangsdaten einer Verbindung (ohne Geheimnis)', en: 'App credentials of a connection (without the secret)' },
+	'access_trail.read.api_profile_client': { de: 'App-Zugangsdaten einer Verbindung (ohne Client-Secret)', en: 'App credentials of a connection (without the Client Secret)' },
 	'access_trail.read.connection_records': { de: 'Stand der Widerrufe von Verbindungen', en: 'Status of connection revocations' },
 	'access_trail.read.oauth_connect': { de: 'Start einer Verbindung mit einem Dienst', en: 'Start of a connection to a service' },
 	'access_trail.read.google_oauth_url': { de: 'Anmeldelink für Google', en: 'Google sign-in link' },
