@@ -1320,6 +1320,34 @@ describe('the claim predicate (BulkLedger.claimTarget)', () => {
     ledger.recordFailed(runId, 1, 'write_failed');
     expect(ledger.claimTarget(runId, 1, t0 + 10 * BULK_CLAIM_STALE_MS)).toBe(false);
   });
+
+  it('records nothing for an undo target another loop took over, and leaves the run it takes back as it was', async () => {
+    const { runId, initial } = recordMemoryRun(2);
+    approve(runId);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial).writer))).status).toBe('done');
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    const forUndo = { id: undo.status.id, kind: 'undo' as const, sourceRunId: runId };
+    const undoneAt = (): (string | null)[] => (engineDb.getDb()
+      .prepare('SELECT undone_at FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runId) as { undone_at: string | null }[]).map((r) => r.undone_at);
+    const appliedAt = (): string | null => (engineDb.getDb()
+      .prepare('SELECT applied_at FROM bulk_targets WHERE run_id = ? AND seq = 0').get(undo.status.id) as { applied_at: string | null }).applied_at;
+
+    const a = Date.now();
+    const b = a + BULK_CLAIM_STALE_MS + 1_000;
+    expect(ledger.claimTarget(undo.status.id, 0, a)).toBe(true);
+    expect(ledger.claimTarget(undo.status.id, 0, b)).toBe(true); // a second loop takes it over
+    // The first loop's record lands nowhere: not on the undo target, not on the run it takes back.
+    expect(ledger.recordApplied(forUndo, 0, 'ok', b + 1, null, null, false, false, a)).toBe(false);
+    expect(appliedAt()).toBeNull();
+    expect(undoneAt()).toEqual([null, null]);
+    expect(ledger.getStatus(undo.status.id)!.applied).toBe(0);
+    // The loop that holds the claim records, and takes the source target back.
+    expect(ledger.recordApplied(forUndo, 0, 'ok', b + 2, null, null, false, false, b)).toBe(true);
+    expect(appliedAt()).not.toBeNull();
+    expect(undoneAt().filter((x) => x !== null)).toHaveLength(1);
+  });
 });
 
 describe('a run closed by the other loop', () => {
