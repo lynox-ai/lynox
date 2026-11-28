@@ -1677,6 +1677,13 @@ export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
 
+/** Whether the page marks this target as taken back: the run wrote it and an undo or a rollback
+ *  took that write back. A target the run never wrote, that a rollback only settled, or one found
+ *  already as planned, is not marked: nothing of the run's changed there. */
+export function bulkTakenBack(target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
+	return target.written === true && target.undone === true;
+}
+
 /** Per target the owner still writes: how many OTHER targets get the same new value in the same
  *  field. A judge can give different products one value (three products with one SEO title), and
  *  the preview showed each row alone. Only text values count, a target's own text such as a

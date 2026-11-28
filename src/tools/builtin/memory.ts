@@ -35,6 +35,27 @@ function trailOf(site: 'memory_store#create' | 'memory_update#fallback' | 'memor
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
 
 /**
+ * Whether text that moves or is replaced came in untrusted. A flat-file line carries no
+ * mark, so it is read from the knowledge rows with the same text: one written on an
+ * untrusted turn, or at the `external_unverified` tier, marks the new row too, whatever
+ * the turn that moves it. A line whose origin cannot be read — no graph, no matching row,
+ * an empty body, a lookup that throws — counts as untrusted.
+ */
+function cameInUntrusted(agent: IAgent, lines: readonly string[], namespace: MemoryNamespace, scope?: MemoryScopeRef | undefined): boolean {
+  const kg = agent.toolContext.knowledgeLayer;
+  for (const line of lines) {
+    const body = line.replace(DATE_PREFIX_RE, '').trim();
+    if (!body || !kg?.sourceUntrustedOf) return true;
+    try {
+      if (kg.sourceUntrustedOf(body, namespace, scope) !== false) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Token budget for memory_recall responses (applied to BOTH paths).
  *
  * A full namespace dump (~15-20K tokens) thrashes the agent context window
@@ -613,6 +634,9 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
       linesToRewrite.push({ originalLine: line, markedLine });
       marked++;
     }
+    // The new line replaces the marked ones, so it keeps their mark: read from their knowledge
+    // rows in any scope of the namespace (the flat line does not say which scope its row has).
+    const replacesUntrusted = cameInUntrusted(agent, linesToRewrite.map(l => l.originalLine), input.namespace);
 
     // Persist via the same scoped/unscoped path the memory abstraction uses.
     // The IMemory interface doesn't expose a bulk "save" for scoped writes,
@@ -654,8 +678,9 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
           scopeId: defaultScope.id,
           sourceThreadId: chatThreadOf(agent),
           // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
-          // Write-trust derived from the FULL union, not the bare marker (deriveTurnUntrusted).
-          sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+          // Write-trust derived from the FULL union, not the bare marker (deriveTurnUntrusted),
+          // or from the lines it replaces when one of them came in untrusted (cameInUntrusted).
+          sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent) || replacesUntrusted,
           actor: actorOf(agent), trail: trailOf('memory_update#fallback', w.correlationId),
         });
       }
@@ -848,6 +873,8 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
     }
 
     const matchedLine = lines[matchIdx]!;
+    // Read before the original is retired below: the copy keeps the original's mark.
+    const sourceUntrusted = deriveTurnUntrusted(agent) || cameInUntrusted(agent, [matchedLine], input.namespace, fromRef);
 
     const memory = agent.memory;
     return withInstanceWrite(agent, { site: 'memory_promote#move', kind: 'move', store: 'memory', target: () => memoryTarget(input.namespace, ['from', fromRef], ['to', toRef]), main: ['append', 'delete'] }, async (w) => {
@@ -878,12 +905,11 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
         scopeType: toRef.type,
         scopeId: toRef.id,
         sourceThreadId: chatThreadOf(agent),
-        // Promotion moves an existing line across scopes. The original tier
-        // isn't available from the flat-file line without a KG lookup, so the
-        // re-embedded copy lands at the conservative default — never falsely
-        // elevated to tool_verified. Write-trust from the FULL union (deriveTurnUntrusted),
-        // not the bare marker — a promote on an external-content turn quarantines.
-        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+        // Promotion moves an existing line across scopes. The copy is untrusted when the
+        // turn is (the FULL union, deriveTurnUntrusted) OR the original came in untrusted
+        // (cameInUntrusted, read from its knowledge rows before the retire); a clean turn
+        // never washes the original's mark off. Never elevated to tool_verified.
+        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted,
         ...(movedIds.length > 0 ? { replaces: { ids: movedIds } } : {}),
         actor: actorOf(agent), trail: trailOf('memory_promote#move', w.correlationId),
       });

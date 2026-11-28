@@ -1728,6 +1728,16 @@ const MIGRATIONS: string[] = [
      last_run_member_notes = json_object('migrated', substr(last_run_result, instr(last_run_result, char(10) || '• ') + 3)),
      last_run_result = substr(last_run_result, 1, instr(last_run_result, char(10) || '• ') - 1)
    WHERE instr(last_run_result, char(10) || '• ') > 0 AND last_run_status = 'halted' AND substr(effect, 1, 5) <> 'bulk_';`,
+  // v81: where a bulk run's data-store writes came from (`_source_grants`, data-store.ts). The
+  // run runs in the worker, outside any conversation, so the grant set of the conversation that
+  // planned it is kept on the run (`planner_grants`) and its writes are stamped with it. Per
+  // target, `before_grants` is the stamp the row held before the run wrote it, and
+  // `write_grants` the stamp an undo writes back in place of the run's. Each a JSON array of
+  // grant ids, sorted and without duplicates; NULL is unknown (and, on `write_grants`, the run's).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (81);
+   ALTER TABLE bulk_runs ADD COLUMN planner_grants TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN before_grants TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN write_grants TEXT;`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */

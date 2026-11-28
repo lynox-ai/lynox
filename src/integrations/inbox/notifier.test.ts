@@ -87,6 +87,18 @@ describe('createInboxNotifier — a mail the sensitive check flagged', () => {
   });
 });
 
+describe('createInboxNotifier — a push for another message of the item', () => {
+  it('names that message\'s sender and subject, not the item\'s', async () => {
+    const router = new NotificationRouter();
+    const sent: NotificationMessage[] = [];
+    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return 'delivered' as const; } });
+    const notifier = createInboxNotifier({ router, language: () => 'de' });
+    const item = fakeItem({ fromName: 'Mail Delivery System', fromAddress: 'mailer-daemon@post.example', subject: 'Undelivered Mail Returned to Sender' });
+    await notifier.notifyNewItem(item, { sender: { address: 'anna@kunde.example', name: 'Anna' }, subject: 'Frage zur Offerte' });
+    expect(sent.map((m) => m.body)).toEqual(['Anna: Frage zur Offerte']);
+  });
+});
+
 describe('createInboxNotifier — basic dispatch', () => {
   it('routes a requires_user item via the router with the item id in data', async () => {
     const router = new NotificationRouter();
