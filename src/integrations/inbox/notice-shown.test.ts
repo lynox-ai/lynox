@@ -101,11 +101,11 @@ describe('the mail the row of a delivery failure notice shows', () => {
     const item = listed();
     const newest = followUpsOf(inbox, inbox.getItem(id)!)[0]!;
     expect(item.shown).toEqual({
-      fromAddress: newest.fromAddress, fromName: newest.fromName, subject: newest.subject, messageId: newest.messageId,
+      id: newest.id, fromAddress: newest.fromAddress, fromName: newest.fromName, subject: newest.subject, messageId: newest.messageId,
       mailDate: newest.mailDate!.toISOString(), sensitive: false,
     } satisfies InboxItemShown);
     expect(item.shown).toEqual({
-      fromAddress: 'anna@kunde.example', fromName: 'Anna Kunde', subject: 'Frage zur Offerte', messageId: '<real@x>',
+      id: expect.any(String), fromAddress: 'anna@kunde.example', fromName: 'Anna Kunde', subject: 'Frage zur Offerte', messageId: '<real@x>',
       mailDate: T_REAL.toISOString(), sensitive: false,
     });
     // Nothing of the item is changed: its own mail is still the notice.
@@ -121,7 +121,7 @@ describe('the mail the row of a delivery failure notice shows', () => {
     await hook()(real());
     await hook()(real({ uid: 7, messageId: '<second@x>', from: [{ address: 'ben@kunde.example', name: 'Ben Kunde' }], date: T_LATER, subject: 'Noch eine Frage' }));
     const { list, item, full } = wire();
-    expect(list['shown']).toEqual({ fromAddress: 'ben@kunde.example', fromName: 'Ben Kunde', subject: 'Noch eine Frage', messageId: '<second@x>', mailDate: T_LATER.toISOString(), sensitive: false });
+    expect(list['shown']).toEqual({ id: expect.any(String), fromAddress: 'ben@kunde.example', fromName: 'Ben Kunde', subject: 'Noch eine Frage', messageId: '<second@x>', mailDate: T_LATER.toISOString(), sensitive: false });
     expect(item['shown']).toEqual(list['shown']);
     expect(full['shown']).toEqual(list['shown']);
     expect(list['subject']).toBe('Undelivered Mail Returned to Sender');
@@ -153,11 +153,70 @@ describe('the mail the row of a delivery failure notice shows', () => {
     await hook('skip')(real({ ...OTP, from: [{ address: 'bank@bank.example', name: 'Hausbank Support' }] }));
     const { list, item, full } = wire();
     for (const sent of [list, item, full]) {
-      expect(sent['shown']).toEqual({ fromAddress: 'bank@bank.example', messageId: '<real@x>', mailDate: T_REAL.toISOString(), sensitive: true });
+      expect(sent['shown']).toEqual({ id: expect.any(String), fromAddress: 'bank@bank.example', messageId: '<real@x>', mailDate: T_REAL.toISOString(), sensitive: true });
       const text = JSON.stringify(sent);
       expect(text).not.toContain('Hausbank Support');
       expect(text).not.toContain('Ihr Code');
     }
+  });
+});
+
+describe('a mail the owner dealt with before the counted one', () => {
+  it('shown and the counted follow-up are different rows when the counted mail came after the owner action', async () => {
+    const id = await noticeItem();
+    await hook()(real());
+    // The owner replies; a mail without a Date header then opens the item again. The count leaves
+    // out the first real mail (answered), the row still shows it (the newest by date).
+    const repliedAt = new Date('2026-11-20T11:00:00Z');
+    const storedAt = new Date('2026-11-20T12:00:00Z');
+    inbox.updateUserAction(id, 'replied', repliedAt);
+    inbox.appendAudit({ itemId: id, action: 'replied', actor: 'system', payloadJson: JSON.stringify({ undo_logged: true }), createdAt: repliedAt });
+    const undated = inbox.insertThreadMessage({
+      accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<undated@x>', fromAddress: 'cleo@kunde.example', fromName: 'Cleo',
+      subject: 'Ohne Datum', snippet: 'Noch eine Frage.', direction: 'inbound', inboxItemId: id, autoReply: false, fetchedAt: storedAt,
+    });
+    inbox.reopenReplied(id, 'default', storedAt, storedAt);
+    inbox.appendAudit({ itemId: id, action: 'reopened_on_reply', actor: 'system', payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: '<undated@x>' }), createdAt: storedAt });
+
+    const item = listed();
+    expect(item.followUps?.count).toBe(1);
+    expect(item.followUps?.latestMessageId).toBe(undated);
+    expect(item.shown?.messageId).toBe('<real@x>');
+    expect(item.shown?.id).toBe(followUpsOf(inbox, inbox.getItem(id)!)[0]!.id);
+    expect(item.shown?.id).not.toBe(item.followUps?.latestMessageId);
+  });
+});
+
+describe('a flagged mail stored without its text and without a flag in the audit', () => {
+  const ARCHIVED_AT = new Date('2026-11-20T11:00:00Z');
+  async function archivedNotice(): Promise<string> {
+    const id = await noticeItem();
+    inbox.updateUserAction(id, 'archived', ARCHIVED_AT);
+    inbox.appendAudit({ itemId: id, action: 'archived', actor: 'user', payloadJson: JSON.stringify({ undo_logged: true }), createdAt: ARCHIVED_AT });
+    return id;
+  }
+
+  it('under skip, dated before the owner archive: no name, no subject, sensitive', async () => {
+    const id = await archivedNotice();
+    // Dated before the archive, so it raises nothing and the intake writes no flag for it.
+    await hook('skip')(real({ ...OTP, from: [{ address: 'bank@bank.example', name: 'Hausbank Support' }] }));
+    const audit = inbox.listAuditForItem(id).map((a) => a.action);
+    expect(audit).not.toContain('raised_on_sensitive_follow_up');
+    expect(audit).not.toContain('sensitive_follow_up_kept_open');
+    const stored = inbox.listThreadMessages(ACCOUNT.id, THREAD).find((m) => m.messageId === '<real@x>')!;
+    expect({ subject: stored.subject, snippet: stored.snippet }).toEqual({ subject: 'Ihr Code', snippet: undefined });
+
+    const { list, item, full } = wire();
+    for (const sent of [list, item, full]) {
+      expect(sent['shown']).toEqual({ id: stored.id, fromAddress: 'bank@bank.example', messageId: '<real@x>', mailDate: T_REAL.toISOString(), sensitive: true });
+      expect(JSON.stringify(sent)).not.toContain('Hausbank Support');
+    }
+  });
+
+  it('control: the same case with a mail that kept its text and is not flagged shows name and subject', async () => {
+    await archivedNotice();
+    await hook('skip')(real());
+    expect(listed().shown).toMatchObject({ fromName: 'Anna Kunde', subject: 'Frage zur Offerte', sensitive: false });
   });
 });
 

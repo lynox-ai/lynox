@@ -72,6 +72,8 @@ export interface InboxItem {
 /** The mail the list row shows for an item a delivery failure notice created. Every field comes
  *  from that one mail; name and subject are absent when it reads as sensitive. */
 export interface InboxItemShown {
+	/** Thread-message row id, as `followUps.latestMessageId` names one. */
+	id: string;
 	fromAddress: string;
 	fromName?: string | undefined;
 	subject?: string | undefined;

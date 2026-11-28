@@ -143,6 +143,8 @@ export interface InboxItem {
  * reads as sensitive, or the intake check flagged it, the name and subject are left out.
  */
 export interface InboxItemShown {
+  /** The stored thread message's row id, as {@link InboxItemFollowUps.latestMessageId} names one. */
+  id: string;
   fromAddress: string;
   fromName?: string | undefined;
   subject?: string | undefined;

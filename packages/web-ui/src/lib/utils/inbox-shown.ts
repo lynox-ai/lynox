@@ -21,6 +21,7 @@ export interface ShownCandidate {
 	mailDate?: string | undefined;
 	classifiedAt: string;
 	shown?: {
+		id: string;
 		fromAddress: string;
 		fromName?: string | undefined;
 		subject?: string | undefined;

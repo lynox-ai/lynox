@@ -8,22 +8,23 @@
 import { isRaisedOpen, type RaisedCandidate } from './inbox-raised.js';
 
 export interface FollowUpCandidate extends RaisedCandidate {
-	followUps?: { count: number } | undefined;
-	/** Present when the row shows the newest follow-up in place of the item's own mail. */
-	shown?: object | undefined;
+	followUps?: { count: number; latestMessageId?: string | undefined } | undefined;
+	/** Present when the row shows a follow-up in place of the item's own mail; its thread-message row id. */
+	shown?: { id: string } | undefined;
 }
 
 type Translate = (key: string) => string;
 type TranslateFill = (key: string, vars: Record<string, string>) => string;
 
 /** The list row's line for an item with follow-ups, or undefined when it has none or its raised
- *  line is shown instead. A row that shows the newest follow-up in place of its own mail (a
- *  delivery failure notice's) says nothing for that one mail: the row names it already. With more
- *  than one, the line still counts them all. */
+ *  line is shown instead. A row that shows a follow-up in place of its own mail (a delivery
+ *  failure notice's) says nothing when the one counted mail is that mail: the row names it already.
+ *  The count leaves out mail the owner dealt with, so the counted mail can be another one; then
+ *  the line stays. With more than one, the line counts them all. */
 export function followUpLine(item: FollowUpCandidate, t: Translate, tf: TranslateFill, now: number = Date.now()): string | undefined {
 	const count = item.followUps?.count ?? 0;
 	if (count < 1 || isRaisedOpen(item, now)) return undefined;
-	if (item.shown !== undefined && count === 1) return undefined;
+	if (item.shown !== undefined && count === 1 && item.followUps?.latestMessageId === item.shown.id) return undefined;
 	return count === 1 ? t('inbox.follow_up_one') : tf('inbox.follow_up_many', { count: String(count) });
 }
 

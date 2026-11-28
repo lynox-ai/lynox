@@ -194,11 +194,20 @@ function shownMail(deps: InboxApiDeps, item: InboxItem): InboxItemShown | undefi
   if (item.prefilterRule !== 'bounce') return undefined;
   const latest = followUpsOf(deps.state, item)[0];
   if (latest === undefined) return undefined;
+  // A received mail stored without any text counts as sensitive too, as the thread history marks
+  // it confidential: under `skip` a flagged mail is stored without its text and with its subject as
+  // it came, and the intake writes its flag to the audit only when the mail raises the item (not
+  // for one dated before the owner's last action). This withholds the name and subject of a mail
+  // that genuinely came without text as well; that is the safe direction, accepted.
+  const empty = (latest.bodyMd === undefined || latest.bodyMd.length === 0)
+    && (latest.snippet === undefined || latest.snippet.length === 0);
   const sensitive = followUpIsSensitive(latest)
-    || flaggedAtIntake(deps.state.listAuditForItem(item.id, item.tenantId)).has(latest.messageId);
+    || flaggedAtIntake(deps.state.listAuditForItem(item.id, item.tenantId)).has(latest.messageId)
+    || (latest.direction === 'inbound' && empty);
   const at = latest.mailDate ?? latest.fetchedAt;
   const name = latest.fromName?.trim();
   return {
+    id: latest.id,
     fromAddress: latest.fromAddress,
     ...(!sensitive && name !== undefined && name.length > 0 ? { fromName: latest.fromName } : {}),
     ...(!sensitive && latest.subject.trim().length > 0 ? { subject: latest.subject } : {}),

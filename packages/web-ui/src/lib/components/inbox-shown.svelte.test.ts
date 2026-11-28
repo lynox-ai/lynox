@@ -61,7 +61,7 @@ function byTestId(id: string): HTMLElement | null {
 	return target.querySelector(`[data-testid="${id}"]`);
 }
 
-const SHOWN = { fromAddress: 'anna@kunde.example', fromName: 'Anna Kunde', subject: 'Frage zur Offerte', messageId: '<real@x>', mailDate: '2026-11-22T10:00:00.000Z', sensitive: false };
+const SHOWN = { id: 'tm_1', fromAddress: 'anna@kunde.example', fromName: 'Anna Kunde', subject: 'Frage zur Offerte', messageId: '<real@x>', mailDate: '2026-11-22T10:00:00.000Z', sensitive: false };
 
 function notice(over: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
@@ -118,12 +118,17 @@ describe('InboxView — the row of a notice item with a shown mail', () => {
 	});
 
 	it('a sensitive shown mail: the address without a name, the confidential mark as subject and as mark', async () => {
-		await renderList([notice({ shown: { fromAddress: 'bank@bank.example', messageId: '<real@x>', mailDate: SHOWN.mailDate, sensitive: true } })]);
+		await renderList([notice({ shown: { id: 'tm_1', fromAddress: 'bank@bank.example', messageId: '<real@x>', mailDate: SHOWN.mailDate, sensitive: true } })]);
 		const r = row();
 		expect(r.querySelector('p[title] span.truncate')?.textContent).toBe('Vertraulicher Inhalt');
 		expect(r.querySelector('span.truncate[title]')?.textContent?.trim()).toBe('bank@bank.example');
 		expect(r.querySelector('[role="img"][aria-label="Vertraulicher Inhalt"]')).not.toBeNull();
 		expect(r.textContent).not.toContain('Undelivered');
+	});
+
+	it('the one counted mail is another than the shown one: the line stays', async () => {
+		await renderList([notice({ shown: SHOWN, followUps: { count: 1, latestAt: SHOWN.mailDate, latestFromName: 'Cleo', latestMessageId: 'tm_other' } })]);
+		expect(byTestId('inbox-follow-up-line')?.textContent).toBe('Neue Nachricht im Thread');
 	});
 
 	it('several follow-ups: the line still counts them', async () => {
@@ -136,5 +141,39 @@ describe('InboxView — the row of a notice item with a shown mail', () => {
 		const r = row();
 		expect(r.querySelector('p[title] span.truncate')?.textContent).toBe('Undelivered Mail Returned to Sender');
 		expect(r.querySelector('span.truncate[title]')?.textContent?.trim()).toBe('Mail Delivery System');
+	});
+});
+
+async function renderCard(items: unknown[]): Promise<void> {
+	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+		const u = new URL(String(url), 'http://localhost');
+		if (u.pathname.endsWith('/inbox/counts')) return Response.json({ counts: { requires_user: items.length, draft_ready: 0, auto_handled: 0 }, snoozed: 0, rulesPending: 0 });
+		if (u.pathname.endsWith('/inbox/items')) return Response.json({ items });
+		return Response.json({ triggers: [], items: [], rules: [] });
+	}));
+	const store = await import('../stores/inbox.svelte.js');
+	await store.loadInboxItems('requires_user');
+	await store.loadInboxCounts();
+	const { default: Card } = await import('./InboxKopilotCard.svelte');
+	component = mount(Card, { target });
+	await settle();
+}
+
+describe('InboxKopilotCard — a notice item with a shown mail', () => {
+	it('names the shown mail, as the list row does', async () => {
+		await renderCard([notice({ shown: SHOWN })]);
+		const pick = target.querySelector<HTMLButtonElement>('li button')!;
+		expect(pick.querySelector('span.truncate')?.textContent).toBe('Anna Kunde');
+		expect(pick.querySelector('p.truncate')?.textContent).toBe('Frage zur Offerte');
+		expect(pick.textContent).not.toContain('Undelivered');
+		expect(pick.textContent).not.toContain('Mail Delivery System');
+	});
+
+	it('a sensitive shown mail: the address and the confidential mark, no name and no subject', async () => {
+		await renderCard([notice({ shown: { id: 'tm_1', fromAddress: 'bank@bank.example', messageId: '<real@x>', mailDate: SHOWN.mailDate, sensitive: true } })]);
+		const pick = target.querySelector<HTMLButtonElement>('li button')!;
+		expect(pick.querySelector('span.truncate')?.textContent).toBe('bank@bank.example');
+		expect(pick.querySelector('p.truncate')?.textContent).toBe('Vertraulicher Inhalt');
+		expect(pick.textContent).not.toContain('Undelivered');
 	});
 });

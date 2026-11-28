@@ -10,7 +10,7 @@ const notice: ShownCandidate & { classifierVersion: string } = {
 	reasonDe: 'Meldet, dass eine deiner Mails nicht ankam.', mailDate: '2026-11-20T09:00:00.000Z', classifiedAt: '2026-11-20T09:00:01.000Z',
 	classifierVersion: 'prefilter',
 };
-const shown = { fromAddress: 'anna@kunde.example', fromName: 'Anna Kunde', subject: 'Frage zur Offerte', messageId: '<real@x>', mailDate: '2026-11-20T10:00:00.000Z', sensitive: false };
+const shown = { id: 'tm_1', fromAddress: 'anna@kunde.example', fromName: 'Anna Kunde', subject: 'Frage zur Offerte', messageId: '<real@x>', mailDate: '2026-11-20T10:00:00.000Z', sensitive: false };
 
 describe('the row of a notice item with a shown mail', () => {
 	it('headline, label, sender and date all name the shown mail', () => {
@@ -23,7 +23,7 @@ describe('the row of a notice item with a shown mail', () => {
 	});
 
 	it('a sensitive shown mail: the address without a name, the confidential mark in the subject place', () => {
-		const item = { ...notice, shown: { fromAddress: 'bank@bank.example', messageId: '<real@x>', sensitive: true } };
+		const item = { ...notice, shown: { id: 'tm_1', fromAddress: 'bank@bank.example', messageId: '<real@x>', sensitive: true } };
 		expect(rowHeadline(item, t)).toBe('«inbox.sensitive_mark»');
 		expect(rowLabel(item, t)).toBe('«inbox.sensitive_mark»');
 		expect(rowSender(item)).toEqual({ label: 'bank@bank.example', address: 'bank@bank.example' });
@@ -44,11 +44,15 @@ describe('the row of a notice item with a shown mail', () => {
 		expect(rowOwnDate(notice)).toBe('2026-11-20T09:00:00.000Z');
 	});
 
-	it('the follow-up line says nothing for the one mail the row shows, and still counts several', () => {
-		const one = { count: 1 };
+	it('the follow-up line says nothing when the one counted mail is the mail the row shows, and still counts several', () => {
+		const one = { count: 1, latestMessageId: 'tm_1' };
 		expect(followUpLine({ ...notice, shown, followUps: one }, t, tf)).toBeUndefined();
-		expect(followUpLine({ ...notice, shown, followUps: { count: 3 } }, t, tf)).toBe('«inbox.follow_up_many:{"count":"3"}»');
+		expect(followUpLine({ ...notice, shown, followUps: { count: 3, latestMessageId: 'tm_1' } }, t, tf)).toBe('«inbox.follow_up_many:{"count":"3"}»');
 		expect(followUpLine({ ...notice, followUps: one }, t, tf)).toBe('«inbox.follow_up_one»');
+	});
+
+	it('the follow-up line stays when the one counted mail is another mail than the shown one', () => {
+		expect(followUpLine({ ...notice, shown, followUps: { count: 1, latestMessageId: 'tm_other' } }, t, tf)).toBe('«inbox.follow_up_one»');
 	});
 });
 
