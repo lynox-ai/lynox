@@ -32,6 +32,8 @@ let changedIn: Map<string, Array<{ file: string; status: string; diff: string }>
 let holdLaterRuns: Promise<void> | null;
 /** While true, the first run's own stream drops before its end, once it is released. */
 let dropFirstRun: boolean;
+/** The transcript the server gives for a thread without a live run. */
+let serverTranscript: Array<{ role: string; content: string }>;
 let reviewStatus: number;
 let changesetFails: boolean;
 let saved: Map<string, string>;
@@ -132,7 +134,7 @@ function serve(): void {
 			liveRunIn = null; // re-attached once; the reconcile after it sees no live run
 			return json({ messages: liveTranscript, activeRun: { runId: 'r-live', status: 'running', lastPersistedSeq: 0 } });
 		}
-		return json({ messages: [], activeRun: null });
+		return json({ messages: serverTranscript, activeRun: null });
 	}));
 }
 
@@ -161,6 +163,7 @@ beforeEach(async () => {
 	changedIn = new Map();
 	holdLaterRuns = null;
 	dropFirstRun = false;
+	serverTranscript = [];
 	holdReopen = new Map();
 	holdReview = null;
 	liveRunIn = null;
@@ -311,6 +314,31 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
 		expect(store.getMessages().find((m) => m.content === 'then this')?.queued, 'the turn keeps its place').toBe(true);
 	}, 20_000);
+
+	for (const how of ['a reconcile', 'opening the thread again'] as const) {
+		it(`${how}: a queued turn the review holds keeps its bubble, waiting, once, when the server transcript is taken`, async () => {
+			const release = await queueBehindRun();
+			changed = notes;
+			release();
+			await settle();
+			await wait(200);
+			await settle();
+			expect(store.getPendingChangeset(), 'positive control: the review is open').not.toBeNull();
+			expect(store.getQueueLength(), 'positive control: the turn waits').toBe(1);
+			// The server has every message the chat sent, and not the waiting one: as many as the
+			// chat shows without it, so the transcript is taken only when the waiting one is not counted.
+			const own = store.getMessages().filter((m) => m.content !== 'then this').length;
+			serverTranscript = Array.from({ length: own }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `server ${i}` }));
+			if (how === 'a reconcile') await store.reconcileThread();
+			else await store.resumeThread('t1');
+			await settle();
+			expect(store.getMessages().some((m) => m.content === `server ${own - 1}`), 'the server transcript was taken').toBe(true);
+			const bubbles = store.getMessages().filter((m) => m.content === 'then this');
+			expect(bubbles, 'the waiting turn keeps one bubble').toHaveLength(1);
+			expect(bubbles[0]?.queued, 'shown waiting').toBe(true);
+			expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+		});
+	}
 
 	it('with no review the queued turn is sent after the run (control)', async () => {
 		const release = await queueBehindRun();

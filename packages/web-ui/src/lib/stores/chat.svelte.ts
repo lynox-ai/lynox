@@ -1156,10 +1156,23 @@ export function removeHeldMessage(msg: ChatMessage): void {
 	persistChatNow();
 }
 
-/** After a server transcript replaced the list: the held messages of the list it replaced go on
- *  at its end, since the server never had them. */
+/** A message the server never had and a taken server transcript keeps: a held one, or one still
+ *  waiting in the send-queue (a bubble whose entry is gone has been sent or dropped). */
+function carriedOver(m: ChatMessage): boolean {
+	if (m.role !== 'user') return false;
+	return m.held === true || (m.queued === true && m.queueId !== undefined && messageQueue.some((q) => q.id === m.queueId));
+}
+
+/** How many messages of a local list the server can have: the ones {@link carryHeld} carries
+ *  over are not counted when a server transcript is compared with it. */
+function serverLength(list: ChatMessage[]): number {
+	return list.filter((m) => !carriedOver(m)).length;
+}
+
+/** After a server transcript replaced the list: the messages the server never had (held, or
+ *  still waiting in the send-queue) go on at its end. */
 function carryHeld(from: ChatMessage[], to: ChatMessage[]): void {
-	for (const m of from) if (m.role === 'user' && m.held === true && !to.includes(m)) to.push(m);
+	for (const m of from) if (carriedOver(m) && !to.includes(m)) to.push(m);
 }
 
 /** The run refused because no AI provider is set up (`code: 'llm_not_configured'`): the
@@ -4990,7 +5003,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// adopting the shorter server list would wipe the in-flight user bubble +
 			// placeholder. The `>=` path stays unguarded — a thread switch that legitimately
 			// loads an equal-or-longer transcript is unaffected.
-			if (serverMessages.length >= shown.length
+			if (serverMessages.length >= serverLength(shown)
 				|| (!isStreaming && !resumeActiveRun && !hasUnpersistedLocal)) {
 				// Server messages never carry chips — without this, adoption wipes a
 				// pending-review chip at run end (the observed end-of-run flicker) and
@@ -5193,7 +5206,7 @@ export async function reconcileThread(): Promise<void> {
 		// server transcript and WIPE the just-sent user bubble + streaming placeholder.
 		// Never adopt while a turn is in flight.
 		if (tid === sessionId && !isStreaming
-			&& (serverMessages.length >= messages.length || (!data.activeRun && !hasUnpersistedLocal))) {
+			&& (serverMessages.length >= serverLength(messages) || (!data.activeRun && !hasUnpersistedLocal))) {
 			// Same carry-over as resumeThread — a reconcile on remount must not wipe
 			// a pending-review chip either.
 			carryKnowledgeWrites(messages, serverMessages);
