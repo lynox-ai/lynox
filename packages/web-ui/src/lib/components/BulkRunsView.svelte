@@ -173,7 +173,7 @@
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{bulkReadsList(run) ? t('bulk.head.counts_pending') : bulkListUnread(run) !== null ? '' : `${run.applied}/${run.total}`}</td>
 									<!-- Amounts read as on the run's own page, „0.25 USD“; nothing spent reads as a dash (U-339). -->
-									<td class="py-2 hidden sm:table-cell font-mono text-xs whitespace-nowrap" data-testid="bulk-run-cost">{run.costUsd > 0 ? `${bulkUsd(run.costUsd)} USD` : '–'}</td>
+									<td class="py-2 hidden sm:table-cell font-mono text-xs whitespace-nowrap" data-testid="bulk-run-cost">{run.costUsd > 0 ? `${bulkUsd(run.costUsd)}\u00a0USD` : '–'}</td>
 								</tr>
 							{/each}
 						</tbody>

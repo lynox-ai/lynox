@@ -76,13 +76,128 @@ describe('the first connect of a profile on a built-in provider', () => {
 		expect(q('api-connect-first-not-yours')).toBeNull();
 	});
 
-	it('the owner, a profile a person with access set up: no first connect, the form stays', async () => {
-		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com' }]);
+	const TAKE_OVER = 'Diese Verbindung hat eine Person mit Zugang eingerichtet; verbinden kann sie nur diese Person. Willst du sie selbst verbinden, sag lynox im Chat, dass du sie übernimmst. Danach kannst du sie hier verbinden.';
+	const ANNA = 'mandate:anna@example.com';
+	const ago = (): string => new Date(Date.now() - DAY).toISOString();
+
+	// The owner on a profile a person with access set up: the way to take it over stands where the
+	// first connect would, below the app credentials' Save, and only where the engine says the
+	// owner's save goes through (`owner_may_take_over`, the condition the save itself asks).
+	it('the owner, never connected: no first connect; the way to take it over, once, below Save in its own row', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true }]);
 		await render();
-		expect(q('preset-client-form')).not.toBeNull();
+		const form = q('preset-client-form');
+		expect(form).not.toBeNull();
 		expect(q('api-connect-first')).toBeNull();
 		expect(q('api-connect-first-link')).toBeNull();
 		expect(q('api-connect-first-not-yours')).toBeNull();
+		const line = q('api-set-up-by-member');
+		expect(line?.textContent).toBe(TAKE_OVER);
+		expect(all('api-set-up-by-member')).toBe(1);
+		// Its own row right after the form, so below Save, whatever state the form is in.
+		expect(form?.contains(line)).toBe(false);
+		const save = [...form!.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Speichern');
+		expect(save).toBeDefined();
+		expect(save!.compareDocumentPosition(line!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
+	// The form's states other than loaded: the way stays, once.
+	function serveClient(client: () => Promise<Response>): void {
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+			const u = String(url);
+			if (u.endsWith('/config')) return Response.json({ viewer: 'owner' });
+			if (u.endsWith('/connections/records')) return Response.json({ notices: [] });
+			if (u.endsWith('/client')) return client();
+			return Response.json({ profiles: [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true }] });
+		}));
+	}
+	it.each([
+		['its app credentials failed to load', 'failed', () => Promise.resolve(Response.json({ error: 'x' }, { status: 500 }))],
+		['it reads other names', 'other-names', () => Promise.resolve(Response.json({ preset: 'shopify', client_id_key: 'K', client_secret_key: 'S', client_id: 'c', client_secret_set: true, redirect_uri: 'https://tenant.example/api/oauth/callback', reads_other_names: true }))],
+		['its app credentials are still loading', 'loading', () => new Promise<Response>(() => {})],
+	])('the owner, never connected, the form showing that %s: the way to take it over, once', async (_state, shown, client) => {
+		// The app credentials' request reached this case's answer (still open, for loading).
+		let reached = false;
+		serveClient(() => { reached = true; return (client as () => Promise<Response>)(); });
+		await render();
+		expect(reached).toBe(true);
+		expect(q('preset-client-form')).toBeNull();
+		// The form is in the state the case names, not merely absent.
+		const failed = target.textContent?.includes('Laden fehlgeschlagen. Ist die Engine erreichbar?') ?? false;
+		const otherNames = q('preset-client-other-names') !== null;
+		expect({ failed, otherNames }).toEqual({ failed: shown === 'failed', otherNames: shown === 'other-names' });
+		expect(q('api-set-up-by-member')?.textContent).toBe(TAKE_OVER);
+		expect(all('api-set-up-by-member')).toBe(1);
+	});
+
+	it('the owner, the person who set it up connected it and their access lasts: no way to take it over, their connection shown', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: false, oauth_grant: { connection: true, state: 'connected', connected_by: ANNA, connected_by_reader: false } }]);
+		await render();
+		expect(q('api-set-up-by-member')).toBeNull();
+		expect(q('api-connection')).not.toBeNull();
+		expect(q('api-connect-first-link')).toBeNull();
+	});
+
+	it('the owner, that person\'s grant revoked while their access lasts: no way to take it over, no reconnect', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: false, oauth_grant: { connection: true, state: 'revoked', revoked_at: ago(), connected_by: ANNA } }]);
+		await render();
+		expect(q('api-set-up-by-member')).toBeNull();
+		expect(q('api-reconnect')).toBeNull();
+		expect(q('api-reconnect-not-yours')).toBeNull();
+	});
+
+	it('the owner, that person\'s access ended: the way to take it over, once', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true, oauth_grant: { connection: true, state: 'connected', connected_by: ANNA, connected_by_reader: false } }]);
+		await render();
+		expect(q('api-set-up-by-member')?.textContent).toBe(TAKE_OVER);
+		expect(all('api-set-up-by-member')).toBe(1);
+	});
+
+	it('the owner, an own connection on a profile a person with access set up: not shown as connected, the way once', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true, oauth_grant: { connection: true, state: 'connected', connected_by: 'owner', connected_by_reader: true, unused: true } }]);
+		await render();
+		expect(q('api-connection')).toBeNull();
+		expect(all('api-set-up-by-member')).toBe(1);
+	});
+
+	it('the owner, such a profile signing in without a built-in provider: no form, the way in its own row', async () => {
+		serve('owner', [{ id: 'crm', name: 'CRM', base_url: 'https://crm.example', description: '', auth: { type: 'oauth2', oauth: {} }, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true }]);
+		await render();
+		expect(q('preset-client-form')).toBeNull();
+		const row = q('api-set-up-by-member-row');
+		expect(row?.contains(q('api-set-up-by-member'))).toBe(true);
+		expect(q('api-set-up-by-member')?.textContent).toBe(TAKE_OVER);
+	});
+
+	it('control: the owner\'s connection on the owner\'s profile is shown as connected', async () => {
+		serve('owner', [{ ...shop, oauth_grant: { connection: true, state: 'connected', connected_by: 'owner', connected_by_reader: true } }]);
+		await render();
+		expect(q('api-connection')).not.toBeNull();
+		expect(q('api-set-up-by-member')).toBeNull();
+	});
+
+	it('the person who set it up, client pair released: the first connect', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: true, reader_client_withheld: false }]);
+		await render();
+		const link = q('api-connect-first-member') as HTMLAnchorElement | null;
+		expect(link?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+		expect(link?.textContent).toBe('Konto verbinden');
+		expect(q('api-connect-first-withheld')).toBeNull();
+	});
+
+	it('the person who set it up, client pair not released: who has to act, no link', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: true, reader_client_withheld: true }]);
+		await render();
+		expect(q('api-connect-first-withheld')?.textContent).toBe('Verbinden kannst du diese Verbindung, sobald der Inhaber dir ihren App-Zugang freigegeben hat. Bitte den Inhaber darum.');
+		expect(q('api-connect-first-member')).toBeNull();
+	});
+
+	it('another person with access (no field from the server): neither link nor release line', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false }]);
+		await render();
+		expect(q('api-connect-first-member')).toBeNull();
+		expect(q('api-connect-first-withheld')).toBeNull();
+		expect(q('api-connect-first-not-yours')).not.toBeNull();
 	});
 
 	it('the owner, a profile the owner set up: the first connect', async () => {
@@ -99,14 +214,46 @@ describe('the first connect of a profile on a built-in provider', () => {
 	});
 
 	it('the owner, already connected: no first connect', async () => {
-		serve('owner', [{ ...shop, oauth_grant: { state: 'connected', connected_by: 'owner' } }]);
+		serve('owner', [{ ...shop, oauth_grant: { connection: true, state: 'connected', connected_by: 'owner' } }]);
 		await render();
 		expect(q('preset-client-form')).not.toBeNull();
 		expect(q('api-connect-first-link')).toBeNull();
 	});
 
+	// A save records a grant for every new oauth2 profile before anyone connected it: the engine
+	// says it is no connection (`connection: false`), and the profile is still to connect.
+	const minted = { grant_id: 'g-1', connected_by_reader: true, connection: false };
+
+	it('the owner, a never-connected profile carrying the record a save makes: the first connect', async () => {
+		serve('owner', [{ ...shop, oauth_grant: minted }]);
+		await render();
+		expect(q('api-connect-first-link')?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+		expect(q('api-connection')).toBeNull();
+	});
+
+	it('the person who set it up, client pair released, the record a save makes: the first connect', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: true, reader_client_withheld: false, oauth_grant: { ...minted, connected_by_reader: false } }]);
+		await render();
+		expect(q('api-connect-first-member')?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+	});
+
+	it('the person who set it up, client pair not released, the record a save makes: who has to act', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: true, reader_client_withheld: true, oauth_grant: { ...minted, connected_by_reader: false } }]);
+		await render();
+		expect(q('api-connect-first-withheld')).not.toBeNull();
+		expect(q('api-connect-first-member')).toBeNull();
+	});
+
+	// What a revoked grant shows does not depend on `connection`: its own reconnect link, never the first connect.
+	it.each([[true], [false]])('the owner, grant revoked (connection %s): the reconnect link only', async (connection) => {
+		serve('owner', [{ ...shop, oauth_grant: { connection, state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
+		await render();
+		expect(all('api-reconnect')).toBe(1);
+		expect(q('api-connect-first-link')).toBeNull();
+	});
+
 	it('the owner, grant revoked: the reconnect link only, not a second one', async () => {
-		serve('owner', [{ ...shop, oauth_grant: { state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
+		serve('owner', [{ ...shop, oauth_grant: { connection: true, state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
 		await render();
 		expect(all('api-reconnect')).toBe(1);
 		expect(q('api-connect-first-link')).toBeNull();
@@ -150,7 +297,7 @@ describe('the first connect of a profile on a built-in provider', () => {
 	});
 
 	it('a session the server lets not connect it, profile revoked: the reconnect refusal only, not the first-connect sentence', async () => {
-		serve('mandate', [{ ...shop, reader_may_connect: false, oauth_grant: { state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
+		serve('mandate', [{ ...shop, reader_may_connect: false, oauth_grant: { connection: true, state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
 		await render();
 		expect(q('api-reconnect-not-yours')).not.toBeNull();
 		expect(q('api-connect-first-not-yours')).toBeNull();

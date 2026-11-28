@@ -164,10 +164,12 @@ describe('a run\'s page as a mandate sees it', () => {
 		expect(target.textContent).not.toContain(t('bulk.halt.probeRequired_confirm'));
 	});
 
-	it('does not tell a mandate to check a read list and start it', async () => {
+	it('shows a mandate no list sentence and no step for a read list, only who starts it and its note', async () => {
 		run = makeRun({ phase: 'planned', haltKey: 'listed', haltReason: 'engine English', total: 1, listFirstPage: 'https://demo.myshopify.com/products.json', listStartChecksum: 'l1', changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		await renderDetail();
-		expect(target.textContent).not.toContain(t('bulk.start.listed').replace('{n}', '1'));
+		expect(target.textContent).not.toContain(tf('bulk.start.listed_one', { n: '1' }));
+		expect(target.textContent).not.toContain(t('bulk.halt.listed_start').split('{button}')[0]);
+		expect(target.textContent).toContain(t('bulk.halt.wait_owner_only'));
 		expect(target.textContent).toContain(t('bulk.start.list_note'));
 	});
 });
@@ -250,11 +252,13 @@ describe('a session whose reader the server has not named as the owner', () => {
 		expect(target.textContent).not.toContain(t('bulk.halt.awaitingStart_start').replace('{button}', t('bulk.start.read')));
 	});
 
-	it('does not tell a reader not known to be the owner to check a read list and start it', async () => {
+	it('shows a reader not known to be the owner no list sentence and no step for a read list, only who starts it and its note', async () => {
 		viewer = null;
 		run = makeRun({ phase: 'planned', haltKey: 'listed', haltReason: 'engine English', total: 1, listFirstPage: 'https://demo.myshopify.com/products.json', listStartChecksum: 'l1', changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		await renderDetail();
-		expect(target.textContent).not.toContain(t('bulk.start.listed').replace('{n}', '1'));
+		expect(target.textContent).not.toContain(tf('bulk.start.listed_one', { n: '1' }));
+		expect(target.textContent).not.toContain(t('bulk.halt.listed_start').split('{button}')[0]);
+		expect(target.textContent).toContain(t('bulk.halt.wait_owner_only'));
 		expect(target.textContent).toContain(t('bulk.start.list_note'));
 	});
 });

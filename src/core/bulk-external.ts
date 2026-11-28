@@ -34,7 +34,7 @@ import { urlScanForms } from './url-scan-forms.js';
 import { BulkRedirectError, BulkSecretError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
 import { isMailProviderTarget } from './bulk-mail-targets.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
-import { BULK_HALT_REASONS } from './bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_REQUEST_TIMEOUT_MS } from './bulk-ledger.js';
 
 /** An external after-state: a non-empty JSON object of scalar fields. */
 export type ExternalImage = Record<string, string | number | boolean | null>;
@@ -95,8 +95,8 @@ export type ExternalRead =
 export const BULK_RETRY_AFTER_CAP_MS = 60_000;
 /** How long an external write waits on a spent profile rate limit before failing the target. */
 const PROFILE_LIMIT_WAIT_MS = 1_000;
-/** One request's own deadline. */
-export const BULK_REQUEST_TIMEOUT_MS = 30_000;
+/** One request's own deadline; defined with the claim bound derived from it. */
+export { BULK_REQUEST_TIMEOUT_MS };
 
 // `canonicalHost` lives in its own module so the containment check can use it without loading
 // the bulk machinery; re-exported here for the callers that import it from this module.

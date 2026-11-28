@@ -80,7 +80,7 @@ describe('the cost column of the runs list', () => {
 			// An older engine may send no cost at all.
 			makeRun({ id: 'unknown', costUsd: null as unknown as number }),
 		];
-		expect(await costs()).toEqual(['0.25 USD', '0.0040 USD', '–', '–']);
+		expect(await costs()).toEqual(['0.25\u00a0USD', '0.0040\u00a0USD', '–', '–']);
 		// The cell does not wrap, so the amount and its unit stand together, also at four decimals.
 		for (const td of target.querySelectorAll('[data-testid="bulk-run-cost"]')) expect(td.classList.contains('whitespace-nowrap')).toBe(true);
 	});

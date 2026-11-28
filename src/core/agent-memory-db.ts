@@ -1031,6 +1031,17 @@ export class AgentMemoryDb {
   }
 
   /**
+   * The texts of the active memories in `namespace` that were written untrusted (or at the
+   * `external_unverified` tier). A read path marks the flat lines found in them, so text that
+   * came in untrusted reaches the model marked as such.
+   */
+  untrustedTexts(namespace: string): string[] {
+    return (this.db.prepare(
+      "SELECT text FROM memories WHERE is_active = 1 AND namespace = ? AND (source_untrusted = 1 OR source_type = 'external_unverified')",
+    ).all(namespace) as Array<{ text: string }>).map(r => r.text);
+  }
+
+  /**
    * Name `successorId` as the successor of memories retired without one — they were
    * moved, and the fact lives on in the successor. Only rows still retired without a
    * successor are touched, never the successor itself. Returns the rows changed.

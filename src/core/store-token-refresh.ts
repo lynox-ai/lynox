@@ -628,6 +628,7 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   if (refreshExpiry === 'unknown') delete grantNext.refresh_expires_at;
   else grantNext.refresh_expires_at = refreshExpiry;
   let saved = false;
+  let threw = false;
   try {
     saved = apiStore.save(
       { ...profile, auth: { ...profile.auth, oauth: oauthNext }, oauth_grant: grantNext } as ApiProfile,
@@ -646,6 +647,26 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
     ).ok;
   } catch {
     saved = false;
+    threw = true;
+  }
+  // A save that threw may have gone through first (a follow-up inside `ApiStore.save` threw
+  // after the write); a row or file write that threw puts the profile in memory back as it was.
+  // So the profile read back says which: the new binding, and the stamp of the refresh token now
+  // in use, mean the new tokens are stored and bound. The binding alone is not enough: a store
+  // that answers with the same access token and a rotated refresh token leaves it unchanged. And
+  // only a save that changes one of the two can be told apart this way: where the store answered
+  // with the same access token and no new refresh token, both read as before whether or not the
+  // save went through, so that case stays not saved, the safe direction.
+  // (A throw after the mint branch committed, in `_othersWatching`, also puts memory back while
+  // the row holds the new profile: read here as not saved, which ends the connection.)
+  const before = profile.oauth_grant;
+  const changes = before?.store_binding !== binding || before.minted_for !== grantNext.minted_for;
+  if (threw && changes) {
+    const after = apiStore.get(profileId)?.oauth_grant;
+    if (after?.store_binding === binding && after.minted_for === grantNext.minted_for) {
+      outcomeLine(profileId, 'ok', trigger, 'new tokens stored and bound; the profile save threw after it went through');
+      return 'renewed';
+    }
   }
   if (!saved) {
     // The vault holds the new tokens, the profile the old binding: every request to the store now
