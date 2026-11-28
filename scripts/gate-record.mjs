@@ -38,6 +38,7 @@
  * cannot judge (`wrongRunErrors`: lynox-pro's checkout, or a local branch name as `--base`).
  */
 
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -56,6 +57,28 @@ import { proseWarnings } from './disclosure-vocabulary-scan.mjs';
  * that sibling red against its own guard.
  */
 const MARK = ['gate', 'record'].join('-');
+
+/**
+ * The message of a `::warning::` or `::error::` line, escaped the way GitHub's own toolkit does
+ * it: `%`, CR and LF become `%25`, `%0D`, `%0A`. A message can quote text from the pull request
+ * (a route path, a file name, git's stderr), and the runner reads a command at the start of every
+ * line, a lone CR included. Unescaped, a route like `/api/x<LF>::stop-commands::t` would end the
+ * annotation and start a command of its own. The annotation still shows `%0A` as a line break.
+ * The older `##[cmd]` form is no concern here: the runner tries it only on a line that is not
+ * already a `::` command.
+ */
+export function commandText(text) {
+  return String(text).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+/**
+ * Plain log text, one printed line per line of it, each behind the mark, so no line of a note
+ * can begin with `::`. A plain line still meets the runner's older command form, `##[cmd]data`,
+ * which it finds anywhere in a line, so `##[` is printed as `# #[`.
+ */
+export function logLines(text) {
+  for (const line of String(text).split(/\r\n|\r|\n/)) console.log(`${MARK}: ${line.replace(/##\[/g, '# #[')}`);
+}
 
 /** Gate names the record may claim. An unknown name is a typo, not a new gate. */
 const KNOWN_GATES = new Set(['code-review', 'security', 'delta', 'prd', 'staging-walk', 'legal']);
@@ -328,12 +351,24 @@ export function requiredGates(files) {
  * What it cannot see, stated so nobody reads more into it: a lock tightened by editing only its
  * condition (`if (role !== 'owner')`); a refusal spelled otherwise (a German text, a
  * `ForbiddenError`); a line that starts as a comment, even with code after it or inside a
- * template literal the user reads; a confirmation inside a multi-line entry whose new text
- * already stands in an earlier entry (a line counts only where its count went up, and is
- * credited to the first entry that holds it). Those stay the author's to declare. And where it
- * errs the other way, it asks for a review it did not need: a renamed file reads as all-new
- * lines, as does a re-indented one, and the inner lines of a multi-line import or type are read
- * as sites.
+ * template literal the user reads; a confirmation whose key line
+ * `UX_NEW_TEXT` does not read (an unquoted key, a comment after `{`, a call such as `t({`, a
+ * plain string value) or whose text sits under another locale than `de:`/`en:`; and the part of a
+ * confirmation entry after a line, at the key's indent or less, that starts with `}` or looks like
+ * an entry opening (a flat file, a mixed indent, a template literal's line): a change there is seen
+ * only where the line count credits an added line of it to the confirmation (the `inside` loop
+ * below says when it does). A confirmation is a key naming `confirm`; consent text under another
+ * key, reached through a constant, or written into markup is not one. Those stay the author's to
+ * declare. And where it errs the other way, it asks for a review it did not need: a
+ * renamed file reads as all-new lines, as does a re-indented one, the inner lines of a multi-line
+ * import or type are read as sites, a confirmation entry that only changes its indent or layout
+ * reads as reworded, and so does any later change in a file whose last confirmation entry has no
+ * closing line below it.
+ *
+ * A confirmation entry (a key naming `confirm`) is compared as a block between the two ends, by
+ * key, not line by line (`uxConfirmBlocks`): its wording is the consent, and a line count cannot
+ * see a reworded line whose text also stands in another entry, or two entries swapping lines.
+ * The line count is still read too, so the compare adds what it sees and loses nothing.
  *
  * Lines are compared as a MULTISET, read with `git cat-file`, never with `git diff`: a full diff
  * can run an author-chosen diff driver, which `--name-only` avoids for the file list and this
@@ -425,8 +460,15 @@ export function uxOwed({ files, base, head, read }) {
       // Is the key in the base as a KEY, in either quote — not merely as a substring somewhere.
       const inBase = (k) => new RegExp(`(['"])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\1\\s*:`).test(b.value ?? '');
       const entries = added.map((l) => UX_NEW_TEXT.exec(l)).filter((m) => m !== null && UX_KEY_NAME.test(m[2]));
-      // An entry over several lines changes in its `de:`/`en:` lines while its key line stays:
-      // attribute every added line inside an open entry to that entry's key.
+      // A confirmation is compared as a whole block per key, at both ends: an entry over several
+      // lines changes in its `de:`/`en:` lines while its key line stays, and those lines can move
+      // between entries without any line count going up.
+      const bBlocks = uxConfirmBlocks(b.value);
+      const hBlocks = uxConfirmBlocks(h.value);
+      const reworded = [...hBlocks].filter(([k, v]) => bBlocks.has(k) && bBlocks.get(k) !== v).map(([k]) => k);
+      // And, as before the block compare, every added line inside an open entry is credited to
+      // that entry's key: where a block is cut short (a flat file, a mixed indent), this still
+      // sees what it saw, so the two together never owe less than either alone.
       const inside = new Set();
       let open = null;
       const left = new Map(count);
@@ -438,13 +480,73 @@ export function uxOwed({ files, base, head, read }) {
       }
       keys = {
         added: entries.filter((m) => !inBase(m[2])).map((m) => m[2]),
-        changed: [...entries.filter((m) => inBase(m[2])).map((m) => m[2]), ...[...inside].filter(inBase)],
+        changed: [...entries.filter((m) => inBase(m[2])).map((m) => m[2]), ...[...inside].filter(inBase), ...reworded],
       };
     }
     if (keys.added.some((k) => UX_KEY_NAME.test(k))) why.push(`${f} adds a user text that says what to do next`);
     else if (keys.changed.some((k) => /confirm/i.test(k))) why.push(`${f} changes what a confirmation asks the user to agree to`);
   }
   return { line: true, review: why.length > 0, why };
+}
+
+/**
+ * Each confirmation entry of a source file (a `UX_NEW_TEXT` line whose key names `confirm`) with
+ * its text, by key; the same key several times keeps every block, in order. A block runs from
+ * the key line up to the next line, at the key line's indent or less (counted in characters, a
+ * tab as one), that opens another entry, and it takes in a line starting with `}` at that indent
+ * or less and ends there; with neither, it runs to the end of the file. So it holds nested
+ * entries, a value that starts on the key line and goes on below, and the lines of a template
+ * literal indented deeper than the key, or at any indent unless they start with `}` or look like
+ * an entry opening. Lines are kept as they are, blank and comment-like ones too: inside a
+ * template literal they are what the user reads, so a new indent counts as a change. A
+ * confirmation inside another keeps its lines in its own block, and the outer block holds, where
+ * they stood, a digest of that block (a line of the file that starts with `\0` gets one more, so
+ * it never reads as a digest): every line is kept once, plus 65 characters for each nested entry,
+ * so a file of deeply nested confirmations costs its length, not its length times its depth, and
+ * the outer block still changes with what it holds, wherever that moves. `null` text (an absent
+ * file) has none. Pure.
+ *
+ * @param {string|null} text
+ * @returns {Map<string, string>}
+ */
+export function uxConfirmBlocks(text) {
+  const out = new Map();
+  const indent = (l) => /^\s*/.exec(l)[0].length;
+  // The open entries, innermost last; their indents rise, so a line that ends one also ends
+  // every entry inside it, and a line that ends none ends nothing further out.
+  const open = [];
+  // An entry's text goes into its own block; the entry that holds it gets, where it stood, a
+  // digest of it, filled in when it ends (always before the entry around it).
+  const end = (e) => {
+    const text = e.body.join('\n');
+    out.get(e.key)[e.slot] = text;
+    if (e.outer !== null) e.outer.body[e.held] = `\0${createHash('sha256').update(text).digest('hex')}`;
+  };
+  for (const l of (text ?? '').split('\n')) {
+    const t = l.trim();
+    const at = t === '' ? Infinity : indent(l);
+    if (t.startsWith('}')) {
+      const ended = [];
+      while (open.length > 0 && at <= open[open.length - 1].at) ended.push(open.pop());
+      if (ended.length > 0) ended[0].body.push(l);
+      else if (open.length > 0) open[open.length - 1].body.push(l);
+      for (const e of ended) end(e);
+      continue;
+    }
+    const m = UX_NEW_TEXT.exec(l);
+    if (m !== null) while (open.length > 0 && at <= open[open.length - 1].at) end(open.pop());
+    const outer = open.length > 0 ? open[open.length - 1] : null;
+    if (m === null || !/confirm/i.test(m[2])) {
+      // A line that starts like a digest gets one more \0, so it never reads as one.
+      if (outer !== null) outer.body.push(l.startsWith('\0') ? `\0${l}` : l);
+      continue;
+    }
+    if (!out.has(m[2])) out.set(m[2], []);
+    const held = outer === null ? -1 : outer.body.push('') - 1;
+    open.push({ key: m[2], at, body: [l], slot: out.get(m[2]).push('') - 1, outer, held });
+  }
+  while (open.length > 0) end(open.pop());
+  return new Map([...out].map(([k, v]) => [k, JSON.stringify(v)]));
 }
 
 /**
@@ -519,6 +621,134 @@ export function uxErrors(raw, ux, visibility) {
     return [];
   }
   return [`\`ux: ${value}\` is not an answer — write \`ux: reviewed U-<number>\`, \`ux: self — way out: <…>\` or \`ux: not user-facing — <reason>\``];
+}
+
+/**
+ * ── agent-awareness: does the agent know what this diff ships? ─────────────────
+ *
+ * A capability can reach a user before the agent knows it, and then the agent answers as if the
+ * capability did not exist or points to the wrong place. So a diff that adds a TOOL, a
+ * ROUTE or a UI PAGE says, on an `agent-awareness:` line, whether the agent was told:
+ *   · `agent-awareness: updated <briefing|catalog|tool-text>` (more than one: `briefing, tool-text`);
+ *   · `agent-awareness: not needed: <reason>`. The reason carries the trade-off: telling the agent
+ *     about a capability can widen what an injected instruction reaches.
+ * The German forms (`nachgeführt`, `Katalog`, `Tool-Text`, `bewusst nicht:`) are aliases.
+ *
+ * WARNING ONLY. A missing or malformed line prints a `::warning::` naming the trigger file, and
+ * the check still passes. It becomes required only after two weeks of warnings have been counted
+ * against false alarms, and only on the owner's word.
+ *
+ * What counts as "adds", each judged between the merge base and the head of the files the diff
+ * touches, tests left out:
+ *   · a TOOL: a tool name in `definition: { name: '<name>'` under src/ that none of the touched
+ *     files had at the base. A new tool in an existing file counts; a tool moved or a file renamed
+ *     does not, since the name was there before;
+ *   · a ROUTE: a new `parseDynamicRoute('<role>', '<METHOD>', '<path>'` or `pathname === '/api/…'`
+ *     under src/server/;
+ *   · a UI PAGE: a `+page.svelte` under packages/web-ui/src/routes/ that the base does not have.
+ */
+const AA_TEST = [/\.(?:test|spec)\.[cm]?[jt]sx?$/, /^tests\//, /\/__tests__\//];
+const AA_TOOL_FILE = /^src\/.+\.ts$/;
+const AA_ROUTE_FILE = /^src\/server\/.+\.ts$/;
+const AA_PAGE_FILE = /^packages\/web-ui\/src\/routes\/(?:.+\/)?\+page\.svelte$/;
+const AA_TOOL = /definition:\s*\{\s*name:\s*(?:['"`]([A-Za-z0-9_-]+)['"`]|([A-Z][A-Z0-9_]*)\b)/g;
+// Every way http-api.ts registers a route, keyed `METHOD path` (or the bare path for a
+// `pathname ===` check), so a route that moves between styles stays quiet. Any quote: a path in
+// backticks is keyed by its literal text, `${…}` included.
+const AA_Q = '[\'"`]';
+const AA_ROUTES = [
+  new RegExp(`(?:parseDynamicRoute|addDynamic)\\(\\s*${AA_Q}[a-z]+${AA_Q}\\s*,\\s*${AA_Q}([A-Z]+)${AA_Q}\\s*,\\s*${AA_Q}([^'"\`]+)${AA_Q}`, 'g'),
+  new RegExp(`addStatic\\(\\s*${AA_Q}[a-z]+${AA_Q}\\s*,\\s*${AA_Q}([A-Z]+) ([^'"\`]+)${AA_Q}`, 'g'),
+  new RegExp(`addCpAdminRoute\\(\\s*${AA_Q}([A-Z]+) ([^'"\`]+)${AA_Q}`, 'g'),
+  new RegExp(`pathname\\s*===\\s*${AA_Q}(\\/api\\/[^'"\`]+)${AA_Q}`, 'g'),
+];
+
+function aaToolNames(text) {
+  // A literal name, or the constant that holds it (`name: FAIL_STEP_TOOL_NAME`), keyed by its text.
+  return new Set([...String(text ?? '').matchAll(AA_TOOL)].map((m) => m[1] ?? m[2]));
+}
+
+function aaRoutes(text) {
+  const out = new Set();
+  for (const re of AA_ROUTES) for (const m of String(text ?? '').matchAll(re)) out.add(m.slice(1).join(' '));
+  return out;
+}
+
+/**
+ * What this diff adds that the agent may need to know. `read(sha, path)` as for `uxOwed`.
+ *
+ * @returns {{ adds: string[], unjudged?: string }} `adds`: one entry per tool, route or page, each
+ *   naming its file; `unjudged`: why nothing could be judged (no base, a file that cannot be read).
+ */
+export function agentAwarenessOwed({ files, base, head, read }) {
+  // A name git printed quoted cannot be read, but it hides nothing else: the other files are still
+  // judged, and the note is raised only when the quoted name itself could be a trigger file.
+  const isTrigger = (f) => AA_TOOL_FILE.test(f) || AA_ROUTE_FILE.test(f) || AA_PAGE_FILE.test(f);
+  const quoted = files.filter((f) => isQuotedPath(f)).find((f) => isTrigger(f.slice(1, -1)));
+  const note = quoted ? { unjudged: `${quoted} is a name git printed quoted, so it could not be read` } : {};
+  const code = files.filter((f) => !isQuotedPath(f) && !AA_TEST.some((p) => p.test(f)));
+  const relevant = code.filter(isTrigger);
+  if (relevant.length === 0) return { adds: [], ...note };
+  if (!base || !head) return { adds: [], unjudged: `without \`--base\` and \`--head\` nothing can tell what ${relevant[0]} adds` };
+  const at = {};
+  for (const f of relevant) {
+    try {
+      at[f] = { base: read(base, f), head: read(head, f) };
+    } catch (e) {
+      return { adds: [], unjudged: `cannot read ${f}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+  const adds = [];
+  // Names are compared across ALL touched files, so a tool or route that only moved between
+  // files is not new.
+  for (const [kind, fileRe, names] of [['tool', AA_TOOL_FILE, aaToolNames], ['route', AA_ROUTE_FILE, aaRoutes]]) {
+    const files = relevant.filter((f) => fileRe.test(f));
+    const before = new Set(files.flatMap((f) => [...names(at[f].base)]));
+    for (const f of files) {
+      for (const n of names(at[f].head)) {
+        if (!before.has(n)) { adds.push(`${f} adds the ${kind} \`${n}\``); before.add(n); }
+      }
+    }
+  }
+  for (const f of relevant.filter((p) => AA_PAGE_FILE.test(p))) {
+    if (at[f].base === null && at[f].head !== null) adds.push(`${f} adds a UI page`);
+  }
+  return { adds, ...note };
+}
+
+const AA_KINDS = new Map([
+  ['briefing', 'briefing'], ['catalog', 'catalog'], ['katalog', 'catalog'], ['tool-text', 'tool-text'],
+]);
+
+/**
+ * What is wrong with the `agent-awareness:` line, as WARNINGS. Pure.
+ * @param {string | undefined} raw the field's value, `undefined` when the record has no such line
+ * @param {{ adds: string[], unjudged?: string }} owed
+ */
+export function agentAwarenessWarnings(raw, owed) {
+  const value = raw === undefined ? undefined : String(raw).trim();
+  const forms = '`agent-awareness: updated <briefing|catalog|tool-text>` or `agent-awareness: not needed: <reason>`';
+  const out = [];
+  if (value === undefined || value === '') {
+    if (owed.adds.length > 0) {
+      out.push(`agent-awareness: ${owed.adds.join('; ')}. Say whether the agent was told: ${forms} (a warning for now, not yet required).`);
+    }
+    return out;
+  }
+  const updated = /^(?:updated|nachgeführt|nachgefuehrt)\s+(.+)$/i.exec(value);
+  if (updated) {
+    const parts = updated[1].split(/\s*(?:,|\+|\band\b|\bund\b)\s*/i).filter(Boolean);
+    const bad = parts.filter((p) => !AA_KINDS.has(p.toLowerCase()));
+    if (parts.length > 0 && bad.length === 0) return out;
+    return [`\`agent-awareness: ${value}\` names ${bad.length ? `\`${bad.join(', ')}\`, which is not one of briefing, catalog, tool-text` : 'no kind (briefing, catalog or tool-text)'}. Write ${forms}.`];
+  }
+  // `:`, or the dash the `ux:` line teaches (`not user-facing — <reason>`).
+  const notNeeded = /^(?:not needed|bewusst nicht)\s*(?::|—|–|-)\s*(.*)$/i.exec(value);
+  if (notNeeded) {
+    if (notNeeded[1].trim().length > 0) return out;
+    return [`\`agent-awareness: ${value}\` names no reason. Write \`agent-awareness: not needed: <why the agent need not know>\`.`];
+  }
+  return [`\`agent-awareness: ${value}\` is not one of the two forms. Write ${forms}.`];
 }
 
 /**
@@ -871,7 +1101,8 @@ export function evaluate(input) {
   const { body, title, commits = [], author, visibility = 'unknown' } = input;
   // Same scope as the field rule: public or unknown, never a bot's body.
   if (visibility === 'private' || (author && /\[bot\]$/.test(author))) return verdict;
-  const warnings = openWorkWarnings({ title, body, commits });
+  // The record's own warnings can quote a field value, so they are masked like the errors below.
+  const warnings = [...(verdict.warnings ?? []).map(withoutRegisterIds), ...openWorkWarnings({ title, body, commits })];
   const extra = [];
   if (registerIdLines(title).length > 0) {
     extra.push('the TITLE names a register row, and the title becomes the commit subject on the public main branch. Take it out.');
@@ -916,7 +1147,7 @@ export function evaluate(input) {
   };
 }
 
-function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux = null, delta = null }) {
+function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux = null, delta = null, securityModel = null, agentAwareness = null }) {
   const errors = [];
   const notes = [];
 
@@ -1257,22 +1488,61 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
     if (!raw) {
       errors.push(
         'this diff owes the `security` gate, so the record needs a `security:` line saying WHERE the',
-        'round came from and what it found. Format: `security: <origin>, <result>`, where origin is',
-        '`own round`, `leaning on <what>`, or `origin unclear` — e.g. `security: own round, no findings`,',
-        '`security: leaning on the parity run, no findings`, `security: origin unclear, findings filed privately`.',
+        'round came from, which model ran it, and what it found. Format: `security: <origin> (<model>), <result>`,',
+        'where origin is `own round`, `leaning on <what>`, or `origin unclear` and the model is `opus` or `fable`',
+        '— e.g. `security: own round (opus), no findings`, `security: leaning on the parity run (opus), no findings`,',
+        '`security: origin unclear (fable), findings filed privately`.',
         '⚠ `origin unclear` is a FULL answer, not an admission: if you cannot tell whether the round was',
         'its own, saying so is the true line, and writing `own round` instead is the lie this field exists for.',
         '⚠ And THIS REPO IS PUBLIC, so the result half carries no count of open findings: write',
         '`findings filed privately`, and the number lives in the private register row.',
       );
+    } else if (raw.length > SECURITY_LINE_MAX) {
+      // ⛔ A length cap BEFORE the pattern, because the pattern is polynomial: `\s+`, the lazy
+      // `[^,]*?` and `\s*` overlap on whitespace, so `leaning on ` + a few thousand spaces + `x`
+      // takes seconds — measured cubic, 6 s at 2000 spaces — and a body of the size GitHub allows
+      // holds the runner slot until the job's timeout. A real line is a few dozen characters.
+      errors.push(
+        `the \`security:\` line is ${raw.length} characters long; it may be at most ${SECURITY_LINE_MAX}.`,
+        'Write the origin, the model and the result: `own round (opus), no findings`.',
+      );
     } else {
-      const m = /^(own\s+round|origin\s+unclear|leaning\s+on\s+[^,]*?)\s*,\s*(.+)$/i.exec(raw);
+      // The model sits in parentheses between origin and comma: `own round (opus), no findings`.
+      // `[^(),]*` keeps a parenthesis or comma out of the model slot. ⚠ The reverse is open by the
+      // grammar: the lazy reference may itself hold a parenthesis, so `leaning on the run (sonnet)
+      // (opus), …` reads the reference as `the run (sonnet)`. A shape rule for that (refuse a
+      // reference ending in `)`) was tried and failed both ways: `(sonnet) x (opus)` walked past it
+      // and `run (#123) (opus)` was refused. What is wrong in that line is not its shape but a
+      // MODEL NAME outside the model slot, so that is what is refused: a reference that names a
+      // model, by word. A reference may hold a PR number in parentheses; it may not hold a model.
+      const m = /^(own\s+round|origin\s+unclear|leaning\s+on\s+[^,]*?)(?:\s*\(([^(),]*)\))?\s*,\s*(.+)$/i.exec(raw);
+      if (m && !securityModel?.predates) {
+        if (m[2] === undefined && MODEL_IN_PARENS_BEFORE_COMMA.test(m[3])) {
+          // The model is there, behind a comma that was read as the separator — `leaning on a, b
+          // (opus), …`. "names no model" would be true of the parse and false of the line.
+          errors.push(
+            `\`security: ${raw}\`: the model in parentheses comes after a comma, so it was read as part of the result.`,
+            /^leaning/i.test(m[1])
+              ? 'The comma separates origin from result; write the reference without one: `leaning on a b (opus), no findings`.'
+              : 'The model goes right after the origin, before the comma: `own round (opus), no findings`.',
+          );
+        } else {
+          errors.push(...securityModelErrors(m[2], `security: ${raw}`));
+        }
+        if (/^leaning/i.test(m[1]) && MODEL_WORD.test(m[1].replace(/^leaning\s+on/i, ''))) {
+          errors.push(
+            `\`security: ${raw}\`: the reference names a model; the model goes in the parentheses after the origin, once.`,
+            'Write `leaning on the parity run (opus), no findings` — a model name in the reference is read as a second claim.',
+          );
+        }
+      }
       if (!m) {
         errors.push(
-          `\`security: ${raw}\` is not \`<origin>, <result>\`.`,
-          'The origin is one of three: `own round` · `leaning on <what>` · `origin unclear`.',
+          `\`security: ${raw}\` is not \`<origin> (<model>), <result>\`.`,
+          'The origin is one of three: `own round` · `leaning on <what>` · `origin unclear`, followed by the',
+          'model in parentheses: `own round (opus), no findings`.',
           '⚠ A `leaning on <what>` reference carries NO comma — the comma separates origin from result,',
-          'so write `leaning on the v1/v2 parity run, no findings` and keep the reference in one piece.',
+          'so write `leaning on the v1/v2 parity run (opus), no findings` and keep the reference in one piece.',
         );
       } else if (/^leaning/i.test(m[1]) && !/[\p{L}\p{N}]/u.test(m[1].replace(/^leaning\s+on/i, ''))) {
         // ⛔ A reference made of whitespace or punctuation passes the shape and says nothing.
@@ -1286,7 +1556,7 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
           '`origin unclear` is the honest answer and carries no penalty.',
         );
       } else {
-        const resultErrors = roundResultErrors(m[2].trim(), `security: ${raw}`);
+        const resultErrors = roundResultErrors(m[3].trim(), `security: ${raw}`);
         errors.push(...resultErrors);
         // ⚠ The diagnosis would otherwise point at the wrong end. `leaning on a, b, no findings`
         // parses as origin `leaning on a` and result `b, no findings`, so the grammar refuses the
@@ -1407,11 +1677,19 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
   // only a caller that is not `main` can produce — the CLI test holds `main` to passing it.
   const uxVerdict = ux ?? { line: false, review: false, why: [] };
   if (uxVerdict.predates) notes.push('ux: not owed — this branch\'s merge base predates the `ux:` line; rebasing onto main brings it under the rule');
+  if (required?.has('security') && securityModel?.predates) notes.push('security: the model is not owed — this branch\'s merge base predates the model in the `security:` line; merging main into it brings it under the rule');
   if (required?.has('delta') && delta?.predates) notes.push('delta: the bare `clean` still counts — this branch\'s merge base predates the range; rebasing onto main brings it under the rule');
   for (const w of uxVerdict.review ? uxVerdict.why : []) notes.push(`ux review owed: ${w}`);
   errors.push(...uxErrors(f.ux, uxVerdict, visibility));
 
-return errors.length ? { ok: false, errors } : { ok: true, notes };
+  // `agent-awareness` warns, never fails; judged in `main` like `ux`, `null` when nobody judged it.
+  const aaOwed = agentAwareness ?? { adds: [] };
+  const aaWarnings = [
+    ...(aaOwed.unjudged ? [`agent-awareness: not judged — ${aaOwed.unjudged}`] : []),
+    ...agentAwarenessWarnings(f['agent-awareness'], aaOwed),
+  ];
+  const withAa = aaWarnings.length ? { warnings: aaWarnings } : {};
+  return errors.length ? { ok: false, errors, ...withAa } : { ok: true, notes, ...withAa };
 }
 
 /** The PR body and title from a GitHub event payload file; empty strings where absent. */
@@ -1452,6 +1730,69 @@ export function readEventPr(path) {
 export const DELTA_LINE_MARK = 'export function ' + 'deltaRangeErrors(';
 /** `clean on <from>..<to>`: abbreviated or full commit ids, lower-case hex. */
 export const DELTA_RANGE = /^clean on ([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})$/;
+
+/**
+ * ⭐ THE MODEL OF THE SECURITY ROUND.
+ *
+ * The rule is that a security round runs on Opus, on Fable when Opus answers 429, and never on
+ * Sonnet. Before this the line said only WHERE the round came from, so `own round, no findings`
+ * passed whatever ran it, and the only check left was a person asking each author.
+ *
+ * So the line names the model, and the vocabulary is an ALLOW list of the two that the rule
+ * accepts, not a deny list of `sonnet`: a deny list passes `haiku`, `gpt`, `sonet` and every name
+ * the rule never heard of. A missing model is refused on the same grounds as a wrong one — an
+ * unnamed model is the state this field existed to end. ⚠ That holds for `origin unclear` too:
+ * not knowing WHOSE round it was is an honest answer the field keeps; not knowing what model ran
+ * it means the round cannot be shown to meet the rule, and the way out is an own round on Opus.
+ *
+ * What it cannot do: prove the name is true. It makes the claim falsifiable and turns a Sonnet
+ * round under an `opus` label into a deliberate statement rather than a silence.
+ *
+ * THE TRANSITION, as for the `delta:` range and the other fields added later: a PR whose merge
+ * base predates this function is not held to the model; merging main into it brings it under
+ * the rule.
+ */
+export const SECURITY_MODEL_MARK = 'export function ' + 'securityModelErrors(';
+/** The longest `security:` line read; see the cap where the line is parsed. */
+export const SECURITY_LINE_MAX = 300;
+/**
+ * A model name as a word, allowed or not: what a `leaning on` reference may not contain. The names
+ * here are the families a round could run on; a reference that needs one is naming a second model.
+ */
+const MODEL_WORD = /(?<![\p{L}\p{N}])(opus|fable|sonnet|haiku)(?![\p{L}\p{N}])/iu;
+/** A model in parentheses before the next comma — the shape of a model that landed in the result half. */
+const MODEL_IN_PARENS_BEFORE_COMMA = /^[^,()]*\(\s*(opus|fable|sonnet|haiku)\s*\)\s*,/i;
+/** The models a security round may run on. */
+export const SECURITY_MODELS = ['opus', 'fable'];
+
+/**
+ * What is wrong with the model named in a `security:` line, as messages.
+ * @param {string | undefined} model  the text inside the parentheses, or undefined when there were none
+ * @param {string} line               the line as written, for the message
+ */
+export function securityModelErrors(model, line) {
+  const named = (model ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  if (SECURITY_MODELS.includes(named)) return [];
+  const head = named
+    ? `\`${line}\` names the model \`${named}\`; a security round runs on \`opus\`, or \`fable\` when Opus answers 429.`
+    : `\`${line}\` names no model; write it in parentheses after the origin: \`own round (opus), no findings\`.`;
+  return [
+    head,
+    'A round on Sonnet or any other model does not meet the rule — run the security round again on Opus',
+    'and write that one. If you do not know which model ran the round, the same applies.',
+  ];
+}
+
+/** Whether this branch's merge base predates the model in `security:`. Unreadable or no base: it does not. */
+export function securityModelPredates({ base, read }) {
+  if (!base) return false;
+  try {
+    const self = read(base, UX_SELF_PATH);
+    return self === null || !self.includes(SECURITY_MODEL_MARK);
+  } catch {
+    return false;
+  }
+}
 
 /** Whether this branch's merge base predates the range rule. Unreadable or no base: it does not. */
 export function deltaPredates({ base, read }) {
@@ -1654,7 +1995,7 @@ function main() {
     localBranch: isLocalBranch,
   });
   if (wrong.length > 0) {
-    for (const e of wrong) console.log(`::error::${MARK}: ${e}`);
+    for (const e of wrong) console.log(`::error::${MARK}: ${commandText(e)}`);
     process.exitCode = 2;
     return;
   }
@@ -1678,19 +2019,23 @@ function main() {
     explicit: args['repo-visibility'],
   });
   const ux = uxOwed({ files, base: args.base || '', head: args.head || '', read: gitRead });
+  const agentAwareness = agentAwarenessOwed({ files, base: args.base || '', head: args.head || '', read: gitRead });
   const delta = {
     predates: deltaPredates({ base: args.base || '', read: gitRead }),
     check: (from, to) => deltaRangeErrors({ from, to, head: args.head || '', tip: args['base-tip'] || '', git: gitGraph() }),
   };
-  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux, delta });
+  const securityModel = { predates: securityModelPredates({ base: args.base || '', read: gitRead }) };
+  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux, delta, securityModel, agentAwareness });
 
-  for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
-  for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${w}`);
+  // Every printed line passes one of these two, so text from the pull request cannot start a
+  // workflow command of its own.
+  for (const n of verdict.notes ?? []) logLines(n);
+  for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${commandText(w)}`);
   if (verdict.ok) {
     console.log(`${MARK}: ok`);
     return;
   }
-  for (const e of verdict.errors) console.log(`::error::${MARK}: ${e}`);
+  for (const e of verdict.errors) console.log(`::error::${MARK}: ${commandText(e)}`);
   process.exitCode = 1;
 }
 

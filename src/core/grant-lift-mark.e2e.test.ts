@@ -11,6 +11,7 @@
  * What is pinned: the mark is present exactly when the write gate let a write through on a
  * grant, it names that acceptance, and it says nothing about the outcome.
  */
+import { ownerNamed } from '../../tests/helpers/owner-named.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -318,6 +319,8 @@ describe('the mark at the write gate itself, with a contract handed to the agent
       ...(extra.promptUser ? { promptUser: extra.promptUser } : {}),
       name: 'step', model: 'claude-sonnet-4-6', tools: [httpRequestTool], autonomy: 'autonomous', capabilityContract: contract,
       toolContext,
+      // The owner named these hosts: this test is about the grant, not about where a target comes from.
+      ownerKnown: ownerNamed(HOST, 'example.com', 'api.dataforseo.com'),
       onStream: async (e) => { if (e.type === 'tool_result') events.push(e); },
     });
     await agent.send('post it');

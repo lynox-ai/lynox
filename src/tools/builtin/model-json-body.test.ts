@@ -104,7 +104,7 @@ describe('repairStrayCloseTag — the shape the model actually produced', () => 
     // tag and stops leaves a body that still fails — and declines to repair exactly the inputs
     // it was built for. Found by a delta round comparing against the regex this replaced: 366
     // bodies in that class, and zero in the other direction.
-    for (const ws of [' ', ' ', '﻿', '　', ' \t\n']) {
+    for (const ws of [' ', '\u2028', '\uFEFF', '　', ' \t\n']) {
       const got = repairStrayCloseTag(`{"a":1}${ws}</body>`, JSON_CT);
       expect(got, JSON.stringify(ws)).not.toBeNull();
       expect(JSON.parse(got?.body ?? 'null'), JSON.stringify(ws)).toEqual({ a: 1 });

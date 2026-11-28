@@ -11,7 +11,8 @@ import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import { reportedErrorStep, reportedFailureForCaller } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
-import { getErrorMessage } from '../../core/utils.js';
+import { formatUsdAmount, getErrorMessage } from '../../core/utils.js';
+import { getSessionCostCeiling } from '../../core/session-budget.js';
 import { asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { withWorkflowDefaults, workflowAwaitsStampResult, workflowStampState } from '../../core/workflow-stamp.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
@@ -25,6 +26,8 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { stepIdCollision, templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
+import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepRunNames } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
@@ -320,19 +323,26 @@ function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null,
 }
 
 /** @internal exported for tests: the run's result as the calling model reads it. */
-export function formatResult(state: RunState, name: string, resultLimit?: number): string {
+export function formatResult(state: RunState, name: string, resultLimit?: number, stepOrder?: readonly string[]): string {
   // The name and the step ids are names, which take none of the places real text puts a character
   // that renders as nothing; each goes in as a placeholder and is escaped on its own below.
   const nonce = randomUUID();
   const names: string[] = [];
   const asName = (value: string): string => `__lynox_name_${names.push(value) - 1}_${nonce}__`;
+  // A step id outside the shape (`step-id.ts`) goes in by its position in `stepOrder`, never as its
+  // text. A stored workflow's run already carries its steps under their run names (`runStepIds`).
+  const asStepId = (id: string): string => {
+    if (isStepIdShape(id)) return asName(id);
+    const at = stepOrder?.indexOf(id) ?? -1;
+    return shownStepId(id, at === -1 ? undefined : at);
+  };
   const steps: PipelineStepResult[] = [];
   let totalDuration = 0;
   let totalCost = 0;
 
   for (const [, output] of state.outputs) {
     steps.push({
-      stepId: asName(output.stepId),
+      stepId: asStepId(output.stepId),
       result: truncateResult(output.result, resultLimit),
       durationMs: output.durationMs,
       tokensIn: output.tokensIn,
@@ -344,7 +354,7 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
       // fixed sentence instead, as one level up in a nested run (`spawnPipeline`), and where the
       // reason is: diagnose_workflow_run shows it, quoted (U-192).
       // The step id inside it is a name too: escaped like the `stepId` field (`asName`).
-      error: output.reportedFailure === true ? reportedFailureForCaller(asName(output.stepId)) : output.error,
+      error: output.reportedFailure === true ? reportedFailureForCaller(asStepId(output.stepId)) : output.error,
     });
     totalDuration += output.durationMs;
     totalCost += output.costUsd;
@@ -359,7 +369,7 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
   // run's error (the reason) stays out (U-192 1b). A step already named above is not named twice.
   const runLevelNotice = reportedBy !== undefined
     && ![...state.outputs.values()].some(o => o.stepId === reportedBy && o.reportedFailure === true)
-    ? reportedFailureForCaller(asName(reportedBy)) : undefined;
+    ? reportedFailureForCaller(asStepId(reportedBy)) : undefined;
   const result: PipelineResult = {
     pipelineId: state.runId,
     name: asName(name),
@@ -396,6 +406,14 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
 // retired here.
 
 // ===== Private execution helpers =====
+
+/**
+ * What `run_workflow` answers in a run admitted with a spending bound of its own. `capUsd` is
+ * the amount a saved workflow started from the Workflows page is admitted on.
+ */
+export function workflowUnderRunCeiling(capUsd: number): string {
+  return `Not run: in this conversation lynox may spend only what is left of the AI budget, and a workflow's steps cannot be kept within that. Tell the user the workflow was not run for this reason. If it is a saved workflow, they can start it from the Workflows page once at least ${formatUsdAmount(capUsd)} of AI budget is left; otherwise they can run it here in the next billing period.`;
+}
 
 /**
  * Debit the aggregated cost of an IN-SESSION `run_workflow` execution.
@@ -463,6 +481,17 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     return `Error: Workflow exceeds maximum of ${maxSteps} steps (got ${steps.length}).`;
   }
 
+  // A step id has a limited shape (`step-id.ts`): a run's result and its diagnosis show it to the
+  // model. Checked before the duplicate check, so no refusal quotes an id outside it back.
+  const shapeIssue = stepIdIssue(steps);
+  if (shapeIssue) return `Error: ${shapeIssue}`;
+
+  // A step id the run's context already uses (`template-refs.ts`): an inline context key, or `params`
+  // beside it. Refused here, by the place in the list the model wrote, before anything is estimated.
+  const inlineContext = input.context ?? {};
+  const collision = stepIdCollision(steps, { ...inlineContext, params: inlineContext }, 'steps', { saved: false });
+  if (collision) return `Error: ${collision}`;
+
   // Validate unique IDs
   const ids = new Set<string>();
   for (const step of steps) {
@@ -505,6 +534,9 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     // step's durable-write routing. See RunTaint in runtime-adapter.ts.
     const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
+      // The chat's run ending (its stop, its time limit): without it a stop between steps, or under `on_failure:
+      // continue`, lets the next step start (the scope below only ends the agents already in it).
+      endSignal: deps.parentAgent?.runSignal,
       // Steps this agent wrote for the run, which no saved workflow shaped.
       source: { kind: 'adhoc' },
       autonomy: deps.autonomy,
@@ -632,6 +664,9 @@ export interface RunSavedWorkflowResult {
    *  succeeded; present for every step that recorded an error (incl. on_failure
    *  = 'continue'/'notify' runs that finished 'completed' with errored steps). */
   stepErrors?: Array<{ stepId: string; error?: string | undefined; costUsd: number; reported?: true | undefined }> | undefined;
+  /** The sends its steps refused because a target was not one the owner named, for the run's
+   *  result: a run with no calling conversation has nobody else to tell. */
+  originRefusals?: import('../../core/origin-notices.js').OriginRefusal[] | undefined;
   /** The step whose reported failure (`fail_step`) is `error`: `error` is then the model's text,
    *  and a sink that may not carry it (the escalation thread) names the step instead. A
    *  `stepErrors` entry with `reported` is the same for that entry. */
@@ -646,6 +681,12 @@ export interface RunSavedWorkflowResult {
   /** For a refusal whose `error` names stored text: the same refusal in words lynox wrote alone,
    *  for a sink that may not carry stored text (`FixedTextError`). */
   fixedError?: string | undefined;
+  /** For a refusal because a step refers to the output of a step its run cannot read
+   *  (`templateRefIssue`): that step's position, 1-based, which the owner is told in fixed words. */
+  unresolvedRefStep?: number | undefined;
+  /** For a refusal because a step's id is one a run already uses (`stepIdCollision`): that step's
+   *  position, 1-based, which the owner is told in fixed words. */
+  reservedIdStep?: number | undefined;
 }
 
 /**
@@ -881,7 +922,9 @@ export async function runSavedWorkflow(
     };
   }
 
-  // Asked of the workflow as read here, so no edit can fall between the check and the run.
+  // Asked of the workflow as read here, so no edit can fall between the check and the run. As stored:
+  // the owner's stamp binds the stored definition, so the check must see that, not a renamed copy.
+  // A check that needs the steps as the run executes them builds that copy itself (`runStepIds`).
   const refused = runtime?.checkWorkflow?.(planned) ?? null;
   if (refused !== null) return { ok: false, error: refused };
 
@@ -934,7 +977,9 @@ export async function runSavedWorkflow(
   // Each step's task without the characters that render as nothing: the save refuses them now,
   // but a workflow saved before that still carries them, and a hidden clause would run as part
   // of the step's instruction. Stripped, not refused, so it keeps running on what can be seen.
-  const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s, task: stripHidden(s.task) }));
+  // A step id stored before ids had a shape runs as `step-<n>`, so nothing the run writes quotes it.
+  // The names come from the stored plan as stored, as every other reader computes them.
+  const steps: InlinePipelineStep[] = runStepIds(planned.steps.map(s => ({ ...s, task: stripHidden(s.task) })), stepRunNames(planned.steps));
   if (steps.length === 0) {
     return { ok: false, error: 'Workflow has no steps to execute.' };
   }
@@ -944,6 +989,22 @@ export async function runSavedWorkflow(
   }
 
   const writeNotes = new Set<string>();
+  // The sends its steps refuse for a target the owner did not name: kept for the run's result,
+  // also when the run then throws.
+  const originRefusals: import('../../core/origin-notices.js').OriginRefusal[] = [];
+
+  // A step id the run's context already uses, or a reference no run resolves (`template-refs.ts`),
+  // here before the runner refuses it, so the caller can tell the owner which step and why in fixed
+  // words (`reservedIdStep`, `unresolvedRefStep`) and does not retry a run that cannot start.
+  const runContext = { params: bound.params };
+  const collision = stepIdCollision(steps, runContext, 'steps');
+  if (collision !== null) {
+    return { ok: false, error: `Workflow execution failed: Invalid manifest: ${collision}`, reservedIdStep: templateRefStep(collision) };
+  }
+  const refIssue = templateRefIssue(steps, runContext);
+  if (refIssue !== null) {
+    return { ok: false, error: `Workflow execution failed: Invalid manifest: ${refIssue}`, unresolvedRefStep: templateRefStep(refIssue) };
+  }
 
   try {
     // Honour the workflow's stored failure strategy instead of hardcoding 'stop'
@@ -966,6 +1027,8 @@ export async function runSavedWorkflow(
     // contract rides along only when `decideGrant` passed it, i.e. it came from the
     // grant dialog of the scheduling route while that feature is on, and its stamp
     // still matches.
+    const headlessTaint = headlessRunTaint(runtime?.seed, runParams, runtime?.startedVia);
+    headlessTaint.onOriginRefused = (r) => { originRefusals.push(r); };
     const state = await runManifest(manifest, config, buildRunCtx({
       // A run of a saved workflow depends on the mandates that shaped it (`run-source.ts`).
       source: savedWorkflowSource(planned.id, runHistory ? (id) => runHistory.getWorkflowAuthorship(id) : undefined, runtime?.toolContext?.mandateEnds),
@@ -990,7 +1053,7 @@ export async function runSavedWorkflow(
       // Headless: no caller to seed from, except what the scheduling session had taken in
       // (`runtime.seed`). The accumulator still carries taint ACROSS steps — a saved workflow
       // whose step 1 reads external content must not land step 2's durable write as active.
-      runTaint: headlessRunTaint(runtime?.seed, runParams, runtime?.startedVia),
+      runTaint: headlessTaint,
       // The claim seam: both are undefined for every caller that holds no claim.
       runId: runtime?.runId,
       hooks: runtime?.hooks,
@@ -1022,10 +1085,14 @@ export async function runSavedWorkflow(
       // The decision's note, or the runner's when it had to drop the contract (an unrecorded run).
       ...(grant.note !== null ? { grantNote: grant.note } : state.grantNote !== undefined ? { grantNote: state.grantNote } : {}),
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
+      ...(originRefusals.length > 0 ? { originRefusals } : {}),
     };
   } catch (err: unknown) {
     // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
-    return { ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}` };
+    return {
+      ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}`,
+      ...(originRefusals.length > 0 ? { originRefusals } : {}),
+    };
   }
 }
 
@@ -1307,6 +1374,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       if (prevGrants !== undefined) for (const id of prevGrants.members()) retryGrants?.add(id);
       else retryGrants?.add(UNKNOWN_GRANT);
       const state = await asPlanOfAuthor(retryTrail, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+        // The chat's run ending (its stop, its time limit): without it a stop between steps, or under `on_failure:
+        // continue`, lets the next step start (the scope below only ends the agents already in it).
+        endSignal: deps.parentAgent?.runSignal,
         source,
         autonomy: deps.autonomy,
         parentTools: deps.tools,
@@ -1343,7 +1413,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // the next retry from a third chat skip the check while this chat is contained.
       recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs), ranDigest: prev.ranDigest });
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents, prev.state.outputs);
-      const text = formatResult(state, planned.name, resultLimit);
+      const text = formatResult(state, planned.name, resultLimit, prev.manifest.agents.map(a => a.id));
       // Set last: a throw above returns an error, and the end row must not say success then.
       retryOutcome = state.status === 'completed' && !memberRefused ? 'success' : 'failed';
       return text;
@@ -1391,20 +1461,25 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     // One run's changes: drop a step or change its task. Ids and the step list change only in the
     // stored workflow (`update_workflow_steps`), where they are saved and checked.
     if (input.modifications.some(m => m.action !== 'remove' && m.action !== 'update_task')) {
-      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.';
+      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, or change what a step reads (set_input_from), edit the workflow with update_workflow_steps.';
     }
     const error = applyModifications(steps, input.modifications);
     if (error) return error;
   }
   // Each step's task without the characters that render as nothing, after the modifications too.
   for (const s of steps) s.task = stripHidden(s.task);
+  // A step id stored before ids had a shape runs as `step-<n>`, after the modifications (which
+  // address steps by their stored id), so nothing the run writes quotes it. The names come from the
+  // stored plan, so a removed step does not shift them; the ids a stored id is read against come
+  // from the stored plan too.
+  const runSteps = runStepIds(steps, stepRunNames(planned.steps), planned.steps.map(s => s.id));
 
-  if (steps.length === 0) {
+  if (runSteps.length === 0) {
     return 'Error: All steps were removed. Nothing to execute.';
   }
 
   const maxSteps = maxStepsFor(deps.config);
-  if (steps.length > maxSteps) {
+  if (runSteps.length > maxSteps) {
     return `Error: Workflow exceeds maximum of ${maxSteps} steps.`;
   }
 
@@ -1414,7 +1489,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   try {
     const manifest = buildManifest(
       planned.name,
-      steps,
+      runSteps,
       input.on_failure ?? 'stop',
       { params: bound.params },
     );
@@ -1437,6 +1512,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const runTaint = newRunTaint(deps.parentAgent);
     const state = await asPlanOfAuthor(trail, () => runManifest(manifest, deps.config, buildRunCtx({
+      // The chat's run ending (its stop, its time limit): without it a stop between steps, or under `on_failure:
+      // continue`, lets the next step start (the scope below only ends the agents already in it).
+      endSignal: deps.parentAgent?.runSignal,
       source,
       autonomy: deps.autonomy,
       parentTools: deps.tools,
@@ -1477,7 +1555,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }
 
     debitInSessionWorkflowCost(deps, state, manifest.agents, null);
-    const text = formatResult(state, planned.name, resultLimit);
+    const text = formatResult(state, planned.name, resultLimit, runSteps.map(s => s.id));
     // Set last: a throw above returns an error, and the end row must not say success then.
     outcome = state.status === 'completed' && !memberRefused ? 'success' : 'failed';
     return text;
@@ -1581,6 +1659,11 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     },
   },
   handler: async (input: RunPipelineInput, agent): Promise<string> => {
+    // A workflow's steps run on agents of their own, whose spend this run's cost guard never
+    // sees. A run admitted with a spending bound of its own could pass it through them, so
+    // such a run does not start one: not a first run, a retry or a continuation.
+    // An agent that cannot say (no such method) is treated as bounded: refused, never waved through.
+    if (typeof agent.hasRunCostCeiling !== 'function' || agent.hasRunCostCeiling()) return workflowUnderRunCeiling(getSessionCostCeiling());
     const rawPipelineConfig = agent.toolContext.userConfig;
     // `getAvailableTools()`, not `toolContext.tools`: that context carries the ENGINE's
     // registry, which for a child agent is wider than the child's own grant — a workflow step

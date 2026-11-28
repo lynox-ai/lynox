@@ -120,6 +120,12 @@ export function htmlFieldsOfListForm(form: BulkListSourceForm | null): readonly 
   return form === null ? [] : HTML_FIELDS[form] ?? [];
 }
 
+/** {@link htmlFieldsOfListForm} for a form as the planner or a stored source names it: none for a
+ *  name that is no list form (`constructor` included — the map is a plain object). */
+export function htmlFieldsOfFormName(form: unknown): readonly string[] {
+  return typeof form === 'string' && Object.hasOwn(HTML_FIELDS, form) ? HTML_FIELDS[form as BulkListSourceForm] : [];
+}
+
 // --- The extraction.
 
 export type MarkupNamespace = 'html' | 'svg' | 'mathml' | 'other';
@@ -1170,6 +1176,11 @@ export interface FieldMarkupChange {
    *  element) counts as outside here. It does not judge a link's domain, which depends on what
    *  the product pointed to before: a link to a domain new to the product counts as within. */
   addsOutsideAllowlist: boolean;
+  /** Whether every added item is one lynox can tell is harmless to show again ({@link passiveItem}):
+   *  on an undo it picks the sentence that says so, else the one that names markup lynox cannot
+   *  confirm is harmless (U-092). Display only: the undo sends the same bytes
+   *  either way. Fail-closed: anything not on the passive list counts as active. */
+  addsOnlyPassive: boolean;
   /** Set where the value or its before-image lies beyond {@link withinReadingBounds}: nothing is
    *  listed, the page says the field's markup could not be listed, and `addsOutsideAllowlist` is
    *  set, so an undo still says it may write back a script. */
@@ -1185,6 +1196,41 @@ export function withinAllowlist(item: MarkupItem): boolean {
   return item.kind === 'element' && item.namespace === 'html' && ALLOWED_ELEMENTS.has(item.element) && item.text === null
     && !item.inTemplate
     && item.attributes.every(([name, value]) => item.element === 'a' && name === 'href' && linkTarget(value, ANY_STORE_HOST).ok);
+}
+
+/** Elements whose occurrence does nothing on the page but lay out or format text: the write
+ *  allowlist, tables, and text-level formatting. Not `img`: its `src` loads from a host the
+ *  owner may not control. */
+const PASSIVE_ELEMENTS: ReadonlySet<string> = new Set([
+  ...ALLOWED_ELEMENTS,
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption', 'colgroup', 'col',
+  'span', 'div', 'b', 'i', 'u', 's', 'sub', 'sup', 'small', 'blockquote', 'hr', 'h1', 'h5', 'h6', 'pre', 'code',
+]);
+/** Attributes that only size, align or label. Not `class` (themes hang behaviour on classes,
+ *  utility classes hide content), not `id`/`name` (they shadow what a theme's script looks up),
+ *  not `style` (`url()` loads), and no URL but an `a`'s checked `href`. */
+const PASSIVE_ATTRIBUTES: ReadonlySet<string> = new Set([
+  'width', 'height', 'align', 'valign', 'colspan', 'rowspan', 'border', 'cellpadding', 'cellspacing', 'title', 'alt', 'lang', 'dir',
+]);
+const PASSIVE_CELL_ATTRIBUTES: ReadonlySet<string> = new Set(['scope', 'headers', 'abbr']);
+
+function passiveAttribute(element: string, name: string, value: string): boolean {
+  if (PASSIVE_ATTRIBUTES.has(name)) return true;
+  if ((element === 'td' || element === 'th') && PASSIVE_CELL_ATTRIBUTES.has(name)) return true;
+  if (element === 'a' && name === 'rel') return true;
+  return element === 'a' && name === 'href' && linkTarget(value, ANY_STORE_HOST).ok;
+}
+
+/** Whether an item is harmless to show again: a comment node of the parser outside a
+ *  `template`, or an HTML element — by its namespace, so an `svg` `a` is not an HTML one —
+ *  outside a `template`, on the passive list, with no raw text and only passive attributes.
+ *  Every element of an added subtree is an item of its own ({@link markupOf}), so an `iframe`
+ *  inside a passive `div` makes the change active. */
+export function passiveItem(item: MarkupItem): boolean {
+  if (item.inTemplate) return false;
+  if (item.kind === 'comment') return true;
+  return item.namespace === 'html' && PASSIVE_ELEMENTS.has(item.element) && item.text === null
+    && item.attributes.every(([name, value]) => passiveAttribute(item.element, name, value));
 }
 
 /** Whether an occurrence is worth naming. Left out is only a bare allowlisted element — on
@@ -1204,12 +1250,12 @@ function toItem(o: Occurrence): MarkupItem {
  *  the bytes sent (sec-core M3: a rewrite to the allowlist must not delete an image unseen). */
 export function markupChangesOf(field: string, before: string | null, after: string): FieldMarkupChange {
   if (!withinReadingBounds(after) || (before !== null && !withinReadingBounds(before))) {
-    return { field, added: [], removed: [], addsOutsideAllowlist: true, unread: true };
+    return { field, added: [], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: false, unread: true };
   }
   const b = markupOf(parseHtmlFragment(before ?? '')).occurrences.filter(named);
   const a = markupOf(parseHtmlFragment(after)).occurrences.filter(named);
   const added = multisetMinus(a, b).map(toItem);
-  return { field, added, removed: multisetMinus(b, a).map(toItem), addsOutsideAllowlist: added.some((i) => !withinAllowlist(i)) };
+  return { field, added, removed: multisetMinus(b, a).map(toItem), addsOutsideAllowlist: added.some((i) => !withinAllowlist(i)), addsOnlyPassive: added.every(passiveItem) };
 }
 
 function multisetMinus(xs: Occurrence[], ys: Occurrence[]): Occurrence[] {

@@ -1,5 +1,6 @@
 import type { ManifestStep, AgentOutput } from '../types/orchestration.js';
 import { getByPath } from './conditions.js';
+import { replacePlaceholders, solePlaceholder } from './placeholders.js';
 import { channels } from '../core/observability.js';
 import { detectInjectionAttempt, wrapUntrustedData } from '../core/data-boundary.js';
 
@@ -15,7 +16,9 @@ export function buildStepContext(
   outputs: Map<string, AgentOutput>,
   contextLimit = DEFAULT_CONTEXT_LIMIT,
 ): Record<string, unknown> {
-  const ctx: Record<string, unknown> = { ...globalContext };
+  // Without a prototype: a step id is a key here, and on a plain object `__proto__` would set the
+  // prototype instead of holding the step's output.
+  const ctx: Record<string, unknown> = Object.assign(Object.create(null) as Record<string, unknown>, globalContext);
   for (const fromId of step.input_from ?? []) {
     const out = outputs.get(fromId);
     if (out === undefined) {
@@ -57,11 +60,11 @@ export function resolveTaskTemplate(
    *  knows. */
   fenceStepOutputs = false,
 ): string {
-  return task.replace(/\{\{([^}]+)\}\}/g, (_match: string, rawPath: string) => {
+  return replacePlaceholders(task, (_match: string, rawPath: string) => {
     const path = rawPath.trim();
     const value = getByPath(context, path);
-    // A function is not a value: `getByPath` walks the prototype, so `{{params.toString}}`
-    // finds one, and `JSON.stringify` of it is `undefined`, which the boundary cannot wrap.
+    // A function is not a value, and `JSON.stringify` of one is `undefined`, which the boundary
+    // cannot wrap. `getByPath` reads own properties only, so this holds only a value that is one.
     if (value === undefined || typeof value === 'function') return `{{${path}}}`;
     const str = typeof value === 'string' ? value : JSON.stringify(value);
     // Workflow parameter values are caller/external-supplied (untrusted) → ALWAYS
@@ -76,8 +79,6 @@ export function resolveTaskTemplate(
       : str;
   });
 }
-
-const SOLE_PLACEHOLDER = /^\{\{\s*([^}]+)\s*\}\}$/;
 
 /**
  * Substitute `{{params.<name>}}` (and any `{{path}}`) placeholders inside a
@@ -120,12 +121,12 @@ function walk(value: unknown, context: Record<string, unknown>): unknown {
 }
 
 function substituteString(s: string, context: Record<string, unknown>): unknown {
-  const sole = SOLE_PLACEHOLDER.exec(s);
-  if (sole) {
-    const resolved = getByPath(context, sole[1]!.trim());
+  const sole = solePlaceholder(s);
+  if (sole !== null) {
+    const resolved = getByPath(context, sole.trim());
     return resolved === undefined ? s : resolved;
   }
-  return s.replace(/\{\{([^}]+)\}\}/g, (_match: string, rawPath: string) => {
+  return replacePlaceholders(s, (_match: string, rawPath: string) => {
     const path = rawPath.trim();
     const resolved = getByPath(context, path);
     if (resolved === undefined) return `{{${path}}}`;

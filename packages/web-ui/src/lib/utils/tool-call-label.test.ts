@@ -155,7 +155,63 @@ describe('toolCallLabel', () => {
   });
 
   describe('subjects', () => {
+    /** No subject is longer than 50 characters of at most 24 code units each, plus the ellipsis. */
+    const SUBJECT_UNITS_BOUND = 50 * 24 + 1;
     const subject = (tool: string, input: unknown): string | undefined => toolCallLabel(tool, input, tk)?.subject;
+
+    it('looks at only the head of a very long text, so megabytes do not stall the line', () => {
+      const huge = 'h'.repeat(2_000_000);
+      const started = performance.now();
+      expect(subject('bash', { command: huge })).toBe(`${'h'.repeat(49)}…`);
+      expect(subject('memory_store', { content: huge })).toBe(`${'h'.repeat(49)}…`);
+      // Splitting two megabytes into characters takes seconds; the head takes nothing.
+      expect(performance.now() - started).toBeLessThan(250);
+      // Short characters clipped by code units still end in the ellipsis, and a piece of an emoji at the clip goes.
+      expect(subject('remember', { text: `${'é'.repeat(30)}${'😀'.repeat(200)}` })).toBe(`${'é'.repeat(30)}${'😀'.repeat(19)}…`);
+      expect(subject('remember', { text: `${'😀'.repeat(150)}` })).toBe(`${'😀'.repeat(49)}…`);
+    });
+
+    it('keeps a character to its base when combining marks pile up on it, so it cannot draw over other rows', () => {
+      const zalgo = `a${'\u0301'.repeat(100_000)}`;
+      expect(subject('bash', { command: zalgo })).toBe('…');
+      expect(subject('bash', { command: `ok ${`a${'\u0301'.repeat(40)}`} done` })).toBe('ok a done');
+      // A few marks are a real character and stay.
+      expect(subject('bash', { command: `e${'\u0301\u0323'} x` })).toBe(`e${'\u0301\u0323'} x`);
+      // The longest emoji sequences stay whole.
+      expect(subject('remember', { text: '👩🏽‍❤️‍💋‍👨🏻 ok' })).toBe('👩🏽‍❤️‍💋‍👨🏻 ok');
+      for (const out of [subject('bash', { command: zalgo.repeat(3) }), subject('spawn_agent', { task: zalgo })]) {
+        expect(out?.length ?? 0).toBeLessThanOrEqual(SUBJECT_UNITS_BOUND);
+      }
+    });
+
+    it('shows a file name whole, and of a name longer than a line can show its end with the extension', () => {
+      const long = `${'n'.repeat(120)}.xlsx`;
+      for (const [tool, input] of [
+        ['edit_file', { path: `/w/${long}` }],
+        ['read_file', { path: `/w/${long}` }],
+        ['write_file', { path: `/w/${long}` }],
+        ['media_process', { input: `/w/${long}` }],
+        ['google_drive', { action: 'upload', file_name: long }],
+        ['bulk_plan', { target_system: 'workspace', source_file: `/w/${long}` }],
+      ] as const) {
+        expect(subject(tool, input)).toBe(long);
+      }
+      const huge = `${'n'.repeat(2_000_000)}.csv`;
+      for (const [tool, input] of [
+        ['edit_file', { path: `/w/${huge}` }],
+        ['media_process', { input: huge }],
+        ['google_drive', { action: 'upload', file_name: huge }],
+        ['bulk_plan', { target_system: 'workspace', source_file: huge }],
+      ] as const) {
+        const out = subject(tool, input) ?? '';
+        expect(out.startsWith('…')).toBe(true);
+        expect(out.endsWith('.csv')).toBe(true);
+        expect(out.length).toBeLessThanOrEqual(200);
+      }
+      // A piece of an emoji at the clip goes; a pile of marks keeps its base.
+      expect(subject('edit_file', { path: `/w/${'😀'.repeat(150)}.md` })).toBe(`…${'😀'.repeat(98)}.md`);
+      expect(subject('edit_file', { path: `/w/a${'\u0301'.repeat(60)}.md` })).toBe('a.md');
+    });
 
     it('keeps 50 chars whole and cuts from 51 on, ending in an ellipsis', () => {
       expect(subject('remember', { text: 'r'.repeat(50) })).toBe('r'.repeat(50));
@@ -216,6 +272,9 @@ describe('toolCallLabel', () => {
       expect(subject('inbox_read', { action: 'list', bucket: 'draft_ready' })).toBe('inbox.zone_drafted');
       expect(subject('inbox_read', { action: 'list', bucket: 'auto_handled' })).toBe('inbox.zone_handled');
       expect(subject('inbox_read', { action: 'list', bucket: 'other' })).toBe('');
+      for (const bucket of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+        expect(subject('inbox_read', { action: 'list', bucket })).toBe('');
+      }
       expect(subject('inbox_read', { action: 'item', bucket: 'requires_user', id: 'i1' })).toBe('');
       expect(subject('inbox_read', { action: 'counts' })).toBe('');
     });

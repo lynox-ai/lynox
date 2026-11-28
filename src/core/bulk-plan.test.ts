@@ -65,8 +65,8 @@ describe('source parsing', () => {
   });
 
   it('strips a byte-order mark from JSON as from CSV', () => {
-    expect(parseSourceText('﻿[{"target":"a","after":"b"}]', 'json')).toEqual([{ target: 'a', after: 'b' }]);
-    expect(parseSourceText('﻿target,after\na,b', 'csv')).toEqual([{ target: 'a', after: 'b' }]);
+    expect(parseSourceText('\uFEFF[{"target":"a","after":"b"}]', 'json')).toEqual([{ target: 'a', after: 'b' }]);
+    expect(parseSourceText('\uFEFFtarget,after\na,b', 'csv')).toEqual([{ target: 'a', after: 'b' }]);
   });
 
   it('refuses a CSV header that names a column twice', () => {

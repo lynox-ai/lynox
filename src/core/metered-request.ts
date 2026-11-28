@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { currentRunGroup } from './run-group.js';
 import { checkPersistentBudget, recordSessionCost } from './session-budget.js';
 import type { Engine, RunContext } from './engine.js';
+import { fireAdmissionHooks, RunAdmissionRefusedError, SINGLE_CALL_WORST_CASE_CENTS } from './run-admission.js';
 import type { ModelTier, PersistentBudgetCheck, SessionCounters } from '../types/index.js';
 
 /**
@@ -58,6 +59,12 @@ export interface MeteredGateResult {
    * over its spend, so the caller does not name one.
    */
   capReached: 'daily' | 'monthly' | 'unknown' | null;
+  /**
+   * True when a hook refused because the balance cannot cover the call while runs are
+   * admitted only within it ({@link RunAdmissionRefusedError}): a refusal that can lift as
+   * soon as a running run gives its reservation back.
+   */
+  refusedWithinBalance: boolean;
 }
 
 function reachedCap(check: PersistentBudgetCheck): 'daily' | 'monthly' | 'unknown' {
@@ -89,23 +96,36 @@ function buildRunContext(host: HookHost, runId: string, modelTier: ModelTier): R
  *
  * The caller must not make the call when `blockedReason` is non-null. Returns
  * the run id to thread into the matching `reportMeteredCost()` on the success path.
+ *
+ * A single call cannot be stopped part-way, so it is admitted on its worst case: the hooks
+ * see it as `maxCostCents` (the caller's, or {@link SINGLE_CALL_WORST_CASE_CENTS}), and a hook
+ * that admits only within the balance refuses the call unless that much is free. What a hook
+ * sets aside for the check is given back at once; nothing is held while the call runs.
  */
-export async function fireBeforeRunGate(host: HookHost | null, modelTier: ModelTier): Promise<MeteredGateResult> {
+export async function fireBeforeRunGate(
+  host: HookHost | null,
+  modelTier: ModelTier,
+  opts: { maxCostCents?: number | undefined } = {},
+): Promise<MeteredGateResult> {
   const runId = randomUUID();
   const cap = checkPersistentBudget();
-  if (!cap.allowed) return { runId, blockedReason: cap.reason ?? 'Spending cap reached.', capReached: reachedCap(cap) };
-  if (host === null) return { runId, blockedReason: null, capReached: null };
-  const runContext = buildRunContext(host, runId, modelTier);
-  for (const hook of host.getHooks()) {
-    if (hook.onBeforeRun) {
-      try {
-        await hook.onBeforeRun(runId, runContext);
-      } catch (err: unknown) {
-        return { runId, blockedReason: err instanceof Error ? err.message : String(err), capReached: null };
-      }
-    }
+  if (!cap.allowed) return { runId, blockedReason: cap.reason ?? 'Spending cap reached.', capReached: reachedCap(cap), refusedWithinBalance: false };
+  if (host === null) return { runId, blockedReason: null, capReached: null, refusedWithinBalance: false };
+  const runContext: RunContext = {
+    ...buildRunContext(host, runId, modelTier),
+    maxCostCents: opts.maxCostCents ?? SINGLE_CALL_WORST_CASE_CENTS,
+  };
+  try {
+    (await fireAdmissionHooks(host.getHooks(), runId, runContext)).release();
+  } catch (err: unknown) {
+    return {
+      runId,
+      blockedReason: err instanceof Error ? err.message : String(err),
+      capReached: null,
+      refusedWithinBalance: err instanceof RunAdmissionRefusedError,
+    };
   }
-  return { runId, blockedReason: null, capReached: null };
+  return { runId, blockedReason: null, capReached: null, refusedWithinBalance: false };
 }
 
 /**

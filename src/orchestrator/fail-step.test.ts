@@ -155,14 +155,14 @@ describe('fail_step on the inline runtime, through the runner', () => {
   });
 
   it('the reason is sanitised and capped before it is stored', async () => {
-    const raw = `line one\nline two\u0007‮ hidden ${'x'.repeat(2_000)}`;
+    const raw = `line one\nline two\u0007\u202E hidden ${'x'.repeat(2_000)}`;
     mockProcess.mockResolvedValueOnce(callsFailStep(raw));
     const { rh, updates } = fakeHistory();
     const state = await runManifest(manifestOf(step), config, { source: { kind: 'adhoc' as const }, parentTools: [tool('http_request')], runHistory: rh });
     const stored = updates.find(u => u.status === 'failed')?.errorText ?? '';
     expect(stored).toBe(sanitizeFailStepReason(raw));
     expect(state.error).toBe(stored);
-    expect(stored).not.toMatch(/[\u0000-\u001f\u007f‮]/);
+    expect(stored).not.toMatch(/[\u0000-\u001f\u007f\u202E]/);
     expect(stored.startsWith('line one line two hidden x')).toBe(true);
     expect([...stored].length).toBe(FAIL_STEP_REASON_MAX + 1); // cut + ellipsis
   });
@@ -171,7 +171,7 @@ describe('fail_step on the inline runtime, through the runner', () => {
 describe('sanitizeFailStepReason', () => {
   it('collapses control characters, drops invisible ones, keeps short text, and fills an empty reason', () => {
     expect(sanitizeFailStepReason('  a\r\n\tb  ')).toBe('a b');
-    expect(sanitizeFailStepReason('a​b')).toBe('ab');
+    expect(sanitizeFailStepReason('a\u200Bb')).toBe('ab');
     // A control character separates words; it is not dropped so that two words run together.
     expect(sanitizeFailStepReason('host\u0007unreachable\u0085now')).toBe('host unreachable now');
     expect(sanitizeFailStepReason('short reason')).toBe('short reason');
@@ -525,10 +525,10 @@ describe('fix round 1 (refute-code-r1)', { timeout: 60_000 }, () => {
     expect(parsed['endedBecause']).toBeUndefined();
   });
 
-  it('under stop, the run-level sentence escapes a hidden character in the step id, as the step-level one does', () => {
+  it('under stop, the run-level sentence names a step id outside the shape by the note alone where no order is known', () => {
     const stepId = 'ab\u200Ccd';
     const json = formatResult(stopState(STOP_REASON, { stepId, reason: STOP_REASON }), 'm');
-    expect(json).toContain('"reportedFailure": "Step \\"ab\\u200Ccd\\" reported that it could not complete its task.');
+    expect(json).toContain('"reportedFailure": "Step \\"(lynox does not show its id)\\" reported that it could not complete its task.');
     expect(json).not.toContain('\u200C');
     expect(json).not.toContain('__lynox_name_');
   });
@@ -556,20 +556,20 @@ describe('fix round 1 (refute-code-r1)', { timeout: 60_000 }, () => {
     expect(occurrences(both, 'reported that it could not complete its task')).toBe(1);
   });
 
-  it('the notice escapes a hidden character an old step id holds, as the stepId field does', () => {
-    const stepId = 'ab‌cd';
+  it('the notice names an old step id outside the shape by its position, as the stepId field does', () => {
+    const stepId = 'ab\u200Ccd';
     const out = {
       stepId, result: '', startedAt: '', completedAt: '', durationMs: 0, tokensIn: 0, tokensOut: 0, costUsd: 0,
       skipped: false, error: 'reason', reportedFailure: true as const,
     };
     const state = { runId: 'r', manifestName: 'm', status: 'completed' as const, startedAt: '', globalContext: {}, outputs: new Map<string, AgentOutput>([[stepId, out]]) };
-    const json = formatResult(state, 'm');
-    expect(json).toContain('"stepId": "ab\\u200Ccd"');
-    expect(json).toContain('"error": "Step \\"ab\\u200Ccd\\" reported that it could not complete its task. Its reason is not shown here; diagnose_workflow_run with this run\'s id shows it, quoted."');
-    expect(json).not.toContain('‌');
-    // The same JSON to whoever parses it: the notice names the step as stored.
+    // A hidden character puts the id outside the shape: its position in the workflow stands in.
+    const json = formatResult(state, 'm', undefined, ['first', stepId]);
+    expect(json).toContain('"stepId": "#2 (lynox does not show its id)"');
+    expect(json).not.toContain('\u200C');
+    expect(json).not.toContain('abcd');
     const steps = (JSON.parse(json) as { steps: Array<{ stepId: string; error?: string }> }).steps;
-    expect(steps[0]!.error).toBe(`Step "${stepId}" reported that it could not complete its task. Its reason is not shown here; diagnose_workflow_run with this run's id shows it, quoted.`);
+    expect(steps[0]!.error).toBe('Step "#2 (lynox does not show its id)" reported that it could not complete its task. Its reason is not shown here; diagnose_workflow_run with this run\'s id shows it, quoted.');
     expect(json).not.toContain('__lynox_name_');
   });
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  approvalCard, approvalChatThread, approvalOutcome, approvalScopeOf, listScopeOf, mandateNamer, plainAddresses, replyRecipientDiffers, replyToElsewhere, setupLines, UNNAMED_MANDATE,
+  approvalCard, approvalChatThread, approvalOutcome, approvalScopeOf, listScopeOf, mandateNamer, OTHER_MANDATE, plainAddresses, SOME_MANDATE, replyRecipientDiffers, replyToElsewhere, setupLines, UNNAMED_MANDATE,
   type ApprovalCardSources, type DisplayNameOf, type MandateNamer, type SetupMarks,
 } from './approval-view.js';
 import type { ApprovalEntry, MailReplyPayload, MailSendPayload, StoredAddress } from './approval-store.js';
@@ -44,7 +44,7 @@ const displayNameOf: DisplayNameOf = (id) => NAMES.get(id) ?? null;
 /** The owner's namer: every grant by its trail name. */
 const nameOf: MandateNamer = mandateNamer({ viewer: 'owner' }, displayNameOf);
 const owner: ApprovalCardSources = { scope: { viewer: 'owner' }, displayNameOf, now: T0 + 90_000 };
-const asMandate: ApprovalCardSources = { scope: { viewer: 'mandate', mandateId: 'grant-a' }, displayNameOf, now: T0 + 90_000 };
+const asMandate: ApprovalCardSources = { scope: { viewer: 'mandate', mandateId: 'grant-a', tag: 'mandate:anna@example.com' }, displayNameOf, now: T0 + 90_000 };
 
 const addresses = (n: number, f = (i: number): string => `r${String(i)}@example.com`): StoredAddress[] =>
   Array.from({ length: n }, (_, i) => ({ address: f(i) }));
@@ -249,7 +249,7 @@ describe('the card\'s fields', () => {
     const card = approvalCard(entry({ status: 'failed', resultJson: '{"reason":"rate_limit","message":"secret-ish"}' }), owner);
     expect(Object.keys(card).sort()).toEqual([
       'afterUntrusted', 'afterUntrustedBy', 'ageMs', 'chatThreadId', 'checksum', 'createdAt', 'decidedAt', 'executable', 'executedAt', 'expiresAt', 'held',
-      'id', 'kind', 'mail', 'massSend', 'origin', 'outcome', 'recipientDiffers', 'replyToElsewhere', 'setup', 'status', 'tombstoned',
+      'id', 'kind', 'mail', 'massSend', 'origin', 'outcome', 'recipientDiffers', 'replyToElsewhere', 'setup', 'status', 'targetOrigin', 'tombstoned',
     ]);
     expect(JSON.stringify(card)).not.toContain('secret-ish');
     expect(JSON.stringify(card)).not.toContain('keyed');
@@ -265,6 +265,20 @@ describe('the card\'s fields', () => {
     const card = approvalCard(entry({ origin: { source: 'task', triggerId: 'trg-u', runId: 'run-u', rootRunId: 'run-u', ...flags } }), owner);
     expect(card.afterUntrustedBy).toBe(by);
     expect(card.afterUntrusted).toBe(flags.afterUntrusted);
+  });
+
+  it('names where a recipient the owner did not name comes from, in both languages, and nothing without it', () => {
+    const card = approvalCard(entry({ origin: {
+      source: 'task', triggerId: 'trg-o', runId: 'run-o', rootRunId: 'run-o',
+      targetOrigin: { unnamed: ['x@evil.example'], origin: { kind: 'triggerRun', name: 'Bericht', setUpBy: { kind: 'other', who: 'h@x.ch' } } },
+    } }), owner);
+    expect(card.targetOrigin).toEqual({
+      de: 'Empfänger stammt aus dem Trigger "Bericht" von "h@x.ch".',
+      en: 'Recipient comes from the trigger "Bericht" set up by "h@x.ch".',
+    });
+    const unknown = approvalCard(entry({ origin: { source: 'task', triggerId: 'trg-o', runId: 'run-o', rootRunId: 'run-o', targetOrigin: { unnamed: ['x@evil.example'], origin: { kind: 'unknown' } } } }), owner);
+    expect(unknown.targetOrigin).toEqual({ de: 'Woher der Empfänger stammt, kann lynox nicht feststellen.', en: 'lynox cannot tell where the recipient comes from.' });
+    expect(approvalCard(entry(), owner).targetOrigin).toBeNull();
   });
 
   it('shows a reply\'s original, persona and the origin it came from', () => {
@@ -403,20 +417,68 @@ describe('who set an entry up', () => {
     expect(JSON.stringify(card.setup)).not.toContain('grant-x');
   });
 
-  describe('a mandate\'s card names another grant by its address only', () => {
+  describe('a mandate\'s card names another grant as another mandate only', () => {
     // Both grants have a name in the trail. Bea's entry: Anna set the trigger up, Bea changed it last.
     const beaEntry = entry(B);
     const both = { trigger: marks({ createdBy: A.createdBy, createdMandateId: 'grant-a', mandateEditor: B.createdBy, mandateEditorId: 'grant-b' }) };
+
+    it('on her own entry, Bea\'s marks of an earlier grant or of none are hers: one line, never a test run, and the owner still tells the grants apart', () => {
+      const asBea = { ...owner, scope: { viewer: 'mandate', mandateId: 'grant-b', tag: B.createdBy } as const };
+      // The trigger set up under her earlier grant, its workflow under the current one.
+      const sources = { trigger: marks({ createdBy: B.createdBy, createdMandateId: 'grant-b-old' }), workflow: marks({ createdBy: B.createdBy, createdMandateId: 'grant-b' }) };
+      expect(approvalCard(beaEntry, { ...asBea, ...sources }).setup).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+      // Only the earlier grant's mark, or one with no grant id: still hers, not a test run.
+      expect(approvalCard(beaEntry, { ...asBea, trigger: sources.trigger }).setup).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+      expect(approvalCard(beaEntry, { ...asBea, trigger: marks({ createdBy: B.createdBy }) }).setup).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+      // The owner reads the earlier grant as a grant of its own.
+      const ownerLines = approvalCard(beaEntry, { ...owner, ...sources }).setup;
+      expect(ownerLines.map((l) => l.kind)).toEqual(['set_up_by', 'set_up_by']);
+    });
 
     it('the owner sees both grants by their names', () => {
       expect(approvalCard(beaEntry, { ...owner, ...both }).setup)
         .toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
     });
 
-    it('Bea sees her own grant by its name and Anna\'s by its address, on the same entry', () => {
-      const card = approvalCard(beaEntry, { ...owner, ...both, scope: { viewer: 'mandate', mandateId: 'grant-b' } });
-      expect(card.setup).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+    it('Bea sees her own grant by its name and Anna\'s as another mandate, neither by name nor by address, on the same entry', () => {
+      const card = approvalCard(beaEntry, { ...owner, ...both, scope: { viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' } });
+      expect(card.setup).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: OTHER_MANDATE, takenOver: false }]);
       expect(JSON.stringify(card)).not.toContain('Anna A.');
+      expect(JSON.stringify(card.setup)).not.toContain('anna@example.com');
+    });
+
+    it('names to a mandate another grant\'s mark as another mandate, and a tag without a grant id as some mandate, never by name or address', () => {
+      const asBea = mandateNamer({ viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' }, (id) => ({ 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' } as Record<string, string>)[id] ?? null);
+      expect(asBea('grant-a', 'mandate:anna@example.com')).toBe(OTHER_MANDATE);
+      expect(asBea(null, 'mandate:anna@example.com')).toBe(SOME_MANDATE);
+      expect(asBea(null, null)).toBe(SOME_MANDATE);
+      expect(asBea('grant-b', 'mandate:bea@example.com')).toBe('Bea B.');
+      // Her own grant without a shown name: her address, as before.
+      expect(mandateNamer({ viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' }, () => null)('grant-b', 'mandate:bea@example.com')).toBe('bea@example.com');
+      // The owner: unchanged, every name, else the address.
+      const asOwner = mandateNamer({ viewer: 'owner' }, (id) => (id === 'grant-a' ? 'Anna A.' : null));
+      expect(asOwner('grant-a', 'mandate:anna@example.com')).toBe('Anna A.');
+      expect(asOwner(null, 'mandate:anna@example.com')).toBe('anna@example.com');
+    });
+
+    it('names to a mandate a mark stamped with its own tag as its own, by its own grant, whichever grant stamped it', () => {
+      const names = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.', 'grant-b-old': 'Beatrice (old grant)' } as Record<string, string>;
+      const read: string[] = [];
+      const asBea = mandateNamer({ viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' }, (id) => { read.push(id); return names[id] ?? null; });
+      // An earlier grant for her address: hers, named as her own grant, never read under the other grant.
+      expect(asBea('grant-b-old', 'mandate:bea@example.com')).toBe('Bea B.');
+      // No grant id but her own tag: hers too.
+      expect(asBea(null, 'mandate:bea@example.com')).toBe('Bea B.');
+      expect(read).toEqual(['grant-b', 'grant-b']);
+      // Another address stays another's, with or without a grant id, never by name or address.
+      expect(asBea('grant-a', 'mandate:anna@example.com')).toBe(OTHER_MANDATE);
+      expect(asBea(null, 'mandate:anna@example.com')).toBe(SOME_MANDATE);
+      expect(asBea(null, null)).toBe(SOME_MANDATE);
+      // Exact tag only: another spelling of her address is not hers here (one rule with the trigger masking).
+      expect(asBea('grant-b-old', 'mandate:Bea@example.com')).toBe(OTHER_MANDATE);
+      expect(asBea('grant-b-old', 'mandate:bea@example.com ')).toBe(OTHER_MANDATE);
+      // Her own grant without a shown name: her address.
+      expect(mandateNamer({ viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' }, () => null)('grant-b-old', 'mandate:bea@example.com')).toBe('bea@example.com');
     });
   });
 });
@@ -424,7 +486,7 @@ describe('who set an entry up', () => {
 describe('the scope a principal reads in', () => {
   it('the owner reads everything; a mandate its grant; a mandate without a grant, and the control plane, nothing', () => {
     expect(approvalScopeOf(OWNER_PRINCIPAL)).toEqual({ viewer: 'owner' });
-    expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com', mandateId: 'grant-a' })).toEqual({ viewer: 'mandate', mandateId: 'grant-a' });
+    expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com', mandateId: 'grant-a' })).toEqual({ viewer: 'mandate', mandateId: 'grant-a', tag: 'mandate:a@example.com' });
     expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com' })).toBeNull();
     expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com', mandateId: '' })).toBeNull();
     expect(approvalScopeOf({ kind: 'cp-admin' })).toBeNull();
@@ -432,7 +494,7 @@ describe('the scope a principal reads in', () => {
 
   it('reads the store as every entry for the owner and the grant\'s own for a mandate', () => {
     expect(listScopeOf({ viewer: 'owner' })).toEqual({ kind: 'all' });
-    expect(listScopeOf({ viewer: 'mandate', mandateId: 'grant-a' })).toEqual({ kind: 'grant', mandateId: 'grant-a' });
+    expect(listScopeOf({ viewer: 'mandate', mandateId: 'grant-a', tag: 'mandate:anna@example.com' })).toEqual({ kind: 'grant', mandateId: 'grant-a' });
   });
 });
 

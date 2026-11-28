@@ -77,6 +77,22 @@ export interface EscalationMailChannelOptions {
   account?: string | undefined;
 }
 
+/** Whether a message names one side of the instance. Every audience is named: one this does not know does not compile. */
+function namesASide(audience: NotificationMessage['audience']): boolean {
+  switch (audience) {
+    case undefined: return false;
+    case 'owner':
+    case 'mandates':
+    case 'all_mandates':
+      return true;
+    default: {
+      const unknown: never = audience;
+      void unknown;
+      return true;
+    }
+  }
+}
+
 export class EscalationMailChannel implements NotificationChannel {
   readonly name = 'escalation-mail';
   private readonly registry: MailRegistry;
@@ -155,7 +171,7 @@ export class EscalationMailChannel implements NotificationChannel {
     if (raw === undefined) return 'skipped';
     // A message for one side of the instance (the owner's or the mandates' sentence): this channel
     // cannot tell whose mailbox a recipient is, so it does not deliver either.
-    if (msg.audience !== undefined) return 'skipped';
+    if (namesASide(msg.audience)) return 'skipped';
 
     // Parse rather than trust: a bare `{ address: raw }` would hand the whole
     // string to the provider, and a comma-separated or bare-word value is not

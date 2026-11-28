@@ -63,8 +63,9 @@ beforeEach(() => {
 		if (u.endsWith('/config')) return viewer === null ? new Response('', { status: 502 }) : reply({ managed: true, viewer });
 		if (u.endsWith('/bulk/runs')) return reply({ runs: [run] });
 		if (u.endsWith('/merges')) return reply({ merges: [MERGE] });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: shownTargets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
+		if (page) return reply({ targets: (page[3] ? shownTargets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : shownTargets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });
@@ -168,6 +169,58 @@ describe('a run\'s page as a mandate sees it', () => {
 		await renderDetail();
 		expect(target.textContent).not.toContain(t('bulk.start.listed').replace('{n}', '1'));
 		expect(target.textContent).toContain(t('bulk.start.list_note'));
+	});
+});
+
+describe('an undo\'s approval as a reader who is not the owner sees it (U-466)', () => {
+	const UNDO: BulkTarget[] = [{ seq: 0, key: 'gid://shopify/Product/1', change: 'update', diff: { kind: 'fields', fields: [{ field: 'title', before: 'Neu', after: 'Alt' }] } as BulkTarget['diff'], error: null, deselected: false, title: 'Snowboard Blau' }];
+	for (const atomic of [false, true]) {
+		for (const [name, answer] of [['a mandate', 'mandate'], ['no answer', null]] as const) {
+			it(`lists the targets of ${atomic ? 'an atomic' : 'a non-atomic'} undo to ${name}, without taking one out or the sentence on the owner's taking one out`, async () => {
+				viewer = answer;
+				run = makeRun({ kind: 'undo', sourceRunId: 'r0', atomic });
+				shownTargets = UNDO;
+				await renderDetail();
+				expect(target.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
+				expect([...target.querySelectorAll('th')].map((h) => h.textContent)).toContain(t('bulk.undo.now_back'));
+				expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
+				expect(buttonByText(t('bulk.undo.approve'))).toBeUndefined();
+				expect(target.querySelector('[data-testid="bulk-undo-atomic"]')).toBeNull();
+			});
+		}
+	}
+
+	// The owner took out every target that gets a value back; with no entry to delete, or one.
+	for (const deletes of [0, 1]) {
+		it(`never tells a mandate "you took out" on an undo the owner took every target out of (${String(deletes)} to delete): each row names the owner, the approval and its sentence stay the owner's`, async () => {
+			const was = getLocale();
+			setLocale('de');
+			try {
+				run = makeRun({ kind: 'undo', sourceRunId: 'r0', atomic: false, total: 1 + deletes, deselected: 1, changes: { update: 0, create: 0, delete: deletes, unchanged: 0, invalid: 0 } });
+				shownTargets = [
+					{ ...UNDO[0]!, deselected: true },
+					...(deletes === 1 ? [{ seq: 1, key: 'gid://shopify/Product/2', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false } as BulkTarget] : []),
+				];
+				await renderDetail();
+				expect(target.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
+				expect(target.textContent).toContain('Vom Inhaber herausgenommen.');
+				expect(target.textContent).toContain(t('bulk.owner_only_notice'));
+				expect(target.querySelector('[data-testid="bulk-undo-approve-explain"]')).toBeNull();
+				expect(buttonByText(t('bulk.undo.approve'))).toBeUndefined();
+				expect(target.textContent).not.toContain('Du hast');
+				expect(target.textContent).not.toContain('Von dir');
+			} finally {
+				setLocale(was);
+			}
+		});
+	}
+
+	it('control: offers the owner the same undo\'s target out', async () => {
+		viewer = 'owner';
+		run = makeRun({ kind: 'undo', sourceRunId: 'r0', atomic: false });
+		shownTargets = UNDO;
+		await renderDetail();
+		expect(buttonByText(t('bulk.deselect.off'))).toBeDefined();
 	});
 });
 
@@ -319,5 +372,15 @@ describe('a sentence that names an act of the owner\'s', () => {
 		viewer = 'owner';
 		await renderList();
 		expect(target.textContent).toContain(t('bulk.intro'));
+	});
+});
+
+describe('the reason under a value lynox leaves out, as a mandate reads it', () => {
+	it('names the owner as the one who can still approve the other products', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		shownTargets = [...TARGETS, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'html_too_long', deselected: false }];
+		await renderDetail();
+		expect(target.textContent).toContain(t('bulk.invalid.html_too_long_mandate'));
+		expect(target.textContent).not.toContain(t('bulk.invalid.html_too_long'));
 	});
 });
