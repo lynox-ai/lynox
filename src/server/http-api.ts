@@ -4337,6 +4337,28 @@ export class LynoxHTTPApi {
     };
   }
 
+  /** How long shutdown waits for the chat runs it ended to unwind, before the engine closes. */
+  private static readonly SHUTDOWN_RUN_DRAIN_MS = 3_000;
+
+  /**
+   * End every chat run still going, a run whose client is gone among them, as a restart ends it,
+   * and wait until their slots are free: the engine closes its stores next, and a run still going
+   * then would write into closed ones. Each keeps its row in the registry of live runs (the
+   * route's `finally` leaves the row of a run ended for this reason), so the boot after marks it
+   * interrupted, as a crash leaves it. A run that does not unwind within the bound is left to the process's exit.
+   */
+  private async _endRunsForShutdown(): Promise<void> {
+    if (this.runningSessions.size === 0) return;
+    for (const slot of [...this.runningSessions.values()]) {
+      try { slot.takeover('process_restarted'); } catch { /* the others are still ended */ }
+    }
+    const started = Date.now();
+    while (this.runningSessions.size > 0 && Date.now() - started < LynoxHTTPApi.SHUTDOWN_RUN_DRAIN_MS) {
+      // run-group-starter: a one-shot wait during shutdown, outside any run; it reports no spend.
+      await new Promise<void>((r) => setTimeout(r, 25));
+    }
+  }
+
   /** @param options.inboxBacklog passed to `Engine.shutdown`; a signal handler passes `'bounded'`. */
   async shutdown(options: { inboxBacklog?: 'classify' | 'bounded' | undefined } = {}): Promise<void> {
     this._stopping = true;
@@ -4348,6 +4370,7 @@ export class LynoxHTTPApi {
     // exception would be pointless.
     this.engine?.getPromptStore()?.expireUnparked();
     this.server?.close();
+    await this._endRunsForShutdown();
     // Release the client-error lookup. Module state is last-writer-wins, so a
     // second instance in the same process (tests do this) would otherwise leave
     // the reference pointing into a shut-down instance. Not a live leak today —
@@ -6314,7 +6337,12 @@ export class LynoxHTTPApi {
         // Run reached a terminal state (done/error/abort-completion) — drop it
         // from the registry. The transcript persists in thread_messages. A
         // process crash never reaches here, leaving the row for the boot-sweep.
-        runRegistry?.remove(runId);
+        // Nor does a run that shutdown ended: its row stays for the same sweep,
+        // so after the restart the chat says the run was interrupted and offers
+        // to run it again. Only that run: one that ended on its own meanwhile
+        // was answered, and is dropped as usual. (`takeover` sets `endedBy`, so
+        // it is read as its declared type, not as the value set above.)
+        if ((endedBy as PromptClosedReason) !== 'process_restarted') runRegistry?.remove(runId);
         // End + drop the resumable buffer: notifies any live `/stream`
         // subscribers to close, then frees the ring (the durable transcript
         // persists regardless).

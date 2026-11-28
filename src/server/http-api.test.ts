@@ -1032,6 +1032,178 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  describe('shutdown with a run whose client is gone', () => {
+    type Slot = { streamAlive: boolean; takeover: (reason: string) => void; lastEventAt: number };
+    const slotsOf = (a: LynoxHTTPApi): Map<string, Slot> => (a as unknown as { runningSessions: Map<string, Slot> }).runningSessions;
+    const engineOf = (a: LynoxHTTPApi): { shutdown: ReturnType<typeof vi.fn> } => (a as unknown as { engine: { shutdown: ReturnType<typeof vi.fn> } }).engine;
+
+    it('ends the run, waits until its slot is free, and only then shuts the engine down', async () => {
+      const own = new LynoxHTTPApi();
+      await own.init();
+      const slots = slotsOf(own);
+      const reasons: string[] = [];
+      let freedAt = 0;
+      slots.set('headless-1', {
+        streamAlive: false,
+        lastEventAt: Date.now(),
+        takeover: (reason) => {
+          reasons.push(reason);
+          // The run unwinds on the next turns of the loop, as a stopped run does.
+          setTimeout(() => { freedAt = performance.now(); slots.delete('headless-1'); }, 50);
+        },
+      });
+      let engineDownAt = 0;
+      engineOf(own).shutdown.mockImplementationOnce(async () => { engineDownAt = performance.now(); });
+      await own.shutdown();
+      expect(reasons, 'the run is ended, as a restart ends it').toEqual(['process_restarted']);
+      expect(slots.size, 'its slot is free').toBe(0);
+      expect(engineDownAt, 'positive control: the engine was shut down').toBeGreaterThan(0);
+      expect(freedAt, 'the slot was free before the engine shut down').toBeLessThanOrEqual(engineDownAt);
+    });
+
+    it('a run ended by shutdown frees its slot, keeps its row for the boot after, and that boot marks it interrupted', async () => {
+      // A key for the provider, so the run passes the check for a configured one.
+      vi.stubEnv('ANTHROPIC_API_KEY', 'test-only-placeholder');
+      const { RunHistory } = await import('../core/run-history.js');
+      const { RunRegistry } = await import('../core/run-registry.js');
+      const history = new RunHistory(':memory:');
+      const own = new LynoxHTTPApi();
+      try {
+        await own.init();
+        await own.start(0);
+        const engine = (own as unknown as { engine: { getRunRegistry: ReturnType<typeof vi.fn>; shutdown: ReturnType<typeof vi.fn> } }).engine;
+        const registry = new RunRegistry(history.getDb());
+        engine.getRunRegistry.mockReturnValue(registry);
+        // The run works until it is stopped; the stop makes it throw, as an aborted run does.
+        let stop!: () => void;
+        mockSessionRun.mockImplementationOnce(() => new Promise((_, reject) => { stop = () => reject(new Error('aborted')); }));
+        mockSessionAbort.mockImplementationOnce(() => { stop(); });
+        const client = new AbortController();
+        // The run writes nothing, so the answer's head is not awaited: the request stays open.
+        const req = fetch(`http://127.0.0.1:${portOf(own)}/api/sessions/headless-3/run`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task: 'go' }),
+          signal: client.signal,
+        }).catch(() => null);
+        await vi.waitFor(() => { expect(registry.getByThread('headless-3')?.status, 'positive control: the run started').toBe('running'); });
+        client.abort(); // the client goes away: the run goes on without it
+        await req;
+        await vi.waitFor(() => { expect(slotsOf(own).get('headless-3')?.streamAlive).toBe(false); });
+        let slotsAtEngineDown = -1;
+        engine.shutdown.mockImplementationOnce(async () => { slotsAtEngineDown = slotsOf(own).size; });
+        await own.shutdown();
+        expect(slotsAtEngineDown, 'the slot was free before the engine shut down').toBe(0);
+        expect(registry.getByThread('headless-3')?.status, 'its row stays, as a crash leaves it').toBe('running');
+        // The boot after, on the same store, finds the row and says the run was interrupted.
+        const booted = new RunRegistry(history.getDb());
+        expect(booted.sweepInterrupted(), 'the boot sweep finds it').toBe(1);
+        expect(booted.getByThread('headless-3')?.status, 'the chat is told it was interrupted').toBe('interrupted');
+      } finally {
+        history.close();
+        vi.stubEnv('ANTHROPIC_API_KEY', undefined);
+        // A once-implementation this test did not use must not reach the next one.
+        mockSessionRun.mockReset();
+        mockSessionRun.mockResolvedValue('Agent response');
+        mockSessionAbort.mockReset();
+      }
+    });
+
+    it('ending a run leaves the question a scheduled run is parked on in the same chat open', async () => {
+      vi.stubEnv('ANTHROPIC_API_KEY', 'test-only-placeholder');
+      const { RunHistory } = await import('../core/run-history.js');
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const history = new RunHistory(':memory:');
+      const own = new LynoxHTTPApi();
+      try {
+        await own.init();
+        await own.start(0);
+        const prompts = new PromptStore(history.getDb());
+        const engine = (own as unknown as { engine: { getPromptStore: ReturnType<typeof vi.fn> } }).engine;
+        engine.getPromptStore = vi.fn(() => prompts);
+        // A scheduled run waits on its question in this chat, across the restart.
+        const parked = prompts.insertAskUser('headless-5', 'Which list?', undefined, undefined, undefined, undefined, 'trigger-1');
+        let stop!: () => void;
+        mockSessionRun.mockImplementationOnce(() => new Promise((_, reject) => { stop = () => reject(new Error('aborted')); }));
+        mockSessionAbort.mockImplementationOnce(() => { stop(); });
+        const client = new AbortController();
+        const req = fetch(`http://127.0.0.1:${portOf(own)}/api/sessions/headless-5/run`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task: 'go' }),
+          signal: client.signal,
+        }).catch(() => null);
+        await vi.waitFor(() => { expect(slotsOf(own).has('headless-5'), 'positive control: the run started').toBe(true); });
+        client.abort();
+        await req;
+        await own.shutdown();
+        expect(slotsOf(own).size, 'positive control: the run was ended').toBe(0);
+        expect(prompts.getById(parked)?.status, 'the parked question stays open for the restart').toBe('pending');
+      } finally {
+        history.close();
+        vi.stubEnv('ANTHROPIC_API_KEY', undefined);
+        mockSessionRun.mockReset();
+        mockSessionRun.mockResolvedValue('Agent response');
+        mockSessionAbort.mockReset();
+      }
+    });
+
+    it('a run that ended on its own before shutdown leaves no row for the boot after', async () => {
+      // A key for the provider, so the run passes the check for a configured one.
+      vi.stubEnv('ANTHROPIC_API_KEY', 'test-only-placeholder');
+      const { RunHistory } = await import('../core/run-history.js');
+      const { RunRegistry } = await import('../core/run-registry.js');
+      const history = new RunHistory(':memory:');
+      const own = new LynoxHTTPApi();
+      try {
+        await own.init();
+        await own.start(0);
+        const engine = (own as unknown as { engine: { getRunRegistry: ReturnType<typeof vi.fn> } }).engine;
+        const registry = new RunRegistry(history.getDb());
+        engine.getRunRegistry.mockReturnValue(registry);
+        let finish!: () => void;
+        mockSessionRun.mockImplementationOnce(() => new Promise((resolve) => { finish = () => resolve('done'); }));
+        // A stop that comes after the run had already answered: it ends on its own.
+        mockSessionAbort.mockImplementationOnce(() => { finish(); });
+        const req = fetch(`http://127.0.0.1:${portOf(own)}/api/sessions/headless-4/run`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task: 'go' }),
+        });
+        await vi.waitFor(() => { expect(registry.getByThread('headless-4')?.status, 'positive control: the run started').toBe('running'); });
+        // It ends on its own before shutdown reaches it.
+        finish();
+        const res = await req;
+        expect(res.status).toBe(200);
+        await res.text();
+        await vi.waitFor(() => { expect(slotsOf(own).has('headless-4')).toBe(false); });
+        await own.shutdown();
+        expect(registry.getByThread('headless-4'), 'an answered run leaves no row for the boot sweep').toBeUndefined();
+      } finally {
+        history.close();
+        vi.stubEnv('ANTHROPIC_API_KEY', undefined);
+        // A once-implementation this test did not use must not reach the next one.
+        mockSessionRun.mockReset();
+        mockSessionRun.mockResolvedValue('Agent response');
+        mockSessionAbort.mockReset();
+      }
+    });
+
+    it('does not wait past its bound for a run that does not end', async () => {
+      const own = new LynoxHTTPApi();
+      await own.init();
+      const slots = slotsOf(own);
+      const takeover = vi.fn();
+      slots.set('headless-2', { streamAlive: false, lastEventAt: Date.now(), takeover });
+      const started = performance.now();
+      await own.shutdown();
+      expect(takeover, 'the run is told to end').toHaveBeenCalledWith('process_restarted');
+      expect(engineOf(own).shutdown, 'the engine is shut down all the same').toHaveBeenCalled();
+      expect(performance.now() - started, 'within the bound, not until the run ends').toBeLessThan(6000);
+      slots.delete('headless-2');
+    });
+  });
+
   // ── T1-1 · npx/bare-node first run must be authenticatable ───────────────
   //
   // The SvelteKit Web UI handler snapshots process.env into
@@ -4037,6 +4209,40 @@ describe('LynoxHTTPApi', () => {
         engineRef.getPromptStore = originalGetPromptStore;
         runningSessions.delete('stale-1');
         db.close();
+      }
+    });
+
+    // A taken-over run whose tool ignores the stop for longer than the takeover waits (1 s): the
+    // follow-up is answered 409 like any busy session, and the chat asks again every few seconds
+    // (its busy wait), so the message goes once the old run has ended.
+    it('a follow-up whose taken-over run outlasts the wait gets a 409, and takes over once the old run has ended', async () => {
+      const runningSessions = (api as unknown as {
+        runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>;
+      }).runningSessions;
+      let takeovers = 0;
+      try {
+        runningSessions.set('test', {
+          streamAlive: false,
+          lastEventAt: 0, // silent far past the stale window
+          takeover: () => {
+            takeovers++;
+            // Its tool ignores the stop: the run unwinds 1.5 s later, past the 1 s wait.
+            if (takeovers === 1) setTimeout(() => runningSessions.delete('test'), 1500);
+          },
+        });
+        const first = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'second' }) });
+        expect(first.status, 'the old run still ends: busy').toBe(409);
+        await first.text();
+        expect(takeovers, 'positive control: the old run was told to end').toBe(1);
+        expect(runningSessions.has('test'), 'the old run is still ending').toBe(true);
+        await vi.waitFor(() => { expect(runningSessions.has('test')).toBe(false); }, { timeout: 3000 });
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const next = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'second' }) });
+        expect(next.status, 'once it ended, the follow-up runs').toBe(200);
+        await next.text();
+        expect(mockSessionRun, 'the follow-up ran').toHaveBeenCalled();
+      } finally {
+        runningSessions.delete('test');
       }
     });
 
