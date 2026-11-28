@@ -44,7 +44,7 @@ type MemoryTexts = {
 
 /** The remembered-text half of a store that holds none. */
 const NO_MEMORY_TEXTS = {
-  'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [] },
+  'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [], untrusted_lines: [] },
   'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE, supersedes: [], subject_cooccurrences: [], subject_mints: [] },
 };
 

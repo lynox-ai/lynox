@@ -225,6 +225,8 @@ export interface HeldMemoryTexts {
   'agent-memory.db': {
     memories: ExportRow[]; mentions: ExportRow[]; supersedes: ExportRow[]; cooccurrences: ExportRow[]; metrics: ExportRow[];
     entities: ExportRow[]; relations: ExportRow[];
+    /** Which remembered lines came from a source that was not checked: fingerprints, no text. */
+    untrusted_lines: ExportRow[];
   };
   /** The subject-graph store: each remembered text, which subject it is about, every relation
    * between subjects (those of a kind the graph block does not list included), which text
@@ -298,7 +300,7 @@ export function readMemoryTextsForExport(opts: {
     return { ...row, text: UNREADABLE_MEMORY_TEXT };
   };
 
-  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [] };
+  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [], untrusted_lines: [] };
   let legacy: Database.Database | null = null;
   try {
     if (existsSync(opts.agentMemoryFile)) {
@@ -313,6 +315,7 @@ export function readMemoryTextsForExport(opts: {
           .map(row => maskField(row, 'reason'));
         legacyHalf.cooccurrences = read(legacy, 'cooccurrences', '', 't.last_seen_at, t.entity_a_id, t.entity_b_id', 'agent-memory.db cooccurrences');
         legacyHalf.metrics = read(legacy, 'metrics', '', 't.computed_at, t.id', 'agent-memory.db metrics');
+        legacyHalf.untrusted_lines = read(legacy, 'untrusted_lines', '', 't.created_at, t.namespace, t.key', 'agent-memory.db untrusted_lines');
         if (opts.subjectGraph === true) {
           legacyHalf.entities = read(legacy, 'entities', '', 't.first_seen_at, t.id', 'agent-memory.db entities')
             .map(row => ['canonical_name', 'aliases', 'description', 'metadata'].reduce(maskField, row));
