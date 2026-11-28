@@ -2325,6 +2325,11 @@ export class LynoxHTTPApi {
     } catch { /* best-effort — the caller's teardown continues regardless */ }
   }
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
+  /**
+   * The clock the rate windows run on. Monotonic: a step of the wall clock neither opens a
+   * window early nor stretches one, so a window is always a minute of elapsed time.
+   */
+  private rateNow: () => number = () => performance.now();
   /** Built on the first webhook request, once the engine's database is open. */
   private webhookReceiver: WebhookReceiver | null = null;
   private readonly staticRoutes = new Map<string, RouteHandler>();
@@ -3850,7 +3855,7 @@ export class LynoxHTTPApi {
     const socketIp = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
     const isLoopback = socketIp === '127.0.0.1' || socketIp === '::1';
     const limit = isLoopback ? RATE_MAX_LOOPBACK : RATE_MAX;
-    const now = Date.now();
+    const now = this.rateNow();
     let rateEntry = this.rateCounts.get(clientIp);
     if (!rateEntry || rateEntry.resetAt < now) {
       rateEntry = { count: 0, resetAt: now + RATE_WINDOW_MS };
@@ -4253,7 +4258,7 @@ export class LynoxHTTPApi {
 
     // Rate limit GC
     this.rateGcTimer = setInterval(() => {
-      const now = Date.now();
+      const now = this.rateNow();
       for (const [ip, entry] of this.rateCounts) {
         if (entry.resetAt < now) this.rateCounts.delete(ip);
       }
