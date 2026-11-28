@@ -63,8 +63,9 @@ beforeEach(() => {
 		if (u.endsWith('/config')) return viewer === null ? new Response('', { status: 502 }) : reply({ managed: true, viewer });
 		if (u.endsWith('/bulk/runs')) return reply({ runs: [run] });
 		if (u.endsWith('/merges')) return reply({ merges: [MERGE] });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: shownTargets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
+		if (page) return reply({ targets: (page[3] ? shownTargets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : shownTargets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });
@@ -103,7 +104,7 @@ const buttonByText = (text: string): HTMLButtonElement | undefined =>
 describe('a run\'s page as a mandate sees it', () => {
 	it('shows a preview without approving or taking a target out, and says who can act', async () => {
 		await renderDetail();
-		expect(target.textContent).toContain('Product/1');
+		expect(target.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
 		expect(buttonByText(t('bulk.approve.approve'))).toBeUndefined();
 		expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
 		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
@@ -171,12 +172,64 @@ describe('a run\'s page as a mandate sees it', () => {
 	});
 });
 
+describe('an undo\'s approval as a reader who is not the owner sees it (U-466)', () => {
+	const UNDO: BulkTarget[] = [{ seq: 0, key: 'gid://shopify/Product/1', change: 'update', diff: { kind: 'fields', fields: [{ field: 'title', before: 'Neu', after: 'Alt' }] } as BulkTarget['diff'], error: null, deselected: false, title: 'Snowboard Blau' }];
+	for (const atomic of [false, true]) {
+		for (const [name, answer] of [['a mandate', 'mandate'], ['no answer', null]] as const) {
+			it(`lists the targets of ${atomic ? 'an atomic' : 'a non-atomic'} undo to ${name}, without taking one out or the sentence on the owner's taking one out`, async () => {
+				viewer = answer;
+				run = makeRun({ kind: 'undo', sourceRunId: 'r0', atomic });
+				shownTargets = UNDO;
+				await renderDetail();
+				expect(target.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
+				expect([...target.querySelectorAll('th')].map((h) => h.textContent)).toContain(t('bulk.undo.now_back'));
+				expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
+				expect(buttonByText(t('bulk.undo.approve'))).toBeUndefined();
+				expect(target.querySelector('[data-testid="bulk-undo-atomic"]')).toBeNull();
+			});
+		}
+	}
+
+	// The owner took out every target that gets a value back; with no entry to delete, or one.
+	for (const deletes of [0, 1]) {
+		it(`never tells a mandate "you took out" on an undo the owner took every target out of (${String(deletes)} to delete): each row names the owner, the approval and its sentence stay the owner's`, async () => {
+			const was = getLocale();
+			setLocale('de');
+			try {
+				run = makeRun({ kind: 'undo', sourceRunId: 'r0', atomic: false, total: 1 + deletes, deselected: 1, changes: { update: 0, create: 0, delete: deletes, unchanged: 0, invalid: 0 } });
+				shownTargets = [
+					{ ...UNDO[0]!, deselected: true },
+					...(deletes === 1 ? [{ seq: 1, key: 'gid://shopify/Product/2', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false } as BulkTarget] : []),
+				];
+				await renderDetail();
+				expect(target.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
+				expect(target.textContent).toContain('Vom Inhaber herausgenommen.');
+				expect(target.textContent).toContain(t('bulk.owner_only_notice'));
+				expect(target.querySelector('[data-testid="bulk-undo-approve-explain"]')).toBeNull();
+				expect(buttonByText(t('bulk.undo.approve'))).toBeUndefined();
+				expect(target.textContent).not.toContain('Du hast');
+				expect(target.textContent).not.toContain('Von dir');
+			} finally {
+				setLocale(was);
+			}
+		});
+	}
+
+	it('control: offers the owner the same undo\'s target out', async () => {
+		viewer = 'owner';
+		run = makeRun({ kind: 'undo', sourceRunId: 'r0', atomic: false });
+		shownTargets = UNDO;
+		await renderDetail();
+		expect(buttonByText(t('bulk.deselect.off'))).toBeDefined();
+	});
+});
+
 describe('a session whose reader the server has not named as the owner', () => {
 	for (const [name, answer] of [['no answer', null], ['a viewer that is neither', 'none']] as const) {
 		it(`offers no act and says nothing about the owner on ${name}`, async () => {
 			viewer = answer;
 			await renderDetail();
-			expect(target.textContent).toContain('Product/1');
+			expect(target.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
 			expect(buttonByText(t('bulk.approve.approve'))).toBeUndefined();
 			expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
 			expect(target.textContent).not.toContain(t('bulk.owner_only_notice'));
@@ -232,6 +285,11 @@ describe('a sentence that names an act of the owner\'s', () => {
 					expect(mandate, `${lang} ${key}`).not.toBe(`${key}_mandate`);
 					expect(mandate, `${lang} ${key}`).not.toBe(t(key));
 					expect(bulkMandateI18n({ t, tf }).t(key), `${lang} ${key}`).toBe(mandate);
+					// A key with a singular has the mandate's singular too, so neither reads as a raw key.
+					if (t(`${key}_one`) !== `${key}_one`) {
+						expect(t(`${key}_mandate_one`), `${lang} ${key}_mandate_one`).not.toBe(`${key}_mandate_one`);
+						expect(bulkMandateI18n({ t, tf }).t(`${key}_one`), `${lang} ${key}_one`).toBe(t(`${key}_mandate_one`));
+					}
 				}
 				expect(bulkMandateI18n({ t, tf }).t('bulk.halt.wait_owner_only')).toBe(t('bulk.halt.wait_owner_only'));
 			}
@@ -241,17 +299,18 @@ describe('a sentence that names an act of the owner\'s', () => {
 	});
 
 	const nothing = { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 };
-	const cases: { name: string; run: Partial<BulkRunDetailData>; targets?: BulkTarget[]; key: string; vars?: Record<string, string> }[] = [
+	// `mandate`: the mandate's key where it is not `<key>_mandate` — a count of one reads `_mandate_one`.
+	const cases: { name: string; run: Partial<BulkRunDetailData>; targets?: BulkTarget[]; key: string; mandate?: string; vars?: Record<string, string> }[] = [
 		{ name: 'lynox skips a target of a preview', run: { total: 2, changes: { ...nothing, update: 1, invalid: 1 } },
 			targets: [TARGETS[0]!, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false }],
-			key: 'bulk.skipped.products', vars: { n: '1' } },
+			key: 'bulk.skipped.products_one', mandate: 'bulk.skipped.products_mandate_one', vars: { n: '1' } },
 		{ name: 'lynox skips one target of another host and one was taken out', run: { targetSystem: 'http:api.example.com', total: 3, deselected: 1, changes: { ...nothing, update: 1, invalid: 1 } },
 			targets: [
 				{ ...TARGETS[0]!, key: 'https://api.example.com/items/1' },
 				{ seq: 2, key: 'https://api.example.com/items/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false },
 				{ ...TARGETS[0]!, seq: 3, key: 'https://api.example.com/items/3', deselected: true },
 			],
-			key: 'bulk.skipped.both_targets', vars: { n: '1', m: '1' } },
+			key: 'bulk.skipped.both_targets_one', mandate: 'bulk.skipped.both_targets_mandate_one', vars: { n: '1', m: '1' } },
 		{ name: 'a target was taken out', run: { total: 2, deselected: 1, changes: { ...nothing, update: 1 } },
 			targets: [TARGETS[0]!, { ...TARGETS[0]!, seq: 2, key: 'gid://shopify/Product/2', deselected: true }],
 			key: 'bulk.deselect.taken_out' },
@@ -283,15 +342,25 @@ describe('a sentence that names an act of the owner\'s', () => {
 				component = undefined;
 				return seen;
 			};
+			const mandateKey = c.mandate ?? `${c.key}_mandate`;
 			const asMandate = await show('mandate');
-			expect(asMandate).toContain(text(`${c.key}_mandate`));
+			expect(asMandate).toContain(text(mandateKey));
 			expect(asMandate).not.toContain(text(c.key));
 			const asOwner = await show('owner');
 			expect(asOwner).toContain(text(c.key));
 			// A mandate's form may be the owner's first sentence alone; the owner's full one is asserted above.
-			if (!text(c.key).includes(text(`${c.key}_mandate`))) expect(asOwner).not.toContain(text(`${c.key}_mandate`));
+			if (!text(c.key).includes(text(mandateKey))) expect(asOwner).not.toContain(text(mandateKey));
 		});
 	}
+
+	it('sets a space between a run\'s date and its system on a narrow list', async () => {
+		viewer = 'owner';
+		await renderList();
+		const system = target.querySelector('tbody span.sm\\:hidden');
+		expect(system?.textContent?.startsWith(' · ')).toBe(true);
+		unmount(component!);
+		component = undefined;
+	});
 
 	it('tells a mandate on the list who approves and takes back, and the owner that it is them', async () => {
 		await renderList();
@@ -303,5 +372,15 @@ describe('a sentence that names an act of the owner\'s', () => {
 		viewer = 'owner';
 		await renderList();
 		expect(target.textContent).toContain(t('bulk.intro'));
+	});
+});
+
+describe('the reason under a value lynox leaves out, as a mandate reads it', () => {
+	it('names the owner as the one who can still approve the other products', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		shownTargets = [...TARGETS, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'html_too_long', deselected: false }];
+		await renderDetail();
+		expect(target.textContent).toContain(t('bulk.invalid.html_too_long_mandate'));
+		expect(target.textContent).not.toContain(t('bulk.invalid.html_too_long'));
 	});
 });

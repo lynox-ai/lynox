@@ -161,7 +161,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
   const listed = (p: ApiProfile): StampEntry[] => [{ profile: p.id, grant: p.oauth_grant!.grant_id!, binding: bindingOf(p) }];
   const lead = 'setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login';
   // Spelled out: the model reads this sentence, and the probe that tests it reads this wording.
-  const FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.';
+  const FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“). Say so in your reply, and do not ask for permission.';
   // The same end without who decides: for these the owner's stamp is not the way.
   const FINAL_RUN = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Say so in your reply, and do not ask for permission.';
   // The member's own connection: a token exchange is not promised the same answer, another check stops it.
@@ -214,7 +214,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
       expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}. This run of a workflow setup@example.org set up or changed was not started by a schedule of setup@example.org's, so it does not use connections setup@example.org made with their own login. `
         + 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. '
         + 'In your reply, say so. The person reading your reply is the owner of this instance, not setup@example.org. '
-        + 'Tell them to connect api.crm.example themselves under Settings → APIs and then ask lynox in a chat to do this step with that connection. '
+        + 'Tell them to connect api.crm.example themselves under Settings → API connections and then ask lynox in a chat to do this step with that connection. '
         + 'Do not suggest running this workflow again, and do not ask setup@example.org to do anything. Do not ask for permission to try again.');
     }, null, undefined, true);
   });
@@ -300,7 +300,7 @@ describe('memberConnectionRefusal', () => {
   const lead = 'setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login';
 
   it('(a) the owner, while the access lasts', () => {
-    expect(memberConnectionRefusal(crm(), OWNER_PRINCIPAL, ends(['M-1']))).toBe(`${lead}, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects setup@example.org).`);
+    expect(memberConnectionRefusal(crm(), OWNER_PRINCIPAL, ends(['M-1']))).toBe(`${lead}, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this connection under Settings → API connections and connect it yourself (that disconnects setup@example.org).`);
   });
 
   it('(b) the owner, once it has ended', () => {
@@ -360,16 +360,16 @@ describe('the run\'s member-connection notes', () => {
 
   it('memberNotesRepeat: only a last run that halted on the same lines', () => {
     const notes = ['Connection not used: x'];
-    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_result: 'done\n• Connection not used: x' }, notes)).toBe(true);
-    expect(memberNotesRepeat({ last_run_status: 'success', last_run_result: 'done\n• Connection not used: x' }, notes)).toBe(false);
-    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_result: 'done\n• Connection not used: y' }, notes)).toBe(false);
-    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_result: 'done' }, [])).toBe(false);
+    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_member_notes: ['Connection not used: x'] }, notes)).toBe(true);
+    expect(memberNotesRepeat({ last_run_status: 'success', last_run_member_notes: ['Connection not used: x'] }, notes)).toBe(false);
+    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_member_notes: ['Connection not used: y'] }, notes)).toBe(false);
+    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_member_notes: [] }, [])).toBe(false);
     expect(memberNotesRepeat({}, notes)).toBe(false);
   });
 });
 
 describe('collectWriteNotes and a member connection\'s line (A4)', () => {
-  const line = `${MEMBER_CONNECTION_PREFIX} setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects setup@example.org).`;
+  const line = `${MEMBER_CONNECTION_PREFIX} setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you. Take it over in the chat once setup@example.org's access has ended, or delete this connection under Settings → API connections and connect it yourself (that disconnects setup@example.org).`;
 
   it('a chat\'s run_workflow report picks the line up whole', () => {
     const into = new Set<string>();

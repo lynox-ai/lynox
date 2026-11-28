@@ -1,8 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 import { StreamProcessor } from './stream.js';
+import { ToolCallImitationDetector } from './tool-call-imitation.js';
+import { StreamIncompleteError } from './stream-incomplete.js';
+import type { PartialReply } from './stream.js';
 import type { StreamEvent } from '../types/index.js';
 
+/** A complete stream: `events`, then the `message_stop` that ends every complete reply (added when missing). */
 async function* mockStream(events: Array<Record<string, unknown>>) {
+  yield* cutStream(events);
+  if (events.at(-1)?.['type'] !== 'message_stop') yield { type: 'message_stop' };
+}
+
+/** A stream of exactly `events`: one that ends without `message_stop` is a reply cut off. */
+async function* cutStream(events: Array<Record<string, unknown>>) {
   for (const e of events) {
     yield e;
   }
@@ -65,13 +75,13 @@ describe('StreamProcessor', () => {
       });
     });
 
-    it('emits it on block stop even when the stream never reports a stop reason', async () => {
-      // No `message_delta`, so `stop_reason` falls back to its 'end_turn'
-      // default — the shape the openai-compat adapter produces when a provider
-      // ends a tool-calling stream without a `finish_reason`. The UI renders
-      // follow-up chips off this event, and the agent loop skips its recovery
-      // call for exactly this shape, so the two must not both depend on the
-      // stop reason: the event is a property of the BLOCK closing.
+    it('emits it on block stop, not on the stop reason the reply ends with', async () => {
+      // No `message_delta`, only `message_stop`, so `stop_reason` keeps its
+      // 'end_turn' default although the reply is a tool call. The UI renders
+      // follow-up chips off this event, and the agent loop reads the content,
+      // not only the stop reason, before its recovery call, so the two must not
+      // both depend on the stop reason: the event is a property of the BLOCK
+      // closing.
       const { proc, collected } = createProcessor();
 
       const result = await proc.process(mockStream([
@@ -294,5 +304,121 @@ describe('StreamProcessor', () => {
 
       expect(result.content[0]).toMatchObject({ type: 'tool_use', input: {} });
     });
+  });
+});
+
+describe('StreamProcessor on a stream that ends without message_stop', () => {
+  const start = { type: 'message_start', message: { usage: { input_tokens: 10, output_tokens: 0, cache_creation: null, cache_creation_input_tokens: null, cache_read_input_tokens: null, inference_geo: null, iterations: null, server_tool_use: null, service_tier: null, speed: null } } };
+  // Built fresh per test: the processor appends to the streamed block object in place.
+  const text = (): Array<Record<string, unknown>> => [
+    start,
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } },
+  ];
+  const turnEnd = [
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } },
+  ];
+
+  it('throws StreamIncompleteError after a text piece, with the partial still readable and the stream answered', async () => {
+    const { proc } = createProcessor();
+    await expect(proc.process(cutStream(text()) as AsyncIterable<never>)).rejects.toBeInstanceOf(StreamIncompleteError);
+    expect(proc.answered()).toBe(true);
+    expect(proc.turnEnded()).toBe(false);
+    expect(proc.partial().content[0]).toMatchObject({ type: 'text', text: 'Hello' });
+  });
+
+  it('after a message_delta that named a stop reason: returns the reply, with turn_end handed on', async () => {
+    const { proc, collected } = createProcessor();
+    const result = await proc.process(cutStream([...text(), ...turnEnd]) as AsyncIterable<never>);
+    expect(result.stop_reason).toBe('end_turn');
+    expect(result.content[0]).toMatchObject({ type: 'text', text: 'Hello' });
+    expect(proc.turnEnded()).toBe(true);
+    expect(collected.filter((e) => e.type === 'turn_end')).toHaveLength(1);
+  });
+
+  it('throws StreamIncompleteError after a message_delta without a stop reason', async () => {
+    const { proc } = createProcessor();
+    const noReason = { type: 'message_delta', delta: { stop_reason: null }, usage: { output_tokens: 5 } };
+    await expect(proc.process(cutStream([...text(), noReason]) as AsyncIterable<never>)).rejects.toBeInstanceOf(StreamIncompleteError);
+    expect(proc.turnEnded()).toBe(false);
+  });
+
+  it('control: the same stream with its message_stop returns the reply', async () => {
+    const { proc } = createProcessor();
+    const result = await proc.process(cutStream([...text(), ...turnEnd, { type: 'message_stop' }]) as AsyncIterable<never>);
+    expect(result.content[0]).toMatchObject({ type: 'text', text: 'Hello' });
+    expect(result.stop_reason).toBe('end_turn');
+  });
+});
+
+describe('StreamProcessor with the guard on a tool call written out as text', () => {
+  const COPY = '{"url": "https://x.test/orders", "method": "POST"}\n';
+  const TOOLS = [{ name: 'http_request', properties: ['url', 'method'] }];
+
+  function textEvents(startIndex: number, text: string): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [{ type: 'content_block_start', index: startIndex, content_block: { type: 'text', text: '' } }];
+    for (let o = 0; o < text.length; o += 6) out.push({ type: 'content_block_delta', index: startIndex, delta: { type: 'text_delta', text: text.slice(o, o + 6) } });
+    out.push({ type: 'content_block_stop', index: startIndex });
+    return out;
+  }
+
+  function guarded(): { proc: StreamProcessor; collected: StreamEvent[]; stops: unknown[]; partials: PartialReply[] } {
+    const collected: StreamEvent[] = [];
+    const stops: unknown[] = [];
+    const partials: PartialReply[] = [];
+    const proc = new StreamProcessor((e: StreamEvent) => { collected.push(e); }, 'test-agent', {
+      detector: new ToolCallImitationDetector(TOOLS),
+      stop: (hit, partial) => { stops.push(hit); partials.push(partial); return new Error('stopped by the guard'); },
+    });
+    return { proc, collected, stops, partials };
+  }
+
+  it('throws the guard\'s error once the same call is written out three times, and does not render that delta', async () => {
+    const { proc, collected, stops, partials } = guarded();
+    const start = { type: 'message_start', message: { usage: { input_tokens: 1234, output_tokens: 1, cache_read_input_tokens: 50 } } };
+    const thinking = [
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'plan it' } },
+      { type: 'content_block_stop', index: 0 },
+    ];
+    await expect(proc.process(mockStream([start, ...thinking, ...textEvents(1, COPY.repeat(5))]) as AsyncIterable<never>)).rejects.toThrow('stopped by the guard');
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toMatchObject({ toolName: 'http_request', count: 3 });
+    // What the call used so far goes with the stop: the reported usage.
+    expect(partials[0]!.usage).toMatchObject({ input_tokens: 1234, cache_read_input_tokens: 50 });
+    const shown = collected.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text).join('');
+    // Everything before the delta that completed the third copy, and nothing after it.
+    expect(COPY.repeat(3).startsWith(shown)).toBe(true);
+    expect(shown.length).toBeGreaterThan(COPY.length * 2);
+    expect(shown.length).toBeLessThan(COPY.length * 3);
+    // The content goes with it as far as it came: the thinking, and the text including the
+    // delta that completed the third copy (6 characters), which was not shown.
+    const content = partials[0]!.content as Array<{ type: string; thinking?: string; text?: string }>;
+    expect(content[0]).toMatchObject({ type: 'thinking', thinking: 'plan it' });
+    expect(content[1]!.type).toBe('text');
+    expect(content[1]!.text).toBe(COPY.repeat(5).slice(0, shown.length + 6));
+  });
+
+  it('does not stop a reply that started a real tool call before its text', async () => {
+    const { proc, stops } = guarded();
+    const result = await proc.process(mockStream([
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't1', name: 'http_request', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"url":"https://x.test"}' } },
+      { type: 'content_block_stop', index: 0 },
+      ...textEvents(1, COPY.repeat(5)),
+    ]) as AsyncIterable<never>);
+    expect(stops).toHaveLength(0);
+    expect(result.content[1]).toMatchObject({ type: 'text', text: COPY.repeat(5) });
+  });
+
+  it('does not stop a reply that started a server tool call before its text', async () => {
+    const { proc, stops } = guarded();
+    await proc.process(mockStream([
+      { type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', id: 's1', name: 'web_search', input: {} } },
+      { type: 'content_block_stop', index: 0 },
+      ...textEvents(1, COPY.repeat(5)),
+    ]) as AsyncIterable<never>);
+    expect(stops).toHaveLength(0);
   });
 });

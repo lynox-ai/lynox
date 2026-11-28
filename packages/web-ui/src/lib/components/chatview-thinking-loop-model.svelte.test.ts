@@ -136,3 +136,42 @@ describe('the thinking-loop note and the choice of model', () => {
 		for (const key of ['nav.settings', 'settings.config', 'llm.preset.heading']) expect(line()?.textContent).toContain(t(key));
 	});
 });
+
+describe('the note for an action written out as text, not run', () => {
+	const noteTitle = (): string | null | undefined => target.querySelector('[role="status"] .text-text-muted')?.textContent;
+	const noteBody = (): string | null | undefined => target.querySelector('[role="status"] .text-text-muted + .text-text-subtle')?.textContent;
+
+	it('renders the reviewed German title and body, in the info style', async () => {
+		await render({ viewer: 'owner', locks: {} }, 'tool_call_imitation');
+		expect(noteTitle()).toBe('Abgebrochen: Aktion nur geschrieben, nicht ausgeführt');
+		expect(noteBody()).toBe('Der Agent hat dieselbe Aktion mehrmals nur als Text ausgegeben, statt sie auszuführen. Ausgeführt wurde davon nichts, deshalb hat lynox angehalten; der abgebrochene Text wird nicht gespeichert. Bitte lynox noch einmal darum, oder sag in deiner Nachricht genau, was lynox tun soll.');
+		// The info border, not the error one.
+		expect(target.querySelector('[role="status"]')?.className).toContain('border-border');
+		expect(target.querySelector('[role="status"]')?.className).not.toContain('border-danger');
+	});
+
+	it('renders the reviewed English title and body', async () => {
+		(await import('../i18n.svelte.js')).setLocale('en');
+		await render({ viewer: 'owner', locks: {} }, 'tool_call_imitation');
+		expect(noteTitle()).toBe('Stopped: an action was written out, not run');
+		expect(noteBody()).toBe('The agent output the same action several times as text instead of running it. None of it was run, so lynox stopped; the cut-off text is not saved. Ask lynox again, or say in your message exactly what lynox should do.');
+	});
+
+	it('tells the owner of an instance without a provider lock where to choose another model', async () => {
+		await render({ viewer: 'owner', locks: {} }, 'tool_call_imitation');
+		expect(line()?.textContent).toBe(t('chat.note.thinking_loop.model'));
+	});
+
+	it('does not show the model line where the model cannot be chosen', async () => {
+		await render({ viewer: 'owner', locks: { provider: { reason: 'managed-tier' } } }, 'tool_call_imitation');
+		// Positive control in the same render: the note itself is there, only the line is not.
+		expect(noteTitle()).toBe(t('chat.note.tool_call_imitation.title'));
+		expect(line()).toBeNull();
+	});
+
+	it('does not show the model line in a mandate\'s session', async () => {
+		await render({ viewer: 'mandate', locks: {} }, 'tool_call_imitation');
+		expect(noteTitle()).toBe(t('chat.note.tool_call_imitation.title'));
+		expect(line()).toBeNull();
+	});
+});

@@ -36,10 +36,15 @@ interface MockedAgentShape {
   getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
   getRecordedToolCallCount: () => number;
   getLastStop: () => import('../../core/agent.js').SendStop | null;
+  getHelperCostUsd: () => number;
+  getStoppedCallSessionCostUsd: () => number;
+  getCapOnlyCostUsd: () => number;
 }
 
 /** How many tool calls each constructed child reports having recorded. */
 let mockRecordedToolCalls = 0;
+/** The estimate of ended calls each constructed child reports (`getHelperCostUsd`). */
+let mockHelperCostUsd = 0;
 /** Why each constructed child says its `send()` ended (null = clean end_turn). */
 let mockLastStop: import('../../core/agent.js').SendStop | null = null;
 
@@ -96,6 +101,12 @@ vi.mock('../../core/agent.js', () => ({
     // `mockRecordedToolCalls` and then asserts the value REACHED updateRun.
     this.getRecordedToolCallCount = () => mockRecordedToolCalls;
     this.getLastStop = () => mockLastStop;
+    // By default no ended calls in a mocked child: nothing on its cost line beyond the
+    // snapshot, nothing to take back off the session cap, and no bound for the parent's ceiling. The real booking is pinned in
+    // `spawn-stopped-call-cost.test.ts`, against a real child agent.
+    this.getHelperCostUsd = () => mockHelperCostUsd;
+    this.getStoppedCallSessionCostUsd = () => 0;
+    this.getCapOnlyCostUsd = () => 0;
   }),
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
   // factory mock replaces the whole module, so this export must exist or the
@@ -116,6 +127,13 @@ vi.mock('../../core/agent.js', () => ({
     constructor() {
       super('Run stopped: two truncated turns in a row held only thinking');
       this.name = 'ThinkingOnlyLoopError';
+    }
+  },
+  // As in agent.ts: a run-abort subclass, thrown by the guard on the reply's text.
+  ToolCallImitationError: class ToolCallImitationError extends MockRunAbortedError {
+    constructor() {
+      super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+      this.name = 'ToolCallImitationError';
     }
   },
 }));
@@ -213,6 +231,8 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   ];
   return {
     principal: OWNER_PRINCIPAL,
+    // Required on `IAgent` and called directly by spawn: a parent without a bound of its own.
+    hasRunCostCeiling: () => false,
     name: 'parent',
     model: 'claude-sonnet-4-6',
     memory: null,
@@ -280,6 +300,7 @@ describe('spawn_agent tool', () => {
     mockCostSnapshot = null;
     mockCostSnapshotQueue = null;
     mockRecordedToolCalls = 0;
+    mockHelperCostUsd = 0;
     mockLastStop = null;
     testCounters = {
       httpRequests: 0,
@@ -287,6 +308,18 @@ describe('spawn_agent tool', () => {
       costUSD: 0,
     };
     resetSessionSpawnCost(testCounters);
+  });
+
+  it('a child of a run with a spending bound of its own runs under its share as a run ceiling', async () => {
+    // Kills: a child sent without `runCostCeilingUSD` under a bounded parent (the child would
+    // not count as bounded, and an in-session workflow would start there unseen by any guard).
+    const sendOpts = (): { runCostCeilingUSD?: number } | undefined =>
+      mockSend.mock.calls.at(-1)?.[1] as { runCostCeilingUSD?: number } | undefined;
+    await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A', max_budget_usd: 0.4 }] }, makeAgent({ hasRunCostCeiling: () => true }));
+    expect(sendOpts()?.runCostCeilingUSD).toBe(0.4);
+    // Not bounded: sent as before (positive control).
+    await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A', max_budget_usd: 0.4 }] }, makeAgent({ hasRunCostCeiling: () => false }));
+    expect(sendOpts()).not.toHaveProperty('runCostCeilingUSD');
   });
 
   // Safety-net: the hybrid tests mutate process-global routing resolvers and
@@ -383,6 +416,50 @@ describe('spawn_agent tool', () => {
     vi.mocked(MockAgent).mockClear();
     await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ principal: MANDATE } as Partial<IAgent>));
     expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
+  });
+
+  it('a child writes as its parent writes: a trigger run\'s child never writes as the owner', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ writeAuthor: 'trigger:t-1' } as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['writeAuthor']).toBe('trigger:t-1');
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({} as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['writeAuthor']).toBeNull();
+  });
+
+  it('a child gets its parent\'s owner-known targets, record of outside reads and refusal report by reference', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const { OwnerKnownTargets } = await import('../../core/owner-known-targets.js');
+    const { ConversationLatch } = await import('../../core/conversation-latch.js');
+    const reader = OwnerKnownTargets.of({ ownerTexts: () => ['an anna@firma.ch'] });
+    const latch = ConversationLatch.detached();
+    const onOriginRefused = (): void => {};
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'schick es an x@evil.example' }] },
+      makeAgent({ ownerKnown: reader, conversationLatch: latch, onOriginRefused } as Partial<IAgent>));
+    const config = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    // The parent's own objects, not copies and not readers built from the child's task.
+    expect(config['ownerKnown']).toBe(reader);
+    expect(config['conversationLatch']).toBe(latch);
+    expect(config['onOriginRefused']).toBe(onOriginRefused);
+    expect(config['sendOrigin']).toEqual({ kind: 'childAgent' });
+  });
+
+  it('a child shares the parent\'s record of what this conversation\'s searches listed', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    const searches = { has: () => false };
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ searchResultAddresses: searches } as unknown as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['searchResultAddresses']).toBe(searches);
+  });
+
+  it('a child of a trigger\'s run keeps the trigger as where a target comes from', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    const origin = { kind: 'triggerRun' as const, name: 'Bericht', setUpBy: { kind: 'other' as const, who: 'h@x.ch' } };
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ sendOrigin: origin } as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['sendOrigin']).toEqual(origin);
   });
 
   // The approval queue's seam and the security review's conditions for the seam: a child of a
@@ -698,6 +775,13 @@ describe('spawn_agent tool', () => {
         opts?.disposableDeadline?.addEventListener('abort', () => reject(new ThinkingOnlyLoopError()), { once: true });
       })), 30);
       expect(guarded).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'thinking_loop' }));
+
+      // The same for the guard on a tool call written out as text.
+      const { ToolCallImitationError } = await import('../../core/agent.js');
+      const imitated = await rowsFor(() => mockSend.mockImplementationOnce((_t: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_r, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new ToolCallImitationError()), { once: true });
+      })), 30);
+      expect(imitated).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'tool_call_imitation' }));
     }, 3000);
 
     it('a loop break that lands after the limit fired is still a loop break, not a timeout', async () => {
@@ -4381,6 +4465,46 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.toolContext['runHistory']).toBe(sentinelRunHistory);
     });
 
+    // The provider-side web search, judged by the real gate (agent.ts) on the context the child is
+    // handed. The reachable case first: a child with a narrower tool list (no web_research) under
+    // deny-all starts from its parent's policy.
+    const childContext = async (parentCtx: import('../../core/tool-context.js').ToolContext, tools?: string[]): Promise<{ ctx: import('../../core/tool-context.js').ToolContext; toolNames: string[] }> => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'narrow', task: 'Look something up', ...(tools ? { tools } : {}) }] },
+        makeAgent({ toolContext: parentCtx }),
+      );
+      const arg = vi.mocked(MockAgent).mock.calls[0]![0] as { tools: Array<{ definition: { name: string } }>; toolContext: import('../../core/tool-context.js').ToolContext };
+      return { ctx: arg.toolContext, toolNames: arg.tools.map((t) => t.definition.name) };
+    };
+    const actual = async (): Promise<{ providerSearchAdmitted: typeof import('../../core/agent.js').providerSearchAdmitted; tc: typeof import('../../core/tool-context.js') }> => ({
+      providerSearchAdmitted: (await vi.importActual<typeof import('../../core/agent.js')>('../../core/agent.js')).providerSearchAdmitted,
+      tc: await vi.importActual<typeof import('../../core/tool-context.js')>('../../core/tool-context.js'),
+    });
+
+    it('hands a child with no web_research the parent\'s deny-all, and the gate withholds the search', async () => {
+      const { providerSearchAdmitted, tc } = await actual();
+      const parent = tc.createToolContext({});
+      tc.applyNetworkPolicy(parent, 'deny-all', []);
+      const { ctx, toolNames } = await childContext(parent, ['read_file']);
+      expect(toolNames).not.toContain('web_research');
+      expect(ctx.networkPolicy).toBe('deny-all');
+      expect(providerSearchAdmitted(ctx)).toBe(false);
+    });
+
+    it('keeps the child of a parent with no policy of its own withheld, and the child of an open one offered', async () => {
+      const { providerSearchAdmitted, tc } = await actual();
+      const unread = tc.markPolicyUnread(tc.createToolContext({}));
+      const child = (await childContext(unread)).ctx;
+      expect(child).not.toBe(unread);
+      expect(tc.isPolicyUnread(child)).toBe(true);
+      expect(providerSearchAdmitted(child)).toBe(false);
+      // Control: the same context unmarked (the engine's, no policy) — the child is offered it.
+      const open = (await childContext(tc.createToolContext({}))).ctx;
+      expect(providerSearchAdmitted(open)).toBe(true);
+    });
+
     it('gives the child a SCOPED VIEW of the vault, not the parent store itself', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const parentStore = makeVault({ STRIPE_KEY: 'sk_live', HR_PAYROLL: 'pay' });
@@ -4972,6 +5096,17 @@ describe('spawn_agent tool', () => {
         expect(charged, 'the delegating ceiling sees the whole').toEqual([0.5]);
       });
 
+      it('when it succeeds with an ended call on its cost line: the row adds the estimate, the debit does not', async () => {
+        delegated();
+        mockHelperCostUsd = 0.07;
+        const charged: number[] = [];
+        const { agent, onAfterRun, updateRun } = parent(charged);
+        await spawnAgentTool.handler({ agents: [{ name: 'delegator', task: 'x' }] }, agent);
+        expect((updateRun.mock.calls[0]![1] as { status: string }).status).toBe('completed');
+        expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'own spend plus the estimate').toBeCloseTo(0.27, 12);
+        expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited its own spend only').toEqual([0.2]);
+      });
+
       it('when it fails', async () => {
         delegated();
         mockSend.mockRejectedValueOnce(new Error('child exploded after delegating'));
@@ -5461,8 +5596,9 @@ describe('spawn_agent tool', () => {
     });
 
     it('a child a loop guard stopped is recorded aborted with the guard as the reason and its message as the error', async () => {
-      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } = await import('../../core/agent.js');
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } = await import('../../core/agent.js');
       const cases: Array<[Error, string]> = [
+        [new ToolCallImitationError(), 'tool_call_imitation'],
         [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
         [new ContinuationLoopError('prefix'), 'continuation_loop'],
         [new ThinkingOnlyLoopError(), 'thinking_loop'],
@@ -6131,8 +6267,10 @@ describe('spawn_agent tool', () => {
       expect(payload).not.toBeNull();
       expect(typeof payload).toBe('object');
       const p = payload as WarningPayload;
-      expect(p.message).toContain('DEEP');
-      expect(p.message).toMatch(/Estimated cost/i);
+      expect(p.message).toContain('the Deep tier');
+      // The amount is the model's list-price cost in the budget's own unit ($), named as model cost,
+      // at the end of its sentence.
+      expect(p.message).toMatch(/Estimated model cost for this session: about \$\d+\.\d{2}\./);
       expect(p.tier).toBe('deep');
       expect(p.costUsd).toBeGreaterThan(0);
     });
@@ -6368,7 +6506,7 @@ describe('spawn_agent tool', () => {
         const p = ask({ agents: [{ name: 'a', task: 'x', model: 'deep' }, { name: 'b', task: 'y' }] }, 'claude-opus-4-6') as WarningPayload;
         expect(p.tier).toBe('deep');
         expect(p.downgradeTo).toBeUndefined();
-        expect(p.message).toMatch(/2 children would run/);
+        expect(p.message).toMatch(/2 subtasks would run/);
       });
 
       it('in hybrid routing nothing is inherited, so the pin is not judged', async () => {
@@ -6394,7 +6532,7 @@ describe('spawn_agent tool', () => {
 
       it('through the real guard: the parent\'s config reaches the check', () => {
         const input = { agents: [{ name: 'r', task: 'x' }] };
-        expect(isDangerous('spawn_agent', input, 'guided', spawnAgentTool, undefined, undefined, pinnedTo('claude-opus-4-6'))).toContain('DEEP');
+        expect(isDangerous('spawn_agent', input, 'guided', spawnAgentTool, undefined, undefined, pinnedTo('claude-opus-4-6'))).toContain('the Deep tier');
         // The payload the GO is built from is read on its own path, and must see it too.
         const detailed = isDangerousDetailed('spawn_agent', input, 'guided', spawnAgentTool, undefined, undefined, pinnedTo('claude-opus-4-6'));
         expect(detailed?.payload?.tier).toBe('deep');
@@ -6425,7 +6563,7 @@ describe('spawn_agent tool', () => {
       // autonomous does not gate (the handler clamps instead).
       const guided = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool);
       expect(guided).not.toBeNull();
-      expect(guided).toContain('DEEP');
+      expect(guided).toContain('the Deep tier');
       const autonomous = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'autonomous', spawnAgentTool);
       expect(autonomous).toBeNull();
     });
@@ -6444,7 +6582,7 @@ describe('spawn_agent tool', () => {
       const p = consent({ agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided') as WarningPayload;
       expect(p.downgradeTo).toBe('balanced');
       // Predicate 6: the text must match the buttons offered.
-      expect(p.message).toContain('Run on balanced');
+      expect(p.message).toContain('Run on Balanced');
     });
 
     it('a deep-band profile does NOT offer downgrade (cannot substitute) — mutate canDowngrade → dishonest offer', async () => {
@@ -6528,10 +6666,10 @@ describe('spawn_agent tool', () => {
     it('isDangerousDetailed threads the payload (downgradeTo); isDangerous stays a plain string', () => {
       const signal = isDangerousDetailed('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool);
       expect(signal).not.toBeNull();
-      expect(signal!.warning).toContain('DEEP');
+      expect(signal!.warning).toContain('the Deep tier');
       expect(signal!.payload?.downgradeTo).toBe('balanced');
       // Legacy string view unchanged (287 existing assertions depend on it).
-      expect(isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool)).toContain('DEEP');
+      expect(isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool)).toContain('the Deep tier');
       // A non-destructive danger (bash) carries NO payload — only the declarative
       // gate produces one. Mutate extractDangerPayload to always read and a bash
       // danger would gain a spurious payload.
@@ -6609,7 +6747,7 @@ describe('spawn_agent tool', () => {
 
     it('refuses every name the dialog would clean away to nothing', async () => {
       // `clean()` in the web UI strips control and bidi characters, then trims.
-      for (const name of ['​', '﻿', ' ', ' ', '　', '   ']) {
+      for (const name of ['\u200B', '\uFEFF', ' ', ' ', '　', '   ']) {
         await expect(spawnAgentTool.handler(
           { agents: [{ name, task: 't' }] },
           makeAgent(),
@@ -6768,5 +6906,202 @@ describe('spawn_agent tool', () => {
       expect(result).toContain('unauthorized scope');
       expect(result).not.toContain('note in context:ctx-b');
     });
+  });
+});
+
+describe('spawn_agent holds a batch against the daily and monthly caps', () => {
+  /** Recorded spend of `usd` today, as the run history reports it. */
+  const spentToday = (usd: number): import('../../core/session-budget.js').CostQueryProvider => ({
+    getCostByDay: () => [{ day: new Date().toISOString().slice(0, 10), cost_usd: usd, run_count: 1 }],
+  });
+  const batch = { agents: [{ name: 'a', task: 'A', max_budget_usd: 1 }, { name: 'b', task: 'B', max_budget_usd: 2 }] };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSend.mockResolvedValue('sub-agent result');
+    mockGetRole.mockReturnValue(undefined);
+    mockCostSnapshot = null;
+    mockCostSnapshotQueue = null;
+    testCounters = { httpRequests: 0, writeBytes: 0, costUSD: 0 };
+    resetSessionSpawnCost(testCounters);
+  });
+
+  afterEach(async () => {
+    const { resetPersistentBudget } = await import('../../core/session-budget.js');
+    resetPersistentBudget();
+  });
+
+  /** The refusal's exact text. Throws when the batch was not refused, so no assertion is vacuous. */
+  async function refusalOf(agent: IAgent): Promise<string> {
+    try { await spawnAgentTool.handler(batch, agent); } catch (err: unknown) { return (err as Error).message; }
+    throw new Error('the batch was not refused');
+  }
+
+  /** A parent whose run budget is a REAL guard, so shares and the run's hold are the product's. */
+  function parentOn(guard: CostGuard): IAgent {
+    return makeAgent({
+      hasRunCostCeiling: () => true,
+      getRemainingRunBudgetUSD: () => guard.remainingBudgetUSD(),
+      reserveExternalCost: (usd: number) => guard.reserveExternalCost(usd),
+      releaseExternalCost: (usd: number) => { guard.releaseExternalCost(usd); },
+      chargeExternalCost: (usd: number) => { guard.recordExternalCost(usd); },
+      budgetHeldAgainstCaps: () => guard.budgetHeldAgainstCaps(),
+    });
+  }
+
+  it('refuses a batch on a reached daily cap before the first child, and runs the same batch under it', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(10), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    expect(await refusalOf(makeAgent())).toBe(
+      'Not delegated: the daily budget of $10.00 has $0.00 left, less than one of these sub-agents may spend. '
+      + 'Tell the user that the daily budget leaves no room for this delegation now, and that you cannot change the budget.',
+    );
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(testCounters.costUSD, 'the session counter is not charged for a refused batch').toBe(0);
+    expect(getReservedInFlight()).toBe(0);
+
+    configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    await spawnAgentTool.handler(batch, makeAgent());
+    expect(mockSend).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses with the same sentence when the room is held by work still running, naming neither cause', async () => {
+    const { configurePersistentBudget, reservePersistentBudget } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    expect(reservePersistentBudget(8.5).allowed, 'another run holds $8.50').toBe(true);
+    expect(await refusalOf(makeAgent())).toBe(
+      'Not delegated: the daily budget of $10.00 has $0.50 left, less than one of these sub-agents may spend. '
+      + 'Tell the user that the daily budget leaves no room for this delegation now, and that you cannot change the budget.',
+    );
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('refuses a batch whose children fit one by one but not together, and on a reached monthly cap', async () => {
+    const { configurePersistentBudget } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(8), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    expect(await refusalOf(makeAgent())).toBe(
+      'Not delegated: these sub-agents could together spend up to $3.00, and the daily budget of $10.00 has $2.00 left. '
+      + 'Delegate to fewer sub-agents or give them a lower max_budget_usd, so that together they stay within $2.00.',
+    );
+    configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 100, monthlyCapUSD: 3.5 });
+    await expect(spawnAgentTool.handler(batch, makeAgent())).rejects.toThrow(
+      'the monthly budget of $3.50 has $2.50 left. Delegate to fewer sub-agents',
+    );
+    configurePersistentBudget({ costProvider: spentToday(3.5), dailyCapUSD: 100, monthlyCapUSD: 3.5 });
+    expect(await refusalOf(makeAgent())).toBe(
+      'Not delegated: the monthly budget of $3.50 has $0.00 left, less than one of these sub-agents may spend. '
+      + 'Tell the user that the monthly budget leaves no room for this delegation now, and that you cannot change the budget.',
+    );
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('holds each child\'s cap while the batch runs and gives it all back once it settled', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    const during: number[] = [];
+    mockSend.mockImplementation(async () => { during.push(getReservedInFlight()); return 'ok'; });
+    await spawnAgentTool.handler(batch, makeAgent());
+    expect(during).toHaveLength(2);
+    // While the first child runs, at most both caps are held, and at least the other child's.
+    for (const held of during) expect(held).toBeGreaterThanOrEqual(1);
+    expect(Math.max(...during)).toBe(3);
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('gives each child\'s hold back when that child settles, while its sibling still runs', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    mockSend.mockImplementationOnce(async () => 'a done').mockImplementationOnce(async () => { await gate; return 'b done'; });
+    const run = spawnAgentTool.handler(batch, makeAgent());
+    // a ($1) settled, b ($2) still runs: only b's cap is held.
+    await vi.waitFor(() => { expect(getReservedInFlight()).toBe(2); });
+    release();
+    await run;
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('holds a child of a run with a budget at its share, not at what it asked for', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    const guard = new CostGuard({ maxBudgetUSD: 1.5 }, 'claude-sonnet-4-6');
+    const during: number[] = [];
+    mockSend.mockImplementation(async () => { during.push(getReservedInFlight()); return 'ok'; });
+    await spawnAgentTool.handler(batch, parentOn(guard));
+    // Asked $1 + $2, the run has $1.50: shares $0.50 + $1.00.
+    expect(Math.max(...during)).toBeCloseTo(1.5, 10);
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('holds a child given no budget at the cost of the one turn it still runs', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+    const during: number[] = [];
+    mockSend.mockImplementation(async () => { during.push(getReservedInFlight()); return 'ok'; });
+    await spawnAgentTool.handler({ agents: [{ name: 'z', task: 'Z', max_budget_usd: 0 }] }, makeAgent());
+    expect(during).toHaveLength(1);
+    expect(during[0]).toBeGreaterThan(0);
+  });
+
+  describe('a background run whose budget the admission already holds', () => {
+    /** The admission's reservation of `usd`, and a run guard bounded by `maxUSD` that may carry it. */
+    async function runOn(capUSD: number, spent: number, maxUSD: number, carry: 'hold' | 'none' | 'lookalike' | 'released'): Promise<IAgent> {
+      const { configurePersistentBudget, reservePersistentBudget, releaseReservation } = await import('../../core/session-budget.js');
+      configurePersistentBudget({ costProvider: spentToday(spent), dailyCapUSD: capUSD, monthlyCapUSD: 500 });
+      const hold = reservePersistentBudget(maxUSD);
+      expect(hold.allowed, 'positive control: the admission held the run').toBe(true);
+      // Given back, and the room taken by another run: the object it still carries holds nothing.
+      if (carry === 'released') { releaseReservation(hold); expect(reservePersistentBudget(maxUSD).allowed).toBe(true); }
+      const heldAgainstCaps = carry === 'hold' || carry === 'released' ? hold
+        : carry === 'lookalike' ? { allowed: true, reservedUSD: maxUSD } : undefined;
+      return parentOn(new CostGuard({ maxBudgetUSD: maxUSD, heldAgainstCaps }, 'claude-sonnet-4-6'));
+    }
+
+    it('fans out with the whole headroom held for the run, without holding the batch twice', async () => {
+      // $10 cap, nothing spent, the run holds all $10: a second hold of the shares cannot fit.
+      const agent = await runOn(10, 0, 10, 'hold');
+      await spawnAgentTool.handler(batch, agent);
+      expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+
+    it('still holds the batch for a run without that reservation, a look-alike of it, or one given back', async () => {
+      for (const carry of ['none', 'lookalike', 'released'] as const) {
+        mockSend.mockClear();
+        const { resetPersistentBudget } = await import('../../core/session-budget.js');
+        resetPersistentBudget();
+        const agent = await runOn(10, 0, 10, carry);
+        await expect(spawnAgentTool.handler(batch, agent), carry).rejects.toThrow(/^Not delegated: /);
+        expect(mockSend, carry).not.toHaveBeenCalled();
+      }
+    });
+
+    it('does not count a reservation smaller than the run\'s budget as holding it', async () => {
+      const { configurePersistentBudget, reservePersistentBudget } = await import('../../core/session-budget.js');
+      configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+      const hold = reservePersistentBudget(1);
+      expect(new CostGuard({ maxBudgetUSD: 5, heldAgainstCaps: hold }, 'claude-sonnet-4-6').budgetHeldAgainstCaps()).toBe(false);
+      expect(new CostGuard({ maxBudgetUSD: 1, heldAgainstCaps: hold }, 'claude-sonnet-4-6').budgetHeldAgainstCaps()).toBe(true);
+    });
+  });
+
+  it('gives the hold back when a child throws, when it is stopped, and when dispatch throws', async () => {
+    const { configurePersistentBudget, getReservedInFlight } = await import('../../core/session-budget.js');
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10, monthlyCapUSD: 500 });
+
+    mockSend.mockRejectedValue(new Error('child failed'));
+    await spawnAgentTool.handler(batch, makeAgent()).catch(() => undefined);
+    expect(mockSend, 'positive control: the children ran').toHaveBeenCalledTimes(2);
+    expect(getReservedInFlight(), 'after a child threw').toBe(0);
+
+    mockSend.mockRejectedValue(new RunAbortedError('stopped'));
+    await spawnAgentTool.handler(batch, makeAgent()).catch(() => undefined);
+    expect(getReservedInFlight(), 'after a child was stopped').toBe(0);
+
+    mockSend.mockClear();
+    const onStream = vi.fn().mockRejectedValue(new Error('stream closed'));
+    await expect(spawnAgentTool.handler(batch, makeAgent({ onStream }))).rejects.toThrow('stream closed');
+    expect(mockSend, 'dispatch threw before any child').not.toHaveBeenCalled();
+    expect(getReservedInFlight(), 'after dispatch threw').toBe(0);
   });
 });

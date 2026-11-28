@@ -1,13 +1,22 @@
 import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
+import { workflowStampState } from '../../core/workflow-stamp.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
-import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
+import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
-import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
-import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
+import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, isPaused, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
+import { lastRunResultFor } from '../../core/member-connection-notes.js';
+import { noticeLanguage } from '../../core/notice-language.js';
+import { WORKER_NOTICES } from '../../core/worker-notices.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type BeforeTriggerWrite } from '../../core/task-manager.js';
+import { readAddressWrites } from '../../core/outbound-write.js';
+import { carriesAddress, hostTargets } from '../../core/send-target.js';
+import type { HostPolicyContext } from '../../core/network-guard.js';
+import { extractSecretRefNames } from '../../core/secret-store.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -111,11 +120,15 @@ export function triggerDetailLine(t: {
   next_run_at?: string | undefined;
   status?: string | undefined;
   paused_at?: number | undefined;
-}): string {
+  paused_for?: string | null | undefined;
+},
+// Reads the workflow of a completed plan that keeps its pause, to say whether its takeover comes
+// first (`pausedDoneWorkflow`). Without it the sentence names the condition instead.
+reader?: PausedDoneWorkflowReader | null): string {
   const parts: string[] = [];
-  // A paused plan says so first; it has no next run until it is taken over (`plan-pause.ts`).
+  // A paused plan says so first; it has no next run while it is paused (`plan-pause.ts`).
   const paused = isPaused(t);
-  if (paused) parts.push(`PAUSED — ${PAUSED_MODEL_TEXT}`);
+  if (paused) parts.push(`PAUSED — ${pausedModelText(t, reader)}`);
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
   // 1, so `=== 0` is the test, not falsiness. A todo has no such field at all.
   if (t.enabled === 0) parts.push('SCHEDULE OFF — it will not fire');
@@ -150,7 +163,14 @@ export function triggerDetailLine(t: {
     // as another field — two workflow attributions on one line, at the moment
     // the reader is deciding which workflow a repair must preserve. It costs a
     // middle dot in a provider's prose and removes the ambiguity entirely.
-    const raw = clean(t.last_run_result ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
+    // A stop that paused the plan stored "paused until the owner takes it over". That half holds only
+    // while the plan is paused and open: taken over or with the switch off it is not paused, and
+    // completed it has no takeover (`pausedModelText`). Otherwise the stored sentence is read without
+    // it; the stored value stays, the takeover reads it (`scheduleOf`, `stopResults` in `takeover-core.ts`).
+    const stored = (!paused || t.status === 'completed') && t.last_run_result === ACCESS_ENDED_PAUSED_RESULT
+      ? ACCESS_ENDED_RESULT
+      : t.last_run_result;
+    const raw = clean(stored ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
     const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
     parts.push(`last run ${ENDED_LABEL.get(t.last_run_status ?? '') ?? 'FAILED'}${when}: ${reason}`);
     // …and whether that failure was the last word. `last run FAILED` alone does
@@ -220,17 +240,25 @@ export function triggerDetailLine(t: {
   return parts.length === 0 ? '' : `\n    ↳ ${parts.join(FIELD_SEPARATOR)}`;
 }
 
+/** What a completed paused plan's line reads its workflow's case with (`pausedDoneWorkflow`). */
+function doneReader(agent: IAgent): PausedDoneWorkflowReader | null {
+  return pausedDoneReaderOf(agent.toolContext.runHistory, agent.toolContext.mandateEnds);
+}
+
 // Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
 function formatTaskLine(
-  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined },
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_member_notes?: readonly string[] | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined; paused_for?: string | null | undefined },
   // Callers used to append their own suffix to the RESULT of this function.
   // That was harmless while the result was one line; with a detail line it put
   // "— next run: …" underneath "workflow <id>", where it reads as a property of
   // the workflow. The suffix belongs on the head line, so it is passed in
   // rather than concatenated on.
+  reader: TaskReader,
   suffix = '',
+  // Reads the workflow of a completed plan that keeps its pause (`triggerDetailLine`).
+  workflowReader?: PausedDoneWorkflowReader | null,
 ): string {
   // Title, assignee, scope and due date as stored, without the characters that render as nothing
   // (`hidden-text.ts`): the model's write tools refuse them, but a plan saved before, or through
@@ -239,7 +267,24 @@ function formatTaskLine(
   const due = t.due_date ? ` — due ${stripHidden(t.due_date)}` : '';
   const assign = t.assignee ? ` @${stripHidden(t.assignee)}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine(t)}`;
+  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates()) }, workflowReader)}`;
+}
+
+/**
+ * Who reads a task line: the owner reads a last run's member-connection lines under its result;
+ * anyone else, for a run that has them, the fixed sentence in its place (`lastRunResultFor`).
+ */
+interface TaskReader {
+  readonly owner: () => boolean;
+  readonly forMandates: () => string;
+}
+
+/** Asked only for a row whose last run has lines. */
+function taskReaderOf(agent: IAgent): TaskReader {
+  return {
+    owner: () => isOwnerPrincipal(agent.principal),
+    forMandates: () => WORKER_NOTICES[agent.noticeLanguage ?? noticeLanguage(undefined)].memberEndForMandates,
+  };
 }
 
 // Catches an LLM output failure mode where the model emits an escaped close-quote
@@ -266,6 +311,27 @@ function detectEmbeddedParams(field: string, value: string | undefined): string 
 }
 
 /**
+ * What a turn had taken in, recorded on a trigger instruction it creates or rewrites. The
+ * instruction is the model's text, and it can carry what the conversation took in: a turn in a
+ * thread someone the owner let in started, or one whose conversation read outside content
+ * earlier (the latch, also after a compaction summarized the read away), counts as taken in from
+ * the conversation, so it never counts as the owner's own instruction.
+ */
+function instructionTakenIn(agent: IAgent): UntrustedCause {
+  const turnCause = describeTurnUntrusted(agent);
+  return turnCause === 'none'
+    && (agent.sendOrigin?.kind === 'helperThread' || agent.conversationLatch?.isSet() === true)
+    ? 'conversation'
+    : turnCause;
+}
+
+/** The tag a write under the owner's principal records when the owner did not write the turn: the
+ *  run's own (`trigger:<id>`, `workflow:<id>`), or the unknown run's tag, never the owner's. */
+function runTagOf(agent: IAgent): string {
+  return isRunTag(agent.writeAuthor) ? agent.writeAuthor! : UNKNOWN_RUN_TAG;
+}
+
+/**
  * The sentence a reported row owes the reader when the scheduler will NOT run it
  * yet.
  *
@@ -280,18 +346,82 @@ function detectEmbeddedParams(field: string, value: string | undefined): string 
  * (its consent sits on the workflow), and an edit that changes what a trigger
  * runs clears the stamp, so the update path needs it too.
  */
-function pendingConsent(task: object): string {
+function pendingConsent(task: object, byOwner: boolean): string {
   // Takes the union both creators return (a TODO has neither field) and reads
   // the two fields the gate reads. Narrowed here rather than cast per call site:
   // a caller that has to shape its argument is a caller that can shape it wrong.
-  const row = task as { effect?: unknown; confirmed_at?: unknown };
-  return row.effect === 'run_agent' && !row.confirmed_at
-    ? ' — it runs once you confirm it in Triggers.'
-    : '';
+  const row = task as { effect?: unknown; confirmed_at?: string | undefined; created_by?: string | undefined; edited_by?: string | undefined };
+  // Held back: an agent run nobody confirmed (`getDue`), or any row a mandate created or last
+  // changed that the owner has not stamped, whatever its effect (`mandateNeedsOwnerStamp`, the
+  // test the worker applies).
+  const held = (row.effect === 'run_agent' && !row.confirmed_at) || ('effect' in row && mandateNeedsOwnerStamp(row));
+  if (!held) return '';
+  // Only the owner confirms (`POST /api/tasks/:id/confirm`): a mandate's session is told who does,
+  // so it does not ask the person it works for to confirm what they cannot.
+  return byOwner
+    ? ' — it runs once you confirm it under Automation › Triggers.'
+    : ' — it runs only after the owner of this lynox confirms it under Automation › Triggers. The person in this chat has delegated access and cannot confirm it: tell them the owner has to.';
+}
+
+/**
+ * What a created row's report ends with: the consent it waits for, which names where it stands,
+ * or else where the web UI lists it. The place is read off the row the store returned, not off
+ * the branch that made it: a to-do assigned to lynox becomes a trigger (`createsTrigger`), and
+ * only a trigger carries `effect`. The Automation hub lists triggers under Triggers
+ * (`GET /api/triggers`) and to-dos under Tasks (`GET /api/tasks`).
+ */
+function createdNote(task: object, byOwner: boolean): string {
+  const consent = pendingConsent(task, byOwner);
+  if (consent !== '') return consent;
+  return `. It is listed under Automation › ${'effect' in task ? 'Triggers' : 'Tasks'}.`;
+}
+
+/**
+ * The page a `task_create` call sets up a watch on, or `null`: the handler takes `workflow_id`
+ * first, then `schedule`, and only then `watch_url`, so a call with one of those creates no watch.
+ */
+function watchedUrl(input: TaskCreateInput): string | null {
+  if (input.workflow_id || input.schedule) return null;
+  return input.watch_url ? input.watch_url : null;
+}
+
+/**
+ * Why no watch is created on `url`, as the call's error, or `null`. A watch only reads its page,
+ * unattended and again and again: an address a server may run as a write (`?_method=DELETE`, a
+ * GraphQL mutation) would send that write on every check, and a page the network policy forbids
+ * is not watched only to fail on every poll.
+ */
+function watchRefusal(url: string, ctx: HostPolicyContext): string | null {
+  if (readAddressWrites(url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
+  const refusedBy = watchPolicyRefusal(url, ctx);
+  if (refusedBy !== null) return `Error: watch_url not watched: ${refusedBy.why} No watch was created.${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`;
+  return null;
 }
 
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   undo: 'compensatable',
+  // After content from outside, the page a watch reads goes through the origin check as a read: the
+  // model chose its address, and once the owner confirms the watch under Automation → Triggers the
+  // worker reads it unattended and again and again, so data in its path or host name would leave on
+  // every check. It is checked like `http_request`'s GET, once, when the watch is created; its
+  // question says how often the page is read, and that the yes does not confirm the watch
+  // (`watchEveryMinutes`). A page a search listed needs no question (`readAddress`).
+  // A watch the handler would refuse (`watchRefusal`) is refused before that question: a yes to
+  // it could not create the watch. An address with a `secret:` reference is left to the handler,
+  // which checks it with the reference resolved.
+  refusesUnasked: (input, ctx) => {
+    const url = watchedUrl(input);
+    return url === null || extractSecretRefNames(url).length > 0 ? null : watchRefusal(url, ctx);
+  },
+  sendTargetsWhenLatched: (input) => {
+    const url = watchedUrl(input);
+    return url === null ? null : hostTargets(url);
+  },
+  readCarriesAddress: (input) => {
+    const url = watchedUrl(input);
+    return url !== null && carriesAddress(url);
+  },
+  readAddress: (input) => watchedUrl(input),
   definition: {
     name: 'task_create',
     description: 'Create a task for a concrete deliverable with a deadline or assignee. Not for general notes (use memory_store with status namespace). Only create tasks when the user requests it or a clear action item emerges.',
@@ -391,6 +521,12 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     }
 
     try {
+      // What the turn had taken in, on every trigger it files, not only a workflow one: the
+      // reminder to confirm it says so (worker-loop `consentOneBody`), and what its run files for
+      // approval counts as after outside content (`executeStandard` → `afterUntrusted`). Only a
+      // workflow run is also seeded tainted (`executePipeline`); a run_agent run is not. Also what
+      // the conversation took in (`instructionTakenIn`).
+      const createdUntrusted = instructionTakenIn(agent);
       const baseParams = {
         title: input.title,
         description: input.description,
@@ -403,9 +539,17 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         parentTaskId: input.parent_task_id,
         // A mandate's turn writes under the mandate's name, so what it schedules waits for the
         // owner's stamp exactly as it does when created over HTTP (PRD customer-granted-operator-
-        // access §3.12, H2). The owner's turns leave it absent, as before.
-        ...(isOwnerPrincipal(agent.principal) ? {} : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
+        // access §3.12, H2). A turn the owner typed records the owner; any other turn under the
+        // owner's principal (a trigger's or a workflow's run) records the run's tag, which never
+        // reads as the owner's and keeps the trigger apart from one from before creators were
+        // recorded, the only kind "Confirm recipients" takes (`recipientsConfirmable`).
+        ...(isOwnerPrincipal(agent.principal)
+          ? { createdBy: agent.writeAuthor === principalTag(OWNER_PRINCIPAL) ? principalTag(OWNER_PRINCIPAL) : runTagOf(agent) }
+          : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
+        ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
       };
+      // Whose session reads the report: only the owner confirms a held-back row.
+      const byOwner = isOwnerPrincipal(agent.principal);
 
       if (input.workflow_id) {
         // The tool param is `workflow_id`; the TaskManager + DB column remain
@@ -465,6 +609,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           if (refusal !== null) return `Error: workflow ${planned?.id ?? input.workflow_id}: ${refusal}`;
         }
         if (planned) {
+          const stampState = agent.toolContext.runHistory?.workflowStampState(planned) ?? workflowStampState(null, planned, undefined);
           const unschedulable = !isSchedulableWorkflow(planned)
             ? `is '${planned.mode}' and may ask for something other than an answer from its owner; a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user. Remove its ask_secret / ask_human steps before scheduling it.`
             : planned.template !== true
@@ -474,12 +619,15 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
               // owner saw them (an old template carries one from its content migration).
               : planned.mode === 'interactive'
                 ? 'asks its owner while it runs. Ask the user to schedule it from the workflow library: its confirmation names the steps that ask, and it creates the task. Do not create it here.'
-              : !planned.confirmedAt
+              // The owner's stamp is bound to the steps (`workflow-stamp.ts`): one over other steps,
+              // or a workflow someone the owner let in shaped, waits for the owner to review it.
+              : stampState === 'awaits_owner_stamp'
+                ? 'waits for its owner to review its steps: they were set up or changed by someone the owner let in, or changed after the owner stamped them. Ask the user to review its steps under Automation → Workflows and stamp them; then schedule it there. Do not create the task here.'
+              : stampState === 'unconfirmed'
                 ? 'has not been confirmed for unattended runs, so a task for it would be disabled at its first run. Ask the user to schedule it from the workflow library: that confirms it and creates the task. Do not create it again here.'
                 : null;
           if (unschedulable !== null) return `Error: workflow ${planned.id} ${unschedulable}`;
         }
-        const createdUntrusted = describeTurnUntrusted(agent);
         const plannedId = planned?.id;
         const workflowId = input.workflow_id;
         return withInstanceWrite(agent, { site: 'task_create#workflow', kind: 'create', store: 'tasks', target: () => [['type', 'workflow'], ['workflow', plannedId]], main: ['create'] }, (w) => {
@@ -489,14 +637,13 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             pipelineId: plannedId ?? workflowId,
             scheduleCron: input.schedule,
             ...(pipelineParams !== undefined ? { pipelineParams } : {}),
-            // The run this task starts has no session of its own; it inherits what this one
-            // had taken in, so a step's durable write carries the trust it would carry here.
-            ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
+            // `createdUntrusted` rides in `baseParams`: the run this task starts has no session of
+            // its own, it inherits what this one had taken in.
           }), ifReturned);
           w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
           const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
-          return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${pendingConsent(task)}`)}`;
+          return `Workflow task created: ${formatTaskLine(task, taskReaderOf(agent), `${nextRun}${scheduleInfo}${createdNote(task, byOwner)}`)}`;
         });
       }
 
@@ -509,11 +656,15 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           }), ifReturned);
           w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-          return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${pendingConsent(task)}`)}`;
+          return `Scheduled task created: ${formatTaskLine(task, taskReaderOf(agent), `${nextRun}${createdNote(task, byOwner)}`)}`;
         });
       }
 
       if (input.watch_url) {
+        // Read before anyone is asked too (`refusesUnasked`), but on the address as the model wrote
+        // it: checked here again with `secret:` references resolved.
+        const refused = watchRefusal(input.watch_url, agent.toolContext);
+        if (refused !== null) return refused;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);
@@ -525,7 +676,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             watchIntervalMinutes: intervalMinutes,
           }), ifReturned);
           w.created('create', task.id);
-          return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`)}`;
+          return `Watch task created: ${formatTaskLine(task, taskReaderOf(agent), ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${createdNote(task, byOwner)}`)}`;
         });
       }
 
@@ -536,7 +687,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         return withInstanceWrite(agent, { site: 'task_create#one-shot', kind: 'create', store: 'tasks', target: () => [['type', 'one-shot']], main: ['create'] }, (w) => {
           const task = w.run('create', () => managerRef.create({ ...baseParams, nextRunAt: input.run_at }), ifReturned);
           w.created('create', task.id);
-          return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
+          return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, taskReaderOf(agent), createdNote(task, byOwner))}`;
         });
       }
 
@@ -545,7 +696,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       return withInstanceWrite(agent, { site: 'task_create#todo', kind: 'create', store: 'tasks', target: () => [['type', 'todo']], main: ['create'] }, (w) => {
         const task = w.run('create', () => managerRef.create(baseParams), ifReturned);
         w.created('create', task.id);
-        return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
+        return `Created: ${formatTaskLine(task, taskReaderOf(agent), createdNote(task, byOwner))}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_create', e);
@@ -615,18 +766,21 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         }
       }
       // A mandate's change of a schedule — any field, the schedule, completion — takes the
-      // owner's stamp off it, the rule the HTTP routes apply (`_markMandateEdit`), so a stamped
-      // schedule stops until the owner stamps it again (PRD §3.12 point 3, H2). Resolved under
-      // the same scope as the write below, and before it: the mark must land on the trigger
-      // the write changes. A TODO is not a trigger and carries no mark: a mandate changes only a
-      // to-do of its own, which `complete` and `update` check on the row they resolve, as the
-      // HTTP routes do.
+      // owner's stamp off it, the rule the HTTP routes apply, so a stamped schedule stops until
+      // the owner stamps it again (PRD §3.12 point 3, H2). The manager calls the mark with the
+      // trigger it is about to write, after its own checks and before the write: the mark lands
+      // on the trigger the write changes, and a change it refuses (an invalid cron or status,
+      // fields a trigger does not carry) leaves the owner's stamp where it was. A TODO is not a
+      // trigger and carries no mark: a mandate changes only a to-do of its own, which `complete`
+      // and `update` check on the row they resolve, as the HTTP routes do.
       // A paused plan (`plan-pause.ts`) changes only by its takeover: a mandate changes nothing on
       // it, and the owner may complete it but not edit it. Before the mark, so a refusal marks nothing.
       const pausedTarget = managerRef.getTrigger(input.task_id, scopeFilter);
       if (pausedTarget !== undefined && isPaused(pausedTarget)
         && !(isOwnerPrincipal(agent.principal) && input.status === 'completed')) {
-        return `Error: this plan is ${PAUSED_MODEL_TEXT}. It cannot be changed until then.`;
+        return pausedTarget.status === 'completed'
+          ? pausedDoneUpdateRefusal(pausedDoneWorkflow(pausedTarget, doneReader(agent)))
+          : `Error: this plan is ${pausedModelText(pausedTarget)}. It cannot be changed until then.`;
       }
       return withInstanceWrite(agent, {
         site: 'task_update#change', kind: 'change', store: 'tasks',
@@ -634,14 +788,21 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         target: () => [['task', managerRef.getTrigger(input.task_id, scopeFilter)?.id]],
         main: ['apply'],
       }, (w) => {
-        if (!isOwnerPrincipal(agent.principal)) {
-          const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
-          if (trigger) w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue);
-        }
+        // A mandate's change marks the trigger with its principal; a change under the owner's
+        // principal but not the owner's own turn (a trigger's or a workflow's run) that rewrites the
+        // instruction (its title or description) marks it with the run's tag, an unknown author as
+        // such, never as the owner. A change that leaves the instruction as it is (its status, its
+        // schedule) keeps it the owner's. Either mark is set only once the write has passed its
+        // checks (`BeforeTriggerWrite`), so a refused change marks nothing.
+        const mark: BeforeTriggerWrite | undefined = !isOwnerPrincipal(agent.principal)
+          ? (trigger) => { w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue); }
+          : agent.writeAuthor !== principalTag(OWNER_PRINCIPAL) && (input.title !== undefined || input.description !== undefined)
+            ? (trigger) => { w.run('mark', () => managerRef.markEditedByRun(trigger.id, runTagOf(agent)), ifTrue); }
+            : undefined;
         if (input.status === 'completed') {
-          const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal), ifNonNull);
+          const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal, mark), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
-          return `Task completed: ${formatTaskLine(task)}`;
+          return `Task completed: ${formatTaskLine(task, taskReaderOf(agent), '', doneReader(agent))}`;
         }
 
         const task = w.run('apply', () => managerRef.update(input.task_id, {
@@ -654,8 +815,15 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
           tags: input.tags,
           nextRunAt: input.run_at,
           scheduleCron: input.schedule,
-        }, scopeFilter, agent.principal), ifNonNull);
+          // A trigger's instruction rewritten here carries what this turn had taken in, as one
+          // created here does (`instructionTakenIn`, the same rule); the manager records it only
+          // with a title or description change.
+          untrusted: instructionTakenIn(agent),
+        }, scopeFilter, agent.principal, mark), ifNonNull);
         if (!task) return `Task not found: ${input.task_id}`;
+        // A run's earlier rewrite keeps its tag after a later change in the owner's own turn: a
+        // change of the title or of part of the description leaves the run's words in place, and
+        // nothing here can tell which. Only a trigger the owner sets up anew counts as theirs.
         // Surface the new schedule when it changed so the agent can confirm
         // the reschedule landed (mirrors the create path's "scheduled for …"
         // string, which the LLM is already trained to read back).
@@ -669,10 +837,12 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         // An edit can re-open consent: changing what a trigger RUNS clears the stamp
         // (`trigger-store.ts`), so the row just edited may be held back again — and
         // this report is the only place that says so.
-        return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task)}`)}`;
+        return `Task updated: ${formatTaskLine(task, taskReaderOf(agent), `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);
+      // A plan's missing fields: the model also reads what it can change instead (U-284).
+      if (e instanceof TriggerFieldsNotCarriedError) return `Error: ${e.forModel}`;
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
     }
   },
@@ -711,19 +881,19 @@ export const taskListTool: ToolEntry<TaskListInput> = {
         // Use the history directly for overdue
         const overdue = managerRef.getWeekSummary(scopes).overdue;
         if (overdue.length === 0) return 'No overdue tasks.';
-        return overdue.map(t => formatTaskLine(t)).join('\n');
+        return overdue.map(t => formatTaskLine(t, taskReaderOf(agent), '', doneReader(agent))).join('\n');
       }
       if (input.due === 'today') {
         const summary = managerRef.getWeekSummary(scopes);
         const tasks = [...summary.overdue, ...summary.dueToday];
         if (tasks.length === 0) return 'No tasks due today (and none overdue).';
-        return tasks.map(t => formatTaskLine(t)).join('\n');
+        return tasks.map(t => formatTaskLine(t, taskReaderOf(agent), '', doneReader(agent))).join('\n');
       }
       if (input.due === 'week') {
         const summary = managerRef.getWeekSummary(scopes);
         const tasks = [...summary.overdue, ...summary.dueToday, ...summary.dueThisWeek];
         if (tasks.length === 0) return 'No tasks due this week.';
-        return tasks.map(t => formatTaskLine(t)).join('\n');
+        return tasks.map(t => formatTaskLine(t, taskReaderOf(agent), '', doneReader(agent))).join('\n');
       }
     }
 
@@ -767,7 +937,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     const limited = tasks.slice(0, input.limit ?? 20);
     if (limited.length === 0) return 'No tasks found.';
 
-    const lines = limited.map(t => formatTaskLine(t));
+    const lines = limited.map(t => formatTaskLine(t, taskReaderOf(agent), '', doneReader(agent)));
     if (tasks.length > limited.length) {
       lines.push(`... and ${tasks.length - limited.length} more`);
     }

@@ -4,6 +4,7 @@ import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/ind
 import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
+import { LLM_CATALOG } from './llm/catalog.js';
 import { isPresetClientSecretName } from './oauth-presets.js';
 import { ENV_REGISTRY } from '../contract/env-registry.js';
 
@@ -354,6 +355,251 @@ export function withoutTypedCredentials(text: string): string {
 }
 
 /**
+ * What a mandate's helper is told when a message or an answer they typed reads as carrying a key
+ * (`mandateCredentialInput`). Fixed: it names no part of what they typed, and nothing of it is
+ * kept. The web UI shows its own wording by the code `mandate_key_input` (`chat.mandate_key_input`,
+ * or `…_returned` when it put the text back into the message field); this is its English
+ * variant without the text put back, for any other client.
+ */
+// One literal, not joined: the web UI's wording test finds it verbatim in this file (ux U-150).
+export const MANDATE_KEY_INPUT_REFUSAL = 'Your input was not sent because it contains something that looks like a key, token or password. lynox does not take any in this chat. Only the owner of this instance stores keys, in a chat of their own; ask the owner to store it there. If it was not a key, send your input again without the part that looks like one.';
+
+/** Thrown where a mandate's typed answer reads as carrying a key; nothing of it was stored. */
+export class MandateKeyInputError extends Error {
+  constructor() { super(MANDATE_KEY_INPUT_REFUSAL); this.name = 'MandateKeyInputError'; }
+}
+
+/** The shapes that mark a credential by their context (a bearer header, user:pass in a URL). */
+const CONTEXT_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = SECRET_SHAPES
+  .filter((s) => s.kind === 'contextual')
+  .map((s) => ({ label: s.label, pattern: s.pattern as RegExp }));
+
+/**
+ * The label of the first of `shapes` found in `text`. A shape that cannot match without `://` is
+ * skipped when the text holds none: unanchored, the credential-in-URL rule looks back up to 32
+ * characters from every position, which cost most of a second on a few megabytes of base64 — a
+ * text that has no `://` at all, so the skip changes no answer.
+ */
+function firstShapeIn(text: string, shapes: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }>): string | null {
+  const hasScheme = text.includes('://');
+  for (const { label, pattern } of shapes) {
+    if (!hasScheme && pattern.source.includes(':\\/\\/')) continue;
+    if (pattern.test(text)) return label;
+  }
+  return null;
+}
+
+/** A private key's BEGIN line, as `SECRET_SHAPES` reads it (no global flag, so `test` keeps no state). */
+const KEY_BLOCK_HEAD = /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/;
+
+/** A word a person writes before a credential's value, German or English. */
+const CREDENTIAL_CUE = /(?<![\p{L}\p{N}])(?:api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret|secret|token|key|schlüssel|passwor[dt]|kennwort|zugangsdaten|credentials?)(?![\p{L}\p{N}])/giu;
+const PASSWORD_CUE = /^(?:passwor[dt]|kennwort)$/i;
+const PASSWORD_LINK = /^(?:ist|lautet|heisst|heißt|is|=)$/i;
+/** How many words after a cue are read: on the cue's own line, or on the next line when a colon
+ *  or an equals sign ends the cue's line ("Der Key:\n<key>"). */
+const CUE_WINDOW = 4;
+
+/**
+ * Keys a helper of a small business is likely to paste whose form the run route's mask does not
+ * know, each with a prefix or a fixed layout that ordinary text does not have.
+ */
+const MANDATE_EXTRA_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = [
+  { label: 'HubSpot private app token', pattern: /(?<![\w-])pat-(?:na|eu|ap)\d-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\w-])/i },
+  { label: 'WooCommerce key', pattern: /(?<!\w)c[ks]_[0-9a-f]{40}(?!\w)/ },
+  { label: 'Mailchimp API key', pattern: /(?<![\w.-])[0-9a-f]{32}-us\d{1,2}(?![\w.-])/ },
+  { label: 'SendGrid API key', pattern: /(?<![\w.])SG\.[\w-]{20,24}\.[\w-]{40,46}(?![\w-])/ },
+  { label: 'Twilio API key', pattern: /(?<!\w)SK[0-9a-f]{32}(?!\w)/ },
+];
+
+/** A Stripe object's id (payment, customer, charge …), which is no secret: never a key on its own.
+ *  The whole word in Stripe's form, so a vendor's key with a short prefix of its own is not let through. */
+const NON_SECRET_ID = /^(?:pi|pm|cus|ch|prod|price|sub|evt|acct|txn|seti)_[A-Za-z0-9]{14,30}$/;
+
+function entropyBits(s: string): number {
+  const freq = new Map<string, number>();
+  for (const ch of s) freq.set(ch, (freq.get(ch) ?? 0) + 1);
+  let bits = 0;
+  for (const n of freq.values()) { const p = n / s.length; bits -= p * Math.log2(p); }
+  return bits;
+}
+
+function charClasses(s: string): number {
+  return [/[A-Z]/, /[a-z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(s)).length;
+}
+
+/**
+ * How often neighbouring characters change class (upper, lower, digit), per character. A random
+ * key changes class at about every second character; a word joined with a number or a camel-case
+ * name (`Rechnung2024November05Final`, `meinshop2024Zuerich`) at a quarter or fewer.
+ */
+function classChangeRate(run: string): number {
+  const cls = (c: string): number => (/[A-Z]/.test(c) ? 0 : /[a-z]/.test(c) ? 1 : 2);
+  let changes = 0;
+  for (let i = 1; i < run.length; i++) if (cls(run[i]!) !== cls(run[i - 1]!)) changes++;
+  return run.length > 1 ? changes / (run.length - 1) : 0;
+}
+
+/** A vault or env name (`SHOPIFY_ADMIN_TOKEN`), a link or an address names a credential; it is not one. */
+function isNameOrLink(tok: string): boolean {
+  return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok);
+}
+
+/** Every character a hex digit, in lower case: a key drawn from sixteen symbols. */
+const HEX_ONLY = /^[0-9a-f]+$/;
+
+/**
+ * How spread a key's characters must be. A key drawn from sixteen symbols spreads less than one
+ * drawn from letters and digits: at 3.3 bits, 1.8 % of random 32-character hex keys fell short.
+ */
+const KEY_SPREAD_BITS = 3.3;
+const HEX_KEY_SPREAD_BITS = 2.5;
+
+/** How often two capitals stand side by side: a random key's letters do so at one pair in four,
+ *  a camel-case name (`vaultKeyForAccount`) only at an acronym. */
+function capitalPairs(tok: string): number {
+  return (tok.match(/(?=[A-Z]{2})/g) ?? []).length;
+}
+
+/**
+ * Long enough, spread: a key's value. Letters and digits; or letters alone, changing case as
+ * often as a random key and with capitals side by side at least twice, since one key in sixty of
+ * 24 random letters and digits holds no digit. Most camel-case names have their capitals apart;
+ * one with capitals side by side twice (three in a row, as AIM in `getOpenAIModelMap`, or two
+ * acronyms apart) reads as a key.
+ */
+function keyShaped(tok: string): boolean {
+  if (isNameOrLink(tok) || tok.length < 16) return false;
+  if (/[A-Za-z]/.test(tok) && /[0-9]/.test(tok)) {
+    return entropyBits(tok) >= (HEX_ONLY.test(tok) ? HEX_KEY_SPREAD_BITS : KEY_SPREAD_BITS);
+  }
+  return /^[A-Za-z]+$/.test(tok) && capitalPairs(tok) >= 2
+    && classChangeRate(tok) >= 0.35 && entropyBits(tok) >= KEY_SPREAD_BITS;
+}
+
+/** A password's value: eight or more characters in three classes. */
+function passwordShaped(tok: string): boolean {
+  return !isNameOrLink(tok) && tok.length >= 8 && charClasses(tok) >= 3;
+}
+
+/**
+ * The words after `from`, at most `CUE_WINDOW`, quotes, markdown emphasis and leading and trailing
+ * punctuation stripped: those on the same line, or, when a colon or an equals sign and nothing
+ * else follows the cue on its line, those on the next line that holds any.
+ */
+function wordsAfter(text: string, from: number): string[] {
+  const rest = text.slice(from);
+  const lines = rest.split('\n');
+  const own = lines[0]!;
+  const line = /^[*_\s]*[:=][*_\s]*$/.test(own) ? (lines.slice(1).find((l) => l.trim().length > 0) ?? '') : own;
+  return line.split(/[\s"'`„“”]+/)
+    .map((w) => w.replace(/^[*_:=(<[]+|[*_.,;:!?)>\]]+$/g, ''))
+    .filter((w) => w.length > 0)
+    .slice(0, CUE_WINDOW);
+}
+
+/**
+ * Why a message a mandate's helper typed reads as carrying a credential, or `null` when it does
+ * not. Wider than `maskCredentialInput`, which the run route applies to every message: in a
+ * mandate's turn no key is taken at all, so a key without a vendor's prefix is caught as well,
+ * from its context. In order:
+ *   1. a vendor shape or a JWT (`maskCredentialInput`), a private key block, and the further vendor
+ *      shapes in `MANDATE_EXTRA_SHAPES`;
+ *   2. a bearer header or user:pass in a URL;
+ *   3. a cue word (key, token, secret …) followed, within the next four words on its line (or on
+ *      the next line, when a colon ends the cue's line), by a key-shaped word; a password cue
+ *      (Passwort, Kennwort, password, not as the first part of a compound such as
+ *      "Passwort-Manager") followed by a password- or key-shaped word that is the next word or
+ *      comes after one linking word;
+ *   4. a message that is one word (a code fence around it allowed), at least 20 characters, with an
+ *      unbroken letter-and-digit run of 16 or more holding upper case, lower case and digits that
+ *      change class as often as a random key does, and that is not a Stripe object's id — a key
+ *      pasted on its own. A random-looking id pasted alone, such as a Google Drive file id, reads
+ *      as one too; a link to it does not.
+ * Returns a fixed label, never any part of the text.
+ */
+export function mandateCredentialInput(text: string): string | null {
+  return mandateCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? mandateCredentialIn(separatorsAsSpaces(text)) : null);
+}
+
+/** The characters `stripUntrustedSeparators` (sanitize.ts) replaces with a space; the second reading is
+ *  needed only when one is there. `separatorsAsSpaces` is that function as one native replace — the
+ *  character loop cost over a second on a document of a few megabytes. Pinned equal to it over every
+ *  code point by `mandate-credential-input.test.ts`. */
+const UNTRUSTED_SEPARATOR = '[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f\\u2028\\u2029]';
+const HAS_UNTRUSTED_SEPARATOR = new RegExp(UNTRUSTED_SEPARATOR);
+const UNTRUSTED_SEPARATORS = new RegExp(UNTRUSTED_SEPARATOR, 'g');
+export function separatorsAsSpaces(text: string): string {
+  return text.replace(UNTRUSTED_SEPARATORS, ' ');
+}
+
+/**
+ * Both credential checks read a text twice: as it came, and as the engine stores and sends it on —
+ * `stripUntrustedSeparators` turns a control character or an exotic line separator into a space,
+ * and that can complete a form the raw text broke (`Bearer\u0001<token>` becomes `Bearer <token>`).
+ */
+function mandateCredentialIn(text: string): string | null {
+  const shaped = maskCredentialInput(text).labels[0];
+  if (shaped !== undefined) return shaped;
+  const formed = firstShapeIn(text, [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]);
+  if (formed !== null) return formed;
+  for (const cue of text.matchAll(CREDENTIAL_CUE)) {
+    const end = (cue.index ?? 0) + cue[0].length;
+    const words = wordsAfter(text, end);
+    if (PASSWORD_CUE.test(cue[0])) {
+      // "Passwort-Manager", "Kennwort-Hinweis": a compound word, not a password cue. Only here — a
+      // key cue joined by a hyphen ("Token-Wert: <key>", "key-<key>") still counts.
+      if (text[end] === '-') continue;
+      // A password is short and word-like: it counts only where it is plainly the value (the next
+      // word, or after one linking word).
+      const plain = PASSWORD_LINK.test(words[0] ?? '') ? words[1] : words[0];
+      if (plain !== undefined && (passwordShaped(plain) || keyShaped(plain))) return 'password';
+      continue;
+    }
+    if (words.some(keyShaped)) return 'credential after a cue word';
+  }
+  const lone = text.trim().replace(/^```[\w-]*\s*/, '').replace(/\s*```$/, '');
+  if (
+    !/\s/.test(lone) && lone.length >= 20 && !isNameOrLink(lone) && !/^sha(?:256|384|512)-/.test(lone)
+    && !NON_SECRET_ID.test(lone)
+    && (lone.match(/[A-Za-z0-9]{16,}/g) ?? []).some((run) =>
+      /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run) && classChangeRate(run) >= 0.35)
+  ) return 'credential on its own';
+  return null;
+}
+
+/**
+ * Whether a document a mandate's helper uploads holds a credential, read by its form alone: a vendor's
+ * key, a JWT or a private key block (`maskCredentialInput`), a key of the forms only a helper is
+ * likely to paste (`MANDATE_EXTRA_SHAPES`), a bearer header or user:pass in a URL. Not the cue words
+ * and not the one-word rule of `mandateCredentialInput`: a document says "Schlüssel" or "Key" and
+ * carries long reference numbers as a matter of course, and a key with no prefix in one is not
+ * covered. Returns a fixed label, never any part of the text.
+ */
+export function mandateDocumentCredential(text: string): string | null {
+  return documentCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? joinedBySpaceIn(separatorsAsSpaces(text)) : null);
+}
+
+/**
+ * What only the second reading of a document can find: the forms with a space inside them (a bearer
+ * header, a private key's BEGIN line), which a control character in place of the space hid from the
+ * first. A vendor's key, a JWT or a helper's key form has no space in it, so a space the second
+ * reading puts in can split one, never join one.
+ */
+function joinedBySpaceIn(text: string): string | null {
+  if (KEY_BLOCK_HEAD.test(text)) return 'private key';
+  return firstShapeIn(text, CONTEXT_SHAPES);
+}
+
+function documentCredentialIn(text: string): string | null {
+  const shaped = maskCredentialInput(text).labels[0];
+  if (shaped !== undefined) return shaped;
+  const formed = firstShapeIn(text, [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]);
+  if (formed !== null) return formed;
+  return null;
+}
+
+/**
  * Mask known SHAPES and known VALUES in one pass, over the ORIGINAL text.
  *
  * Running the two maskers in sequence is unsafe in BOTH orders, and that is
@@ -372,6 +618,72 @@ export function withoutTypedCredentials(text: string): string {
  * exact pass could not hide a shape. It does not: a value of four characters or
  * fewer becomes `***` (today every value under 16), so `xx ab yy` grows by one.)
  */
+/** Shortest JSON-blob leaf the export masker hides on its own: below it a leaf is a label, not a credential. */
+const EXPORT_MASK_LEAF_MIN = 12;
+/** The shortest form the export's byte scan of non-text files looks for. */
+export const EXPORT_SCAN_MIN = 8;
+
+/**
+ * The values the data export masks, derived from the stored ones. A secret is not only written
+ * down whole: an OAuth or app-password secret is a JSON blob whose refresh token can appear on its
+ * own, and any value can appear JSON-escaped (once or twice: a tool result inside a JSON column),
+ * base64-encoded or URL-encoded. Each stored value contributes itself, the string leaves of its
+ * JSON (at least `EXPORT_MASK_LEAF_MIN` characters), and those forms of each. Named remainder:
+ * base64 is matched only at the alignment it starts on, and other encodings are not derived.
+ */
+/** Shortest value whose base64 is also derived at a shifted offset: below it the run is too short to tell. */
+const EXPORT_SHIFT_MIN = 12;
+
+/**
+ * The base64 characters a value's bytes decide alone when `k` (0, 1, 2) other bytes come before it
+ * and an unknown number after it: the full groups of the padded buffer, without the first group
+ * when something precedes the value (it mixes in those bytes) and without the trailing partial group.
+ */
+export function shiftedBase64(bytes: Buffer): string[] {
+  const out: string[] = [];
+  for (let k = 0; k < 3; k++) {
+    const enc = Buffer.concat([Buffer.alloc(k), bytes]).toString('base64');
+    const start = k === 0 ? 0 : 4;
+    const end = Math.floor((k + bytes.length) / 3) * 4;
+    if (end - start >= 8) out.push(enc.slice(start, end));
+  }
+  return out;
+}
+
+export function exportMaskValues(values: readonly string[]): string[] {
+  const out = new Set<string>();
+  const leaves = (v: unknown, into: string[]): void => {
+    if (typeof v === 'string') { if (v.length >= EXPORT_MASK_LEAF_MIN) into.push(v); return; }
+    if (Array.isArray(v)) { for (const x of v) leaves(x, into); return; }
+    if (v !== null && typeof v === 'object') for (const x of Object.values(v as Record<string, unknown>)) leaves(x, into);
+  };
+  for (const value of values) {
+    if (value.length < 2) continue;
+    const base = [value];
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed !== null && typeof parsed === 'object') leaves(parsed, base);
+    } catch { /* not JSON: the value alone */ }
+    for (const c of base) {
+      out.add(c);
+      const once = JSON.stringify(c).slice(1, -1);
+      out.add(once);
+      out.add(JSON.stringify(once).slice(1, -1));
+      out.add(Buffer.from(c, 'utf8').toString('base64'));
+      out.add(Buffer.from(c, 'utf8').toString('base64url'));
+      out.add(encodeURIComponent(c));
+      // base64 of a value inside a longer text (`user:` + a password in Basic auth) does not start
+      // on the value's own alignment and does not end on it: for each of the three offsets, the
+      // run of full groups that only the value's bytes decide.
+      if (c.length >= EXPORT_SHIFT_MIN) for (const shifted of shiftedBase64(Buffer.from(c, 'utf8'))) {
+        out.add(shifted);
+        out.add(shifted.replace(/\+/g, '-').replace(/\//g, '_'));
+      }
+    }
+  }
+  return [...out];
+}
+
 export function maskSecretsAndPatterns(
   text: string,
   values: readonly string[],
@@ -379,7 +691,7 @@ export function maskSecretsAndPatterns(
 ): string {
   // `suffix`: whether this span alone could show its last four. A merged span shows them only
   // if every span in it could, since the union's last four may belong to a short one.
-  const spans: Array<{ start: number; end: number; suffix: boolean }> = [];
+  const spans: MaskSpan[] = [];
 
   const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
   for (const pattern of patterns) {
@@ -389,6 +701,17 @@ export function maskSecretsAndPatterns(
     }
   }
 
+  // A loop, not a spread: a long text can hold more matches than a call takes arguments.
+  for (const span of valueSpans(text, values)) spans.push(span);
+  return maskSpans(text, spans);
+}
+
+/** A stretch of a text to mask, and whether its mask may show its last four characters. */
+interface MaskSpan { start: number; end: number; suffix: boolean }
+
+/** Every occurrence of every value in `text`, as spans over the text as given. */
+function valueSpans(text: string, values: readonly string[]): MaskSpan[] {
+  const spans: MaskSpan[] = [];
   for (const value of values) {
     // Single characters would match everywhere; the store applies the same floor.
     if (value.length < 2) continue;
@@ -397,14 +720,23 @@ export function maskSecretsAndPatterns(
       const at = text.indexOf(value, from);
       if (at === -1) break;
       spans.push({ start: at, end: at + value.length, suffix: value.length >= MASK_SUFFIX_MIN_LENGTH });
-      from = at + value.length;
+      // One step on, not past the match: a value that overlaps itself (`XYZXYZ` in `XYZXYZXYZ`)
+      // is found again, and the merge joins the spans.
+      from = at + 1;
     }
   }
+  return spans;
+}
 
+/**
+ * Mask `spans` of `text`, all found over the text as given: overlapping and touching spans merge
+ * into one mask first, so two values that overlap leave no part of either in clear.
+ */
+function maskSpans(text: string, spans: MaskSpan[]): string {
   if (spans.length === 0) return text;
 
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: Array<{ start: number; end: number; suffix: boolean }> = [];
+  const merged: MaskSpan[] = [];
   for (const span of spans) {
     const last = merged[merged.length - 1];
     // `<=`, not `<`: touching spans merge into one mask. That is presentation, because the
@@ -421,7 +753,9 @@ export function maskSecretsAndPatterns(
   for (const span of merged) {
     out += text.slice(cursor, span.start);
     const matched = text.slice(span.start, span.end);
-    out += span.suffix ? maskValue(matched) : '***';
+    const mask = span.suffix ? maskValue(matched) : '***';
+    // A value made of the mask's own characters (`***`) would stand in its own mask.
+    out += mask.includes(matched) ? '[redacted]' : mask;
     cursor = span.end;
   }
   return out + text.slice(cursor);
@@ -461,12 +795,77 @@ const MIN_ENV_SECRET_LENGTH = 8;
  */
 function engineEnvSecretValues(): string[] {
   const values: string[] = [];
+  const add = (value: string | undefined): void => {
+    if (value && value.length >= MIN_ENV_SECRET_LENGTH) values.push(value);
+  };
   for (const row of ENV_REGISTRY) {
     if (!row.secret || ENV_SECRETS_NOT_MASKED.has(row.name)) continue;
     const value = process.env[row.name];
-    if (value && value.length >= MIN_ENV_SECRET_LENGTH) values.push(value);
+    add(value);
+    // A JSON value is masked whole, and a credential inside it on its own as well: a run can
+    // print one key of the object without the rest.
+    if (row.valueKind === 'json' && value) for (const leaf of credentialLeavesOfJson(value)) add(leaf);
   }
+  // Provider keys a self-hosted engine reads from its environment by slot name, which the
+  // registry does not list (they are the owner's, not the platform's).
+  for (const name of [...PROVIDER_KEY_SLOTS, ...ENV_PROVIDER_KEYS_OUTSIDE_SLOTS]) {
+    if (!OPTIONAL_CREDENTIAL_SLOTS.has(name)) add(process.env[name]);
+  }
+  for (const value of processSecrets) add(value);
   return values;
+}
+
+/**
+ * Slots of local servers that take a key without needing one (`credential_optional`): operators
+ * set a placeholder there (`lm-studio`, `not-needed`), and masking it would hide the word, and
+ * refuse every text holding it, wherever it appears.
+ */
+const OPTIONAL_CREDENTIAL_SLOTS: ReadonlySet<string> = new Set(
+  LLM_CATALOG.filter((e) => e.credential_optional === true && typeof e.vault_slot === 'string').map((e) => e.vault_slot as string),
+);
+
+/** Environment keys an engine reads as provider credentials beside {@link PROVIDER_KEY_SLOTS}. */
+const ENV_PROVIDER_KEYS_OUTSIDE_SLOTS: readonly string[] = Object.freeze(['LYNOX_INBOX_MISTRAL_API_KEY']);
+
+/** A property name under which a JSON env value keeps a credential. */
+const CREDENTIAL_PROPERTY = /key|secret|token|password|credential/i;
+
+/**
+ * The string values of `json` held under a credential-named property ({@link CREDENTIAL_PROPERTY}),
+ * at any depth. Only those: a model id or a base URL in the same object is no secret, and masking
+ * it would hide it in every text that names it. Not JSON: none.
+ */
+function credentialLeavesOfJson(json: string): string[] {
+  let parsed: unknown;
+  try { parsed = JSON.parse(json); } catch { return []; }
+  const out: string[] = [];
+  // The top level's property names are names the operator chose (a profile, a tier) and decide
+  // nothing: a profile named `monkey` or `token-saver` must not make its model id and base URL
+  // credentials. Below it, a credential-named property makes everything under it one, nested
+  // objects and arrays included.
+  const walk = (v: unknown, underCredential: boolean, topLevel: boolean): void => {
+    if (typeof v === 'string') { if (underCredential) out.push(v); return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, underCredential, topLevel); return; }
+    if (v !== null && typeof v === 'object') {
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+        walk(x, underCredential || (!topLevel && CREDENTIAL_PROPERTY.test(k)), false);
+      }
+    }
+  };
+  walk(parsed, false, true);
+  return out;
+}
+
+/**
+ * Credentials the process holds that come from neither the environment nor the vault (the web
+ * push private key, read from its own file). Mask-only, like the env values: registered once by
+ * the code that loads them, never listed or resolved.
+ */
+const processSecrets = new Set<string>();
+
+/** Mask `value` wherever the engine's own env secrets are masked. */
+export function registerProcessSecret(value: string): void {
+  if (value.length >= MIN_ENV_SECRET_LENGTH) processSecrets.add(value);
 }
 
 /**
@@ -540,29 +939,12 @@ function maskMatch(match: string): string {
 }
 
 /**
- * Replace every value in `values` that occurs in `text` with its mask. Longest first: a
- * shorter value inside a longer one would otherwise be replaced first, and the rest of the
- * longer one would no longer match and stay in clear.
+ * Replace every value in `values` that occurs in `text` with its mask. Every occurrence is found
+ * over the text as given and the spans merge ({@link maskSpans}): a value inside or overlapping
+ * another is masked together with it, and no rest of either stays in clear.
  */
 function maskValuesIn(text: string, values: readonly string[]): string {
-  let result = text;
-  for (const value of [...values].sort((a, b) => b.length - a.length)) {
-    if (value.length < 2) continue;
-    let masked = maskValue(value);
-    // Guard against a degenerate mask that CONTAINS the raw value (a value made
-    // of the mask's own '*' chars, like "***" → "***"): it
-    // would both loop forever below AND leak the secret through its own
-    // replacement. Fall back to a fixed token that cannot embed the value.
-    if (masked.includes(value)) masked = '[redacted]';
-    // Single global pass — split+join replaces every (non-overlapping)
-    // occurrence at once (literal replacement, no regex special-char issues).
-    // The previous `while (result.includes(...))` loop re-scanned the output
-    // and hung whenever the mask re-introduced the pattern.
-    if (result.includes(value)) {
-      result = result.split(value).join(masked);
-    }
-  }
-  return result;
+  return maskSpans(text, valueSpans(text, values));
 }
 
 export class SecretStore implements SecretStoreLike {
@@ -674,9 +1056,10 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
-   * A check every {@link resolve} asks before it hands a value out, set by the engine once the
-   * stores it reads exist (`connectionTokenAllowed`: a token of a connection whose mandate has
-   * ended). A guard that throws withholds the value.
+   * A check every {@link resolve} asks before it hands a value out, set by the engine as soon as
+   * this store exists (`Engine.resolveGuard`: a token of a connection whose mandate has ended, and,
+   * while the API profiles are not known, every vault name that could hold one). A guard that
+   * throws withholds the value.
    */
   private resolveGuard: ((name: string) => boolean) | null = null;
 
@@ -699,7 +1082,12 @@ export class SecretStore implements SecretStoreLike {
     return secret === undefined || secret.value === '' ? '' : hash(secret.value);
   }
 
-  resolve(name: string): string | null {
+  /**
+   * The value {@link resolve} would hand out for `name`, or `null`: stored, not expired, consented
+   * to, and let through by the resolve guard. The one place these four questions are asked, so
+   * {@link resolve} and {@link holds} cannot drift apart.
+   */
+  private usableValue(name: string): string | null {
     const secret = this.secrets.get(name);
     if (!secret) return null;
     if (this.isExpired(name)) return null;
@@ -711,9 +1099,23 @@ export class SecretStore implements SecretStoreLike {
         return null;
       }
     }
-
-    channels.secretAccess.publish({ name, action: 'resolve' });
     return secret.value;
+  }
+
+  resolve(name: string): string | null {
+    const value = this.usableValue(name);
+    if (value === null) return null;
+    channels.secretAccess.publish({ name, action: 'resolve' });
+    return value;
+  }
+
+  /**
+   * Whether {@link resolve} would hand out a value for `name`, without reading it out: nothing is
+   * returned and no `secretAccess` event is published, so a check that only asks "is it there?"
+   * does not read in the audit trail as a credential read.
+   */
+  holds(name: string): boolean {
+    return this.usableValue(name) !== null;
   }
 
   listNames(): string[] {
@@ -811,6 +1213,31 @@ export class SecretStore implements SecretStoreLike {
 
   maskSecrets(text: string): string {
     return maskValuesIn(text, this._maskedValues());
+  }
+
+  /**
+   * The data export's masker: {@link maskAll} over the stored values AND the forms they take once
+   * written down elsewhere ({@link exportMaskValues}). The values never leave this object.
+   */
+  maskForExport(text: string): string {
+    return maskSecretsAndPatterns(text, exportMaskValues(this._maskedValues()));
+  }
+
+  /**
+   * The data export's guard for file bytes: masks text with {@link maskForExport}, and says
+   * whether raw bytes hold any of the export's forms of a stored value. Built once per export;
+   * the values stay inside the closure, never in what it returns.
+   */
+  exportGuard(): { mask: (text: string) => string; holds: (bytes: Buffer) => boolean; readonly maxNeedle: number } {
+    const values = exportMaskValues(this._maskedValues());
+    // Shorter forms would occur by chance in almost any binary file and withhold it: the scan
+    // looks for forms of at least EXPORT_SCAN_MIN characters (a named remainder below that).
+    const needles = values.filter(v => v.length >= EXPORT_SCAN_MIN).map(v => Buffer.from(v, 'utf8'));
+    return {
+      mask: (text) => maskSecretsAndPatterns(text, values),
+      holds: (bytes) => needles.some(n => bytes.includes(n)),
+      maxNeedle: needles.reduce((m, n) => Math.max(m, n.length), 0),
+    };
   }
 
   recordConsent(name: string): void {

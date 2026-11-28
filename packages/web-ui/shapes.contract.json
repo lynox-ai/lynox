@@ -38,7 +38,7 @@
       "source": "src/lib/components/ChatView.svelte",
       "evidence": {
         "classes": [
-          "rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
+          "rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.held || msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
         ]
       },
       "preview": {
@@ -97,7 +97,7 @@
       "source": "src/lib/components/ChatView.svelte",
       "evidence": {
         "classes": [
-          "ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}"
+          "ml-auto md:ml-1 text-[11px] md:text-[10px] text-success"
         ]
       },
       "preview": {
@@ -246,7 +246,7 @@
       "and the guard counted components + primitives in one bucket, so it could never fail on",
       "the sentence it existed to protect. It is five components and one primitive."
     ],
-    "components": 87,
+    "components": 99,
     "primitives": 2,
     "buttonComponent": false,
     "scopedStyleComponents": 5,

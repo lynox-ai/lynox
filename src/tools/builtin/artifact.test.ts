@@ -12,8 +12,8 @@ import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from '../../core/artifac
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 // Minimal agent — the artifact tools only read agent.toolContext.artifactStore.
-function makeAgent(store: ArtifactStore | null): IAgent {
-  return { principal: OWNER_PRINCIPAL, toolContext: { artifactStore: store } } as unknown as IAgent;
+function makeAgent(store: ArtifactStore | null, currentThreadId?: string, originThreadId?: string): IAgent {
+  return { principal: OWNER_PRINCIPAL, toolContext: { artifactStore: store }, ...(currentThreadId ? { currentThreadId } : {}), ...(originThreadId ? { originThreadId } : {}) } as unknown as IAgent;
 }
 
 describe('artifact history/restore tool handlers', () => {
@@ -132,6 +132,16 @@ describe('artifact_save refuses the eviction placeholder as content', () => {
         .rejects.toThrow(/artifact_save refused/);
     }
     expect(store.list().length).toBe(before);
+  });
+
+  it('the refusal names the placeholder and does not claim a saved document', async () => {
+    // The refusal says what the content is, never that a document was saved: for the old in-field
+    // form, the file may hold no document at all.
+    const { forms } = await placeholdersFor(DOCUMENT);
+    const err = await artifactSaveTool.handler({ title: 'Pitch v3', content: forms[0]![1] }, makeAgent(store)).then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toContain("artifact_save refused: `content` contains the engine's placeholder (");
+    expect(err?.message).toContain('in place of text it took out of an earlier call; a copy of it is not a document.');
+    expect(err?.message).not.toMatch(/already saved|a saved document/);
   });
 
   it('either form under a heading is refused too', async () => {
@@ -301,5 +311,59 @@ describe('the version path in the restore refusal is one read_file reads', () =>
       clearTenantWorkspace();
       rmSync(ws, { recursive: true, force: true });
     }
+  });
+});
+
+describe('artifact_save records the chat that made the artifact (row 1072)', () => {
+  let dir: string;
+  let store: ArtifactStore;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'artifact-thread-')); store = new ArtifactStore(dir); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const idOf = (out: string): string => {
+    const id = store.list().map(a => a.id).find(i => out.includes(i));
+    if (!id) throw new Error(`no artifact id in: ${out}`);
+    return id;
+  };
+
+  it('a new artifact lists the running chat\'s thread id, and an edit from another chat keeps it', async () => {
+    const created = await artifactSaveTool.handler({ title: 'Plan', content: 'first draft of the plan' }, makeAgent(store, 'thread-a'));
+    const id = idOf(created);
+    expect(store.list().find(a => a.id === id)?.threadId).toBe('thread-a');
+
+    await artifactSaveTool.handler({ id, title: 'Plan', content: 'second draft of the plan' }, makeAgent(store, 'thread-b'));
+    const after = store.list().find(a => a.id === id);
+    expect(after?.version).toBe(2);
+    expect(after?.threadId).toBe('thread-a');
+  });
+
+  it('a spawn_agent child or workflow step, which has no thread of its own, records the chat it runs for', async () => {
+    const id = idOf(await artifactSaveTool.handler({ title: 'From a helper', content: 'made by a subagent' }, makeAgent(store, undefined, 'thread-parent')));
+    expect(store.list().find(a => a.id === id)?.threadId).toBe('thread-parent');
+  });
+
+  it('an artifact saved outside a chat stays without one', async () => {
+    const id = idOf(await artifactSaveTool.handler({ title: 'Loose', content: 'no chat around this one' }, makeAgent(store)));
+    expect(store.list().find(a => a.id === id)?.threadId).toBe('');
+  });
+});
+
+describe('artifact_save: the model learns that remote images do not load in an html artifact', () => {
+  // The artifact policy allows images only from data: and blob: URLs, in the chat, the gallery and
+  // the downloaded copy. `detailedGuidance` reaches the model only after its first call of the tool,
+  // so the rule must also be in the definition the model sees before it writes the first artifact.
+  it('says so in the schema, next to the html content, before the first call', () => {
+    const props = artifactSaveTool.definition.input_schema.properties as Record<string, { description: string }>;
+    expect(props['content']!.description).toContain(
+      'full HTML (for type html; images only as inline SVG or data: URLs, remote image URLs do not load)',
+    );
+  });
+
+  it('gives the full rule, the ways around it and what to tell the user in the guidance on use', () => {
+    expect(artifactSaveTool.detailedGuidance).toContain(
+      'Images from other web addresses do not load in an html artifact — not in the chat, the gallery or a downloaded copy. '
+      + 'Draw them as inline SVG, embed them as a data: URL, or leave them out; if the user asked for a specific image such as their logo, '
+      + 'tell them in your reply that it cannot be shown from its web address.',
+    );
   });
 });

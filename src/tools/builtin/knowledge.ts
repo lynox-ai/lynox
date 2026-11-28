@@ -8,6 +8,8 @@ import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { pv } from '../../core/prompt-value.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import { MEMORY_DIALOG } from '../dialog-text.js';
 import { canSupersede } from '../../core/provenance.js';
 import { chatThreadOf, privateThreadRefusal } from './private-thread.js';
 import { containedRefusal } from '../../core/containment.js';
@@ -76,12 +78,18 @@ export const rememberTool: ToolEntry<RememberInput> = {
       'structured/quantitative data (use data_store_insert). Also NOT for instructions about the job you are doing now ' +
       '(what this text, run or batch must contain or leave out, its length, its keywords), even when phrased as binding: ' +
       'they describe the task, not the business. Record such a rule only when the operator says it applies from now on. ' +
+      'Also NOT for what you wrote in a draft the operator asked for (a newsletter, a product or SEO text, a post, an about-us page): ' +
+      'what the draft says about the business, its products, its range or its history is yours, not a fact, and so is the ' +
+      'draft text. A fact the operator states about the business is still a fact when it comes with the order ' +
+      '("we only sell to businesses"): record it. What they want this text to say word for word stays an instruction ' +
+      'about the job, even when it reads like a fact. A detail of the draft they left to you ("decide yourself") is ' +
+      'yours, not confirmed. Keep a draft text only when the operator asks you to. ' +
       'Record a durable fact before you finish the turn.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
       properties: {
-        text: { type: 'string', description: 'The durable fact / decision / preference, in one clear sentence.' },
+        text: { type: 'string', description: 'The durable fact / decision / preference, in one clear sentence, written in the language the operator writes in, also when it comes from a mail, page or file in another language. State the rule itself or name the business; do not call the person "the operator" or "the user".' },
         subject: {
           type: 'string',
           description: 'The client, company, or project this is about, by name. Links the entry to that subject. Omit only for a global preference about the operator themselves.',
@@ -384,11 +392,14 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
           ? `${clip(input.old_text, 240)} → ${clip(input.new_text, 240)}`
           : clip(input.new_text, 500))
       : clip(input.old_text ?? '', 500);
-    const answer = await agent.promptUser(
-      pv`Edit the ${input.block} block (${input.mode}${preview ? pv`: "${preview}"` : ''})? This block loads into every future turn. This is reversible by editing it again.`,
-      ['Apply', 'Cancel'],
-    );
-    if (answer !== 'Apply') return `Cancelled — the ${input.block} block is unchanged.`;
+    const said = MEMORY_DIALOG[agent.dialogLanguage ?? 'en'];
+    // Only the `apply` key edits; the label in any language, or typed text, does not.
+    const consent = decideConsent('apply', await agent.promptUser(
+      MEMORY_DIALOG[agent.dialogLanguage ?? 'en'].editBlock(input.block, input.mode, preview ? said.blockPreview(preview) : pv``),
+      consentOptions('apply'),
+      consentMeta('apply'),
+    ));
+    if (consent !== 'apply') return consentRefusal(consent, `Cancelled — the ${input.block} block is unchanged.`);
     // Again after the dialog: it can stay open for a long time, and private mode may have been
     // switched on meanwhile.
     const privateAfterDialog = containedRefusal(agent) ?? privateThreadRefusal(agent);
@@ -469,12 +480,15 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
       return `Refused: this entry is recorded at a higher trust level (${entry.sourceType}) than I can retire. Retire it yourself in the memory view if it is genuinely wrong.`;
     }
 
-    const reason = input.reason ? ` Reason: ${clip(input.reason)}.` : '';
-    const answer = await agent.promptUser(
-      pv`Retire this memory entry? "${clip(entry.text)}"${reason} It stays on record as superseded and stops surfacing. This needs a new \`remember\` if a corrected fact should replace it.`,
-      ['Retire', 'Cancel'],
-    );
-    if (answer !== 'Retire') return 'Cancelled — the entry stays active.';
+    const said = MEMORY_DIALOG[agent.dialogLanguage ?? 'en'];
+    const reason = input.reason ? said.retireReason(clip(input.reason)) : pv``;
+    // Only the `retire` key retires; the label in any language, or typed text, does not.
+    const consent = decideConsent('retire', await agent.promptUser(
+      MEMORY_DIALOG[agent.dialogLanguage ?? 'en'].retire(clip(entry.text), reason),
+      consentOptions('retire'),
+      consentMeta('retire'),
+    ));
+    if (consent !== 'retire') return consentRefusal(consent, 'Cancelled — the entry stays active.');
 
     try {
       // The store re-checks the same gate — the pre-prompt check above is for the

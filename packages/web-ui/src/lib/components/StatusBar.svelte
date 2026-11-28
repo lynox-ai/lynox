@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { formatCost } from '../format.js';
+	import { formatUsdIn } from '../format.js';
+	import { bootStoreLineKeys, bootStoresOf } from '../boot-store-notice.js';
 	import { parseActiveRuns, countLiveRuns } from '../utils/active-runs.js';
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
-	import { getAuthError } from '../stores/chat.svelte.js';
+	import { getAuthError, RUN_ENDED_EVENT } from '../stores/chat.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled, toggleAutoSpeak } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from '../stores/voice-autosend.svelte.js';
@@ -50,6 +51,8 @@
 	// No vault key over stores that already hold encrypted values. The engine puts this on the
 	// providers poll for the owner only; a mandate's response never carries it, so it sees nothing.
 	let vaultKey = $state<'missing_over_encrypted_data' | 'unknown' | null>(null);
+	// A boot store that did not open, the same way: owner only, from the providers poll.
+	let bootStoreKeys = $state<string[][]>([]);
 	// Tooltip text for the API-status pill — surfaces "Last run failed" (or
 	// equivalent provider description) so the user knows WHY the dot is red
 	// without having to open the status panel. Falls back to the provider
@@ -60,7 +63,17 @@
 	// (WorkerLoop background tasks). Kept separate so the bar never conflates a
 	// streaming chat run with a scheduled task. Only shown when > 0.
 	let liveRuns = $state(0);
-	let todayCost = $state(0);
+	/** Today's cost as the cost endpoint last said it; null while unknown (not read yet, or the read
+	 *  failed). A zero is shown only when the endpoint said zero, never for "do not know". */
+	let todayCost = $state<number | null>(null);
+	/** A known amount, a real zero included, with its number in the page's language (DE "0,0076 $"). */
+	function todayCostAmount(cost: number): string {
+		return formatUsdIn(cost, getLocale() === 'de' ? 'de' : 'en');
+	}
+	/** The footer's figure: the period named with it, a real zero as zero (EN `$0.00`, DE `0,00 $`); `-` alone while unknown. */
+	const todayCostShown = $derived(todayCost === null ? '-' : `${t('status.today')} ${todayCostAmount(todayCost)}`);
+	/** What a screen reader says for the cost: the visible text, or, while unknown, that it is unknown (a bare "-" is not spoken). */
+	const todayCostSpoken = $derived(todayCost === null ? t('status.today_cost_unknown') : todayCostShown);
 	let todayRuns = $state(0);
 	let panelOpen = $state(false);
 
@@ -95,7 +108,14 @@
 		return t('status.api_unknown');
 	}
 
+	// Polls overlap (a run's end polls between two timed ones), and the five requests of one can
+	// take longer than those of the next. Only the latest poll writes, so an older answer that
+	// arrives last cannot put back a value from before the run. Checked after every await.
+	let pollSeq = 0;
+
 	async function poll() {
+		const seq = ++pollSeq;
+		const stale = (): boolean => seq !== pollSeq;
 		try {
 			const [healthRes, tasksRes, dailyRes, providersRes, runsRes] = await Promise.all([
 				fetch(`${getApiBase()}/health`).catch(() => null),
@@ -104,11 +124,13 @@
 				fetch(`${getApiBase()}/providers/status`).catch(() => null),
 				fetch(`${getApiBase()}/runs/active`).catch(() => null),
 			]);
+			if (stale()) return;
 
 			engineOk = healthRes?.ok ?? false;
 			if (healthRes?.ok) {
 				try {
 					const data = (await healthRes.json()) as { version?: unknown; build_sha?: unknown };
+					if (stale()) return;
 					if (typeof data.version === 'string' && data.version.length > 0) {
 						engineVersion = data.version;
 						const sha = typeof data.build_sha === 'string' ? data.build_sha : '';
@@ -118,9 +140,11 @@
 			}
 
 			if (providersRes?.ok) {
-				const data = (await providersRes.json()) as { providers: ProviderEntry[]; vault_key?: unknown };
+				const data = (await providersRes.json()) as { providers: ProviderEntry[]; vault_key?: unknown; boot_stores_missing?: unknown; boot_stores_alerted?: unknown; boot_store_memory_old?: unknown };
+				if (stale()) return;
 				providers = Array.isArray(data.providers) ? data.providers : [];
 				vaultKey = data.vault_key === 'missing_over_encrypted_data' || data.vault_key === 'unknown' ? data.vault_key : null;
+				bootStoreKeys = bootStoreLineKeys(bootStoresOf(data.boot_stores_missing), data.boot_stores_alerted === true, data.boot_store_memory_old === true);
 				const primary = providers[0];
 				// Name ALL configured providers, not just the primary — in a hybrid
 				// tier setup (e.g. balanced=Mistral, deep=Anthropic) the footer must
@@ -181,21 +205,30 @@
 
 			if (tasksRes?.ok) {
 				const data = (await tasksRes.json()) as { tasks: unknown[] };
+				if (stale()) return;
 				activeTasks = data.tasks.length;
 			}
 
 			if (runsRes?.ok) {
 				// Shared parser with the nav dot (utils/active-runs): counts `running` only;
 				// awaiting_input and interrupted show per thread in the nav.
-				liveRuns = countLiveRuns(parseActiveRuns(await runsRes.json()));
+				const runs: unknown = await runsRes.json();
+				if (stale()) return;
+				liveRuns = countLiveRuns(parseActiveRuns(runs));
 			} else {
 				// Unreachable engine (null), 5xx, or 404 (older engine) → clear, so
 				// the pulsing live-run pill never lingers during an outage.
 				liveRuns = 0;
 			}
 
-			if (dailyRes?.ok) {
-				const rows = (await dailyRes.json()) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
+			if (!dailyRes?.ok) {
+				// No answer about today's cost: shown as unknown, not as a zero.
+				todayCost = null;
+			} else {
+				// An answer that is not a list of days says nothing about today: unknown, not the old figure.
+				const rows = (await dailyRes.json().catch(() => null)) as Array<{ day: string; cost_usd: unknown; run_count: number; user_turns: number }> | null;
+				if (stale()) return;
+				if (!Array.isArray(rows)) { todayCost = null; return; }
 				// Match the LOCAL calendar day (the endpoint now buckets by local
 				// day via tzOffsetMin) — not UTC. toISOString() is UTC and would
 				// pick the wrong/empty bucket near the day boundary (the owner's
@@ -203,13 +236,20 @@
 				// local date parts so it lines up with the server's bucket key.
 				const d = new Date();
 				const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-				const todayRow = rows.find(r => r.day === today);
-				todayCost = todayRow?.cost_usd ?? 0;
+				const todayRow = rows.find(r => r?.day === today);
+				// No row for today is a day without cost: the endpoint answered, so that is a real zero.
+				// A figure that is no amount (not a number, not finite, below zero) is unknown, never shown.
+				const cost = todayRow?.cost_usd;
+				todayCost = todayRow === undefined ? 0 : typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost : null;
 				// Headline "N runs today" = chat turns the user took, not voice
 				// renders or spawned sub-runs (which inflated the count).
 				todayRuns = todayRow?.user_turns ?? 0;
 			}
-		} catch { /* silent */ }
+		} catch {
+			// An earlier section threw (a body that is not JSON) before the cost was read: the
+			// figure from the last good poll is no longer known, so it is not shown as today's.
+			if (!stale()) todayCost = null;
+		}
 	}
 
 	async function loadPanelData() {
@@ -306,6 +346,24 @@
 		return () => window.removeEventListener('lynox:provider-changed', onProviderChanged);
 	});
 
+	// Read today's cost again when a chat run ends, as far as this tab's stream sees it, instead
+	// of showing the value from before the run for up to 30s. Runs in other tabs, a run in a chat
+	// the user left, and a stop from a tab without the stream still wait for the timed poll. The signals one run sends close together (a stop sends one when the
+	// server confirms it and one when the stream closes) make one poll; a later one makes another.
+	const RUN_END_POLL_DELAY_MS = 300;
+	$effect(() => {
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		function onRunEnded() {
+			if (timer !== null) clearTimeout(timer);
+			timer = setTimeout(() => { timer = null; void poll(); }, RUN_END_POLL_DELAY_MS);
+		}
+		window.addEventListener(RUN_ENDED_EVENT, onRunEnded);
+		return () => {
+			window.removeEventListener(RUN_ENDED_EVENT, onRunEnded);
+			if (timer !== null) clearTimeout(timer);
+		};
+	});
+
 	$effect(() => {
 		if (!panelOpen) return;
 		function onKey(e: KeyboardEvent) { if (e.key === 'Escape') closePanel(); }
@@ -352,6 +410,17 @@
 	{/if}
 {/snippet}
 
+{#if bootStoreKeys.length > 0}
+	<div role="alert" class="flex items-start gap-2 border-t border-warning/30 bg-warning/10 px-3 py-2 text-xs text-text">
+		<Icon name="warning" size="xs" class="mt-0.5 shrink-0 text-warning" />
+		<div class="space-y-1">
+			{#each bootStoreKeys as paragraph}
+				<p>{paragraph.map((k) => t(k)).join(' ')}</p>
+			{/each}
+		</div>
+	</div>
+{/if}
+
 {#if vaultKey !== null}
 	<div role="alert" class="flex items-start gap-2 border-t border-warning/30 bg-warning/10 px-3 py-2 text-xs text-text">
 		<Icon name="warning" size="xs" class="mt-0.5 shrink-0 text-warning" />
@@ -375,7 +444,7 @@
 	<button
 		onclick={togglePanel}
 		class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors min-w-0"
-		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {formatCost(todayCost)}"
+		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {todayCostSpoken}"
 		title="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()}{apiStatusTooltip ? ` — ${apiStatusTooltip}` : ''}"
 	>
 		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
@@ -383,7 +452,8 @@
 		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {apiStatusClass()}"></span>
 		<span class="truncate">{providerName}</span>
 		<span class="text-border shrink-0">|</span>
-		<span class="shrink-0">{formatCost(todayCost)}</span>
+		<!-- The period is named: next to a monthly cap note, a bare amount reads as the month's. -->
+		<span class="shrink-0 whitespace-nowrap">{todayCostShown}</span>
 	</button>
 	{@render voiceAutoSendBtn()}
 	{@render autoSpeakBtn()}
@@ -435,8 +505,9 @@
 	     Per PRD-IA-CONSOLIDATION-V2 Phase 2 P2-PR-B the click target moves
 	     from the legacy hub cost-limits route to /app/activity. Edit-limits
 	     SSoT now lives in /app/settings/workspace/limits (P3-PR-X). -->
-	<a href="/app/activity" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" aria-label="{formatCost(todayCost)} · {t('status.today')}" title="{formatCost(todayCost)} · {t('status.today')}">
-		{formatCost(todayCost)}
+	<!-- The period is named, as on the phone bar; the link's name is its visible text. -->
+	<a href="/app/activity" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 whitespace-nowrap" aria-label={todayCost === null ? todayCostSpoken : undefined}>
+		{todayCostShown}
 	</a>
 
 	<span class="text-border">|</span>
@@ -556,8 +627,10 @@
 						href="/app/activity"
 						onclick={closePanel}
 						class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2 hover:bg-bg hover:text-text transition-colors"
+						data-panel-cost
+						aria-label={todayCost === null ? todayCostSpoken : undefined}
 					>
-						<p class="text-lg font-semibold text-text">{formatCost(todayCost)}</p>
+						<p class="text-lg font-semibold text-text">{todayCost === null ? '-' : todayCostAmount(todayCost)}</p>
 						<p class="text-xs text-text-subtle">{t('status.cost')}</p>
 					</a>
 					<a

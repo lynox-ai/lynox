@@ -32,11 +32,15 @@ const EXEMPT: Record<string, string> = {
 	'BulkRunsView.svelte': 'A mandate reads the runs and merges without "take back"; one button on a readable page gets no sentence (ux U-111), and a run\'s own page says who acts.',
 	'ContactsView.svelte': 'A mandate reads the contacts without "remove"; one button on a readable page gets no sentence.',
 	'FileBrowserView.svelte': 'A mandate browses and downloads without "delete"; one button on a readable page gets no sentence.',
+	'AccessTrailView.svelte': 'Reveals nothing: `?reveal=true` is read from a recorded row\'s target, to name a refused reveal; the page only reads the trail, and a mandate is shown that it is the owner\'s.',
 	'ChatView.svelte': 'Not a settings page: it reveals the vault key only for the owner\'s backup reminder, and a refused reveal shows nothing.',
 	'ApprovalsView.svelte': 'A card without a checksum only reads, closing is offered at `viewer === \'owner\'` only, and a mandate is told the queue is read-only.',
 	'OnboardingBasics.svelte': 'Mounted only by ChatView, which never runs the owner\'s introduction in a mandate\'s session.',
 	'PersonErasurePanel.svelte': 'Mounted only by SubjectsView, behind a button shown in the owner\'s session only; a mandate is told where an erasure request goes.',
-	'TriggersView.svelte': 'Its one owner-only button (confirming a plan) shows only to a known owner (isOwnerSession); anyone else reads, in its place, that the owner confirms the plan.',
+	'StampConfirm.svelte': 'Mounted only by TriggersView, at a schedule a known owner stamps (`ownerStamps`) or checks (`offersCheck`); anyone else reads, in its place, that the owner confirms the plan.',
+	'TriggersView.svelte': 'Its owner-only buttons (confirming a plan, confirming recipients) show only to a known owner (isOwnerSession); anyone else reads, in its place, that the owner confirms the plan.',
+	'RecipientConfirm.svelte': 'Mounted only by TriggersView, behind "Confirm recipients", which shows to a known owner (`ownerActs`) at a trigger the list flags for the owner only (`recipients_unconfirmed`); a mandate never sees it.',
+	'WorkflowTakeoverDialog.svelte': 'Mounted only by WorkflowLibraryView, behind its takeover button, which shows only where the person\'s access ended and only to a known owner (`ownerActs`); the library route gives a mandate no `runs_as` to show it at.',
 };
 /**
  * Pages outside the settings that write through an owner-only route: the actions on them (approve,
@@ -257,7 +261,7 @@ describe('every page that writes through an owner-only route has a read-only vie
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'TriggersView.svelte']);
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'AccessTrailView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'StampConfirm.svelte', 'TriggersView.svelte', 'RecipientConfirm.svelte', 'WorkflowTakeoverDialog.svelte']);
 		for (const name of OUTSIDE_SETTINGS) expect(pages.map((p) => basename(p))).toContain(name);
 		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte', 'SecretsView.svelte', 'KeysView.svelte', 'CalendarSettings.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {

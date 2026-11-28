@@ -9,6 +9,7 @@ import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import { epochStartByTimeSql } from './grant-ledger.js';
+import { chainEndCountsSql, logChainEndCounts, repointToChainEndSql } from './relation-source.js';
 
 /**
  * EngineDb — the consolidated per-tenant subject-graph store (Foundation Rework v2, S0).
@@ -43,6 +44,15 @@ import { epochStartByTimeSql } from './grant-ledger.js';
  */
 
 const ENGINE_HKDF_INFO = 'lynox-engine-encryption';
+
+/**
+ * The key engine.db's encrypted columns are stored under, derived from the vault key. Exported for
+ * the data export, which reads a snapshot by raw SQL and must not open the live store (the
+ * constructor migrates or recreates it).
+ */
+export function deriveEngineEncKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
 /** Separate label for the keyed-digest subkey: the MAC never shares a key with AES-GCM. */
 const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
 /**
@@ -1607,7 +1617,121 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (67);
    ALTER TABLE bulk_targets ADD COLUMN context TEXT;
    ALTER TABLE bulk_targets ADD COLUMN context_secret_field INTEGER;`,
+  // v68 (1010, PRD shopify-preset §20.2 item 5): with `new_link_domain`, the domain the refused link
+  // points to, encrypted like `before`, so the owner is told which one. NULL for every existing
+  // target: its page keeps the sentence without the domain.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
+   ALTER TABLE bulk_targets ADD COLUMN link_domain TEXT;`,
+  // v69: the once-only pass that gave every workflow stamp from before the digest its digest
+  // (`workflow-stamp.ts`, `stampExistingWorkflows`). After it a stamp without a digest does not
+  // hold, so a definition a backfill or a restored file brings back waits for the owner instead
+  // of running on a stamp nobody took over its steps. `done=0` until the pass has run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (69);
+   CREATE TABLE IF NOT EXISTS workflow_stamp_marker (
+     id   INTEGER PRIMARY KEY CHECK (id = 1),
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   INSERT OR IGNORE INTO workflow_stamp_marker (id, done) VALUES (1, 0);`,
+  // v70: a grant's rows by grant, named or not (`AuditLog.mandatePrincipalOf`). The revoke row
+  // looks its person up once per revoked grant, also for a grant that never acted here; without
+  // this, a grant with no named row walks the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate ON audit_log(mandate_id, id);`,
+  // v71: how long the trail keeps a row (audit-retention.ts). A day row stands for the polls of one
+  // person, route and day once that day is more than 30 days past: `poll_count` reads, the first at
+  // `ts`, the last at `poll_last`. NULL on every other row. The index on `ts` serves the sweep's
+  // delete by time, the partial one its fold, which reads one day of one route at a time.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+   ALTER TABLE audit_log ADD COLUMN poll_count INTEGER;
+   ALTER TABLE audit_log ADD COLUMN poll_last TEXT;
+   CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_poll_fold ON audit_log(action, ts) WHERE phase = 'read' AND poll_count IS NULL;`,
+  // v72: relationships follow the memory that carries their fact. Before, a consolidation retired
+  // the duplicate and left its relationships on it; the GC then deleted the memory and the foreign
+  // key set their source to NULL, so they stayed readable and out of reach of any later deletion.
+  // This moves each relationship of a replaced memory to the end of its chain of successors
+  // (relation-source.ts › repointToChainEndSql). Counted and logged before it runs (`_migrate`).
+  // `origin_memory_id` names the memory whose text an edge's description came from and is never
+  // moved, so a hard deletion of that memory still takes the edge with it; no foreign key, so the
+  // GC deleting that memory does not clear it. Filled from the source first. Mirrors agent-memory.db v8.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
+   ALTER TABLE relationships ADD COLUMN origin_memory_id TEXT;
+   UPDATE relationships SET origin_memory_id = source_memory_id WHERE origin_memory_id IS NULL;
+   ${repointToChainEndSql('relationships')}
+   CREATE INDEX IF NOT EXISTS idx_rel_origin_memory ON relationships(origin_memory_id);`,
+  // v73: why a trigger's last run failed, as a cause lynox knows (`RunCause`, JSON), written with
+  // the run's status on every run end and NULL when the run had none. The trigger list says it
+  // (`blocked_reason`); `last_run_result` cannot be read for that, since it carries outside text.
+  // Existing rows stay NULL: their causes were never recorded.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (73);
+   ALTER TABLE triggers ADD COLUMN last_run_cause TEXT;`,
+  // v74: the live generation of the owner's sessions (owner-sessions.ts). One row; an owner session
+  // cookie of any other generation is refused. Kept across the owner's erasure (`deleteAllData`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (74);
+   CREATE TABLE IF NOT EXISTS owner_sessions (
+     id INTEGER PRIMARY KEY CHECK (id = 1),
+     generation INTEGER NOT NULL,
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
+  // v75: a Shopify product target's title, as the read in the preview answered it, encrypted like
+  // `before`, so the targets route shows each target by its name. That read writes it (`recordRead`) and an
+  // undo copies it from its source; NULL for every existing target, for an image target and for a
+  // target without a title.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (75);
+   ALTER TABLE bulk_targets ADD COLUMN target_title TEXT;`,
+  // v76: with `verdict_invalid`, which field of the run's rule the judge's answer broke and by
+  // which rule (`BulkRefusalDetail`, JSON, encrypted): field name, rule kind and bound, all from
+  // the rule's schema, never the refused value. Existing rows stay NULL and read as before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (76);
+   ALTER TABLE bulk_targets ADD COLUMN refusal_detail TEXT;`,
+  // v77: about the trigger's last escalation, beside its outcome: why a `not_delivered` one reached
+  // nobody (`no_subscription` | `send_failed`), and the chat where its question or alert stands
+  // (thread id, and whether it is a `question` or an `alert`), so the trigger can link to it.
+  // Ids and fixed values only, no text from the run. Existing rows stay NULL and read as before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (77);
+   ALTER TABLE triggers ADD COLUMN last_escalation_case TEXT;
+   ALTER TABLE triggers ADD COLUMN last_escalation_thread_id TEXT;
+   ALTER TABLE triggers ADD COLUMN last_escalation_chat_kind TEXT;`,
+  // v78: the run that superseded a judged run (`BulkLedger.resumePreview`). Set with the halt, so the
+  // ended run's page can link the run that took its place; null on every run before and on any other end.
+  // Pruning may delete the newer run first: like `source_run_id`, the link then falls back to null
+  // instead of naming a run that is gone. Indexed like `source_run_id`, so a delete does not scan the
+  // table for runs to unlink.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (78);
+   ALTER TABLE bulk_runs ADD COLUMN superseded_by TEXT REFERENCES bulk_runs(id) ON DELETE SET NULL;
+   CREATE INDEX IF NOT EXISTS idx_bulk_runs_superseded ON bulk_runs(superseded_by);`,
+  // v79: the phase a run stood in when an undo took it back (`done`, `aborted`, or `writing` with
+  // a halt), so an undo of that undo puts it back exactly there. NULL on every run taken back
+  // before this version: one without a halt reason stood done, one with a reason cannot be told
+  // halted from aborted, and an undo that would put it back is refused (`phase_not_kept`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (79);
+   ALTER TABLE bulk_runs ADD COLUMN phase_before_undo TEXT;`,
+  // v80: the member-connection lines of a trigger's last run, apart from its result (a JSON array
+  // of the lines as recorded; NULL: none). The owner reads them under the result; anyone else
+  // reads a fixed sentence in place of a result that has them (`lastRunResultFor`).
+  // A result recorded before carries its lines under it (`result\n• line…`), and a trigger that
+  // does not run again would keep them in reach of every reader. So such a result is split at its
+  // first `\n• `: what follows goes into the column as one entry, marked as split here
+  // (`{"migrated": …}`), so that only this entry is read back as several lines. The owner reads the
+  // same text as before (`lastRunResultFor` puts it back with the same separator); anyone else
+  // reads the sentence.
+  // Only a halted run's result: a run that noted lines halts (`withMemberNotes` turns its success
+  // into a halt), and other ends put lines of their own under the result in the same form (a
+  // failed workflow's grant and write notes, a model's list), which stay as they are. A bulk run's
+  // trigger is left alone too: its halt sentence can list items the same way. What this leaves as
+  // before: any end other than a halt (failed, timed out, stopped, interrupted, no status), and any
+  // bulk end, whose result carries member lines keeps them in the result until the trigger's next
+  // run end writes the column.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (80);
+   ALTER TABLE triggers ADD COLUMN last_run_member_notes TEXT;
+   UPDATE triggers SET
+     last_run_member_notes = json_object('migrated', substr(last_run_result, instr(last_run_result, char(10) || '• ') + 3)),
+     last_run_result = substr(last_run_result, 1, instr(last_run_result, char(10) || '• ') - 1)
+   WHERE instr(last_run_result, char(10) || '• ') > 0 AND last_run_status = 'halted' AND substr(effect, 1, 5) <> 'bulk_';`,
 ];
+
+/** The migration index (0-based) of v72, which moves relationships to the end of their chain. */
+const REPOINT_MIGRATION_INDEX = 71;
 
 export interface EngineDbOptions {
   /**
@@ -1647,7 +1771,7 @@ export class EngineDb {
     // share a derived key.
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
-      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._encKey = deriveEngineEncKey(vaultKey);
       this._hashKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HASH_HKDF_INFO, CRYPTO_KEY_LENGTH));
       this._bindKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', STORE_BINDING_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
@@ -1677,6 +1801,12 @@ export class EngineDb {
     this.db.prepare('UPDATE verb_backfill_marker SET done = 1 WHERE id = 1').run();
   }
 
+  /** True once the boot pass that gave the workflow stamps from before the digest theirs has run (v69). */
+  isWorkflowStampPassDone(): boolean {
+    const row = this.db.prepare('SELECT done FROM workflow_stamp_marker WHERE id = 1').get() as { done: number } | undefined;
+    return row?.done === 1;
+  }
+
   /** Drop the free pages and empty the WAL; see `scrubFreedPages` in `sqlite-constants.ts`. */
   scrubFreedPages(): void {
     scrubFreedPages(this.db);
@@ -1702,7 +1832,7 @@ export class EngineDb {
   deleteAllData(): void {
     const tables = this.db
       .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker', 'vault_name_binding_migration') AND name NOT LIKE 'sqlite_%'",
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker', 'vault_name_binding_migration', 'owner_sessions') AND name NOT LIKE 'sqlite_%'",
       )
       .all() as { name: string }[];
     this.db.transaction(() => {
@@ -1720,6 +1850,10 @@ export class EngineDb {
    * @internal — posture introspection; not a public API.
    */
   get isEncrypted(): boolean { return this._encKey !== null; }
+
+  /** Whether this open set a corrupt file aside and started an empty one (`onCorruption: 'recreate'`). */
+  get recreated(): boolean { return this._recreated; }
+  private _recreated = false;
 
   /**
    * Open the SQLite database. ONLY a failed `integrity_check` (genuine file
@@ -1753,6 +1887,7 @@ export class EngineDb {
       }
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ Engine database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
+      this._recreated = true;
       try { db.close(); } catch { /* best-effort */ }
       const corruptPath = `${path}.corrupt-${Date.now()}`;
       try {
@@ -1802,6 +1937,10 @@ export class EngineDb {
     for (let i = currentVersion; i < MIGRATIONS.length; i++) {
       // Atomic per-migration: the version stamp + DDL are all-or-nothing, so a
       // crash can't bump the version past un-applied schema (see AgentMemoryDb).
+      if (i === REPOINT_MIGRATION_INDEX) {
+        logChainEndCounts('engine.db', this.db.prepare(chainEndCountsSql('relationships')).get() as
+          { to_active: number; to_deleted: number; without_end: number } | undefined);
+      }
       this.db.transaction(() => { this.db.exec(MIGRATIONS[i]!); })();
     }
   }

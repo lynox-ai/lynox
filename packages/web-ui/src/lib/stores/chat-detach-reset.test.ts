@@ -36,7 +36,7 @@ const SRC = readFileSync(
 const THREAD_SCOPED = [
 	'messages', 'sessionId', 'isStreaming', 'streamingActivity',
 	'streamingToolName', 'streamingToolPhase', 'pendingPermission', 'pendingTabsPrompt',
-	'pendingSecretPrompt', 'pendingMailConnect', 'pendingChangeset', 'changesetLoading',
+	'pendingSecretPrompt', 'pendingMailConnect', 'pendingChangeset', 'rollbackStopped', 'changesetLoading',
 	'skipExtraction', 'threadContained', 'threadContainedUnknown', 'threadReadRefusal', 'chatError', 'runInterrupted', 'messageQueue', 'runStartedAt',
 	'runPromptCount', 'contextBudget', 'compactionOffer', 'retryStatus',
 	// A count of what is waiting in the PREVIOUS conversation is exactly the wrong thing to
@@ -79,6 +79,9 @@ const NEW_CHAT_ONLY = ['sessionModel', 'sessionTier', 'pendingModel'] as const;
  *    earlier claim of "both paths" was wrong.
  *  - `completedTextBlockGen`, `secretPromptGeneration`, `mailConnectGeneration` —
  *    monotonic generation counters; consumers compare deltas, never absolute values.
+ *  - `unmatchedAnswerCount` — monotonic counter of answers that named no question;
+ *    ChatView reads its value on mount as a baseline and acts only on an increase,
+ *    so a count from another thread never moves focus.
  *  - `authError`, `isOffline`, `managedTier` — genuinely app-global.
  *  - `isCompacting` — in-flight latch for a single `compactNow()` call, cleared
  *    in its own `finally`.
@@ -86,7 +89,7 @@ const NEW_CHAT_ONLY = ['sessionModel', 'sessionTier', 'pendingModel'] as const;
 const NOT_THREAD_SCOPED = [
 	'currentToolStartedAt', 'lastEventAt', 'chatErrorDetail', 'contextWindow',
 	'completedTextBlockGen', 'secretPromptGeneration', 'mailConnectGeneration',
-	'authError', 'isOffline', 'managedTier', 'isCompacting',
+	'authError', 'isOffline', 'managedTier', 'isCompacting', 'unmatchedAnswerCount',
 ] as const;
 
 /** Every module-level `let x = $state(...)` in the store. */

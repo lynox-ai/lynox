@@ -7,17 +7,27 @@
  * All operations are designed to be safe during concurrent lynox operation.
  */
 
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import Database from 'better-sqlite3';
+import { snapshotSqlite } from './sqlite-snapshot.js';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
-import { deriveBackupKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
+import { canonicalMac, canonicalMacMatches, deriveBackupKey, deriveListProofKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
-import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
+import { BACKUP_LIST_PROOF_FILE, BACKUP_LIST_PROOF_TMP, BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 import { OMITTED_SIDECAR, restoreRefusal } from './sidecar-refusals.js';
+import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
+
+/**
+ * `: <reason>` for a log line about a failed backup or upload, or nothing while the process
+ * reduces error text (an exact connection is held). The reason can quote a workspace file name
+ * and, for an upload, Google's answer.
+ */
+export function backupFailureDetail(reason: string | undefined, fallback: string): string {
+  return isErrorTextReducedForProcess() ? '' : `: ${reason ?? fallback}`;
+}
 
 export { OMITTED_SIDECAR };
 import { closeAnchor, copyOut, FOLD_PROBE_NAME, isStageName, listDir, namesFoldAt, openAnchor, removeStaleStages, stageIn, statEntry, unlinkAt, WorkspaceAccessError, type StageEntry, type StagedWrite, type WorkspaceAnchor } from './workspace-fd.js';
@@ -54,6 +64,81 @@ function unrestorableEntry(files: unknown): string | null {
 }
 
 /**
+ * Why an entry of the backup must not be read, or null. Every component below the backup folder is
+ * asked with `lstat`: a link there would lead the read, and the verify pass that reports sizes, to
+ * a file outside the backup. The backup folder itself may be a link (a backups dir moved elsewhere).
+ * A missing component is not this check's to report: the verify pass names it. Any other failure
+ * to ask refuses: what cannot be checked is not read.
+ */
+export function backupSourceProblem(backupPath: string, entry: Pick<BackupFileEntry, 'path' | 'type'>): string | null {
+  const parts = entry.path.split('/');
+  let at = backupPath;
+  for (let i = 0; i < parts.length; i++) {
+    at = join(at, parts[i] as string);
+    const shown = parts.slice(0, i + 1).join('/');
+    let st;
+    try {
+      st = lstatSync(at);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return null;
+      return `${shown} could not be checked inside the backup (${typeof code === 'string' ? code : 'unknown error'})`;
+    }
+    if (st.isSymbolicLink()) return `${shown} is a link inside the backup`;
+    const last = i === parts.length - 1;
+    if (!last || entry.type === 'directory') {
+      if (!st.isDirectory()) return `${shown} is not a folder inside the backup`;
+    } else if (!st.isFile()) {
+      return `${shown} is not a plain file inside the backup`;
+    }
+  }
+  return null;
+}
+
+/**
+ * A backup's `manifest.json`, read without following a link: it is read before any entry, and by
+ * the list, whose answer carries its fields — a link would lead that read to a file of this machine.
+ */
+const MANIFEST_READ_MAX = 2 ** 31 - 1;
+type ManifestRead = { ok: true; raw: Buffer } | { ok: false; why: 'missing' | 'link' | 'unreadable' };
+function readManifestFile(manifestPath: string): ManifestRead {
+  let fd: number;
+  try {
+    // As the list's proof file is opened: a link fails the open (`O_NOFOLLOW`), and a FIFO is not
+    // waited on (`O_NONBLOCK`); only a plain file is read, up to the size it had at the open.
+    fd = openSync(manifestPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return { ok: false, why: code === 'ENOENT' ? 'missing' : code === 'ELOOP' ? 'link' : 'unreadable' };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { ok: false, why: 'unreadable' };
+    // The bound `readFileSync` holds itself (Node's `kIoMaxLength`): a larger file was never read
+    // before, and `createBackup` cannot write one, so it costs no backup. Without it a sparse file
+    // would allocate its whole size in memory.
+    if (st.size > MANIFEST_READ_MAX) return { ok: false, why: 'unreadable' };
+    const buf = Buffer.alloc(st.size);
+    let length = 0;
+    for (let n = 1; n > 0 && length < buf.length; length += n) n = readSync(fd, buf, length, buf.length - length, length);
+    return { ok: true, raw: buf.subarray(0, length) };
+  } catch {
+    return { ok: false, why: 'unreadable' };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The first entry `backupSourceProblem` refuses, as its reason, or null. */
+function backupSourceRefusal(backupPath: string, files: readonly BackupFileEntry[]): string | null {
+  for (const entry of files) {
+    const problem = backupSourceProblem(backupPath, entry);
+    if (problem !== null) return problem;
+  }
+  return null;
+}
+
+/**
  * Read a backup file once and check THOSE bytes against its entry. The restore verifies the
  * archive first and stages it later, with the safety backup in between; a file swapped in that
  * window would be copied unchecked if it were read again by name. In an encrypted backup every
@@ -62,7 +147,14 @@ function unrestorableEntry(files: unknown): string | null {
 function readEntryBytes(srcFile: string, entry: BackupFileEntry, encrypted: boolean): Buffer {
   let raw: Buffer;
   try {
-    raw = readFileSync(srcFile);
+    // Not following a link set after `backupSourceProblem` ran: a link here fails the open (ELOOP).
+    // A folder fails the read; any other kind is read once and must match the entry below.
+    const fd = openSync(srcFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      raw = readFileSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     // The verify pass found it; gone now means changed, not "skip it and report success".
     throw new Error(`Backup file changed after it was verified — refusing to restore: ${entry.path}`);
@@ -118,6 +210,33 @@ export type BackupListEntry = BackupManifest & {
   file_count: number;
   total_bytes: number;
 };
+
+/** The list's file of kept answers is read only below this size; a larger one is not trusted to be ours. */
+const LIST_PROOF_MAX_BYTES = 1024 * 1024;
+
+type KeptProvenance = { digest: string; provenance: BackupProvenance };
+
+/**
+ * The entries of the list's file of kept answers, or null when the file is not one this vault key
+ * wrote: wrong shape, other version, or a MAC that does not match. An entry of a shape this code
+ * does not write is left out. `no-key` is never kept (without a key nothing is), so it is refused.
+ */
+function readListProof(value: unknown, key: Buffer): Map<string, KeptProvenance> | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { v, entries, mac } = value as { v?: unknown; entries?: unknown; mac?: unknown };
+  if (v !== 1 || typeof mac !== 'string' || !/^[0-9a-f]{64}$/.test(mac)) return null;
+  if (typeof entries !== 'object' || entries === null || Array.isArray(entries)) return null;
+  if (!canonicalMacMatches({ v, entries }, mac, key)) return null;
+  const out = new Map<string, KeptProvenance>();
+  for (const [name, entry] of Object.entries(entries as Record<string, unknown>)) {
+    const { digest, provenance } = (typeof entry === 'object' && entry !== null ? entry : {}) as { digest?: unknown; provenance?: unknown };
+    // A digest is only ever compared for equality with a sha256 the list just computed.
+    if (typeof digest !== 'string') continue;
+    if (provenance !== 'verified' && provenance !== 'none' && provenance !== 'mismatch') continue;
+    out.set(name, { digest, provenance });
+  }
+  return out;
+}
 
 /** The totals of a manifest's `files`; an entry without a usable size counts as 0 bytes. */
 function fileTotals(files: unknown): { file_count: number; total_bytes: number } {
@@ -514,7 +633,16 @@ export class BackupManager {
    * neither mtime nor ctime. Only the list reads it: a restore checks the manifest it is about to
    * act on afresh.
    */
-  private readonly _listProvenance = new Map<string, { digest: string; provenance: BackupProvenance }>();
+  private readonly _listProvenance = new Map<string, KeptProvenance>();
+  /**
+   * The same answers kept across restarts, in `BACKUP_LIST_PROOF_FILE` at the backup dir's root,
+   * MACed under a key from the vault key: the first list after a start checks only what changed.
+   * Read once per manager; written after a list that changed what is kept. A file this key did not
+   * write, or none, means every manifest is checked afresh. Not in any backup's folder, so a Drive
+   * upload of a backup does not carry it.
+   */
+  private _listProofRead = false;
+  private _listProofChanged = false;
 
   constructor(lynoxDir: string, config: BackupConfig, vaultKey: string | null) {
     this.lynoxDir = lynoxDir;
@@ -783,14 +911,11 @@ export class BackupManager {
           try {
             const result = await this._gdriveUploader.upload(finalDir, manifest);
             if (!result.success) {
-              process.stderr.write(
-                `[lynox:backup] Google Drive upload failed — local backup is intact: ${result.error ?? 'unknown error'}\n`,
-              );
+              process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact${backupFailureDetail(result.error, 'unknown error')}\n`);
             }
           } catch (err: unknown) {
             // A throw is the unexpected path; the uploader reports refusals by return value.
-            const msg = err instanceof Error ? err.message : String(err);
-            process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${msg}\n`);
+            process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${processErrorText(err)}\n`);
           } finally {
             this._uploading--;
           }
@@ -857,9 +982,15 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Missing manifest.json' };
     }
 
+    const read = readManifestFile(manifestPath);
+    if (!read.ok && read.why === 'link') {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Refusing to restore: manifest.json is a link inside the backup. Nothing was replaced.' };
+    }
+
     let manifest: BackupManifest;
     try {
-      manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+      if (!read.ok) throw new Error(read.why);
+      manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
     } catch {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
     }
@@ -873,6 +1004,13 @@ export class BackupManager {
     const unrestorable = unrestorableEntry(manifest.files);
     if (unrestorable !== null) {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path outside the backup — refusing to restore: ${unrestorable}` };
+    }
+
+    // Before anything reads an entry (the verify pass, the key probe, staging): no link inside the
+    // backup may lead a read to a file of this machine.
+    const linked = backupSourceRefusal(backupPath, manifest.files);
+    if (linked !== null) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Refusing to restore: ${linked}. Nothing was replaced.` };
     }
 
     // Written only where `isBackedUpEntryPath` allows. The rest is named in the result, not refused: a
@@ -1117,7 +1255,62 @@ export class BackupManager {
     if (cached !== undefined && cached.digest === digest) return cached.provenance;
     const provenance = this.provenanceOf(manifest);
     this._listProvenance.set(name, { digest, provenance });
+    this._listProofChanged = true;
     return provenance;
+  }
+
+  /** Take the kept answers from the file into the cache, once per manager; see `_listProofRead`. */
+  private readListProofFile(vaultKey: string): void {
+    this._listProofRead = true;
+    const path = join(this.backupDir, BACKUP_LIST_PROOF_FILE);
+    let fd: number | null = null;
+    try {
+      // One descriptor for the check and the read: a symlink is refused at open, a FIFO is not
+      // waited on, and the bound holds on the bytes read, also for a file that grows meanwhile.
+      fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      if (!fstatSync(fd).isFile()) return;
+      const buf = Buffer.alloc(LIST_PROOF_MAX_BYTES + 1);
+      let length = 0;
+      for (let n = 1; n > 0 && length < buf.length; length += n) n = readSync(fd, buf, length, buf.length - length, null);
+      if (length > LIST_PROOF_MAX_BYTES) return;
+      const kept = readListProof(JSON.parse(buf.subarray(0, length).toString('utf-8')) as unknown, deriveListProofKey(vaultKey));
+      if (kept === null) return;
+      for (const [name, entry] of kept) if (!this._listProvenance.has(name)) this._listProvenance.set(name, entry);
+    } catch {
+      // No file, or one that cannot be read: every manifest is checked afresh.
+    } finally {
+      if (fd !== null) try { closeSync(fd); } catch { /* the answers are already taken or not */ }
+    }
+  }
+
+  /**
+   * Write the kept answers to the file. A write that fails leaves the old file or none, and the
+   * next start checks afresh what the file does not hold; it never fails the list.
+   */
+  private writeListProofFile(vaultKey: string): void {
+    this._listProofChanged = false;
+    // `Object.fromEntries` defines each name as an own property, `__proto__` included.
+    const entries = Object.fromEntries([...this._listProvenance].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+    const body = { v: 1, entries };
+    const text = JSON.stringify({ ...body, mac: canonicalMac(body, deriveListProofKey(vaultKey)) });
+    if (Buffer.byteLength(text) > LIST_PROOF_MAX_BYTES) return;
+    const path = join(this.backupDir, BACKUP_LIST_PROOF_FILE);
+    // A write cut off by a crash leaves its temporary file; the next write takes it away. One of
+    // another process mid-write goes too, and that process's rename then fails like any write here.
+    try {
+      for (const name of readdirSync(this.backupDir)) {
+        if (!BACKUP_LIST_PROOF_TMP.test(name)) continue;
+        // One entry that cannot go (a directory of that name, say) does not stop the rest.
+        try { rmSync(join(this.backupDir, name), { force: true }); } catch { /* it stays */ }
+      }
+    } catch { /* a leftover stays until the next write */ }
+    const tmp = `${path}.${String(process.pid)}.${randomBytes(6).toString('hex')}.tmp`;
+    try {
+      writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
+      renameSync(tmp, path);
+    } catch {
+      try { rmSync(tmp, { force: true }); } catch { /* nothing more to do */ }
+    }
   }
 
   private provenanceOf(manifest: BackupManifest): BackupProvenance {
@@ -1142,6 +1335,7 @@ export class BackupManager {
     const entries = readdirSync(this.backupDir, { withFileTypes: true });
     const manifests: BackupListEntry[] = [];
     const seen = new Set<string>();
+    if (this.vaultKey && !this._listProofRead) this.readListProofFile(this.vaultKey);
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -1149,7 +1343,9 @@ export class BackupManager {
       const manifestPath = join(this.backupDir, entry.name, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const raw = readFileSync(manifestPath);
+        const read = readManifestFile(manifestPath);
+        if (!read.ok) continue;
+        const raw = read.raw;
         const manifest = JSON.parse(raw.toString('utf-8')) as BackupManifest;
         seen.add(entry.name);
         // Without a vault key there is no MAC to check (`no-key`), so nothing to keep or to hash.
@@ -1162,7 +1358,12 @@ export class BackupManager {
       }
     }
     // A backup that is gone takes its cached answer with it.
-    for (const name of this._listProvenance.keys()) if (!seen.has(name)) this._listProvenance.delete(name);
+    for (const name of this._listProvenance.keys()) {
+      if (seen.has(name)) continue;
+      this._listProvenance.delete(name);
+      this._listProofChanged = true;
+    }
+    if (this.vaultKey && this._listProofChanged) this.writeListProofFile(this.vaultKey);
 
     // Sort newest first
     manifests.sort((a, b) => b.created_at.localeCompare(a.created_at));
@@ -1196,7 +1397,9 @@ export class BackupManager {
       const manifestPath = join(this.backupDir, entry.name, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+        const read = readManifestFile(manifestPath);
+        if (!read.ok) continue;
+        const manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
         backups.push({ name: entry.name, createdAt: new Date(manifest.created_at) });
       } catch {
         continue;
@@ -1227,10 +1430,14 @@ export class BackupManager {
     if (!existsSync(manifestPath)) {
       return { valid: false, errors: ['Missing manifest.json'], files_checked: 0 };
     }
+    const read = readManifestFile(manifestPath);
+    if (!read.ok) return { valid: false, errors: [read.why === 'link' ? 'manifest.json is a link inside the backup' : 'Invalid manifest.json'], files_checked: 0 };
     try {
-      const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+      const manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
       const unrestorable = unrestorableEntry(manifest.files);
       if (unrestorable !== null) return { valid: false, errors: [`Path outside the backup: ${unrestorable}`], files_checked: 0 };
+      const linked = backupSourceRefusal(backupPath, manifest.files);
+      if (linked !== null) return { valid: false, errors: [linked], files_checked: 0 };
       const verifiableFiles = manifest.files.filter(f => f.type !== 'directory');
       // The sqlite→file relabel, which this method used to omit while `createBackup` step 9 and
       // `restoreBackup` both carried it. One question asked in several places, and the one that
@@ -1259,16 +1466,7 @@ export class BackupManager {
    * Creates a consistent snapshot even during concurrent writes (WAL mode).
    */
   private vacuumInto(srcPath: string, destPath: string): void {
-    let db: InstanceType<typeof Database> | null = null;
-    try {
-      db = new Database(srcPath, { readonly: true });
-      // VACUUM INTO creates a complete, defragmented copy
-      // Escape single quotes in path to prevent SQL injection
-      const safePath = destPath.replace(/'/g, "''");
-      db.exec(`VACUUM INTO '${safePath}'`);
-    } finally {
-      try { db?.close(); } catch { /* ignore */ }
-    }
+    snapshotSqlite(srcPath, destPath);
   }
 
   /** Recursive directory copy preserving structure. */

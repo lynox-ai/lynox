@@ -260,6 +260,10 @@ ARG BUILD_SHA=
 ENV BUILD_SHA=${BUILD_SHA}
 
 ENV NODE_ENV=production
+# Off for every node in the image, also those a compose file starts with its own entrypoint
+# (egress proxy, shell sidecar): a signal must not open the debugger. entrypoint-webui.sh sets
+# it in the argv as well, so an operator's NODE_OPTIONS cannot drop it for the engine.
+ENV NODE_OPTIONS=--disable-sigusr1
 ENV LYNOX_HTTP_PORT=3000
 
 EXPOSE 3000

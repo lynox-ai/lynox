@@ -11,23 +11,42 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ApiProfile } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
-import { memberConnectionRefusal, sharedRefreshRefusal } from './profile-secret-view.js';
+import type { NoticeLanguage } from './notice-language.js';
+import { memberRefusalCase, memberRefusalOwnerNote, memberRefusalText, sharedRefreshOwnerNote, sharedRefreshRefusal, type OwnerNote } from './profile-secret-view.js';
 import type { RequestPrincipal } from './request-principal.js';
 
 /** Start of the line a member connection's refusal is written as. */
 export const MEMBER_CONNECTION_PREFIX = 'Connection not used:';
 
-const collecting = new AsyncLocalStorage<Set<string>>();
-
-/** Run `fn` with a collector for the member-connection lines its requests produce. */
-export function runCollectingMemberNotes<T>(fn: () => Promise<T>): { notes: ReadonlySet<string>; done: Promise<T> } {
-  const notes = new Set<string>();
-  return { notes, done: collecting.run(notes, fn) };
+/**
+ * A run's collector. `notes`: the lines as recorded under its result (English, the owner's
+ * wording where there is one, UX-065); `said`: each line in German, for a push in the owner's
+ * language. `plan`: the trigger's title, which the owner's line names.
+ */
+interface Collector {
+  readonly notes: Set<string>;
+  readonly said: Map<string, string>;
+  readonly plan: string | undefined;
 }
 
-/** The lines noted so far in the run in progress; none outside one. */
+const collecting = new AsyncLocalStorage<Collector>();
+
+/** Run `fn` with a collector for the member-connection lines its requests produce. */
+export function runCollectingMemberNotes<T>(fn: () => Promise<T>, plan?: string): { notes: ReadonlySet<string>; said: ReadonlyMap<string, string>; done: Promise<T> } {
+  const collector: Collector = { notes: new Set(), said: new Map(), plan };
+  return { notes: collector.notes, said: collector.said, done: collecting.run(collector, fn) };
+}
+
+/** The lines noted so far in the run in progress, as recorded; none outside one. */
 export function currentMemberNotes(): readonly string[] {
-  return [...(collecting.getStore() ?? [])];
+  return [...(collecting.getStore()?.notes ?? [])];
+}
+
+/** The same lines in `language`, for the push: the German of a line is its owner's wording. */
+export function currentMemberNotesIn(language: NoticeLanguage): readonly string[] {
+  const store = collecting.getStore();
+  if (store === undefined) return [];
+  return [...store.notes].map((l) => (language === 'de' ? store.said.get(l) ?? l : l));
 }
 
 /**
@@ -41,8 +60,27 @@ export function withMemberNotes<S extends string>(result: string, status: S, not
 }
 
 /** Whether the last run already halted on these same lines, so the owner was told once already. */
-export function memberNotesRepeat(last: { last_run_status?: string | null | undefined; last_run_result?: string | null | undefined }, notes: readonly string[]): boolean {
-  return notes.length > 0 && last.last_run_status === 'halted' && notes.every((l) => last.last_run_result?.includes(l) === true);
+export function memberNotesRepeat(last: { last_run_status?: string | null | undefined; last_run_member_notes?: readonly string[] | undefined }, notes: readonly string[]): boolean {
+  return notes.length > 0 && last.last_run_status === 'halted' && notes.every((l) => last.last_run_member_notes?.includes(l) === true);
+}
+
+/**
+ * A run's end as `reader` reads it. The lines are stored apart from the result
+ * (`last_run_member_notes`): the owner reads the result with its lines under it, as the run ended.
+ * Anyone else reads, for an end with lines, `forMandates` in place of the result: the lines name
+ * another member, their provider and profile, and the result is the model's reply, which the
+ * refusal it read tells to say the same (`memberRefusalText`). An end without lines is the result.
+ */
+export function lastRunResultFor(
+  row: { last_run_result?: string | null | undefined; last_run_member_notes?: readonly string[] | undefined },
+  owner: boolean,
+  forMandates: string,
+): string | undefined {
+  const notes = row.last_run_member_notes ?? [];
+  const result = row.last_run_result ?? undefined;
+  if (notes.length === 0) return result;
+  if (!owner) return forMandates;
+  return withMemberNotes(result ?? '', 'other', notes).result;
 }
 
 /** Whether a run in progress collects the lines itself, so a report that also picks them up
@@ -60,9 +98,23 @@ export function outsideMemberNotes<T>(fn: () => T): T {
   return collecting.exit(fn);
 }
 
-/** Record `line` for the run in progress; nothing outside one. */
-export function noteMemberConnection(line: string): void {
-  collecting.getStore()?.add(line);
+/**
+ * Record `line` for the run in progress; nothing outside one. `owner`: the owner's wording of it,
+ * given the run's plan, recorded in its place (the model keeps `line`); without one, or where it
+ * gives none, the line itself is recorded, in both languages.
+ */
+export function noteMemberConnection(line: string, owner?: (plan: string | undefined) => OwnerNote | null): void {
+  const store = collecting.getStore();
+  if (store === undefined) return;
+  const note = owner?.(store.plan) ?? null;
+  const recorded = note?.en ?? line;
+  store.notes.add(recorded);
+  if (!store.said.has(recorded)) store.said.set(recorded, note?.de ?? line);
+}
+
+/** Pass the lines of an inner collector on to the run in progress, each with its German. */
+export function relayMemberNotes(inner: { notes: ReadonlySet<string>; said: ReadonlyMap<string, string> }): void {
+  for (const line of inner.notes) noteMemberConnection(line, () => ({ en: line, de: inner.said.get(line) ?? line }));
 }
 
 /**
@@ -76,11 +128,27 @@ export function refuseMemberConnection(
   ends: Pick<MandateEnds, 'isLive'> | null,
   mode: 'read' | 'write' = 'read',
 ): string | null {
-  const text = memberConnectionRefusal(profile, reader, ends, mode);
-  if (text === null) return null;
-  const line = `${MEMBER_CONNECTION_PREFIX} ${text}`;
-  noteMemberConnection(line);
-  return line;
+  const text = noteMemberRefusal(profile, reader, ends, mode);
+  return text === null ? null : `${MEMBER_CONNECTION_PREFIX} ${text}`;
+}
+
+/**
+ * The refusal's own words ({@link memberRefusalText}) for a refusal that is said in a sentence of
+ * its own, not as a request's (a save that was not made), noted for the run as the request's is,
+ * or null when nothing is refused. The note is the same prefixed line a request's refusal records,
+ * with the same owner's wording.
+ */
+export function noteMemberRefusal(
+  profile: ApiProfile,
+  reader: RequestPrincipal,
+  ends: Pick<MandateEnds, 'isLive'> | null,
+  mode: 'read' | 'write' = 'read',
+): string | null {
+  const refusal = memberRefusalCase(profile, reader, ends, mode);
+  if (refusal === null) return null;
+  const text = memberRefusalText(refusal);
+  noteMemberConnection(`${MEMBER_CONNECTION_PREFIX} ${text}`, (plan) => memberRefusalOwnerNote(refusal, plan));
+  return text;
 }
 
 /**
@@ -97,6 +165,6 @@ export function refuseSharedRefresh(
   const theirs = refuseMemberConnection(holder, reader, ends, 'write');
   if (theirs !== null) return theirs;
   const line = `${MEMBER_CONNECTION_PREFIX} ${sharedRefreshRefusal(holder, via)}`;
-  noteMemberConnection(line);
+  noteMemberConnection(line, (plan) => sharedRefreshOwnerNote(holder, via, plan));
   return line;
 }

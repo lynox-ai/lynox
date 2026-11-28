@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { bulkPlanTool, bulkStatusTool } from './bulk.js';
+import { bulkPlanTool, bulkStatusTool, NO_PLACE_NOTE } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS } from '../../core/bulk-ledger.js';
 import { mintBulkContract, parseBulkContract } from '../../core/bulk-external.js';
@@ -52,6 +52,8 @@ describe('bulk_plan with source_list', () => {
     const out = await plan({ write_method: 'PUT' });
     expect(out).toContain('List dry run recorded — nothing was sent, read or written.');
     expect(out).toContain('0 page(s) read');
+    // The result asks the model not to name a place for the run.
+    expect(out).toContain(NO_PLACE_NOTE);
     const id = runIdOf(out);
     const run = ledger.getListRun(id)!;
     expect(run).toMatchObject({ state: 'pending', page: 0, phase: 'planned', haltReason: BULK_HALT_REASONS.awaitingStart });
@@ -121,7 +123,7 @@ describe('bulk_plan with source_list and judge', () => {
   it('takes the list without "after": every target planned with the rule\'s template', async () => {
     const id = runIdOf(await judged({}));
     expect(ledger.getListRun(id)!.source.after).toEqual({ status: null });
-    expect(ledger.getStatus(id)!.judge).toEqual({ tier: 'fast', unjudged: 0 });
+    expect(ledger.getStatus(id)!.judge).toEqual({ tier: 'fast', unjudged: 0, judged: 0 });
   });
 
   it('refuses "after" beside judge, and a rule that decides the id field', async () => {

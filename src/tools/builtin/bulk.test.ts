@@ -3,7 +3,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync, statSync, mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { bulkPlanTool, bulkStatusTool, formatStatus, nothingToApprove, NOTHING_TO_APPROVE_NOTE } from './bulk.js';
+import { bulkPlanTool, bulkStatusTool, formatStatus, nothingToApprove, NOTHING_TO_APPROVE_NOTE, NO_PLACE_NOTE } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { DataStore } from '../../core/data-store.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
@@ -441,6 +441,43 @@ describe('bulk_plan over data-store rows', () => {
     writeFileSync(join(ws, 'l.json'), JSON.stringify([{ target: 'x', after: { a: 'y' } }]));
     expect(await bulkPlanTool.handler({ target_system: 'data_store', target_collection: 'loose', source_file: 'l.json' }, agent()))
       .toBe('Error: The target collection needs a single-column unique key to address its rows.');
+  });
+});
+
+// A walk found the model sending the user to the run under a label and a menu the interface does
+// not show. The result the model writes its reply from asks it not to name a place: in every plan
+// the user is to start or approve, and in none with nothing to approve.
+describe('where the user finds a planned run', () => {
+  // The model reads the HTML bound from the constant, and the cost of a larger bound only where it
+  // applies (a list run); the eval measured this wording, so a change to it is a change to measure.
+  it('tells the model the HTML fields\' shared bound from the constant, and the list run\'s cost of a larger one', async () => {
+    const { JUDGE_MAX_HTML } = await import('../../core/bulk-judge-rule.js');
+    const judge = (bulkPlanTool.definition.input_schema as { properties: { judge: { properties: { schema: { description: string } } } } }).properties.judge;
+    const text = judge.properties.schema.description;
+    expect(text).toContain(`Set each text field's maxLength near the longest text the run writes in it: the list form's HTML fields (shopify: descriptionHtml; woocommerce: description, short_description) may take up to ${String(JUDGE_MAX_HTML)} together, and in a list run a larger maxLength makes the run hold fewer targets.`);
+    expect(JUDGE_MAX_HTML).toBe(32_000);
+  });
+
+  it('is not claimed to be nowhere: the description no longer says there is no screen for it', () => {
+    expect(bulkPlanTool.definition.description).not.toMatch(/no screen or button/);
+    expect(bulkPlanTool.definition.description).toContain('you cannot apply it.');
+  });
+
+  it('is left unnamed in a local plan the user approves, and not mentioned where there is nothing to approve', async () => {
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'inside.txt', after: 'y' }]));
+    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent())).toContain(NO_PLACE_NOTE);
+    writeFileSync(join(dir, 'outside.txt'), 'x');
+    writeFileSync(join(ws, 'none.json'), JSON.stringify([{ target: '../outside.txt', after: 'y' }]));
+    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'none.json' }, agent())).not.toContain(NO_PLACE_NOTE);
+  });
+
+  it('is left unnamed in an external plan the user starts, and not mentioned where no target was valid', async () => {
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'https://shop.example.com/products/1', after: { price: '1' } }]));
+    const started = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json' }, agent());
+    expect(started).toContain('External dry run recorded');
+    expect(started).toContain(NO_PLACE_NOTE);
+    writeFileSync(join(ws, 'bad.json'), JSON.stringify([{ target: 'not a url', after: { price: '1' } }]));
+    expect(await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'bad.json' }, agent())).not.toContain(NO_PLACE_NOTE);
   });
 });
 

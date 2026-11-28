@@ -9,7 +9,7 @@ import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import { runBulkJudge, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
-import { checkMarkup, droppedTagsOf, shortcodeChangedBy, shortcodeRefusalOf, shortcodeTextOf } from './bulk-html.js';
+import { checkMarkup, droppedTagsOf, endsClosed, shortcodeChangedBy, shortcodeRefusalOf, shortcodeTextOf } from './bulk-html.js';
 import { canonicalHtml } from './html-tree.js';
 import { formatStatus } from '../tools/builtin/bulk.js';
 import { rawHtmlField, runBulkEffect, type TargetWriter } from './bulk-apply.js';
@@ -125,7 +125,7 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     expect(check('<p>[button url="/a?x=1&y=2"]Kaufen[/button]</p>')).toEqual({ ok: false, reason: 'shortcode_changed', detail: 'Writing would change the shortcode text: [button url="/a?x=1&y=2"]' });
     expect(check('[x a="b>c"]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
     expect(check('[x a="1 < 2"]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
-    expect(check('[embed]https://youtu.be/abc?t=1&list=x[/embed]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    expect(check(`[embed]https://${HOST}/v?t=1&list=x[/embed]`)).toMatchObject({ ok: false, reason: 'shortcode_changed' });
     expect(shortcodeChangedBy('[embed]a&b[/embed]', canonicalHtml('[embed]a&b[/embed]'))).toBe('a&b');
   });
 
@@ -195,6 +195,32 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     expect(shown.refusedValues).toEqual([{ field: 'description', value: after.description }]);
   });
 
+  // The owner pastes the value by hand: a hidden character it holds where text may carry one is
+  // named with it, for the page to mark.
+  it('names with the value to copy the hidden characters it adds', () => {
+    const after = { description: '[button url="/a?x=1&y=2"]Wa\u00adsser[/button]' };
+    const { id, seq } = listed(after);
+    expect(ledger.recordRead(id, seq, { invalid: 'shortcode_changed' })).toBe(true);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'description', value: after.description, codePoints: [0x00ad] }]);
+  });
+
+  // …and one it holds as a character reference, which the store's page turns into the character.
+  it('names with the value to copy a hidden character it adds as a reference', () => {
+    const after = { description: '[button url="/a?x=1&y=2"]Wa&shy;sser[/button]' };
+    const { id, seq } = listed(after);
+    expect(ledger.recordRead(id, seq, { invalid: 'shortcode_changed' })).toBe(true);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'description', value: after.description, codePoints: [0x00ad] }]);
+  });
+
+  // A value past the reading bounds is not read by the shortcode check, so it is no value to copy,
+  // and nothing parses it for hidden characters either.
+  it('offers no value to copy that is nested past the reading bounds', () => {
+    const after = { description: `${'<div>'.repeat(600)}[button url="/a?x=1&y=2"]Wa\u00adsser[/button]` };
+    const { id, seq } = listed(after);
+    expect(ledger.recordRead(id, seq, { invalid: 'shortcode_changed' })).toBe(true);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toBeUndefined();
+  });
+
   it('CONTROL: a target refused for another reason carries no value to copy', () => {
     const { id, seq } = listed({ description: '[button url="/a?x=1&y=2"]Neu[/button]' });
     expect(ledger.recordRead(id, seq, { invalid: 'markup_dropped' })).toBe(true);
@@ -220,7 +246,7 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
       ledger, call,
       resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as never }),
       gate: async () => ({ runId: 'g', blockedReason: null }),
-      report: () => {}, bookSpend: () => {}, budgetAllows: () => true,
+      report: () => {}, bookSpend: () => undefined, settleSpend: () => {}, budgetAllows: () => true,
       scanSecret: (t) => (t.includes('sk-live-') ? 'api_key' : null), maskVault: (t) => t,
       ...over,
     });
@@ -242,6 +268,23 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     const kept = { description: raw.description, short_description: verdict.short_description };
     const { id, seq } = await judge(kept, {}, raw);
     expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'short_description', value: verdict.short_description }]);
+  });
+
+  // A value to copy with a before-image past the reading bounds does not arise here: the markup
+  // check refuses that field first, and a refused value exists only once every field passed every
+  // other check. `hiddenAddsToCopy` still counts such a before as empty (bulk-hidden-adds.test.ts).
+  it('refuses a verdict whose field has a before-image past the reading bounds before any value to copy', async () => {
+    const shy = { ...verdict, short_description: '[pbutton url="/b?x=1&y=2"]Lo\u00ads[/pbutton]' };
+    const { id, seq } = await judge(shy, {}, { ...before, short_description: `${'<div>'.repeat(600)}<p>kurz</p>` });
+    const t = ledger.getPreview(id).find((p) => p.seq === seq)!;
+    expect([t.change, t.error, t.refusedValues]).toEqual(['invalid', 'not_canonical', undefined]);
+  });
+
+  it('marks the same verdict as a value to copy when its before-image is within the bounds', async () => {
+    // CONTROL to the test above: one run per test.
+    const shy = { ...verdict, short_description: '[pbutton url="/b?x=1&y=2"]Lo\u00ads[/pbutton]' };
+    const read = await judge(shy);
+    expect(ledger.getPreview(read.id).find((p) => p.seq === read.seq)!.refusedValues).toEqual([{ field: 'short_description', value: shy.short_description, codePoints: [0x00ad] }]);
   });
 
   it('shows each field the check refuses when both are', async () => {
@@ -293,6 +336,133 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     expect([shown.error, shown.refusedValues]).toEqual(['new_link_domain', undefined]);
   });
 
+  describe('the domain of a refused link (1010)', () => {
+    const linked = (href: string): Record<string, unknown> => ({ ...before, short_description: `<p>neu <a href="${href}">x</a></p>` });
+    const shownOf = (r: { id: string; seq: number }) => ledger.getPreview(r.id).find((p) => p.seq === r.seq)!;
+    const aws = (t: string): string | null => (/AKIA[A-Z0-9]{16}/.test(t) ? 'aws' : null);
+
+    it('names the domain the judge\'s link points to', async () => {
+      const shown = shownOf(await judge(linked('https://evil.example/x')));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', 'evil.example']);
+    });
+
+    it('names an internationalised domain in Punycode as it is written', async () => {
+      expect(shownOf(await judge(linked('https://xn--pple-43d.example/'))).linkDomain).toBe('xn--pple-43d.example');
+    });
+
+    it('keeps no domain the value spells only in Unicode or percent-encoded: its decoded form was never scanned as written', async () => {
+      // A Cyrillic а before „pple“: `new URL` reads it as xn--pple-43d.example, which the value does not spell.
+      expect(shownOf(await judge(linked('https://\u0430pple.example/'))).linkDomain).toBeUndefined();
+    });
+
+    it('keeps no domain the value spells only percent-encoded', async () => {
+      const shown = shownOf(await judge(linked('https://ev%69l.example/x')));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('names a domain the value spells in another case, as the check read it (twin)', async () => {
+      expect(shownOf(await judge(linked('https://Evil.Example/x'), { scanSecret: aws })).linkDomain).toBe('evil.example');
+    });
+
+    it('keeps no domain whose spelling holds a credential that lower case would hide', async () => {
+      // An AWS key is upper case; the host as `new URL` reads it is not, and passes the same scanner.
+      expect(aws('akiaiosfodnn7example.evil.example')).toBeNull();
+      // Built at run time, so no key-shaped literal sits in the source.
+      const key = `AKIA${'IOSFODNN7EXAMPLE'}`;
+      const shown = shownOf(await judge(linked(`https://${key}.evil.example/`), { scanSecret: aws }));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('keeps no domain that holds a credential only once lower case, as the check read it', async () => {
+      // The judge's fake scanner knows the shape in lower case only; the value spells it in upper case.
+      expect(['SK-LIVE-abc.evil.example'].some((t) => t.includes('sk-live-'))).toBe(false);
+      const shown = shownOf(await judge(linked('https://SK-LIVE-abc.evil.example/x')));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('reads the spelling from the link itself, never from the same host written elsewhere', async () => {
+      // The link spells the key percent-encoded, which no scanner sees as one; a lower-case copy of
+      // the host, in the text or in the link's own path, is not how the link spells it. Built at run time.
+      const encoded = `AKIA${'%49OSFODNN7EXAMPLE'}.evil.example`;
+      const decoy = 'akiaiosfodnn7example.evil.example';
+      const inText = shownOf(await judge({ ...before, short_description: `<p>siehe ${decoy} <a href="https://${encoded}/">x</a></p>` }, { scanSecret: aws }));
+      expect([inText.error, inText.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('reads no spelling from the link\'s own path', async () => {
+      const encoded = `AKIA${'%49OSFODNN7EXAMPLE'}.evil.example`;
+      const inPath = shownOf(await judge(linked(`https://${encoded}/akiaiosfodnn7example.evil.example`), { scanSecret: aws }));
+      expect([inPath.error, inPath.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('reads no spelling outside ASCII, though it folds to the domain', async () => {
+      // U+212A KELVIN SIGN lower-cases to `k`, and `new URL` maps it so: the domain is `akia…`,
+      // which neither the spelling nor the domain shows to an upper-case scanner.
+      const kelvin = `A\u212AIA${'IOSFODNN7EXAMPLE'}.evil.example`;
+      expect(new URL(`https://${kelvin}/`).hostname).toBe('akiaiosfodnn7example.evil.example');
+      const shown = shownOf(await judge(linked(`https://${kelvin}/`), { scanSecret: aws }));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('names the domain of a link with user info and a port, as the check read it (twin)', async () => {
+      expect(shownOf(await judge(linked('https://user@Evil.Example.:8080/x'), { scanSecret: aws })).linkDomain).toBe('evil.example');
+    });
+
+    it('keeps no domain whose spelling holds a vault value that lower case would hide', async () => {
+      const vault = (t: string): string => t.replaceAll('MyToken42', '***');
+      expect(vault('mytoken42.evil.example')).toBe('mytoken42.evil.example');
+      const shown = shownOf(await judge(linked('https://MyToken42.evil.example/'), { maskVault: vault }));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('keeps a long host whole, past the 200 characters a refusal\'s detail is cut at', async () => {
+      const host = `${Array.from({ length: 4 }, () => 'a'.repeat(60)).join('.')}.example`;
+      expect(host.length).toBeGreaterThan(200);
+      expect(shownOf(await judge(linked(`https://${host}/`))).linkDomain).toBe(host);
+    });
+
+    it('keeps no domain that holds a vault value', async () => {
+      const vaulted = shownOf(await judge(linked('https://evil.example/x'), { maskVault: (t) => t.replace('evil.example', '***') }));
+      expect([vaulted.error, vaulted.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('keeps no domain shaped like a credential', async () => {
+      const secret = shownOf(await judge(linked('https://sk-live-abc.evil.example/x')));
+      expect([secret.error, secret.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('stores a domain only with new_link_domain, whatever a caller hands in', () => {
+      const { id, seq } = listed({}, true, both);
+      expect(ledger.recordRead(id, seq, { before })).toBe(true);
+      expect(ledger.claimJudge(id, seq, 'tok', Date.now(), 60_000)).toBe(true);
+      expect(ledger.recordJudgement(id, seq, 'tok', { invalid: 'url_scheme', linkDomain: 'evil.example' })).toBe(true);
+      expect(shownOf({ id, seq })).toMatchObject({ error: 'url_scheme' });
+      expect(shownOf({ id, seq }).linkDomain).toBeUndefined();
+      // Not stored either: the column stays empty.
+      const cell = engineDb.getDb().prepare('SELECT link_domain FROM bulk_targets WHERE run_id = ? AND seq = ?').get(id, seq) as { link_domain: string | null };
+      expect(cell.link_domain).toBeNull();
+    });
+
+    it('stores a domain from a read only with new_link_domain, whatever a caller hands in', () => {
+      const { id, seq } = listed({ short_description: '<p>neu</p>' });
+      expect(ledger.recordRead(id, seq, { invalid: 'url_scheme', linkDomain: 'evil.example' })).toBe(true);
+      expect(shownOf({ id, seq })).toMatchObject({ error: 'url_scheme' });
+      const cell = engineDb.getDb().prepare('SELECT link_domain FROM bulk_targets WHERE run_id = ? AND seq = ?').get(id, seq) as { link_domain: string | null };
+      expect(cell.link_domain).toBeNull();
+    });
+
+    it('shows no stored domain once the target holds another reason, or none', async () => {
+      const r = await judge(linked('https://evil.example/x'));
+      expect(shownOf(r).linkDomain).toBe('evil.example');
+      // A resume clears a target's error and leaves its other cells (bulk-ledger resume, `SET
+      // error = NULL`); the domain of the old reason is then not shown with the new one.
+      for (const error of [null, 'read_failed']) {
+        engineDb.getDb().prepare('UPDATE bulk_targets SET error = ? WHERE run_id = ? AND seq = ?').run(error, r.id, r.seq);
+        expect(shownOf(r).linkDomain, String(error)).toBeUndefined();
+      }
+    });
+  });
+
   it('refuses a value for its link, script or hidden character before its shortcode, so none is offered to paste', () => {
     const sc = '[box a="1&2"]x[/box]';
     const at = (after: string): string => {
@@ -302,7 +472,7 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     expect(at(sc)).toBe('shortcode_changed');
     expect(at(`${sc}<p><a href="https://evil.example/x">x</a></p>`)).toBe('new_link_domain');
     expect(at(`${sc}<script>x()</script>`)).toBe('element_not_allowed');
-    expect(at(`<p>a‮b</p>${sc}`)).toBe('hidden_char');
+    expect(at(`<p>a\u202Eb</p>${sc}`)).toBe('hidden_char');
     // Across fields: the other field's reason wins, whichever field comes first.
     const run = { listForm: 'woocommerce' as const, storeHost: HOST, startDomains: [] as string[] };
     expect(verdictTextRefusal({ description: sc, short_description: '<p><a href="https://evil.example/x">x</a></p>' }, before, run)).toBe('new_link_domain');
@@ -419,5 +589,249 @@ describe('a write sends what the ledger stored, and never raw HTML (1130)', () =
     const out = await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: () => s.writer });
     expect(out.status).toBe('done');
     expect(s.sent).toEqual([{ description: '<p>a<br>b</p>' }, { description: own }]);
+  });
+});
+
+// A value the engine sends is its canonical form, and only one that stays itself under it (the send
+// refuses the rest, above). Such a value ends closed and holds no stretch the parser drops, so the
+// strict byte-for-byte side of the comparison is never needed for what lynox sent: a store that
+// re-serialises a value left open (measured on Shopify) never meets one from lynox.
+describe('a value the engine sends ends closed', () => {
+  const OPEN = [
+    '<p>x', '<p>a</p><p', '<p>a</p></p>', '<p>a</p><body class="x">b', '<b>x', '<ul><li>x', '<table><tr><td>x',
+    '<a href="https://shop.example.com/x">x', '<!-- x', '<textarea>x', '<script>x', '<template>x', '<p>a</p><p class="',
+    '<p>a</p></br>', '<p>x</div>', '<html><p>x', '<head><p>x', '<select><option>x', '<svg><desc>x', '<math><mi>x',
+    '<p>a<', '<p>a</', '<plaintext>x',
+  ];
+
+  it('leaves every open input it can send ending closed as the comparison reads it, with no dropped stretch', () => {
+    // `endsClosed` allows an element whose end tag the page may leave out (a paragraph, a list item)
+    // to stand open at the end; what it refuses is a value the next bytes would land inside.
+    const unstable: string[] = [];
+    for (const raw of OPEN) {
+      const sent = canonicalHtml(raw);
+      if (canonicalHtml(sent) !== sent) { unstable.push(raw); continue; }
+      expect(endsClosed(sent), raw).toBe(true);
+      expect(droppedTagsOf(sent), raw).toEqual([]);
+    }
+    // The one input whose canonical form is not itself again: never sent.
+    expect(unstable).toEqual(['<plaintext>x']);
+  });
+
+  it('CONTROL: the open inputs do end open before the canonical form', () => {
+    for (const raw of ['<b>x', '<p>a</p><p', '<textarea>x', '<!-- x', '<a href="https://shop.example.com/x">x']) expect(endsClosed(raw), raw).toBe(false);
+  });
+
+  it('refuses the one input it cannot send in the markup check too', () => {
+    const sent = canonicalHtml('<plaintext>x');
+    expect(checkMarkup({ before: null, after: sent, storeHost: HOST, startDomains: [] }).ok).toBe(false);
+  });
+});
+
+// To the HTML trees a shortcode is text, but the shop's server prints its attributes and what
+// it encloses into embeds, buttons and frames. Its links are held to the same domains as an HTML link.
+describe('a link inside a shortcode is held to the run\'s domains', () => {
+  // The host as written (`hostWritten`) has its own tests; these hold the domain a link is read as.
+  const check = (after: string, before: string | null = null, startDomains: string[] = []) => {
+    const result = checkMarkup({ before, after, storeHost: HOST, startDomains });
+    if (!('hostWritten' in result)) return result;
+    const { hostWritten: _written, ...rest } = result;
+    return rest;
+  };
+  const foreign = { ok: false, reason: 'new_link_domain', detail: 'evil.example' };
+
+  it('refuses a foreign domain in every form WordPress reads an attribute', () => {
+    for (const after of [
+      '[video src="https://evil.example/a.mp4"]',
+      "[video src='https://evil.example/a.mp4']",
+      '[video src=https://evil.example/a.mp4]',
+      '[video "https://evil.example/a.mp4"]',
+      '[video https://evil.example/a.mp4]',
+      '[iframe src="//evil.example/x" /]',
+      '<p>Text [audio mp3="https://Evil.Example./a.mp3"] mehr</p>',
+      '[video\u00a0src="https://evil.example/a.mp4"]',
+    ]) expect(check(after), after).toEqual(foreign);
+    // A zero-width space ends the name as WordPress reads it. Held once by the before-image, so the
+    // hidden-character rule passes it and the link is what is read.
+    expect(check('<p>[video\u200bsrc="https://evil.example/a.mp4"]</p>', '<p>[video\u200bsrc="/a.mp4"]</p>')).toEqual(foreign);
+    // Read on the raw tag, the name would run on through the domain to the `/`, leaving `/a.mp4`,
+    // a path on the store; WordPress reads `video` and a value `evil.example/a.mp4`.
+    expect(check('<p>[video\u200bevil.example/a.mp4]</p>', '<p>[video\u200b/a.mp4]</p>')).toEqual(foreign);
+  });
+
+  it('refuses a foreign domain in the text a pair encloses', () => {
+    expect(check('[embed]https://evil.example/x[/embed]')).toEqual(foreign);
+    expect(check('<p>[embed] <strong>//evil.example/x</strong> [/embed]</p>')).toEqual(foreign);
+    // The whole text, as `[embed]` takes it and `esc_url` prints it: a space is `%20`, a nested
+    // shortcode stays text in the path.
+    expect(check('[embed]evil.example/a b[/embed]')).toEqual(foreign);
+    expect(check('[embed]https://evil.example/a b[/embed]')).toEqual(foreign);
+    expect(check('[embed]evil.example/[x][/embed]')).toEqual(foreign);
+    // A web scheme without `//` keeps its link: on an https page, `http:evil.example` is that host.
+    expect(check('[embed]http:evil.example/a b[/embed]')).toEqual(foreign);
+    expect(check('[embed]http:/evil.example/a[/embed]')).toEqual(foreign);
+    // Twin: words in a pair are a label, not a link, even with a colon or a URL among them.
+    for (const after of ['[b]Hinweis:[/b]', '[b]Hinweis: neu[/b]', '[b]<em>Neu:</em>[/b]', '[box]Mehr unter javascript:alert(1) hier[/box]', '[box]Infos auf www.hersteller.example[/box]', '[b]1.5kg[/b]', '[b]ca.30cm[/b]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('refuses every scheme but a web or mail one as written, in a pair or an attribute, a space after it or not', () => {
+    // A page follows these printed as written; none is a web link.
+    for (const after of [
+      '[link]ms-msdt:/id[/link]', '[link]file://evil.example/x[/link]', '[link]file:///etc/passwd[/link]',
+      '[link]blob:https://evil.example/x[/link]', '[link]filesystem:https://evil.example/x[/link]',
+      '[link]search-ms:query=x[/link]', '[link]intent://evil.example#Intent;scheme=https;end[/link]',
+      '[x url="ms-msdt:/id PCWDiagnostic /skip force"]', '[x url="file:///C:/Program Files/x.exe"]',
+      // A colon with a letter after it reads as a scheme, a label's too: the owner writes it by hand.
+      '[caption]Foto:Max[/caption]', '[b]Zeit:12h[/b]', '[x a="a:b"]',
+      // A scheme that runs something is read in a label's form too.
+      '[x url="ms-settings: x"]', '[b]search-ms: x[/b]', '[x url="MS-Msdt: /id"]', '[x url="file: //evil.example"]',
+    ]) expect(check(after), after).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // Twin: a label, a colon and then a space or nothing, is no link as written.
+    for (const after of ['[b]Hinweis: neu[/b]', '[b]Hinweis:[/b]', '[x title="Kontakt: Anfrage"]', '[x title="Neu:"]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('refuses a scheme a link may not have, as written and as the page decodes it', () => {
+    expect(check('[button url="javascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[button url="  javascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[button url="&#x6a;avascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[link]javascript:alert(1)[/link]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // A tab is dropped as the URL parser drops it, so this is `javascript:`.
+    expect(check('[button url="java\tscript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // A control character is refused as hidden first; the replacement character is visible, and
+    // the link check refuses it.
+    expect(check('[button url="java\ufffdscript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_control_char' });
+  });
+
+  it('reads a value as esc_url prints it: http:// in front of a host, a backslash dropped, ;// as ://', () => {
+    for (const [after, detail] of [
+      ['[video src="evil.example/a.mp4"]', 'evil.example'],
+      ['[audio mp3=evil.example/a.mp3]', 'evil.example'],
+      ['[button link="www.evil.example"]', 'www.evil.example'],
+      // esc_url drops the backslash; the page then reads the store's name as a user name.
+      [`[embed]https://${HOST}\\@evil.example/[/embed]`, 'evil.example'],
+      [`[video src="${HOST}\\@evil.example/a.mp4"]`, 'evil.example'],
+      ['[video src="https;//evil.example/a.mp4"]', 'evil.example'],
+      ['[video src="evil.example./a.mp4"]', 'evil.example'],
+      ['[video src="evil%2Eexample/a.mp4"]', 'evil.example'],
+      ['[video src="evil\u3002example/a.mp4"]', 'evil.example'],
+      ['[video src="203.0.113.7"]', '203.0.113.7'],
+      ['[video src="3405803783/a.mp4"]', '203.0.113.7'],
+      ['[video src="203.0.28935/a.mp4"]', '203.0.113.7'],
+      ['[button url="3405803783"]', '203.0.113.7'],
+      ['[embed]0xcb007107[/embed]', '203.0.113.7'],
+      ['[video src="evil.exa%0D%0ample/a.mp4"]', 'evil.example'],
+      // Removed until none is left: taking one out can join the rest into another.
+      ['[video src="evil.exa%0%0aample/a.mp4"]', 'evil.example'],
+      // esc_url trims the start, so leading spaces do not turn the host into a path.
+      ['[video src="  evil.example/a.mp4"]', 'evil.example'],
+    ] as const) expect(check(after), after).toEqual({ ok: false, reason: 'new_link_domain', detail });
+    // Printed as written, a backslash is a `/` to the page: the host is the name before it.
+    expect(check(`[video src="https://evil.example\\@${HOST}/a.mp4"]`)).toMatchObject({ ok: false, reason: 'url_control_char' });
+    expect(check(`[embed]https://evil.example\\@${HOST}/x[/embed]`)).toMatchObject({ ok: false, reason: 'url_control_char' });
+    // esc_url keeps a web scheme it allows and drops the backslash, so the host is read: the
+    // domain is named, not only the backslash.
+    expect(check('[embed]http:\\evil.example/x[/embed]')).toEqual({ ok: false, reason: 'new_link_domain', detail: 'evil.example' });
+    // In a `mailto:` esc_url keeps an encoded line break, so the address is refused for it.
+    expect(check('[x m="mailto:a@evil.exa%0Ample"]')).toMatchObject({ ok: false, reason: 'url_control_char' });
+    // A file name is a domain to `esc_url` as well.
+    expect(check('[video src="a.mp4"]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'a.mp4' });
+    // Twin: a value that names no host stays a word or a path on the store: a relative path, a
+    // word, a number, a fraction, a one-label name, a space in the host, an abbreviation.
+    for (const after of ['[video src="/media/a.mp4"]', '[button size=large]Go[/button]', '[x version=3.5]', '[x file=index.php?a=b.example]', '[x ratio=16/9]', '[x w=1.5]', '[x label="ja/nein"]', '[x src="media/a.mp4"]', '[button link="evil .example"]', '[x title="Gr.M"]', '[x title="Hinweis:"]', '[video src="/cdn.example/a.mp4"]', '[contact-form-7 id="12" title="Kontakt: Anfrage"]', '[button text="Jetzt: 20% Rabatt"]', '[x id=12345678]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('reads the text a pair encloses at any depth, and a single token as a link', () => {
+    expect(check('[foo][embed]https://evil.example/x[/embed][/foo]')).toEqual(foreign);
+    expect(check('[row][column][video]https://evil.example/a.mp4[/video][/column][/row]')).toEqual(foreign);
+    expect(check('[embed]evil.example/x[/embed]')).toEqual(foreign);
+    expect(check('[embed] <em>www.evil.example</em> [/embed]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'www.evil.example' });
+    expect(check('[link]javascript:alert(1)[/link]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // A nested pair whose text holds a shortcode: no closing tag follows its link directly.
+    expect(check('[foo][embed]evil.example/[x][/embed][/foo]')).toEqual(foreign);
+    // Deeper than the whole texts are read, the text before a closing tag still is.
+    const wraps = Array.from({ length: 9 }, (_, i) => `w${String(i)}`);
+    const deep = `${wraps.map((w) => `[${w}]`).join('')}[embed]evil.example/x[/embed]${[...wraps].reverse().map((w) => `[/${w}]`).join('')}`;
+    expect(check(deep)).toEqual(foreign);
+  });
+
+  it('reads a URL WordPress embeds: alone on its line or alone in a paragraph', () => {
+    expect(check('<p>https://evil.example/x</p>')).toEqual(foreign);
+    expect(check('<p> https://evil.example/x </p>')).toEqual(foreign);
+    expect(check('Neu\nhttps://evil.example/x\nmehr')).toEqual(foreign);
+    // WordPress's pattern reads `\s` as ASCII: a wider space inside the URL does not end it.
+    for (const space of ['\u3000', '\u2003', '\u202f']) {
+      expect(check(`<p>https://evil.example/a${space}b</p>`), space).toMatchObject({ ok: false, reason: 'new_link_domain' });
+      expect(check(`<p>x</p>\nhttps://evil.example/a${space}b\n<p>y</p>`), space).toMatchObject({ ok: false, reason: 'new_link_domain' });
+    }
+    // Twin: a URL among words is not embedded, nor one WordPress's pattern does not read (an
+    // encoded scheme); the store's own address and a URL the before-image holds pass.
+    for (const after of ['<p>Mehr auf www.evil.example</p>', '<p>Mehr auf https://evil.example/x</p>', '<p>&#104;ttps://evil.example/x</p>', `<p>https://${HOST}/sale</p>`]) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+    expect(check('<p>Neu</p><p>https://evil.example/x</p>', '<p>https://evil.example/x</p>')).toEqual({ ok: true });
+  });
+
+  it('takes no domain from a URL the before-image only names among words', () => {
+    const before = '<p>Mehr beim Hersteller unter https://evil.example/ und im Fachhandel.</p>';
+    expect(check(`${before}[video src="https://evil.example/a.mp4"]`, before)).toEqual(foreign);
+    // Twin: a link or an embed of the before-image does lend its domain.
+    expect(check('[video src="https://evil.example/a.mp4"]', '<p><a href="https://evil.example/">x</a></p>')).toEqual({ ok: true });
+    expect(check('[video src="https://evil.example/a.mp4"]', '<p>https://evil.example/x</p>')).toEqual({ ok: true });
+    // Nor does a name in a pair or an attribute that does not name its host as a link does.
+    for (const held of ['<p>Hersteller: [b]evil.example[/b]</p>', '<p>[x title="evil.example"]</p>', '<p>[b]https://evil.example/ ist Partner[/b]</p>']) {
+      expect(check(`${held}[embed]https://evil.example/x[/embed]`, held), held).toEqual(foreign);
+    }
+    // Nor a value with a control character in it; its twin without one lends.
+    expect(check('[embed]https://evil.example/x[/embed]', '<p>[x u="https://evil.example\u0001"]</p>')).toEqual(foreign);
+    expect(check('[embed]https://evil.example/x[/embed]', '<p>[x u="https://evil.example"]</p>')).toEqual({ ok: true });
+  });
+
+  it('asks before shortcode_changed, so a value offered to copy carries no foreign link', () => {
+    expect(check('[button url="https://evil.example/?a=1&b=2"]Go[/button]')).toEqual(foreign);
+    // Twin: the same shortcode on the store's own domain is refused for its `&` alone.
+    expect(check(`[button url="https://${HOST}/?a=1&b=2"]Go[/button]`)).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+  });
+
+  it('passes the store, a relative path, a start domain, and what the before-image already links to', () => {
+    expect(check(`[video src="https://${HOST}/a.mp4"]`)).toEqual({ ok: true });
+    expect(check(`[video src="https://cdn.${HOST}/a.mp4"]`)).toEqual({ ok: true });
+    expect(check('[button url="/sale/tee"]Zum Angebot[/button]')).toEqual({ ok: true });
+    expect(check('[video src="https://evil.example/a.mp4"]', null, ['evil.example'])).toEqual({ ok: true });
+    expect(check('<p>x [video src="https://evil.example/b.mp4"]</p>', '<p><a href="https://evil.example/">x</a></p>')).toEqual({ ok: true });
+    expect(check('<p>[embed]https://evil.example/b[/embed]</p>', '<p>[video src="https://evil.example/a.mp4"]</p>')).toEqual({ ok: true });
+    // Prose in brackets is not a link.
+    // A closing tag takes no attributes, so what follows its name is not read as one.
+    for (const after of ['<p>[Hinweis: neu]</p>', '<p>[siehe unten] und [Preis 20 CHF]</p>', '[button size=large]Zum Angebot[/button]', '[b]x[/b note:y]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('passes a value the before-image\'s shortcodes hold as often, and not one copy more', () => {
+    const own = '[x a="note:b"]';
+    expect(check(`<p>${own}</p>`, `<p>${own}</p>`)).toEqual({ ok: true });
+    expect(check(`<p>${own}${own}</p>`, `<p>${own}</p>`)).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // Twin: without the before-image the one copy is refused.
+    expect(check(`<p>${own}</p>`)).toMatchObject({ ok: false, reason: 'url_scheme' });
+  });
+
+  it('reads values of many attributes, quotes and colons in linear time', () => {
+    for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`, `${'\n'.repeat(100_000)}x`, `${' \n'.repeat(60_000)}x`, `${'\r'.repeat(100_000)}x`, `${' \r'.repeat(60_000)}x`, `[e]${'%'.repeat(30_000)}${'0a'.repeat(30_000)}[/e]`, `[x a="${'%'.repeat(30_000)}${'0a'.repeat(30_000)}"]`]) {
+      const start = performance.now();
+      check(value);
+      expect(performance.now() - start, `${value.slice(0, 12)}… of ${value.length}`).toBeLessThan(3000);
+    }
+    // A value the tree check refuses never reaches the links; a before-image is read for them all the
+    // same, so the shapes that would refuse go there.
+    for (const before of ['<p '.repeat(80_000), '<p a'.repeat(60_000), `${'\r'.repeat(100_000)}x`]) {
+      const start = performance.now();
+      check('<p>x</p>', before);
+      expect(performance.now() - start, `before ${before.slice(0, 12)}… of ${before.length}`).toBeLessThan(3000);
+    }
   });
 });

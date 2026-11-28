@@ -13,6 +13,7 @@ import {
 } from './plan-pause.js';
 import { TAKEOVER_DIGEST_PREFIX, takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverPrompts } from './plan-takeover.js';
 import { stampExpect } from './plan-stamp.js';
+import { COVER_FROM_MARKS } from './takeover-core.js';
 import { creatorCovered, editorCovered, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate } from './request-principal.js';
 import { savedWorkflowSource } from '../orchestrator/run-source.js';
 import { planOfTrigger } from './plan-stamp.js';
@@ -238,9 +239,68 @@ describe('the workflow’s side', () => {
     ended(b, 'h@x.ch');
     pause(b, 'p', 'h@x.ch');
     const p = takeoverPreview(deps(b), 'p');
-    expect(p.kind === 'preview' && [p.preview.runsAs, p.preview.workflow]).toEqual(['owner', { id: 'w', name: 'W', takenOver: true }]);
+    expect(p.kind === 'preview' && [p.preview.runsAs, p.preview.workflow]).toEqual(['owner', { id: 'w', name: 'W', takenOver: true, from: { name: 'h@x.ch', role: 'workflow-created' } }]);
     take(b, 'p');
     expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))).toBeUndefined();
+  });
+
+  // Two plans on one workflow: taking the first over covers the workflow's mark, so nothing on it is
+  // left to take over with the second. The preview then shows no workflow, and no member is said to
+  // have created or changed one: a role line would name a workflow the preview does not carry.
+  it('a workflow whose marks are all covered is not in the preview, and no member keeps a workflow role', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p1', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    plan(b, 'p2', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p1', 'h@x.ch');
+    pause(b, 'p2', 'h@x.ch');
+    take(b, 'p1');
+    expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))).toBeUndefined();
+    const p = takeoverPreview(deps(b), 'p2');
+    expect(p.kind === 'preview' && [p.preview.workflow, p.preview.members.map((m) => [m.name, m.roles])])
+      .toEqual([null, [['h@x.ch', ['created']]]]);
+    // The workflow is there, only its marks are covered: not gone (beside the deleted case below).
+    expect(p.kind === 'preview' && p.preview.workflowGone).toBe(false);
+  });
+
+  it('control: a plan without a workflow has none in the preview, and none gone', () => {
+    const b = box();
+    plan(b, 'p', { by: 'h@x.ch' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.workflow, p.preview.workflowGone]).toEqual([null, false]);
+  });
+
+  // Deleting a workflow clears the plan's reference (`ON DELETE SET NULL`) and leaves it a workflow
+  // plan: the preview says the workflow is gone, so the owner does not take over a plan that runs nothing unawares.
+  // A reference that matches more than one workflow is stored empty when the plan is written: the
+  // plan never had its workflow, and the preview says the same as after a deletion.
+  it('a workflow plan bound to no workflow (an ambiguous short id) is said to miss its workflow', () => {
+    const b = box();
+    workflow(b, 'wf-a1', { email: 'h@x.ch' });
+    workflow(b, 'wf-a2', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'wf-a' });
+    expect(row(b, 'p')['target_workflow_id']).toBeNull();
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.workflow, p.preview.workflowGone]).toEqual([null, true]);
+  });
+
+  it('a workflow plan whose workflow was deleted is said to use one that is gone', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const before = takeoverPreview(deps(b), 'p');
+    expect(before.kind === 'preview' && [before.preview.workflow?.id, before.preview.workflowGone]).toEqual(['w', false]);
+    b.db.prepare("DELETE FROM workflows WHERE id = 'w'").run();
+    expect(row(b, 'p')['target_workflow_id']).toBeNull();
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.workflow, p.preview.workflowGone]).toEqual([null, true]);
   });
 
   it('a pause from a login whose workflow read failed knows no roles: the preview reads them, so the owner is told the workflow moves', () => {
@@ -299,8 +359,57 @@ describe('the workflow’s side', () => {
     plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
     ended(b, 'h@x.ch');
     writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-edited'], closedPrompt: false }]);
+    // The workflow now names h's grant as its creator only: the pause's change stays, the creation is added.
     const p = takeoverPreview(deps(b), 'p');
-    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-edited']]]);
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-edited', 'workflow-created']]]);
+  });
+
+  it('only workflow roles are read for a pause: its roles on the plan stay as the pause knew them', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'triggers', 'p', 'h@x.ch');
+    ended(b, 'h@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-created'], closedPrompt: false }]);
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-created']]]);
+  });
+
+  it('says whose mark on the workflow the takeover reads: the editor’s before the creator’s', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'c@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'workflows', 'w', 'h@x.ch');
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.workflow?.from).toEqual({ name: 'h@x.ch', role: 'workflow-edited' });
+  });
+
+  it('says the creator’s mark where the editor’s is covered, as `planMandate` reads it (cover set in the table)', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'c@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'workflows', 'w', 'h@x.ch');
+    // A takeover covers both marks at once; the editor's alone is set here to read the order.
+    b.db.prepare('UPDATE workflows SET covered_edited_by = mandate_editor, covered_edited_id = mandate_editor_id, covered_edited_at = mandate_edited_at WHERE id = ?').run('w');
+    ended(b, 'c@x.ch');
+    pause(b, 'p', 'c@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.workflow?.from).toEqual({ name: 'c@x.ch', role: 'workflow-created' });
+  });
+
+  it('a pause that knew the workflow’s creation gains the change the same grant made to it, renewed', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-created'], closedPrompt: false }]);
+    renewed(b, 'h@x.ch');
+    editor(b, 'workflows', 'w', 'h@x.ch', 'g-h@x.ch', null);
+    b.db.prepare("UPDATE workflows SET mandate_edited_at = datetime('now', '+1 minute') WHERE id = 'w'").run();
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-created', 'workflow-edited']]]);
   });
 
   it('a renewal: the member the plan was paused for is live again and is still covered', () => {
@@ -527,9 +636,41 @@ describe('the workflow’s side', () => {
       ended(b, 'h@x.ch');
       pause(b, 'p', 'h@x.ch');
       take(b, 'p');
-      b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}' }, { kind: 'mandate', email: 'm2@x.ch', mandateId: 'g-m2@x.ch' }, 'w');
+      b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}', isTemplate: false }, { kind: 'mandate', email: 'm2@x.ch', mandateId: 'g-m2@x.ch' }, 'w');
       expect([from, planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w-copy')!))?.principal.email]).toEqual([from, 'm2@x.ch']);
     }
+  });
+});
+
+describe('after the workflow was taken over on its own, a plan takeover names no role on it', () => {
+  // The trigger's creator also created the workflow; the plan was paused for its editor only.
+  const setup = (b: Box): void => {
+    workflow(b, 'w', { email: 'c@x.ch' });
+    plan(b, 'p', { by: 'c@x.ch', effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'triggers', 'p', 'e@x.ch');
+    renewed(b, 'c@x.ch');
+    ended(b, 'e@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-e@x.ch', email: 'e@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['edited', 'workflow-created'], closedPrompt: false }]);
+  };
+  const rolesShown = (b: Box): unknown => {
+    const p = takeoverPreview(deps(b), 'p');
+    return p.kind === 'preview' && [p.preview.workflow, p.preview.members.map((m) => [m.name, m.roles])];
+  };
+
+  it('CONTROL: before the workflow cover, the creator outside the pause and the pause’s stored role both name the workflow', () => {
+    const b = box();
+    setup(b);
+    expect(rolesShown(b)).toEqual([
+      { id: 'w', name: 'W', takenOver: false, from: { name: 'c@x.ch', role: 'workflow-created' } },
+      [['e@x.ch', ['edited', 'workflow-created']], ['c@x.ch', ['created', 'workflow-created']]],
+    ]);
+  });
+
+  it('with the workflow covered, neither the stored role of the pause nor the creator read through its mark names the workflow', () => {
+    const b = box();
+    setup(b);
+    b.db.prepare(`UPDATE workflows SET ${COVER_FROM_MARKS} WHERE id = 'w'`).run(nowS());
+    expect(rolesShown(b)).toEqual([null, [['e@x.ch', ['edited']], ['c@x.ch', ['created']]]]);
   });
 });
 
@@ -940,7 +1081,7 @@ describe('no other write touches the cover', () => {
     const tasks = new TaskManager(b.history);
     tasks.complete('p');
     tasks.reopen('p');
-    b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}' }, { kind: 'owner' }, 'w');
+    b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}', isTemplate: false }, { kind: 'owner' }, 'w');
     expect(cover()).toEqual(before);
     expect(memberOf(b, 'p')).toBeUndefined();
   });

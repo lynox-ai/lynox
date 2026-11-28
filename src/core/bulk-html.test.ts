@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   checkMarkup, droppedTagsOf, htmlFieldsOfListForm, markupChangesOf, markupOf, plainTextMarkupOf,
-  type MarkupCheckInput, type MarkupRefusal,
+  passiveItem, withinAllowlist, type MarkupCheckInput, type MarkupItem, type MarkupRefusal,
 } from './bulk-html.js';
 import { parseFragment, defaultTreeAdapter, html as p5 } from 'parse5';
 import { canonicalHtml } from './html-tree.js';
@@ -86,11 +86,34 @@ describe('checkMarkup: the allowlist and the multiset', () => {
     expect(reason(`<p>x</p>${img}`, `<p>y</p>${img}`)).toBe('ok');
   });
 
+  // The strings PRD shopify-preset §21.7 names: the rule reads the tree, not the text. A changed
+  // srcset entry, a changed xlink:href and an SVG animation are refused by the element and attribute
+  // rules (a counted attribute changed is a new occurrence), not by the domain rule.
+  it('refuses the strings the description write is checked against', () => {
+    expect(reason('<p>x</p>', '<p>x</p><img/src=x/onerror=y>')).toBe('new_img');
+    expect(reason('<p>x</p>', '<p>x</p><IMAGE src=x>')).toBe('new_img');
+    expect(reason('<p>x</p>', '<p>x</p><noscript><p title="</noscript><img src=x onerror=y>"></noscript>')).not.toBe('ok');
+    const held = '<img src="a.jpg" srcset="https://acme.myshopify.com/a 1x, https://acme.myshopify.com/b 2x">';
+    expect(reason(held, held.replace('acme.myshopify.com/b', 'evil.example/b'))).toBe('new_img');
+    expect(reason(held, held)).toBe('ok');
+    expect(reason('<svg><a xlink:href="https://acme.myshopify.com/x">t</a></svg>', '<svg><a xlink:href="https://evil.example/x">t</a></svg>')).not.toBe('ok');
+    expect(reason('<svg><rect></rect></svg>', '<svg><rect><animate attributeName="href" values="javascript:alert(1)"></animate></rect></svg>')).not.toBe('ok');
+  });
+
   it('refuses a changed body of a held script or style, in every namespace', () => {
     expect(reason('<script>a()</script>', '<script>b()</script>')).toBe('content_changed');
     expect(reason('<style>p{}</style>', '<style>p{color:red}</style>')).toBe('content_changed');
     expect(reason('<svg><script>a()</script></svg>', '<svg><script>b()</script></svg>')).toBe('content_changed');
     expect(reason('<noscript>a</noscript>', '<noscript>b</noscript>')).toBe('content_changed');
+  });
+
+  it('refuses a changed noscript whose change lies only in an attribute\'s text, as Shopify keeps it', () => {
+    // What Shopify kept of the canonical noscript case: it parses with scripting off, so the
+    // case's `img` became attribute text of a `p` inside the noscript, as measured.
+    const kept = '<noscript><p title="&lt;/noscript&gt;&lt;img src=" x onerror="alert(1)">"&gt;</p></noscript>';
+    expect(reason(kept, kept)).toBe('ok');
+    expect(reason(kept, kept.replace('alert(1)', 'alert(2)'))).toBe('content_changed');
+    expect(reason(kept, kept.replace('&lt;img src=', '&lt;img src=y'))).toBe('content_changed');
   });
 
   it('refuses a held foreign script whose text moves between it and an element below it', () => {
@@ -212,14 +235,14 @@ describe('checkMarkup: the domain rule', () => {
 
 describe('checkMarkup: hidden characters', () => {
   it('refuses a hidden character the before-image does not hold, written or as an entity', () => {
-    expect(reason('<p>ab</p>', '<p>a​b</p>')).toBe('hidden_char');
+    expect(reason('<p>ab</p>', '<p>a\u200Bb</p>')).toBe('hidden_char');
     expect(reason('<p>ab</p>', '<p>a&#x200B;b</p>')).toBe('hidden_char');
-    expect(reason('<p>ab</p>', '<p>ab</p><!--​-->')).toBe('comment_added');
+    expect(reason('<p>ab</p>', '<p>ab</p><!--\u200B-->')).toBe('comment_added');
   });
 
   it('counts per code point: as often as the before-image holds it passes, once more does not', () => {
-    expect(reason('<p>a​b</p>', '<p>neu a​b</p>')).toBe('ok');
-    expect(reason('<p>a​b</p>', '<p>a​b​c</p>')).toBe('hidden_char');
+    expect(reason('<p>a\u200Bb</p>', '<p>neu a\u200Bb</p>')).toBe('ok');
+    expect(reason('<p>a\u200Bb</p>', '<p>a\u200Bb\u200Bc</p>')).toBe('hidden_char');
   });
 });
 
@@ -321,13 +344,13 @@ describe('checkMarkup: what the page makes of the value (refuter round 1)', () =
   });
 
   it('allows the places real text puts a hidden character, across the whole field, not per text', () => {
-    const cut = Array.from({ length: 20 }, () => `<p>${'a­b'.repeat(30)}</p>`).join('');
+    const cut = Array.from({ length: 20 }, () => `<p>${'a\u00ADb'.repeat(30)}</p>`).join('');
     expect(reason('<p>plain</p>', cut)).toBe('hidden_char');
-    expect(reason('<p>Silben­trennung</p>', '<p>Neue Silben­trennung und Baum­wolle</p>')).toBe('ok');
+    expect(reason('<p>Silben\u00ADtrennung</p>', '<p>Neue Silben\u00ADtrennung und Baum\u00ADwolle</p>')).toBe('ok');
     expect(reason('<ul><li>✔️ Bio</li></ul>', '<ul><li>✔️ Bio</li><li>✔️ Fair</li></ul>')).toBe('ok');
-    expect(reason('<p>Familie</p>', '<p>Familie \u{1F468}‍\u{1F469}‍\u{1F467}</p>')).toBe('ok');
+    expect(reason('<p>Familie</p>', '<p>Familie \u{1F468}\u200D\u{1F469}\u200D\u{1F467}</p>')).toBe('ok');
     // Outside those places, one more is one too many.
-    expect(reason('<p>ab</p>', '<p>a­ b</p>')).toBe('hidden_char');
+    expect(reason('<p>ab</p>', '<p>a\u00AD b</p>')).toBe('hidden_char');
   });
 
   it('takes a host with a trailing dot as the host', () => {
@@ -483,8 +506,97 @@ describe('markupChangesOf', () => {
   });
 
   it('leaves out a bare p that comes or goes', () => {
-    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [] });
-    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [] });
+    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false, addsOnlyPassive: true });
+    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false, addsOnlyPassive: true });
+  });
+
+  it('says whether an added item lies outside what a write may add (1010, ux U-092)', () => {
+    const outside = (before: string, after: string): boolean => markupChangesOf('d', before, after).addsOutsideAllowlist;
+    // Within: a link with its href only.
+    expect(outside('<p>a</p>', '<p>a <a href="/x">b</a></p>')).toBe(false);
+    // Outside, one condition each: an element off the list, a second attribute on a link, an
+    // attribute on another allowlisted element, raw text, a comment, an allowlisted element in a template.
+    expect(outside('<p>a</p>', '<p>a</p><img src="/i.jpg">')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="/x" target="_blank">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p class="x">a</p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><script>x()</script>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><!-- c -->')).toBe(true);
+    expect(outside('<p>a</p><template></template>', '<p>a</p><template><p>b</p></template>')).toBe(true);
+    // A bare element off the list, which fails on the list alone; a link in SVG, which fails on
+    // its namespace alone; an href on an element that is not a link.
+    expect(outside('<p>a</p>', '<p>a</p><div>b</div>')).toBe(true);
+    expect(outside('<p>a</p><svg></svg>', '<p>a</p><svg><a href="/x">b</a></svg>')).toBe(true);
+    expect(outside('<p>a</p>', '<p href="/x">a</p>')).toBe(true);
+    // A link whose href the link check refuses: a script scheme, a mail link with a second recipient.
+    expect(outside('<p>a</p>', '<p>a <a href="javascript:steal()">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example?bcc=x@evil.example">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example">b</a></p>')).toBe(false);
+    // A comment fails on its kind, its namespace and its name at once, and raw text lies only in
+    // elements off the list: parsed markup reaches neither condition alone (the next test does).
+    // Only what is added counts: a removed image does not.
+    expect(outside('<p>a</p><img src="/i.jpg">', '<p>a</p>')).toBe(false);
+  });
+
+  it('holds its kind and raw-text conditions alone, for an item no parse yields', () => {
+    // The kind and the raw text guard against an item that breaks the parser's invariants: a
+    // comment carrying an element's namespace and name, an allowlisted element carrying raw text.
+    const p: MarkupItem = { kind: 'element', namespace: 'html', element: 'p', attributes: [], text: null, inTemplate: false };
+    expect(withinAllowlist(p)).toBe(true);
+    expect(withinAllowlist({ ...p, kind: 'comment' })).toBe(false);
+    expect(withinAllowlist({ ...p, text: 'x' })).toBe(false);
+  });
+
+  // Which sentence an undo's approval shows (U-092): only harmless markup,
+  // or markup lynox cannot confirm is harmless. Fail-closed: whatever is not on the list is active.
+  it('tells added markup that only lays out text from markup lynox cannot confirm is harmless', () => {
+    const passive = (before: string, after: string): boolean => markupChangesOf('d', before, after).addsOnlyPassive;
+    const was = '<p>a</p>';
+    // Passive: the editor's own table, formatting, a comment node, a link with rel, a header cell's scope.
+    expect(passive(was, '<p>a</p><table width="100%"><tbody><tr><td>\u00a0x</td></tr></tbody></table>')).toBe(true);
+    expect(passive(was, '<p>a</p><div align="center"><span title="t">b</span> <b>c</b></div><hr>')).toBe(true);
+    expect(passive(was, '<p>a</p><!-- c -->')).toBe(true);
+    expect(passive(was, '<p>a <a href="/x" rel="nofollow">b</a></p>')).toBe(true);
+    expect(passive(was, '<p>a</p><table><tr><th scope="col" abbr="n">n</th></tr></table>')).toBe(true);
+    // Active: a script, the table with a style, and an iframe below a passive div (every element
+    // of an added subtree is an item of its own).
+    expect(passive(was, '<p>a</p><script>steal()</script>')).toBe(false);
+    expect(passive(was, '<p>a</p><table style="background:url(https://t.example/p)"><tr><td>x</td></tr></table>')).toBe(false);
+    expect(passive(was, '<p>a</p><div><iframe src="https://evil.example/"></iframe></div>')).toBe(false);
+    // By namespace, not by name: an SVG `a` and a MathML `table` are foreign.
+    expect(passive('<p>a</p><svg></svg>', '<p>a</p><svg><a href="/x">b</a></svg>')).toBe(false);
+    expect(passive('<p>a</p><math></math>', '<p>a</p><math><mtable></mtable></math>')).toBe(false);
+    // An element nobody listed, and one inside a template.
+    expect(passive(was, '<p>a</p><marquee>b</marquee>')).toBe(false);
+    expect(passive('<p>a</p><template></template>', '<p>a</p><template><p class="x">b</p></template>')).toBe(false);
+    // Active by name, each though the default would catch it.
+    for (const after of [
+      '<p onclick="x()">a</p>', '<p class="js-modal">a</p>', '<p id="cart">a</p>', '<p>a</p><form name="f"></form>',
+      '<p>a</p><img src="https://cdn.example/i.jpg">', '<p data-x="1">a</p>', '<p>a <a href="/x" target="_blank">b</a></p>',
+      '<blockquote cite="https://x.example/">a</blockquote>', '<table background="https://x.example/b.png"><tr><td>a</td></tr></table>',
+      '<p>a</p><form><button formaction="https://evil.example/">b</button></form>', '<p>a</p><svg><use xlink:href="#x"></use></svg>',
+      '<p>a</p><base href="https://evil.example/">', '<p>a</p><meta http-equiv="refresh" content="0;url=https://evil.example/">',
+      '<p>a</p><link rel="stylesheet" href="https://evil.example/s.css">', '<p>a</p><form><input name="q"></form>',
+      '<p>a</p><noscript><p>b</p></noscript>', '<p>a <a href="javascript:steal()">b</a></p>', '<p>a</p><object data="https://evil.example/x"></object>',
+      // An image by its name, not only by its `src`: one with only passive attributes is active too.
+      '<p>a</p><img alt="b">', '<p>a</p><img>',
+    ]) expect(passive(was, after), after).toBe(false);
+    // A `<!--` in raw text is no comment: it is a textarea's text, active as the element is.
+    expect(passive(was, '<p>a</p><textarea><!-- c --></textarea>')).toBe(false);
+    // An attribute passive on one element is not on another: `rel` and `href` only on an `a`,
+    // the cell attributes only on a `td` or `th`. And `name` is active on an `a`, too.
+    for (const after of [
+      '<p rel="nofollow">a</p>', '<div href="/x">a</div>', '<p scope="col">a</p>', '<div headers="h">a</div>',
+      '<p abbr="n">a</p>', '<p>a <a href="/x" name="cart">b</a></p>',
+    ]) expect(passive(was, after), after).toBe(false);
+  });
+
+  it('holds its namespace and raw-text conditions alone, for an item no parse yields', () => {
+    const td: MarkupItem = { kind: 'element', namespace: 'html', element: 'td', attributes: [], text: null, inTemplate: false };
+    expect(passiveItem(td)).toBe(true);
+    expect(passiveItem({ ...td, namespace: 'svg' })).toBe(false);
+    expect(passiveItem({ ...td, text: 'x' })).toBe(false);
+    expect(passiveItem({ ...td, inTemplate: true })).toBe(false);
+    expect(passiveItem({ kind: 'comment', namespace: '', element: '', attributes: [], text: 'c', inTemplate: true })).toBe(false);
   });
 
   it('names an allowlisted element with an attribute, and one inside a template', () => {

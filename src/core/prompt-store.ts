@@ -16,8 +16,19 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
-import { OWNER_PRINCIPAL, isMandateTag, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
-import { maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
+import { isConsentKind, type ConsentKind, isConsentAction, type ConsentAction } from '../contract/prompt.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { MandateKeyInputError, mandateCredentialInput, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
+
+/**
+ * A mandate's helper takes no key in this chat:
+ * an answer of theirs that reads as carrying one (`mandateCredentialInput`) is refused before any
+ * row stores it. The owner's answers are masked as before.
+ */
+function refuseMandateKey(by: RequestPrincipal, texts: ReadonlyArray<string | null>): void {
+  if (isOwnerPrincipal(by)) return;
+  if (texts.some((t) => t !== null && mandateCredentialInput(t) !== null)) throw new MandateKeyInputError();
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -110,6 +121,30 @@ export type PromptOutcome =
   | { status: 'answered'; row: PendingPromptRow }
   | { status: 'expired' }
   | { status: 'aborted' };
+
+/**
+ * The engine's own confirmation a stored question is, read from its engine-only marker
+ * (`insertAskUser`'s `consent`). Parsed, not substring-matched; anything else — no marker, a
+ * malformed one, a question stored before the marker existed — is no consent at all.
+ */
+export function consentOfPayload(payloadJson: string | null): ConsentKind | undefined {
+  if (payloadJson === null) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(payloadJson);
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const { kind, consent } = parsed as { kind?: unknown; consent?: unknown };
+    return kind === 'consent' && isConsentKind(consent) ? consent : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The action a stored consent names on its button (`PromptMeta.consentAction`), if it is one. */
+export function consentActionOfPayload(payloadJson: string | null): ConsentAction | undefined {
+  if (consentOfPayload(payloadJson) === undefined || payloadJson === null) return undefined;
+  const { action } = JSON.parse(payloadJson) as { action?: unknown };
+  return isConsentAction(action) ? action : undefined;
+}
 
 /**
  * Is this payload the engine-posed onboarding card?
@@ -360,6 +395,10 @@ export class PromptStore {
      *  Every other caller leaves it undefined. */
     triggerId?: string,
     stamp?: PromptStamp,
+    /** The engine's own confirmation this is (`PromptMeta.consent`); never set for a model's question. */
+    consent?: ConsentKind,
+    /** What that confirmation's button names (`PromptMeta.consentAction`). */
+    consentAction?: ConsentAction,
   ): string {
     return this._insert({
       sessionId,
@@ -375,7 +414,9 @@ export class PromptStore {
       secretName: null,
       secretKeyType: null,
       multiSelect: multiSelect === true,
-      payloadJson: null,
+      // The engine-only consent marker, like the onboarding card's: a question the model
+      // writes stores NULL here, so no option text can make it the engine's confirmation.
+      payloadJson: consent !== undefined ? JSON.stringify(consentAction !== undefined ? { kind: 'consent', consent, action: consentAction } : { kind: 'consent', consent }) : null,
       origin,
     });
   }
@@ -579,8 +620,12 @@ export class PromptStore {
    * the row stores it and before the asking tool hands it to the model.
    *
    * `by` is the principal that answered, recorded beside the answer. Required on every way an
-   * answer is stored, so a new route cannot settle a question without saying who did. */
+   * answer is stored, so a new route cannot settle a question without saying who did.
+   *
+   * An answer from anyone but the owner that reads as carrying a key is not stored at all
+   * (`refuseMandateKey`): it throws `MandateKeyInputError`, and the question stays open. */
   answerUser(promptId: string, answer: string, by: RequestPrincipal): boolean {
+    refuseMandateKey(by, [answer]);
     const result = this._getAnswerStmt().run(withoutTypedCredentials(answer), principalTag(by), mandateIdOf(by) ?? null, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
@@ -590,6 +635,7 @@ export class PromptStore {
   /** Answer a multi-question (tabs) ask_user. Answers are stored as a JSON
    * string[] in the answer column. Ordering must match questions ordering. */
   answerUserTabs(promptId: string, answers: string[], by: RequestPrincipal): boolean {
+    refuseMandateKey(by, answers);
     // Shared UPDATE path: stores JSON-encoded array in the same `answer`
     // column single-question uses. Handler disambiguates by presence of
     // questions_json on the row.
@@ -605,8 +651,10 @@ export class PromptStore {
   /** Optional: persist partial answers so a reconnect mid-batch can restore
    * progress. Doesn't settle the prompt — the handler keeps awaiting. Masked
    * like a final answer, without the note: the partial goes back to the form,
-   * not to the model. */
-  setPartialAnswers(promptId: string, partial: (string | null)[]): boolean {
+   * not to the model. `by` as at `answerUser`: a mandate's partial that reads as carrying a key
+   * is not stored. */
+  setPartialAnswers(promptId: string, partial: (string | null)[], by: RequestPrincipal): boolean {
+    refuseMandateKey(by, partial);
     const masked = partial.map((a) => (a === null ? null : maskCredentialInput(a).text));
     const result = this._getSetPartialStmt().run(JSON.stringify(masked), promptId);
     return result.changes > 0;

@@ -199,7 +199,7 @@ describe('PromptStore', () => {
 
     it('persists partial answers without settling', () => {
       const id = store.insertAskUserTabs('s1', [{ question: 'q1' }, { question: 'q2' }]);
-      store.setPartialAnswers(id, ['first', null]);
+      store.setPartialAnswers(id, ['first', null], OWNER_PRINCIPAL);
       const row = store.getById(id);
       expect(row?.status).toBe('pending'); // not settled
       expect(row?.partial_answers_json).toBe(JSON.stringify(['first', null]));
@@ -223,7 +223,7 @@ describe('PromptStore', () => {
 
     it('every tab answer and a partial answer, without the note', () => {
       const id = store.insertAskUserTabs('s1', [{ question: 'q1' }, { question: 'q2' }]);
-      store.setPartialAnswers(id, [vendor, null]);
+      store.setPartialAnswers(id, [vendor, null], OWNER_PRINCIPAL);
       expect(store.getById(id)?.partial_answers_json).toBe(JSON.stringify([`***${vendor.slice(-4)}`, null]));
       store.answerUserTabs(id, ['plain', `key ${vendor}`], OWNER_PRINCIPAL);
       const answers = JSON.parse(store.getById(id)!.answer!) as string[];

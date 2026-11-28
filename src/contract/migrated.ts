@@ -82,6 +82,8 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'ExactAttachResponse', contractFile: 'http.ts', twinPattern: typeTwin('ExactAttachResponse') },
   { name: 'isExactAttachCleared', contractFile: 'http.ts', twinPattern: valueTwin('isExactAttachCleared') },
   { name: 'readExactHeld', contractFile: 'http.ts', twinPattern: valueTwin('readExactHeld') },
+  // Born in the contract: the reader of `overrun_hold` (usage flush + status answers).
+  { name: 'readOverrunHold', contractFile: 'http.ts', twinPattern: valueTwin('readOverrunHold') },
   { name: 'UsageSummaryPeriod', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryPeriod') },
   { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },
   { name: 'HealthBody', contractFile: 'http.ts', twinPattern: typeTwin('HealthBody') },
@@ -159,6 +161,7 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   // Born in the contract: the Microsoft return parameters and the admin-consent status route.
   { name: 'MICROSOFT_OAUTH_CLAIM_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_CLAIM_PARAM') },
   { name: 'MICROSOFT_OAUTH_ERROR_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_ERROR_PARAM') },
+  { name: 'MICROSOFT_OAUTH_START_ADDRESS_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_START_ADDRESS_PARAM') },
   { name: 'AdminConsentStatusRequest', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusRequest') },
   { name: 'AdminConsentStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusResponse') },
   // Born in the contract: the scopes lynox's Google client asks for.

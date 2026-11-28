@@ -5,7 +5,8 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import dns from 'node:dns/promises';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
@@ -18,6 +19,7 @@ import { SecretStore } from './secret-store.js';
 import { WorkerLoop } from './worker-loop.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { BULK_MAX_SOURCE_BYTES } from './bulk-plan.js';
+import { EXPORT_TABLES } from './export-tables.js';
 import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
 import { createToolContext } from './tool-context.js';
 import { detectSecretInContent } from '../tools/builtin/http.js';
@@ -258,6 +260,14 @@ describe('what stops a list read — each with a fixed reason, nothing of the pr
     expect(s.requests).toEqual([]);
   });
 
+  it('a list whose stored filters were changed past what a parse takes: stopped on its filter, nothing is sent', async () => {
+    const s = shop(3);
+    await stopsWith(s, BULK_HALT_REASONS.listFilterWithdrawn, (id) => {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(engineDb.enc(JSON.stringify({ ...source, filters: { category: ['12', '13'] } })), id);
+    });
+    expect(s.requests).toEqual([]);
+  });
+
   it('(016) a list whose path is no longer one a run may read, after it is read: no target is read', async () => {
     const s = shop(3);
     const restore = serve(s);
@@ -432,11 +442,23 @@ describe('records the list does not need', () => {
     try {
       const id = startedList();
       expect((await runBulkPreview(id, deps())).status).toBe('halted');
-      expect(ledger.getStatus(id)).toMatchObject({ phase: 'planned', haltReason: BULK_HALT_REASONS.listTooLarge });
+      expect(ledger.getStatus(id)).toMatchObject({ phase: 'planned', haltReason: BULK_HALT_REASONS.listTooLarge, applied: 0, sentUnknown: 0 });
       expect(ledger.getListRun(id)!.state).toBe('pending');
     } finally {
       restore();
     }
+  });
+
+  // The page says of this halt "lynox changed nothing" (U-186): it holds because the halt is only
+  // set while a list is read, which only a run planned and never approved does.
+  it('is set only by the list read, which reads only a run that was never approved', async () => {
+    const SRC = fileURLToPath(new URL('.', import.meta.url));
+    const sites = readdirSync(SRC).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+      .filter((f) => readFileSync(`${SRC}${f}`, 'utf8').includes('halt(BULK_HALT_REASONS.listTooLarge)'));
+    expect(sites).toEqual(['bulk-preview.ts']);
+    const id = startedList();
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'approved' WHERE id = ?`).run(id);
+    expect((await runBulkPreview(id, deps())).status).toBe('refused');
   });
 });
 
@@ -527,6 +549,64 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
   it('leaves a product out where the plan adds an image its description did not hold', async () => {
     const id = await previewed({ description: '<p>New</p><img src="/a.png">' });
     expect(ledger.getPreview(id).map((t) => [t.change, t.error])).toEqual([['invalid', 'new_img'], ['invalid', 'new_img']]);
+  });
+
+  it('names the domain of a link the plan adds and the run may not link to (1010)', async () => {
+    const id = await previewed({ description: '<p>New <a href="https://Evil.Example./x">deal</a></p>' });
+    // The host as the check read it: lower case, the trailing dot dropped.
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', 'evil.example'], ['new_link_domain', 'evil.example']]);
+  });
+
+  it('stores the refused link\'s domain encrypted, never in plain text, in a column the export map lists as encrypted', async () => {
+    await previewed({ description: '<p>New <a href="https://evil.example/x">deal</a></p>' });
+    const listed = EXPORT_TABLES['engine.db'].include;
+    const db = engineDb.getDb();
+    // Every column of the ledger's tables that holds a value as the store encrypts it, as written by
+    // the run above, must be in the map: the map is what migration and the keyless check read.
+    const holding: string[] = [];
+    for (const table of ['bulk_runs', 'bulk_targets']) {
+      const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+      for (const col of cols) {
+        const n = (db.prepare(`SELECT count(*) AS n FROM ${table} WHERE typeof("${col}") = 'text' AND "${col}" GLOB 'enc:*'`).get() as { n: number }).n;
+        if (n > 0) holding.push(`${table}.${col}`);
+      }
+    }
+    expect(holding).toContain('bulk_targets.link_domain');
+    const cells = db.prepare(`SELECT link_domain FROM bulk_targets WHERE link_domain IS NOT NULL`).all() as Array<{ link_domain: string }>;
+    expect(cells.length).toBeGreaterThan(0);
+    for (const { link_domain } of cells) expect(engineDb.dec(link_domain)).toBe('evil.example');
+    // Nowhere in either table in plain text.
+    for (const table of ['bulk_runs', 'bulk_targets']) {
+      const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+      for (const col of cols) {
+        const n = (db.prepare(`SELECT count(*) AS n FROM ${table} WHERE typeof("${col}") = 'text' AND instr("${col}", 'evil.example') > 0`).get() as { n: number }).n;
+        expect(n, `${table}.${col}`).toBe(0);
+      }
+    }
+    const unlisted = holding.filter((tc) => { const [t, c] = tc.split('.') as [string, string]; return !(listed[t]?.encrypted ?? []).includes(c); });
+    expect(unlisted).toEqual([]);
+  });
+
+  it('keeps no domain a plan spells only percent-encoded (1010)', async () => {
+    // The run's plan-time scan reads the text, where `%2D` breaks a credential's shape; the link
+    // check decodes the host to `sk-ant-api03-…`. A host the link does not spell as it is gets no
+    // domain at all, before any scanner is asked (the scanner itself: the upper-case test below).
+    const href = 'https://sk%2Dant%2Dapi03%2Dabcdefghijklmnopqrstuvwxyz0123456789ABCD.evil.example/';
+    const id = await previewed({ description: `<p>New <a href="${href}">deal</a></p>` });
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', undefined], ['new_link_domain', undefined]]);
+  });
+
+  it('keeps no domain a plan spells in upper case that is a credential\'s shape once lower case (1010)', async () => {
+    // The plan-time scan reads the text, where the shape is upper case and is not one; the link
+    // check reads the host in lower case, which the scanner names. Built at run time.
+    const host = `${'SK-ANT-API03-'}ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCD.EVIL.EXAMPLE`;
+    const id = await previewed({ description: `<p>New <a href="https://${host}/">deal</a></p>` });
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', undefined], ['new_link_domain', undefined]]);
+  });
+
+  it('keeps no domain with another markup refusal (twin)', async () => {
+    const id = await previewed({ description: '<p>New</p><img src="https://evil.example/a.png">' });
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_img', undefined], ['new_img', undefined]]);
   });
 
   it('leaves a product out where the plan adds markup to a field that is not HTML', async () => {

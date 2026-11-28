@@ -86,6 +86,69 @@ describe('a turn that cannot start', () => {
 		expect(runPosts()).toBe(0);
 	});
 
+	it('when the server refuses the session (a rate limit): no run goes to a session it did not name', async () => {
+		// The proxy's rate limit answers in plain text, not JSON.
+		serve((url) => (url.endsWith('/sessions') ? new Response('Too many requests', { status: 429 }) : undefined));
+		await expect(store.sendMessage('go')).resolves.toBeUndefined();
+		expectFailedAndFree('go');
+		expect(calls.filter((u) => u.includes('/sessions/'))).toEqual([]);
+		expect(store.getSessionId()).toBeNull();
+		// The server answered: the reason is the rate limit, not a lost connection.
+		expect(store.getChatError()).toBe(t('chat.error_rate_limit'));
+	});
+
+	it('when the session answer names no session: nothing is sent to it', async () => {
+		serve((url) => (url.endsWith('/sessions') ? json({}) : undefined));
+		await expect(store.sendMessage('go')).resolves.toBeUndefined();
+		expectFailedAndFree('go');
+		expect(calls.filter((u) => u.includes('/sessions/'))).toEqual([]);
+	});
+
+	it('control: a session the server opens takes the run', async () => {
+		serve(() => undefined);
+		const s = sseStream();
+		serve((url) => (url.endsWith('/run') ? sse(s) : undefined));
+		void store.sendMessage('go');
+		await settle();
+		expect(calls.filter((u) => u.endsWith('/sessions/t1/run'))).toHaveLength(1);
+		s.send('done', {});
+		s.close();
+		await settle();
+	});
+
+	it('sent again with a tap, the failed message is the one that goes: it is not added a second time', async () => {
+		serve((url, n) => (url.endsWith('/sessions') && n === 1 ? json({ error: 'Too many requests' }, 429) : undefined));
+		await store.sendMessage('go');
+		const failed = store.getMessages().find((m) => m.role === 'user' && m.content === 'go')!;
+		expect(failed.failed).toBe(true);
+		const s = sseStream();
+		serve((url) => (url.endsWith('/run') ? sse(s) : undefined));
+		void store.retryFailedTurn(failed, 'go');
+		await settle();
+		const users = store.getMessages().filter((m) => m.role === 'user');
+		expect(users.map((m) => m.content)).toEqual(['go']);
+		expect(users[0]!.failed).toBeFalsy();
+		expect(users[0]!.queued).toBeFalsy();
+		expect(calls.filter((u) => u.endsWith('/sessions/t1/run'))).toHaveLength(1);
+		s.send('done', {});
+		s.close();
+		await settle();
+	});
+
+	it('sent again with a tap while offline, the failed message stays failed, not queued with nothing to send it', async () => {
+		serve((url, n) => (url.endsWith('/sessions') && n === 1 ? new Response('Too many requests', { status: 429 }) : undefined));
+		await store.sendMessage('go');
+		const failed = store.getMessages().find((m) => m.role === 'user' && m.content === 'go')!;
+		vi.stubGlobal('navigator', { onLine: false });
+		await store.retryFailedTurn(failed, 'go');
+		await settle();
+		const users = store.getMessages().filter((m) => m.role === 'user');
+		expect(users).toHaveLength(1);
+		expect(users[0]!.failed).toBe(true);
+		expect(users[0]!.queued).toBeFalsy();
+		expect(runPosts()).toBe(0);
+	});
+
 	it('when the request that starts it fails', async () => {
 		serve((url) => (url.endsWith('/run') ? offline() : undefined));
 		await expect(store.sendMessage('go')).resolves.toBeUndefined();
@@ -325,7 +388,8 @@ describe('sending a failed turn again', () => {
 			? json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }] })
 			: undefined));
 		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
-		expect(toasts).toEqual([{ message: t('chat.question_waiting'), type: 'info' }]);
+		// No card known here, so the sentence that names no card (and no X).
+		expect(toasts).toEqual([{ message: t('chat.question_waiting_plain'), type: 'info' }]);
 		await settle();
 		expect(runPosts()).toBe(0);
 	});

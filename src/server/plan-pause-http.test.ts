@@ -150,6 +150,25 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect(db().prepare('SELECT * FROM triggers WHERE id = ?').get(id)).toEqual(before);
   });
 
+  it('without the store of access ends, neither shows the preview nor takes the plan over, and nothing is written', async () => {
+    const id = pausedPlan();
+    const before = db().prepare('SELECT * FROM triggers WHERE id = ?').get(id);
+    // CONTROL: with the store the preview is there.
+    expect((await ask('GET', `/api/triggers/${id}/takeover-preview`, ownerCookie)).status).toBe(200);
+    const saved = engine.getMandateEnds.bind(engine);
+    for (const missing of [null, undefined]) {
+      Object.assign(engine, { getMandateEnds: () => missing });
+      try {
+        // Without it every person would read as ended: a live person's plan would say their access ended.
+        expect((await ask('GET', `/api/triggers/${id}/takeover-preview`, ownerCookie)).status).toBe(503);
+        expect((await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, { expect: 'x' })).status).toBe(503);
+      } finally {
+        Object.assign(engine, { getMandateEnds: saved });
+      }
+    }
+    expect(db().prepare('SELECT * FROM triggers WHERE id = ?').get(id)).toEqual(before);
+  });
+
   it('only the owner takes a plan over or sees its preview', async () => {
     const id = pausedPlan();
     const post = await ask('POST', `/api/triggers/${id}/takeover`, mandateCookie, { expect: 'x' });
@@ -185,6 +204,76 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect([res.status, res.json['code'], res.json['error']]).toEqual([409, 'paused', 'paused because an access ended; it needs to be taken over']);
   });
 
+  it('a completed plan that keeps its pause is refused with its own sentence, without the takeover; an open one keeps it (U-275)', async () => {
+    // A notify plan runs no workflow: no workflow sentence (U-275 N6).
+    const DONE = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.';
+    const OPEN = 'paused because an access ended; it needs to be taken over';
+    const donePlan = (): string => {
+      const id = pausedPlan();
+      db().prepare("UPDATE triggers SET status = 'completed' WHERE id = ?").run(id);
+      return id;
+    };
+    const run = await ask('POST', `/api/triggers/${donePlan()}/run`, ownerCookie);
+    expect([run.status, run.json['code'], run.json['error']]).toEqual([409, 'paused', DONE]);
+    const edit = await ask('PATCH', `/api/tasks/${donePlan()}`, ownerCookie, { title: 'Renamed' });
+    expect([edit.status, edit.json['code'], edit.json['error']]).toEqual([409, 'paused', DONE]);
+    const helper = await ask('PATCH', `/api/tasks/${donePlan()}`, mandateCookie, { title: 'Renamed' });
+    expect([helper.status, helper.json['error']]).toEqual([409, DONE]);
+    const sw = await ask('PATCH', `/api/tasks/${donePlan()}`, ownerCookie, { enabled: true });
+    expect([sw.status, sw.json['paused'], sw.json['note']]).toEqual([200, true, DONE]);
+    const open = await ask('POST', `/api/triggers/${pausedPlan()}/run`, ownerCookie);
+    expect([open.status, open.json['error']], 'control: an open paused plan still names the takeover').toEqual([409, OPEN]);
+  });
+
+  it('a completed paused workflow plan says whether its workflow is taken over first, in the refusal and the list, and names it to the view only (U-275 N6)', async () => {
+    const who = { kind: 'mandate' as const, email: 'uma@example.invalid', mandateId: 'TEST-MANDATE-DONE-WF' };
+    const history = engine.getRunHistory()!;
+    const nowS = Math.floor(Date.now() / 1000);
+    const ENDED = [{ mandateId: who.mandateId, email: who.email, reason: 'expired' as const, endsAt: nowS - 3600, roles: ['workflow-created' as const], closedPrompt: false }];
+    const wf = (id: string, by: typeof who | null): void => {
+      history.insertPlannedPipeline({
+        id, name: `FX-${id}`, goal: 'g', steps: [{ id: 's1', task: 't' }], reasoning: '', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', template: true,
+      }, by);
+    };
+    const done = (id: string, workflow: string): string => {
+      history.insertTrigger({
+        id, title: 'Runs it', source: 'cron', effect: 'run_workflow', pipelineId: workflow, scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+        confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner',
+      });
+      writePause(db(), id, ENDED);
+      db().prepare("UPDATE triggers SET status = 'completed' WHERE id = ?").run(id);
+      return id;
+    };
+    const BASE = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.';
+    const ITS = ' Its workflow was created or last changed by someone whose access has ended: the owner first takes over that workflow, under "Workflows" with "Take over workflow".';
+    const row = async (id: string, cookie = ownerCookie): Promise<Record<string, unknown> | undefined> =>
+      ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((r) => r['id'] === id);
+    wf('wf-done-a', who);
+    wf('wf-done-own', null);
+    try {
+      const a = done('done-wf-a', 'wf-done-a');
+      const run = await ask('POST', `/api/triggers/${a}/run`, ownerCookie);
+      expect([run.status, run.json['code'], run.json['error']]).toEqual([409, 'paused', BASE + ITS]);
+      // The model and the API never carry the workflow's name; the list gives it to the view.
+      expect(String(run.json['error'])).not.toContain('FX-');
+      expect((await row(a))?.['paused_done_workflow']).toEqual({ name: 'FX-wf-done-a' });
+      expect((await row(a, mandateCookie))?.['paused_done_workflow']).toEqual({ name: 'FX-wf-done-a' });
+      // The owner's own workflow: nothing to take over first.
+      const own = done('done-wf-own', 'wf-done-own');
+      expect((await ask('POST', `/api/triggers/${own}/run`, ownerCookie)).json['error']).toBe(BASE);
+      expect((await row(own))?.['paused_done_workflow']).toBeNull();
+      // After the owner took the workflow over, neither says it any more.
+      db().prepare("UPDATE workflows SET covered_created_by = created_by, covered_created_id = created_mandate_id, covered_created_at = created_at WHERE id = 'wf-done-a'").run();
+      expect((await ask('POST', `/api/triggers/${a}/run`, ownerCookie)).json['error']).toBe(BASE);
+      expect((await row(a))?.['paused_done_workflow']).toBeNull();
+      // CONTROL: an open paused plan and a completed plan without a pause carry no such field.
+      const open = pausedPlan();
+      expect(await row(open)).not.toHaveProperty('paused_done_workflow');
+    } finally {
+      db().prepare("DELETE FROM triggers WHERE id LIKE 'done-wf-%'").run();
+    }
+  });
+
   it("a mandate's change, completion and delete are refused before anything marks the plan", async () => {
     for (const [method, path, body] of [
       ['PATCH', '', { title: 'Renamed' }], ['PATCH', '', { enabled: false }], ['POST', '/complete', undefined], ['DELETE', '', undefined],
@@ -205,6 +294,22 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect([sw.status, sw.json['paused'], sw.json['note']]).toEqual([200, true, 'paused because an access ended; it needs to be taken over']);
     expect((await ask('POST', `/api/tasks/${pausedPlan()}/complete`, ownerCookie)).status).toBe(200);
     expect((await ask('DELETE', `/api/tasks/${pausedPlan()}`, ownerCookie)).status).toBe(200);
+  });
+
+  it('a stamp leaves what the plan\'s creator had taken in as it was: a helper\'s edit and the owner\'s confirm keep it', async () => {
+    const id = `tainted-${String(++n)}`;
+    engine.getRunHistory()!.insertTrigger({
+      id, title: 'Weekly', source: 'cron', effect: 'run_agent', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+      createdBy: 'mandate:ida@example.invalid', createdMandateId: 'TEST-MANDATE-PAUSE', createdUntrusted: 'external-tool',
+    });
+    const taint = (): unknown => (db().prepare('SELECT created_untrusted FROM triggers WHERE id = ?').get(id) as { created_untrusted: unknown }).created_untrusted;
+    expect((await ask('PATCH', `/api/tasks/${id}`, mandateCookie, { title: 'Weekly, again' })).status).toBe(200);
+    expect(taint()).toBe('external-tool');
+    const shown = await ask('GET', `/api/tasks/${id}/stamp-preview`, ownerCookie);
+    expect(shown.status).toBe(200);
+    const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, { expect: shown.json['expect'] });
+    expect([stamp.status, typeof stamp.json['confirmed_at']]).toEqual([200, 'string']);
+    expect(taint()).toBe('external-tool');
   });
 
   it('the list shows a plan as paused, and filters on it', async () => {
@@ -246,6 +351,77 @@ describe('the pause is held to its takeover (real engine)', () => {
     const sw = await ask('PATCH', `/api/tasks/${id}`, ownerCookie, { enabled: true });
     expect(sw.json).not.toHaveProperty('paused_for');
     expect(sw.json['paused_who']).toEqual(['ida@example.invalid']);
+  });
+
+  it('the list tells the owner whether a wakeup reached them, and a helper nothing of it, with the pause on and off', async () => {
+    const id = pausedPlan();
+    db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered' WHERE id = ?").run(id);
+    const rowOf = async (cookie: string): Promise<Record<string, unknown> | undefined> =>
+      ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((t) => t['id'] === id);
+    for (const on of [true, false]) {
+      restore();
+      restore = setPlanPauseForTests(on);
+      const owner = await rowOf(ownerCookie);
+      expect([on, owner?.['last_escalation_at'], owner?.['last_escalation_outcome']]).toEqual([on, '2026-10-27T08:00:00.000Z', 'not_delivered']);
+      const helper = await rowOf(mandateCookie);
+      expect(helper?.['id']).toBe(id);
+      expect(helper).not.toHaveProperty('last_escalation_at');
+      expect(helper).not.toHaveProperty('last_escalation_outcome');
+    }
+  });
+
+  it('the list gives the owner why a wakeup reached nobody and its chat while that chat stands and holds a message, and a helper neither', async () => {
+    const id = pausedPlan();
+    const threadId = `question-chat-${id}`;
+    const threads = engine.getThreadStore()!;
+    threads.createThread(threadId, { title: 'Weekly' });
+    db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered', last_escalation_case = 'no_subscription', last_escalation_thread_id = ?, last_escalation_chat_kind = 'question' WHERE id = ?").run(threadId, id);
+    const rowOf = async (cookie: string): Promise<Record<string, unknown> | undefined> =>
+      ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((t) => t['id'] === id);
+    // The thread stands but nothing was written into it: no link to an empty chat.
+    const empty = await rowOf(ownerCookie);
+    expect([empty?.['last_escalation_case'], empty?.['last_escalation_kind']]).toEqual(['no_subscription', 'question']);
+    expect(empty).not.toHaveProperty('last_escalation_chat');
+    threads.appendMessages(threadId, [{ role: 'assistant', content: [{ type: 'text', text: 'Which supplier?' }] }], threads.getNextSeq(threadId));
+    const owner = await rowOf(ownerCookie);
+    expect([owner?.['last_escalation_case'], owner?.['last_escalation_chat'], owner?.['last_escalation_kind']]).toEqual(['no_subscription', { threadId, kind: 'question' }, 'question']);
+    const helper = await rowOf(mandateCookie);
+    expect(helper?.['id']).toBe(id);
+    expect(helper).not.toHaveProperty('last_escalation_case');
+    expect(helper).not.toHaveProperty('last_escalation_chat');
+    expect(helper).not.toHaveProperty('last_escalation_kind');
+    // The chat is deleted: the case and whether it was a question stay, the link goes.
+    engine.getThreadStore()!.deleteThread(threadId);
+    const after = await rowOf(ownerCookie);
+    expect([after?.['last_escalation_case'], after?.['last_escalation_kind']]).toEqual(['no_subscription', 'question']);
+    expect(after).not.toHaveProperty('last_escalation_chat');
+  });
+
+  it('a change or completion of a plan that is not paused answers the escalation fields to the owner only', async () => {
+    const escalatedPlan = (): string => {
+      const id = `escalated-${String(++n)}`;
+      engine.getRunHistory()!.insertTrigger({
+        id, title: 'Weekly', source: 'cron', effect: 'notify', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+        confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'mandate:ida@example.invalid', createdMandateId: 'TEST-MANDATE-PAUSE',
+      });
+      db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered', last_escalation_case = 'send_failed', last_escalation_thread_id = 'escalation-x', last_escalation_chat_kind = 'alert' WHERE id = ?").run(id);
+      return id;
+    };
+    const owner = await ask('PATCH', `/api/tasks/${escalatedPlan()}`, ownerCookie, { title: 'Renamed' });
+    expect([owner.status, owner.json['last_escalation_at'], owner.json['last_escalation_outcome'], owner.json['last_escalation_case'], owner.json['last_escalation_kind']])
+      .toEqual([200, '2026-10-27T08:00:00.000Z', 'not_delivered', 'send_failed', 'alert']);
+    // This answer does not look the chat up, so it names none.
+    expect(owner.json).not.toHaveProperty('last_escalation_chat');
+    for (const [method, path, body] of [['PATCH', '', { title: 'Renamed' }], ['POST', '/complete', undefined]] as const) {
+      const id = escalatedPlan();
+      const helper = await ask(method, `/api/tasks/${id}${path}`, mandateCookie, body);
+      expect([method, path, helper.status, helper.json['id']]).toEqual([method, path, 200, id]);
+      expect(helper.json).not.toHaveProperty('last_escalation_at');
+      expect(helper.json).not.toHaveProperty('last_escalation_outcome');
+      expect(helper.json).not.toHaveProperty('last_escalation_case');
+      expect(helper.json).not.toHaveProperty('last_escalation_chat');
+      expect(helper.json).not.toHaveProperty('last_escalation_kind');
+    }
   });
 
   it('the list says who reads it, the owner or a helper', async () => {
@@ -326,7 +502,8 @@ describe('the pause is held to its takeover (real engine)', () => {
       // Every answer that sends the row back leaves the stored columns out, a helper's edit as well.
       const stored = ['paused_at', 'paused_due_at', 'paused_for'];
       const helperEdit = await ask('PATCH', `/api/tasks/${id}`, mandateCookie, { title: 'Again' });
-      const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, {});
+      const shown = await ask('GET', `/api/tasks/${id}/stamp-preview`, ownerCookie);
+      const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, { expect: shown.json['expect'] });
       const done = await ask('POST', `/api/tasks/${id}/complete`, mandateCookie);
       for (const [what, r] of [['owner edit', edit], ['helper edit', helperEdit], ['confirm', stamp], ['complete', done]] as const) {
         expect([what, r.status, r.json['id']]).toEqual([what, 200, id]);
@@ -458,4 +635,41 @@ describe('the boot sweep, switched off and failing (real engine)', () => {
       } finally { endRow.mockRestore(); err.mockRestore(); restore(); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }, 180_000);
+});
+
+describe('the workflow library with an unreadable definition (real engine)', () => {
+  it('answers 200 and lists the readable workflows when one stored definition is not valid JSON, and says the left-out one on stderr by its id', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-library-unreadable-'));
+    const warn = vi.spyOn(console, 'warn');
+    try {
+      const { api, base, engine } = await up(dir);
+      try {
+        const { loginSession } = await import('../../packages/web-ui/src/lib/server/auth.js');
+        const owner = loginSession(SECRET, null)?.token;
+        if (owner === undefined) throw new Error('fixture: no cookie');
+        const history = engine.getRunHistory()!;
+        const wf = (id: string, name: string): void => history.insertPlannedPipeline({
+          id, name, goal: 'g', steps: [{ id: 's1', task: 't' }], reasoning: '', estimatedCost: 0,
+          createdAt: '2026-01-01T00:00:00.000Z', template: true,
+        }, null);
+        wf('wf-good', 'Readable');
+        wf('wf-bad', 'Unreadable');
+        engine.getEngineDb()!.getDb().prepare("UPDATE workflows SET definition_json = '{\"steps\": [\"FX-blob' WHERE id = 'wf-bad'").run();
+        (api as unknown as Inner).rateCounts.clear();
+        const res = await fetch(`${base}/api/workflows/library`, { headers: { cookie: `lynox_session=${owner}` } });
+        expect(res.status).toBe(200);
+        const ids = ((await res.json()) as { workflows: Array<{ id: string }> }).workflows.map((w) => w.id);
+        expect(ids).toContain('wf-good');
+        expect(ids).not.toContain('wf-bad');
+        const said = warn.mock.calls.map((c) => String(c[0])).filter((line) => line.includes('wf-bad'));
+        expect(said).toEqual(['[lynox:http] workflow wf-bad not readable, left out of the library']);
+        expect(warn.mock.calls.flat().join(' ')).not.toContain('FX-blob');
+      } finally {
+        await api.shutdown();
+      }
+    } finally {
+      warn.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

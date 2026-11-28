@@ -1,6 +1,8 @@
 import type { CostGuardConfig, CostSnapshot } from '../types/index.js';
 import type { BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getPricing } from './pricing.js';
+import { isHeldReservation } from './session-budget.js';
+import type { PersistentBudgetReservation } from '../types/index.js';
 
 export class CostGuard {
   private readonly maxBudgetUSD: number;
@@ -34,9 +36,19 @@ export class CostGuard {
   private capOnlyUSD = 0;
   private iterations = 0;
   private warned = false;
+  /**
+   * A tighter dollar bound for the current run only, set at admission
+   * ({@link setRunCeilingUSD}); `Infinity` when the run has none. Cleared by `reset()`, so
+   * it never outlives the run it was set for.
+   */
+  private runCeilingUSD = Infinity;
+
+  /** See `CostGuardConfig.heldAgainstCaps`. */
+  private readonly heldAgainstCaps: PersistentBudgetReservation | undefined;
 
   constructor(config: CostGuardConfig, model: string) {
     this.maxBudgetUSD = config.maxBudgetUSD ?? Infinity;
+    this.heldAgainstCaps = config.heldAgainstCaps;
     this.warnAtUSD = config.warnAtUSD ?? this.maxBudgetUSD * 0.8;
     this.maxIterations = config.maxIterations ?? 200;
     this.pricePerM = getPricing(model);
@@ -64,12 +76,13 @@ export class CostGuard {
 
   isExceeded(): boolean {
     const cost = this.capCost();
+    const limit = this.limitUSD();
     // Fail closed on a non-finite cost (NaN from a malformed pricing override):
     // `NaN >= cap` is false and would silently disable the dollar ceiling. An
     // explicitly-disabled budget (Infinity) stays the user's opt-out.
     const costExceeded = Number.isFinite(cost)
-      ? cost >= this.maxBudgetUSD
-      : this.maxBudgetUSD !== Infinity;
+      ? cost >= limit
+      : limit !== Infinity;
     return costExceeded || this.iterations >= this.maxIterations;
   }
 
@@ -90,8 +103,40 @@ export class CostGuard {
       estimatedCostUSD: cost,
       ownCostUSD: cost - this.externalCostUSD,
       iterationsUsed: this.iterations,
-      budgetPercent: this.maxBudgetUSD === Infinity ? 0 : Math.round((cost / this.maxBudgetUSD) * 100),
+      budgetPercent: this.limitUSD() === Infinity ? 0 : Math.round((cost / this.limitUSD()) * 100),
     };
+  }
+
+  /**
+   * Bound THIS run's spend to `usd` on top of the configured budget: the limit in force is
+   * the smaller of the two until the next `reset()`. A NaN or negative amount counts as 0,
+   * so a malformed bound stops the run instead of lifting the limit; `Infinity` sets none.
+   * Several calls keep the smallest.
+   */
+  setRunCeilingUSD(usd: number): void {
+    const bound = Number.isNaN(usd) || usd < 0 ? 0 : usd;
+    this.runCeilingUSD = Math.min(this.runCeilingUSD, bound);
+  }
+
+  /**
+   * Whether everything this run may spend is already held against the daily and monthly caps:
+   * by a reservation the cap module issued and still holds, at least as large as the limit in
+   * force. Work carved out of this run's budget (sub-agent shares) is then inside that hold.
+   * ⚠ Up to one turn over, as any limit here: a turn is recorded before it is compared.
+   */
+  budgetHeldAgainstCaps(): boolean {
+    const hold = this.heldAgainstCaps;
+    return hold !== undefined && isHeldReservation(hold) && this.limitUSD() <= hold.reservedUSD;
+  }
+
+  /** Whether a run ceiling is set for the current run. */
+  hasRunCeiling(): boolean {
+    return this.runCeilingUSD !== Infinity;
+  }
+
+  /** The dollar limit in force: the configured budget, or the run's ceiling when smaller. */
+  private limitUSD(): number {
+    return Math.min(this.maxBudgetUSD, this.runCeilingUSD);
   }
 
   reset(): void {
@@ -105,6 +150,7 @@ export class CostGuard {
     this.reservedUSD = 0;
     this.iterations = 0;
     this.warned = false;
+    this.runCeilingUSD = Infinity;
   }
 
   /**
@@ -123,17 +169,18 @@ export class CostGuard {
    * same room.
    */
   remainingBudgetUSD(): number | null {
-    if (this.maxBudgetUSD === Infinity) return null;
+    const limit = this.limitUSD();
+    if (limit === Infinity) return null;
     // ⛔ BOTH inputs, not one. The first version of this guard checked the spend and not
     // the ceiling — so a non-finite-but-not-`Infinity` ceiling produced `NaN`, every
     // comparison against it was false, and a fan-out was admitted unbounded. The
     // docblock above claimed coverage this line did not have. Not reachable today (every
     // caller clamps or validates), which is exactly why it has to fail closed: the
     // reachability is a property of the callers, and callers change.
-    if (!Number.isFinite(this.maxBudgetUSD)) return 0;
+    if (!Number.isFinite(limit)) return 0;
     const spent = this.capCost();
     if (!Number.isFinite(spent)) return 0;
-    return Math.max(0, this.maxBudgetUSD - spent - this.reservedUSD);
+    return Math.max(0, limit - spent - this.reservedUSD);
   }
 
   /**
@@ -192,9 +239,11 @@ export class CostGuard {
    * NOT in `snapshot().ownCostUSD`, the figure a spawned child is debited and recorded with.
    * Everything booked here was debited already, on managed hosting to the tenant (an in-run
    * helper call, a delegated child), so the child's debit does not repeat it. A delegated child also has a
-   * run row of its own; an in-run helper call does not, so spawned children keep both helper
-   * fallbacks off, or that spend would be missing from the runs table (pinned in
-   * `spawn.test.ts`).
+   * run row of its own; an in-run helper call does not, so spawned children keep both of the
+   * agent's own helper fallbacks off, or that spend would be missing from the runs table (pinned
+   * in `spawn.test.ts`). A child's TOOLS still make helper calls (a rerank, a docs extraction, a
+   * plan): those charge the child's guard here and debit themselves, and are not in the child's
+   * run row, as they were not before they reached the guard.
    */
   recordExternalCost(usd: number): boolean {
     if (Number.isFinite(usd) && usd > 0) this.externalCostUSD += usd;
@@ -208,6 +257,15 @@ export class CostGuard {
   recordCapOnlyCost(usd: number): boolean {
     if (Number.isFinite(usd) && usd > 0) this.capOnlyUSD += usd;
     return this.isExceeded();
+  }
+
+  /**
+   * The aborted-call bounds on their own ({@link capOnlyUSD}). Read-only. Read by `spawn.ts`,
+   * which books a settled child's bounds onto the delegating run's ceiling: the child's
+   * `snapshot()` leaves them out, and the delegating run's ceiling must still count them.
+   */
+  capOnlyCostUSD(): number {
+    return this.capOnlyUSD;
   }
 
   /** What the ceiling is measured against: the spend plus the aborted-call bounds. */

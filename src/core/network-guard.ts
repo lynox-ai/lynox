@@ -6,7 +6,7 @@ import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import type { NetworkPolicy } from '../types/index.js';
 import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
 import { noteNetworkContact } from './call-connection.js';
-import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { isShopifyAdminHost, isShopifyAdminUrl, SHOPIFY_HOST_HEADER, SHOPIFY_PAGES, SHOPIFY_REDIRECT } from './shopify-host.js';
 import { storePassBodyRefusal, storePassRefusal, storeRefusalNext, type StorePass } from './store-pass.js';
 
 /**
@@ -206,11 +206,35 @@ export interface HostPolicyContext {
 }
 
 /** True iff `hostname` is in the operator floor (exact host or wildcard apex). */
-function hostInFloor(hostname: string, ctx: HostPolicyContext): boolean {
+function hostInFloor(hostname: string, ctx: Pick<HostPolicyContext, 'allowedHosts' | 'allowedWildcards'>): boolean {
   if (ctx.allowedHosts?.has(hostname)) return true;
   for (const domain of ctx.allowedWildcards) {
     if (hostname === domain || hostname.endsWith(`.${domain}`)) return true;
   }
+  return false;
+}
+
+/** The baseline's loopback names: no read of the engine's reaches them by the baseline. */
+const BASELINE_LOOPBACK: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
+
+/**
+ * Whether the policy itself names this host for the engine's full-control surface: the guarded
+ * baseline (its loopback names left out) under `guarded` and `allow-all`, and the operator floor
+ * under every policy but `deny-all`. The origin check counts this for a READ only, once foreign
+ * content is in the conversation: a send to such a host the owner did not name keeps asking.
+ */
+export function policyNamesHost(hostname: string, ctx: Pick<HostPolicyContext, 'networkPolicy' | 'allowedHosts' | 'allowedWildcards'>): boolean {
+  // Written as conditions, not a switch: tests/doc-drift.test.ts reads the guard's own deny-all case
+  // below by its first `case` label.
+  const policy = ctx.networkPolicy;
+  if (policy === 'allow-list') return hostInFloor(hostname, ctx);
+  if (policy === undefined || policy === 'allow-all' || policy === 'guarded') {
+    return (!BASELINE_LOOPBACK.has(hostname) && isGuardedBaselineHost(`https://${hostname}/`)) || hostInFloor(hostname, ctx);
+  }
+  if (policy === 'deny-all') return false;
+  // A policy this code does not know names no host, and a new value fails the build here.
+  const _exhaustive: never = policy;
+  void _exhaustive;
   return false;
 }
 
@@ -262,8 +286,12 @@ export function assertHostPolicy(
       // Still outside it: the LLM provider call, push notifications, error
       // reporting, IMAP/SMTP mail, voice transcribe/TTS, and a shell command
       // outside sidecar mode (in sidecar mode with the egress proxy, a shell
-      // command reaches only the exact host names this policy lets http_request
-      // reach; src/shell-sidecar/egress.ts). This list is
+      // command reaches only what src/shell-sidecar/egress.ts registers: under
+      // allow-all and no policy every host, until a tool round starts after the
+      // conversation took in foreign content; then, and under guarded, exact
+      // host names this policy names plus hosts the owner typed,
+      // and under guarded before that round a connected API's host; under
+      // allow-list the list; under deny-all none). This list is
       // stated identically in engine-init.ts and types/config.ts; a review found
       // all three carrying DIFFERENT lists in the very change that introduced
       // the sentence claiming they move together.
@@ -743,6 +771,18 @@ export function setPinnedTransportForTests(transport: PinnedTransport): () => vo
 }
 
 /**
+ * A store pass refused the request as it is formed (its path, its body, its headers): nothing was
+ * sent. Its own class, so a caller tells it from the network policy's refusals, which name the
+ * host; the message still starts with `Blocked:` like every refusal here.
+ */
+export class StoreRequestRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StoreRequestRefusedError';
+  }
+}
+
+/**
  * SSRF-safe fetch: resolves DNS once, validates the IP, then pins the http(s)
  * connection to that IP via Agent.lookup. The original hostname is preserved
  * in the URL path (so the Host header is correct) and reaches TLS as SNI (since
@@ -777,14 +817,17 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
     // A store pass reaches its own store and nothing else (`store-pass.ts`), checked here on
     // the URL as it is finally sent, on every hop.
     const refusal = toStore ? storePassRefusal(parsed, headers, pass, init.method ?? 'GET') : 'a store pass reaches only its own store';
-    if (refusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${refusal}. ${storeRefusalNext(refusal)}`);
+    if (refusal !== null) throw new StoreRequestRefusedError(`Blocked: request to a Shopify store refused: ${refusal}. ${storeRefusalNext(refusal)}`);
     // The exchange's body is digested as the bytes it is sent as; a body that is not a string
     // is not the one serialised for it.
     if (pass.kind === 'exchange' && typeof init.body !== 'string') {
-      throw new Error('Blocked: request to a Shopify store refused: the token exchange sends its body as a string. Do not retry it with changed headers or a changed address.');
+      throw new StoreRequestRefusedError('Blocked: request to a Shopify store refused: the token exchange sends its body as a string. Do not retry it with changed headers or a changed address.');
     }
   } else if (toStore) {
-    throw new Error(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
+    // Without a pass: a Host header that names a store while the URL does not is the header's
+    // fault; a store URL is a page fetch (web search, watch, discovery, calendar, connector),
+    // since the request tool sends a store's data only with a pass and refuses before here.
+    throw new Error(`Blocked: ${isShopifyAdminHost(parsed.hostname) ? SHOPIFY_PAGES : SHOPIFY_HOST_HEADER}`);
   }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
   const { address: pinnedIp, family } = await resolveAndValidate(hostname);
@@ -801,7 +844,7 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
   if (pass !== undefined) {
     // After the body is bytes: the exchange's pass names those bytes, and is spent here.
     const bodyRefusal = storePassBodyRefusal(pass, body, headers);
-    if (bodyRefusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${bodyRefusal}. ${storeRefusalNext(bodyRefusal)}`);
+    if (bodyRefusal !== null) throw new StoreRequestRefusedError(`Blocked: request to a Shopify store refused: ${bodyRefusal}. ${storeRefusalNext(bodyRefusal)}`);
   }
 
   // Default port matches Node's URL behaviour (empty → protocol default).
@@ -835,6 +878,14 @@ function appendIncomingHeaders(target: Headers, src: IncomingHttpHeaders): void 
       target.append(name, String(value));
     }
   }
+}
+
+/**
+ * Throws the redirect refusal when a hop without a store pass leads to a Shopify store: the
+ * request did not go to one, so the store would be reached by whatever the server answered.
+ */
+export function refuseRedirectToStore(hopUrl: string): void {
+  if (isShopifyAdminUrl(hopUrl)) throw new Error(`Blocked: ${SHOPIFY_REDIRECT}`);
 }
 
 /**
@@ -877,6 +928,8 @@ export async function fetchWithPublicRedirects(
     } else {
       delete (hopInit as { body?: unknown }).body;
     }
+    // A hop to a store, from a request that was not one, is a redirect the engine does not follow.
+    if (i > 0 && opts.pass === undefined) refuseRedirectToStore(currentUrl);
     const response = await fetchPinned(currentUrl, hopInit, opts.pass);
 
     if (!REDIRECT_STATUSES.has(response.status)) {

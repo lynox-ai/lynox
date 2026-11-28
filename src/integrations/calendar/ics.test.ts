@@ -415,8 +415,8 @@ END:VEVENT`,
   // decision and there is no literal left to forge.
   describe.each([
     ['the boundary literal repeated in a DESCRIPTION', () => Array.from({ length: 5001 }, () => 'BEGIN:VEVENT').join(' ')],
-    ['the literal after U+2028, a JS line terminator RFC 5545 allows in a value', () => Array.from({ length: 5001 }, () => ' BEGIN:VEVENT').join('')],
-    ['the literal after U+2029', () => Array.from({ length: 5001 }, () => ' BEGIN:VEVENT').join('')],
+    ['the literal after U+2028, a JS line terminator RFC 5545 allows in a value', () => Array.from({ length: 5001 }, () => '\u2028BEGIN:VEVENT').join('')],
+    ['the literal after U+2029', () => Array.from({ length: 5001 }, () => '\u2029BEGIN:VEVENT').join('')],
   ])('a DESCRIPTION carrying %s', (_label, payload) => {
     it('neither breaks the feed nor hides the real appointment', () => {
       const r = parseIcsEvents(cal(

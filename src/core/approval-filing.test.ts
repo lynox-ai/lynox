@@ -156,7 +156,7 @@ describe('a plugin tool is never queueable', () => {
 describe('the danger check lets a queueable call of a filing run through, marked', () => {
   it('files the mail: the handler runs marked, asks nobody, and one entry waits', async () => {
     const seen = newSeen();
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     const agent = agentWith([mailTool(seen)], { promptUser });
     const result = await call(agent, 'mail_send', { to: 'bob@example.com', subject: 's', body: 'b' });
     expect(String(result.content)).toMatch(/^Queued for the owner's approval \(entry [0-9a-f-]{36}\)\. Nothing was sent\.$/);
@@ -170,7 +170,11 @@ describe('the danger check lets a queueable call of a filing run through, marked
     const agent = agentWith([mailTool(seen)], { approvalFiling: ctx({ rootRunId: 'root-9', threadId: 'th-1' }) });
     const result = await call(agent, 'mail_send', {});
     const id = /entry ([0-9a-f-]{36})/.exec(String(result.content))![1]!;
-    expect(store.get(id)!.origin).toEqual({ source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'root-9', threadId: 'th-1', afterUntrusted: false });
+    // The recipient is one the owner did not name (this agent knows none): the card says so.
+    expect(store.get(id)!.origin).toEqual({
+      source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'root-9', threadId: 'th-1', afterUntrusted: false,
+      targetOrigin: { unnamed: ['bob@example.com'], origin: { kind: 'unknown' } },
+    });
   });
 
   it('without a filing context the call is refused as today, and the handler does not run', async () => {
@@ -185,7 +189,7 @@ describe('the danger check lets a queueable call of a filing run through, marked
 
   it('without a filing context but with someone to ask, it asks as today', async () => {
     const seen = newSeen();
-    const promptUser = vi.fn(async () => 'Deny');
+    const promptUser = vi.fn(async () => 'deny');
     const agent = agentWith([mailTool(seen)], { approvalFiling: undefined, promptUser });
     const result = await call(agent, 'mail_send', {});
     expect(promptUser).toHaveBeenCalledTimes(1);
@@ -239,7 +243,7 @@ describe('the danger check lets a queueable call of a filing run through, marked
     // the call must be asked about, not let through to be filed.
     const seen = newSeen();
     const tool = { ...otherTool('note', seen), queueable: true, destructive: { mode: 'data', check: () => '' } } as unknown as ToolEntry;
-    const promptUser = vi.fn(async () => 'Deny');
+    const promptUser = vi.fn(async () => 'deny');
     const result = await call(agentWith([tool], { autonomy: 'guided', promptUser }), 'note', {});
     expect(promptUser).toHaveBeenCalledTimes(1);
     expect(String(result.content)).toBe('Permission denied by user: note');
@@ -325,6 +329,23 @@ describe('only the marked call can file', () => {
     expect(file(fromTrigger, 'from trigger')).toBe(true);
     const child = agentWith([], { currentRunId: 'run-4', approvalFiling: childFilingContext(ctx({ createdUntrusted: true }), 'run-3') });
     expect(file(child, 'from trigger, child')).toBe(true);
+  });
+
+  it('stores which side held: the run read outside content, the trigger\'s instruction was written after some, or both (U-209)', () => {
+    const sides = (agent: Agent, subject: string) => {
+      const r = runInCallSlot({ filing: true }, () => agent.fileApproval({ kind: 'mail_send', payload: payload({ subject }) }));
+      const o = r.ok ? store.get(r.id)!.origin! : undefined;
+      return { after: o?.afterUntrusted, instruction: o?.instructionUntrusted, run: o?.runUntrusted };
+    };
+    expect(sides(agentWith([]), 'clean')).toEqual({ after: false, instruction: undefined, run: undefined });
+    const read = agentWith([], { currentRunId: 'run-u1' });
+    read.noteUntrustedData();
+    expect(sides(read, 'run read')).toEqual({ after: true, instruction: undefined, run: true });
+    const fromTrigger = agentWith([], { currentRunId: 'run-u2', approvalFiling: ctx({ createdUntrusted: true }) });
+    expect(sides(fromTrigger, 'instruction')).toEqual({ after: true, instruction: true, run: undefined });
+    const both = agentWith([], { currentRunId: 'run-u3', approvalFiling: ctx({ createdUntrusted: true }) });
+    both.noteUntrustedData();
+    expect(sides(both, 'both')).toEqual({ after: true, instruction: true, run: true });
   });
 
   it('a reply always counts as after foreign content: it answers a mail nobody here wrote', () => {

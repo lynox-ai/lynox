@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { getLynoxDir } from '../../core/config.js';
 import { ensureDirSync } from '../../core/atomic-write.js';
 import { scrubFreedPages, zeroDeletedContent } from '../../core/sqlite-constants.js';
+import { normalizeMailTarget } from '../../core/send-target.js';
 import type { MailAccountConfig, MailAccountType, MailAuthType, MailAddress, MailEnvelope, MailPresetSlug } from './provider.js';
 import { isValidAccountType, isValidAuthType } from './provider.js';
 import type { DeltaCursor, DeltaCursorStore } from './providers/oauth-graph.js';
@@ -31,7 +32,20 @@ function defaultDbPath(): string {
  */
 const RESERVED_ACCOUNT_PREFIXES: ReadonlyArray<string> = [];
 
-const MIGRATIONS: string[] = [
+/** A migration: SQL run as one script, or a step that reads the schema before it changes it. */
+type Migration = string | ((db: Database.Database) => void);
+
+/** v23's table and index, kept in one place: v25 creates them too where v23 never ran (see v25).
+ *  The text is the one v23 has always written, so `sqlite_master` reads the same either way. */
+const OWNER_KNOWN_DDL = `CREATE TABLE IF NOT EXISTS mail_sent_owner_known (
+     sent_id TEXT NOT NULL,
+     tenant_id TEXT NOT NULL,
+     address TEXT NOT NULL,
+     PRIMARY KEY (sent_id, address)
+   );
+   CREATE INDEX IF NOT EXISTS idx_mail_sent_owner_known_address ON mail_sent_owner_known(tenant_id, address);`;
+
+const MIGRATIONS: Migration[] = [
   // v1: Initial schema — Message-ID dedup table
   `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
    INSERT OR IGNORE INTO schema_version (version) VALUES (1);
@@ -582,6 +596,91 @@ const MIGRATIONS: string[] = [
    INSERT OR IGNORE INTO schema_version (version) VALUES (19);
    ALTER TABLE inbox_thread_messages ADD COLUMN auto_reply INTEGER;
    COMMIT;`,
+
+  // v20: mails the inbox deferred (`InboundMailDeferred`), per account, as the watcher holds them
+  // for its next poll (`watch.ts`). In memory they were lost on a restart, and Gmail and Graph do
+  // not list a mail again. Keyed by Message-ID, the dedup key; the envelope as JSON. A row goes
+  // once its mail is marked seen, and with its account (ON DELETE CASCADE). One transaction and
+  // `IF NOT EXISTS`, as v18.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (20);
+   CREATE TABLE IF NOT EXISTS mail_deferred (
+     account_id TEXT NOT NULL,
+     message_id TEXT NOT NULL,
+     envelope TEXT NOT NULL,
+     held_at TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (account_id, message_id),
+     FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
+   );
+   COMMIT;`,
+
+  // v21: rules the owner confirms, named, and the rule that filed an item. `name` is what a rule
+  // is called and the topic an item was filed under; `confirmed_at` is set when the owner confirms
+  // a rule, and the loader reads only confirmed rules; `run_id` names the run that proposed a
+  // rule. Every rule that exists today was made by the owner through the owner-only route, so it
+  // is confirmed as of its creation. `matched_rule_id` names the rule that filed an item;
+  // deleting the rule clears it. One transaction, as v17.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (21);
+   ALTER TABLE inbox_rules ADD COLUMN name TEXT;
+   ALTER TABLE inbox_rules ADD COLUMN confirmed_at INTEGER;
+   ALTER TABLE inbox_rules ADD COLUMN run_id TEXT;
+   UPDATE inbox_rules SET confirmed_at = created_at;
+   ALTER TABLE inbox_items ADD COLUMN matched_rule_id TEXT;
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_matched_rule ON inbox_items(tenant_id, matched_rule_id);
+   COMMIT;`,
+
+  // v22: whether every recipient of a sent mail was one the owner had named before it went out
+  // (`SentMailLogInput.originOwnerKnown`). Only such a send makes its recipients count as known
+  // later (`isOwnerKnownRecipient`). Every older row is 0: nothing recorded it before, and a
+  // send approved on a card is 0 too, since an approval is not the owner naming the address.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (22);
+   ALTER TABLE mail_sent_log ADD COLUMN origin_owner_known INTEGER NOT NULL DEFAULT 0;
+   COMMIT;`,
+
+  // v23: the recipients of the sends flagged in v22, one normalized address per row, so the
+  // check before a send (`isOwnerKnownRecipient`) is one indexed probe instead of a scan of the
+  // whole log. Written with the log row by `recordSentMail`, only for a flagged send. No
+  // backfill: nothing set the flag before this version was written, and an address missing
+  // here only reads as not known.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (23);
+   ${OWNER_KNOWN_DDL}
+   COMMIT;`,
+
+  // v24: the rule that named an item but was not applied: its id, its name as it was then, and
+  // why (one of the reasons the CHECK below lists). Written with the item, as the bucket is, and
+  // never by a later write: an item is classified once. Deleting the rule clears the id and keeps
+  // name and reason. Rows from before carry NULL, which reads as "no rule withheld"; nothing is
+  // backfilled, as no released version withheld a rule. One transaction, as v17.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (24);
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_id TEXT;
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_name TEXT;
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_reason TEXT
+     CHECK (rule_withheld_reason IS NULL OR rule_withheld_reason IN
+       ('rule_withheld_sensitive', 'rule_withheld_classifier', 'rule_withheld_unchecked', 'forwarded_by_person'));
+   COMMIT;`,
+
+  // v25: which prefilter rule an inbox item's mail met (`automated_sender`,
+  // `bounce`, `newsletter_domain`, `bulk_subdomain`), NULL when none did. The watcher no
+  // longer drops mail on these rules, so an automated sender's mail now costs a
+  // classifier call; this column lets that spend be counted per rule. Not shown
+  // to the user. One transaction, as v17. A build of this change once ran from a branch
+  // image that added the column as v23, so the column is added only when it is missing:
+  // such a database then opens, and its values stay. That database reads 23 and so never
+  // ran main's v23; its table and index are created here, from the same text.
+  (db) => {
+    db.transaction(() => {
+      db.prepare('INSERT OR IGNORE INTO schema_version (version) VALUES (25)').run();
+      const columns = db.prepare<[], { name: string }>('PRAGMA table_info(inbox_items)').all();
+      if (!columns.some((c) => c.name === 'prefilter_rule')) {
+        db.exec('ALTER TABLE inbox_items ADD COLUMN prefilter_rule TEXT');
+      }
+      db.exec(OWNER_KNOWN_DDL);
+    })();
+  },
 ];
 
 export interface MailStateDbOptions {
@@ -748,6 +847,8 @@ export interface SentMailLogInput {
   bodyChars: number;
   sentAt?: Date | undefined;
   followupId?: string | undefined;
+  /** Every recipient was one the owner had named before the send (v22). Absent: false. */
+  originOwnerKnown?: boolean | undefined;
 }
 
 export interface SentMailLogEntry {
@@ -1061,6 +1162,14 @@ export class MailStateDb {
         + `those are reserved for inbox_items polymorphic account ids.`,
       );
     }
+    // An update keeps the row, so its ON DELETE CASCADE does not run. Mails kept for the account
+    // (`mail_deferred`) belong to the mailbox it named: when the id now names another one, they go.
+    this.db
+      .prepare(
+        `DELETE FROM mail_deferred WHERE account_id = ? AND EXISTS (SELECT 1 FROM mail_accounts WHERE id = ?
+           AND (lower(address) <> lower(?) OR imap_host <> ? OR imap_port <> ? OR auth_type <> ?))`,
+      )
+      .run(account.id, account.id, account.address, account.imap.host, account.imap.port, account.authType);
     this.db
       .prepare(
         `INSERT INTO mail_accounts (id, display_name, address, preset, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, type, persona_prompt, auth_type, oauth_provider_key, is_default, created_at, updated_at)
@@ -1175,6 +1284,66 @@ export class MailStateDb {
 
   clearDeltaCursor(accountId: string, folder: string): void {
     this.db.prepare('DELETE FROM mail_delta_cursors WHERE account_id = ? AND folder = ?').run(accountId, folder);
+  }
+
+  // ── Deferred mails (the watcher's held mails, v20) ──────────────────────
+
+  /**
+   * Keep deferred mails across a restart, in order, up to `max` per account; beyond it the
+   * newest are not kept. A mail without a Message-ID is not kept (no key to release it by), nor
+   * one already kept, nor one of an account that has no row (removed, or never stored).
+   * Returns how many mails with a Message-ID of an existing account are not kept (the cap).
+   */
+  holdDeferredMail(accountId: string, envelopes: ReadonlyArray<MailEnvelope>, max: number): number {
+    const stmt = this.db.prepare(
+      `INSERT OR IGNORE INTO mail_deferred (account_id, message_id, envelope)
+       SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM mail_accounts WHERE id = ?)
+         AND (SELECT COUNT(*) FROM mail_deferred WHERE account_id = ?) < ?`,
+    );
+    const isKept = this.db.prepare<[string, string], ExistsRow>('SELECT 1 as c FROM mail_deferred WHERE account_id = ? AND message_id = ?');
+    return this.db.transaction(() => {
+      let notKept = 0;
+      for (const env of envelopes) {
+        if (!env.messageId) continue;
+        stmt.run(accountId, env.messageId, JSON.stringify(env), accountId, accountId, max);
+        if (isKept.get(accountId, env.messageId) === undefined) notKept++;
+      }
+      return this.getAccount(accountId) === null ? 0 : notKept;
+    })();
+  }
+
+  /**
+   * The account's kept deferred mails, oldest first. An IMAP uid holds across a restart and
+   * stays. Any other comes back as uid 0: a uid of Gmail or Graph names a message only within
+   * the process that listed it (`uidToGmailId`), and in a new one the same number can name
+   * another message. No provider gives out 0, so a read by it fails instead of reading the wrong
+   * message (on Graph that leaves a kept follow-up's auto-reply question unknown, and the hook
+   * reopens), and `getUidByMessageId` reads 0 as no uid. A row that does not parse is deleted.
+   */
+  deferredMail(accountId: string): MailEnvelope[] {
+    const rows = this.db
+      .prepare<[string], { message_id: string; envelope: string }>('SELECT message_id, envelope FROM mail_deferred WHERE account_id = ? ORDER BY rowid')
+      .all(accountId);
+    const stableUid = this.getAccount(accountId)?.authType === 'imap';
+    const out: MailEnvelope[] = [];
+    const drop = this.db.prepare('DELETE FROM mail_deferred WHERE account_id = ? AND message_id = ?');
+    for (const row of rows) {
+      try {
+        const env = JSON.parse(row.envelope) as MailEnvelope & { date: string };
+        out.push({ ...env, uid: stableUid ? env.uid : 0, date: new Date(env.date) });
+      } catch {
+        drop.run(accountId, row.message_id);
+      }
+    }
+    return out;
+  }
+
+  /** Forget the kept deferred mails among `envelopes`: they were handled or are known. */
+  releaseDeferredMail(accountId: string, envelopes: ReadonlyArray<MailEnvelope>): void {
+    const stmt = this.db.prepare('DELETE FROM mail_deferred WHERE account_id = ? AND message_id = ?');
+    this.db.transaction(() => {
+      for (const env of envelopes) if (env.messageId) stmt.run(accountId, env.messageId);
+    })();
   }
 
   // ── Follow-ups ──────────────────────────────────────────────────────────
@@ -1298,33 +1467,71 @@ export class MailStateDb {
    */
   recordSentMail(input: SentMailLogInput): string {
     const id = randomUUID().slice(0, 12);
-    this.db
-      .prepare<[
-        string, string, string, string, string | null,
-        string, string | null, string | null,
-        string, number, number, string | null,
-      ], unknown>(
-        `INSERT INTO mail_sent_log (
-           id, tenant_id, account_id, message_id, in_reply_to,
-           to_json, cc_json, bcc_json,
-           subject, body_chars, sent_at, followup_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        input.tenantId ?? 'default',
-        input.accountId,
-        input.messageId,
-        input.inReplyTo ?? null,
-        JSON.stringify(input.to),
-        input.cc && input.cc.length > 0 ? JSON.stringify(input.cc) : null,
-        input.bcc && input.bcc.length > 0 ? JSON.stringify(input.bcc) : null,
-        input.subject,
-        input.bodyChars,
-        (input.sentAt ?? new Date()).getTime(),
-        input.followupId ?? null,
-      );
+    // The log row and its owner-known recipients in one transaction: a recipient is never
+    // counted for a send the log does not hold.
+    this.db.transaction(() => {
+      this.db
+        .prepare<[
+          string, string, string, string, string | null,
+          string, string | null, string | null,
+          string, number, number, string | null, number,
+        ], unknown>(
+          `INSERT INTO mail_sent_log (
+             id, tenant_id, account_id, message_id, in_reply_to,
+             to_json, cc_json, bcc_json,
+             subject, body_chars, sent_at, followup_id, origin_owner_known
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.tenantId ?? 'default',
+          input.accountId,
+          input.messageId,
+          input.inReplyTo ?? null,
+          JSON.stringify(input.to),
+          input.cc && input.cc.length > 0 ? JSON.stringify(input.cc) : null,
+          input.bcc && input.bcc.length > 0 ? JSON.stringify(input.bcc) : null,
+          input.subject,
+          input.bodyChars,
+          (input.sentAt ?? new Date()).getTime(),
+          input.followupId ?? null,
+          input.originOwnerKnown === true ? 1 : 0,
+        );
+      if (input.originOwnerKnown === true) {
+        const tenantId = input.tenantId ?? 'default';
+        const insert = this.db.prepare<[string, string, string], unknown>(
+          'INSERT OR IGNORE INTO mail_sent_owner_known (sent_id, tenant_id, address) VALUES (?, ?, ?)',
+        );
+        for (const entry of [...input.to, ...(input.cc ?? []), ...(input.bcc ?? [])]) {
+          const address = normalizeMailTarget(entry.address)?.value;
+          if (address !== undefined) insert.run(id, tenantId, address);
+        }
+      }
+    })();
     return id;
+  }
+
+  /**
+   * Whether `address` was a recipient — to, cc or bcc — of a send whose every recipient the
+   * owner had named (`origin_owner_known = 1`). Addresses are compared as whole normalized
+   * tokens (`normalizeMailTarget`: lower case, the domain in ASCII form), never as substrings,
+   * so `x@firma.ch` does not match a send to `max@firma.ch`. An address that does not
+   * normalize is never known.
+   */
+  isOwnerKnownRecipient(address: string, opts: { tenantId?: string | undefined } = {}): boolean {
+    const wanted = normalizeMailTarget(address)?.value;
+    if (wanted === undefined) return false;
+    // One indexed probe on the normalized recipients of flagged sends (v23), joined to the log
+    // row so a recipient whose send is gone, or no longer flagged, does not count.
+    const row = this.db
+      .prepare<[string, string], { hit: number }>(
+        `SELECT 1 AS hit FROM mail_sent_owner_known r
+         JOIN mail_sent_log l ON l.id = r.sent_id
+         WHERE r.tenant_id = ? AND r.address = ? AND l.origin_owner_known = 1
+         LIMIT 1`,
+      )
+      .get(opts.tenantId ?? 'default', wanted);
+    return row !== undefined;
   }
 
   /**
@@ -1554,7 +1761,9 @@ export class MailStateDb {
   private _migrate(): void {
     const current = this._getVersion();
     for (let i = current; i < MIGRATIONS.length; i++) {
-      runMultiStatement(this.db, MIGRATIONS[i]!);
+      const migration = MIGRATIONS[i]!;
+      if (typeof migration === 'string') runMultiStatement(this.db, migration);
+      else migration(this.db);
     }
   }
 

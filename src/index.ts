@@ -26,6 +26,7 @@ process.emit = function (event: string, ...args: unknown[]) {
 export { Agent } from './core/agent.js';
 export type { SendStop, SendStopCause } from './core/agent.js';
 export { StreamProcessor } from './core/stream.js';
+export { StreamIncompleteError } from './core/stream-incomplete.js';
 // Residuum 4 of four (closing comment 2026-08-02). A tool OUTSIDE this
 // package — a plugin, an integration in pro — cannot signal "completed but
 // did not succeed" without this symbol, so its calls stay booked as
@@ -146,6 +147,8 @@ const pkg = require('../package.json') as { version: string };
 import { getErrorMessage } from './core/utils.js';
 import { normalizeAllowedOrigins } from './server/cross-site-write.js';
 import { installSignalShutdown } from './server/signal-shutdown.js';
+import { pinTlsFloor } from './core/tls-floor.js';
+import { assertSignalDebuggerOff, startedFromImage } from './core/signal-debugger.js';
 
 /**
  * Resolve the default ORIGIN env var for `--http-api` boot.
@@ -171,6 +174,9 @@ export function resolveDefaultOrigin(opts: {
 }
 
 async function runCLI(): Promise<void> {
+  // First, before any command can open a connection (the installer checks a key over TLS
+  // before an engine exists): no launch flag may lower the TLS floor (core/tls-floor.ts).
+  pinTlsFloor();
   const args = argv.slice(2);
 
   // Load vault key from ~/.lynox/.env before anything else
@@ -343,7 +349,12 @@ const isMainModule = (() => {
 })();
 
 if (isMainModule) {
-  runCLI().catch((err: unknown) => {
+  // Started from the image's code, the engine refuses to run with the signal debugger on
+  // (signal-debugger.ts); `npx` and a source checkout start elsewhere and are not asked.
+  Promise.resolve().then(() => {
+    if (startedFromImage(process.argv[1])) assertSignalDebuggerOff('the engine');
+    return runCLI();
+  }).catch((err: unknown) => {
     const msg = getErrorMessage(err);
     stderr.write(`Fatal: ${msg}\n`);
     if (err instanceof Error && err.cause) {

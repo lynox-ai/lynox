@@ -15,7 +15,7 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
   const backing = new Map<string, OAuthPreset>(real.OAUTH_PRESETS.ids().map((id) => [id, real.OAUTH_PRESETS.get(id)!] as const));
   for (const p of [named('bearer', 'Authorization'), named('shaping', 'X-Forwarded-Host'), named('broken', 'Not A Header')]) backing.set(p.id, p);
   const register = Object.freeze({ get: (id: string) => backing.get(id), ids: () => [...backing.keys()].sort() });
-  return { ...real, OAUTH_PRESETS: register };
+  return { ...real, OAUTH_PRESETS: register, builtInPresetOf: (profile: Parameters<typeof real.builtInPresetOf>[0]) => real.builtInPresetOf(profile, register) };
 });
 
 const { attachStoredCredential } = await import('./http.js');
@@ -32,7 +32,7 @@ async function headersFor(presetId: string): Promise<Record<string, string>> {
   };
   expect(store.register(profile)).toBe(true);
   const headers: Record<string, string> = {};
-  await attachStoredCredential(`https://${host}/x`, headers, false, {
+  await attachStoredCredential(`https://${host}/x`, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
     apiStore: store,
     secretStore: { resolve: (n: string) => (n === accessTokenKey(profile.id) ? 'tok-value' : null) } as never,
     principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),

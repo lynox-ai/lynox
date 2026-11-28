@@ -7,9 +7,11 @@
  *
  * The first effect that spends money without minting a Run, so it does what a Run would do, per
  * call: the spend limit of the run and the daily and monthly limits are checked before the gate;
- * `fireBeforeRunGate` before the call; and every answered call is booked — into the run's
- * `cost_usd`, to the control plane under the gate's run id, and into history.db — whatever its
- * verdict turns out to be. A call is paid the moment it is answered (PRD bulk-loop §3.1).
+ * `fireBeforeRunGate` before the call; each call booked at its worst case into the run's
+ * `cost_usd` and into history.db before it is made; and every answered call settled at what it
+ * cost there and reported to the control plane under the gate's run id, whatever its verdict turns
+ * out to be. A call is paid the moment it is answered; one that never answers keeps
+ * its worst case.
  *
  * Nothing of a target reaches a model of the session, a notification or the error tracker: the
  * summaries are counts, the invalid reasons a fixed vocabulary, and an error is reported by its
@@ -18,23 +20,24 @@
  */
 import { randomUUID } from 'node:crypto';
 import { providerStatus } from './error-egress.js';
+import { reportAbortedCall } from './aborted-call.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, callForStructuredJson, extractionSpendOf,
-  type ExtractSchema,
+  type ExtractSchema, type SchemaRefusal,
 } from './llm-helper.js';
 import { getPricing } from './pricing.js';
 import { refuseExternalAfter } from './bulk-external.js';
 import { checkMarkup, htmlFieldsOfListForm, plainTextMarkupOf } from './bulk-html.js';
-import type { BulkListSourceForm } from './bulk-list.js';
+import { isEmptyShopifyDescription, type BulkListSourceForm } from './bulk-list.js';
 import { checkSeoAfter } from './seo-text.js';
 import { hiddenCharIndexes } from './hidden-chars.js';
-import { parseHtmlFragment, walkHtml } from './html-tree.js';
+import { parseHtmlFragment, walkHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_MAX_TARGET_BYTES, mapToColumns, type dataStoreColumns } from './bulk-plan.js';
 import { judgeCallSchema, judgeFields, judgeMaxOutputTokens, judgedTargets, type JudgeRule } from './bulk-judge-rule.js';
 import {
   BULK_HALT_REASONS, canonicalJson, externalHostOf,
-  type BulkHaltReason, type BulkInvalidReason, type BulkJudgeRun, type BulkLedger,
+  type BulkHaltReason, type BulkInvalidReason, type BulkJudgeRun, type BulkLedger, type BulkRefusalDetail,
 } from './bulk-ledger.js';
 import type { BulkPreviewOutcome } from './bulk-preview.js';
 import { shopifyNoneLeftSentence } from './bulk-shopify.js';
@@ -52,6 +55,10 @@ export interface BulkJudgeOutcome {
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
   retryAt?: number | undefined;
+  /** Set on a `halted` outcome when the pass found its run no longer its own to read (gone,
+   *  ended before its approval, halted by another pass, or moved on). The summary then cannot say
+   *  which; the worker reads it from the ledger. */
+  gone?: true | undefined;
 }
 
 /** The model a run's tier resolved to, and the client that reaches it. */
@@ -67,12 +74,16 @@ export interface BulkJudgeDeps {
   readTargets?: (() => Promise<BulkPreviewOutcome>) | undefined;
   /** The run's tier to a model the operator allows, or null when there is none. */
   resolveModel: (tier: ModelTier) => JudgeModel | null;
-  /** The managed gate, per call (`fireBeforeRunGate`). */
-  gate: (tier: ModelTier) => Promise<MeteredGateResult>;
+  /** The managed gate, per call (`fireBeforeRunGate`), told the call's worst case in cents
+   *  (undefined when it is no finite amount: the gate's default then holds). */
+  gate: (tier: ModelTier, maxCostCents: number | undefined) => Promise<MeteredGateResult>;
   /** The managed debit, per answered call, under its gate's run id (`reportMeteredCost`). */
   report: (gateRunId: string, costUsd: number, tier: ModelTier) => void;
-  /** The day's spend in history.db (`RunHistory.recordBulkJudgeCost`). */
-  bookSpend: (entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }) => void;
+  /** The day's spend in history.db (`RunHistory.recordBulkJudgeCost`): a call's provisional row,
+   *  booked before the call; returns the row, undefined without history.db. */
+  bookSpend: (entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }) => number | undefined;
+  /** That row replaced by what the call cost (`RunHistory.settleBulkJudgeCost`). */
+  settleSpend: (row: number, entry: { tokensIn: number; tokensOut: number; costUsd: number }) => void;
   /** Whether the daily and monthly limits allow another call (`checkPersistentBudget`). */
   budgetAllows: () => boolean;
   /** The egress secret scan (`detectSecretInContent`). */
@@ -96,10 +107,14 @@ export interface BulkJudgeDeps {
  * The model that judges, per provider that serves the call — decided, not the provider's tier
  * model. The tier models are chosen for chat; measured as a judge, Mistral's `fast` model did not
  * hold the rule or resist an injection in a target. A provider not listed here gets no judge.
+ * On Anthropic and Vertex the judge is Sonnet, not Haiku: measured on a real rule, Haiku repeated
+ * the context into the verdict on part of the targets, Sonnet held the rule on the same sample.
+ * Sonnet is also the `balanced` chat model, so two operator settings now reach the judge: an
+ * instance capped at `fast` gets no judge there, and a blocklist entry for Sonnet blocks it too.
  */
 export const JUDGE_MODELS = {
-  anthropic: 'claude-haiku-4-5-20251001',
-  vertex: 'claude-haiku-4-5',
+  anthropic: 'claude-sonnet-4-6',
+  vertex: 'claude-sonnet-4-6',
   mistral: 'mistral-medium-2604',
   fireworks: 'accounts/fireworks/models/gpt-oss-120b',
 } as const;
@@ -357,6 +372,8 @@ export function judgeContext(
   // And with every entity decoded where it stands: the parser leaves one raw in a comment or in
   // `<xmp>`, which the model reads as easily as one it decodes.
   const textHolds = (text: string): boolean => {
+    // A text with markup beyond the reading bounds is not parsed: unread, it is held back as if it held one.
+    if ((text.includes('<') || text.includes('&')) && !withinReadingBounds(text)) return true;
     const readings = [text, htmlTextOf(text), entitiesDecoded(text)].filter((t): t is string => t !== null);
     return readings
       .some((t) => holdsSecret(t) || holdsSecret(withoutHidden(t, { inPlace: false })));
@@ -461,12 +478,39 @@ export function classifyCallFailure(err: unknown, aborted: boolean): CallFailure
   return { kind: 'halt', reason: BULK_HALT_REASONS.unavailable, report: true };
 }
 
+/** The schema refusal an unusable answer carries, if its class names one (path, rule, bound). */
+function schemaRefusalOf(err: unknown): SchemaRefusal | undefined {
+  return err instanceof SchemaValueError || err instanceof ExtractShapeError ? err.refusal : undefined;
+}
+
+/**
+ * Which field of the run's rule an unusable verdict broke and by which rule, as the target keeps
+ * it: the field by its name in the rule (an envelope's `after.` taken off), the rule's kind and
+ * its bound. Only a field the rule names is kept; a refusal elsewhere (the envelope's `keep`, the
+ * verdict's own shape) keeps none, and the page says the sentence without a field.
+ */
+export function judgeRefusalDetail(err: unknown, rule: Pick<JudgeRule, 'schema' | 'verdict'>): BulkRefusalDetail | undefined {
+  const refusal = schemaRefusalOf(err);
+  if (refusal === undefined) return undefined;
+  const path = rule.verdict === 'envelope'
+    ? (refusal.path.startsWith('after.') ? refusal.path.slice('after.'.length) : null)
+    : refusal.path;
+  if (path === null) return undefined;
+  const field = /^[^.[]+/.exec(path)?.[0];
+  if (field === undefined || !Object.hasOwn(rule.schema.properties, field)) return undefined;
+  const limit = refusal.limit;
+  return { field, kind: refusal.kind, ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}) };
+}
+
 /** An error as the tracker may see it: class, status, and for a schema refusal its path and
  *  rule — never a value, a message or a response body (PRD bulk-loop §3.1, error classes). */
 export function judgeErrorForTracker(err: unknown, what = 'bulk_judge call'): Error {
   const name = err instanceof Error ? err.name.replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || 'Error' : typeof err;
   const status = providerStatus(err);
-  const where = err instanceof SchemaValueError ? ` at ${err.path.replace(/[^A-Za-z0-9_.[\]]/g, '').slice(0, 80)}` : '';
+  const refusal = schemaRefusalOf(err);
+  const path = refusal?.path ?? (err instanceof SchemaValueError ? err.path : undefined);
+  const rule = refusal === undefined ? '' : ` (${refusal.kind}${refusal.limit !== undefined && Number.isFinite(refusal.limit) ? ` ${String(refusal.limit)}` : ''})`;
+  const where = path !== undefined ? ` at ${path.replace(/[^A-Za-z0-9_.[\]]/g, '').slice(0, 80)}${rule}` : '';
   const e = new Error(`${what} failed: ${name}${status !== null ? ` (HTTP ${String(status)})` : ''}${where}`);
   e.name = 'BulkJudgeCallError';
   return e;
@@ -520,30 +564,93 @@ export interface VerdictTextRun {
 export function verdictTextRefusal(
   after: Readonly<Record<string, unknown>>, before: Readonly<Record<string, unknown>>, run: VerdictTextRun,
 ): BulkInvalidReason | null {
+  return verdictTextRefusalOf(after, before, run)?.reason ?? null;
+}
+
+/** A refusal of {@link verdictTextRefusalOf}: the reason, and with `new_link_domain` the domain the
+ *  new link points to, so the owner is told which one (1010). The domain is the link's host as the
+ *  check read it, in ASCII. */
+export interface VerdictTextRefusal {
+  reason: BulkInvalidReason;
+  linkDomain?: string | undefined;
+  /** The host as the refused link's own value spells it, in its own case, where that spelling is
+   *  the domain up to ASCII case and a final dot. The value is the attribute as parsed, an entity
+   *  already decoded. Undefined where the link spells it percent-encoded or outside ASCII: `new URL`
+   *  decoded or mapped it, and what it became was never seen as written. */
+  linkDomainWritten?: string | undefined;
+}
+
+/**
+ * The domain of a refused link as the owner may be shown it (1010), or undefined. The check reads
+ * the host as `new URL` does: lower case, percent-escapes decoded, Unicode in Punycode. A credential
+ * spelled in a host can lose its shape that way (`AKIA…` in upper case) or gain it (`sk%2Dant…`),
+ * so the domain is shown only where the link's own value spells it as it is, and only if neither
+ * that spelling nor the domain itself holds a vault value or a credential's shape.
+ */
+export function shownLinkDomain(refusal: VerdictTextRefusal, holdsSecret: (text: string) => boolean): string | undefined {
+  const domain = refusal.linkDomain;
+  const written = refusal.linkDomainWritten;
+  if (domain === undefined || written === undefined) return undefined;
+  return holdsSecret(domain) || holdsSecret(written) ? undefined : domain;
+}
+
+/** The host a refused link spells, where it is its domain up to ASCII case and a final dot: that
+ *  spelling, else undefined. Only the link's own value counts — the same host written elsewhere in
+ *  the field says nothing about how this link spells it. */
+function writtenDomain(hostWritten: string | undefined, domain: string): string | undefined {
+  // Printable ASCII only: `toLowerCase` folds one other character to ASCII (U+212A KELVIN SIGN to
+  // `k`, which `new URL` maps the same way), and a spelling with it would pass a scan for `AKIA…`.
+  if (hostWritten === undefined || !/^[\x21-\x7e]+$/.test(hostWritten)) return undefined;
+  return hostWritten.toLowerCase().replace(/\.$/, '') === domain ? hostWritten : undefined;
+}
+
+/**
+ * Whether a verdict sets a Shopify product description to `null` or to a text that shows nothing:
+ * Shopify ignores the one and the other leaves the page empty (PRD shopify-preset §16.8 M6b (iii)),
+ * and a model that gives either gave no new text. A description that already showed nothing is not
+ * emptied by it.
+ * Asked of a verdict only, never of a judged target's planned after-state: that is the rule's
+ * template, every field `null` until its verdict.
+ */
+export function emptiesDescription(
+  form: BulkListSourceForm | null, after: Readonly<Record<string, unknown>>, before: Readonly<Record<string, unknown>>,
+): boolean {
+  return Object.entries(after).some(([field, value]) => isEmptyShopifyDescription(form, field, value)
+    && !isEmptyShopifyDescription(form, field, before[field]));
+}
+
+/** {@link verdictTextRefusal} with the domain of a refused link. */
+export function verdictTextRefusalOf(
+  after: Readonly<Record<string, unknown>>, before: Readonly<Record<string, unknown>>, run: VerdictTextRun,
+): VerdictTextRefusal | null {
   const own = run.storeHost === null ? run.startDomains : [run.storeHost, ...run.startDomains];
   const seo = checkSeoAfter(run.listForm, after, before, own);
-  if (!seo.ok) return seo.reason;
+  if (!seo.ok) return { reason: seo.reason };
   const html = htmlFieldsOfListForm(run.listForm);
   // `shortcode_changed` is returned only once every field passed every other check: the preview
   // offers such a target's values to the owner to paste into the shop by hand (1130), so another
   // field's script, foreign link or hidden character must win over it.
-  let shortcode: BulkInvalidReason | null = null;
+  let shortcode: VerdictTextRefusal | null = null;
   for (const [field, value] of Object.entries(after)) {
     if (typeof value !== 'string') continue;
     const was = Object.hasOwn(before, field) && typeof before[field] === 'string' ? before[field] as string : null;
     if (value === was) continue;
     if (html.includes(field)) {
       // A list run always has its host; without one, links cannot be resolved: refused.
-      if (run.storeHost === null) return 'not_canonical';
+      if (run.storeHost === null) return { reason: 'not_canonical' };
       const checked = checkMarkup({ before: was, after: value, storeHost: run.storeHost, startDomains: run.startDomains });
-      if (!checked.ok && checked.reason === 'shortcode_changed') shortcode = checked.reason;
-      else if (!checked.ok) return checked.reason;
+      if (!checked.ok && checked.reason === 'shortcode_changed') shortcode = { reason: checked.reason };
+      else if (!checked.ok) {
+        return checked.reason === 'new_link_domain'
+          ? { reason: checked.reason, linkDomain: checked.detail, linkDomainWritten: writtenDomain(checked.hostWritten, checked.detail) }
+          : { reason: checked.reason };
+      }
       continue;
     }
-    if ((run.listForm !== null || run.storeHost !== null) && !plainTextMarkupOf(was, value).ok) return 'markup_in_text';
+    if ((run.listForm !== null || run.storeHost !== null) && !plainTextMarkupOf(was, value).ok) return { reason: 'markup_in_text' };
     const held = hiddenCounts(was ?? '');
     for (const [cp, n] of hiddenCounts(value)) {
-      if (n > (held.get(cp) ?? 0)) return 'hidden_char';
+      if (n > (held.get(cp) ?? 0)) return { reason: 'hidden_char' };
     }
   }
   return shortcode;
@@ -561,17 +668,18 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   const call = deps.call ?? callForStructuredJson;
   const newToken = deps.newToken ?? randomUUID;
   const run = ledger.getJudgeRun(runId);
-  if (!run) return { status: 'refused', summary: 'No judged bulk run with this id.' };
-  if (run.kind !== 'apply' || run.listPending) return { status: 'refused', summary: 'The bulk run has nothing to judge yet.' };
+  if (!run) return { status: 'refused', summary: say.noJudgedRun };
+  if (run.kind !== 'apply' || run.listPending) return { status: 'refused', summary: say.nothingToJudge };
   if (run.phase !== 'planned' || run.haltReason !== null) {
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run is ${run.phase}${run.haltReason !== null ? ' and halted' : ''} — nothing judged.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.notReadyToJudge(run.phase, run.haltReason !== null), say) };
   }
 
   // An external run reads its targets first, with the preview's read and under its budget.
   if (ledger.listUnread(runId).length > 0) {
     if (!deps.readTargets) return halt(BULK_HALT_REASONS.unavailable);
     const read = await deps.readTargets();
-    if (read.status !== 'done') return { status: read.status, summary: read.summary, retryAt: read.retryAt };
+    // A read that found its run no longer its own says so to the worker, which reads why.
+    if (read.status !== 'done') return { status: read.status, summary: read.summary, retryAt: read.retryAt, gone: read.gone };
     if (ledger.listUnread(runId).length > 0) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge has targets left to read.');
   }
 
@@ -588,12 +696,14 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (!external && cols === null) return halt(BULK_HALT_REASONS.unavailable);
 
   let bookingFailed = false;
+  // The refusals this pass told the tracker, by path and rule: one event each, not one per target.
+  const told = new Set<string>();
   for (const seq of ledger.listUnjudged(runId)) {
     if (bookingFailed) return halt(BULK_HALT_REASONS.unavailable);
     if (deps.signal?.aborted) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge paused.');
     const current = ledger.getJudgeRun(runId);
     if (!current || current.phase !== 'planned' || current.haltReason !== null) {
-      return { status: 'halted', summary: summarize(ledger, runId, say.judgeStopped, say) };
+      return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.judgeStopped, say) };
     }
     // The operator's switch, asked before every paid call: a Shopify run judged while it is off
     // could never be approved (`approve` refuses it), so nothing more is spent on it.
@@ -602,7 +712,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     if (!target) continue;
     const token = newToken();
     if (!ledger.claimJudge(runId, seq, token, now(), JUDGE_CLAIM_STALE_MS)) continue;
-    const record = (verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown>; contextField?: number }): void => {
+    const record = (verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown>; contextField?: number; linkDomain?: string | undefined; refusal?: BulkRefusalDetail | undefined }): void => {
       ledger.recordJudgement(runId, seq, token, verdict, now());
     };
     if (target.before.absent) {
@@ -645,24 +755,51 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       ledger.releaseJudgeClaim(runId, seq, token);
       return halt(BULK_HALT_REASONS.spendLimit);
     }
-    const gate = await deps.gate(model.tier);
+    // The gate is told this call's own worst case, in cents rounded up; without a finite amount
+    // above zero it is told nothing and keeps its default.
+    const gate = await deps.gate(model.tier, Number.isFinite(worst) && worst > 0 ? Math.ceil(worst * 100) : undefined);
     if (gate.blockedReason !== null) {
       // Both causes of a blocked gate — no credit, or a control plane out of reach — are one
       // fixed reason: the hook tells them apart only as text.
       ledger.releaseJudgeClaim(runId, seq, token);
       return halt(BULK_HALT_REASONS.creditRefused);
     }
-    // Three bookings of one paid call, each on its own: a failure of one (a busy database) must
-    // not take the others with it. The control plane first — its report never throws. A booking
-    // that failed stops the run before its next paid call: what is not booked is not counted.
-    // That call stays uncounted for good — if the owner starts the run again, its limit and the
-    // daily limit see one call less than was paid, at most one per failed booking.
+    // The call is booked at its worst case before it is made, into the run's `cost_usd` and the
+    // day's spend, and that provisional booking is replaced by what the call cost once it is known.
+    // A call that never answers — the process dies with it in flight, it times out, the connection
+    // drops after the request went out — keeps its worst case: the provider may have billed it, and
+    // the run's limit and the daily limit count it as at most that. `cost_usd` is the run's limit
+    // and the cost the owner sees in one, so for such a call it shows the bound, not a cost. The
+    // control plane is not told of such a call (the tenant is debited only for what was answered).
+    // A provisional booking that cannot be written stops the run before the call is made. A worst
+    // case that is no finite amount books nothing provisionally, so the settlement still adds what
+    // the call cost — a guard only: pricing drops a malformed override when it loads.
+    const provisional = Number.isFinite(worst) && worst > 0 ? worst : 0;
+    let spendRow: number | undefined;
+    let added = false;
+    try {
+      ledger.addJudgeCost(runId, provisional);
+      added = true;
+      spendRow = deps.bookSpend({ runId, modelId: model.modelId, tokensIn: 0, tokensOut: 0, costUsd: provisional });
+    } catch (err: unknown) {
+      // Only what was added is taken back: a failed `addJudgeCost` added nothing.
+      if (added) try { ledger.settleJudgeCost(runId, provisional, 0); } catch { /* the worst case stays counted */ }
+      try { ledger.releaseJudgeClaim(runId, seq, token); } catch { /* the claim goes stale */ }
+      deps.captureError?.(judgeErrorForTracker(err, 'bulk_judge booking'));
+      return halt(BULK_HALT_REASONS.unavailable);
+    }
+    // The settlement of one call: the control plane's report for what was paid, then both
+    // provisional bookings replaced, each on its own — a failure of one (a busy database) must not
+    // take the others with it. The report never throws. A settlement that failed leaves that
+    // booking at the call's worst case, which counts the call as more than it cost, never less;
+    // after an answer it stops this pass before its next paid call. `costUsd` 0 takes the bookings
+    // back: a call never sent, or refused with a 429 or 529.
     const book = (costUsd: number, tokensIn: number, tokensOut: number): void => {
-      if (!(costUsd > 0)) return;
-      deps.report(gate.runId, costUsd, model.tier);
+      const paid = costUsd > 0 ? costUsd : 0;
+      if (paid > 0) deps.report(gate.runId, paid, model.tier);
       for (const write of [
-        () => { ledger.addJudgeCost(runId, costUsd); },
-        () => { deps.bookSpend({ runId, modelId: model.modelId, tokensIn, tokensOut, costUsd }); },
+        () => { ledger.settleJudgeCost(runId, provisional, paid); },
+        () => { if (spendRow !== undefined) deps.settleSpend(spendRow, { tokensIn, tokensOut, costUsd: paid }); },
       ]) {
         try {
           write();
@@ -699,10 +836,32 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       verdict = res.data;
     } catch (err: unknown) {
       const spent = extractionSpendOf(err);
-      if (spent) book(spent.costUsd, spent.inputTokens ?? 0, spent.outputTokens ?? 0);
       const failure = classifyCallFailure(err, deps.signal?.aborted === true);
+      // A reply that came back is booked at what it cost (every `invalid` answer carries its
+      // spend). Without one, only a call that cannot have been processed is taken back: one the
+      // helper refused before sending it (its pre-flight, `invalid` without spend), and a 429 or
+      // 529, which the provider refuses before it processes the request — kept, each retry a
+      // minute later would add another worst case for as long as the provider is overloaded.
+      // Every other call without a reply — a timeout, a dropped connection, another 5xx, a 4xx —
+      // keeps its worst case: whether the provider billed it is not visible here. It is counted
+      // under its own site; a call lost with the process is not, but its day row stays with no
+      // tokens and its worst case, which is where such calls can be counted from.
+      const status = providerStatus(err);
+      if (spent) book(spent.costUsd, spent.inputTokens ?? 0, spent.outputTokens ?? 0);
+      else if (failure.kind === 'invalid' || status === 429 || status === 529) book(0, 0, 0);
+      else reportAbortedCall('bulk_judge.unanswered', model.modelId, { upperBoundUsd: provisional, estimateUsd: provisional, fromSnapshot: false });
       if (failure.kind === 'invalid') {
-        if (!afterPaid(() => { record({ invalid: failure.reason }); })) return halt(BULK_HALT_REASONS.unavailable);
+        // An answer the rule refused keeps which field broke which rule, and the tracker sees the
+        // same (path and rule, never the value), so a refusal can be told from a provider fault.
+        const refusal = failure.reason === 'verdict_invalid' ? judgeRefusalDetail(err, run.rule) : undefined;
+        if (!afterPaid(() => { record({ invalid: failure.reason, ...(refusal !== undefined ? { refusal } : {}) }); })) return halt(BULK_HALT_REASONS.unavailable);
+        if (failure.reason === 'verdict_invalid') {
+          const shown = judgeErrorForTracker(err, 'bulk_judge verdict');
+          if (!told.has(shown.message)) {
+            told.add(shown.message);
+            deps.captureError?.(shown);
+          }
+        }
         continue;
       }
       ledger.releaseJudgeClaim(runId, seq, token);
@@ -733,10 +892,17 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
         }
         verdict = changed as Record<string, unknown>;
       }
-      const textRefused = verdictTextRefusal(verdict, beforeRow, textRun);
-      if (textRefused !== null) {
+      if (emptiesDescription(textRun.listForm, verdict, beforeRow)) {
+        record({ invalid: 'verdict_without_after' });
+        return;
+      }
+      const refusal = verdictTextRefusalOf(verdict, beforeRow, textRun);
+      if (refusal !== null) {
+        const textRefused = refusal.reason;
         if (textRefused !== 'shortcode_changed') {
-          record({ invalid: textRefused });
+          // The domain of a refused link is shown to the owner (1010); the judge wrote it.
+          const shown = shownLinkDomain(refusal, (t) => deps.maskVault(t) !== t || deps.scanSecret(t) !== null);
+          record({ invalid: textRefused, linkDomain: shown });
           return;
         }
         // A shortcode refusal shows the judge's values to the owner to copy into the shop (1130),
@@ -780,7 +946,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (bookingFailed) return halt(BULK_HALT_REASONS.unavailable);
   if (ledger.listUnjudged(runId).length > 0) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge has targets left to judge.');
   if (!ledger.finishJudge(runId)) {
-    return { status: 'halted', summary: summarize(ledger, runId, say.judgeStopped, say) };
+    return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.judgeStopped, say) };
   }
   // A filtered list whose every product fell out before the judge says that no product matched.
   const list = ledger.getListRun(runId);
@@ -788,9 +954,12 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   return { status: 'done', summary: summarize(ledger, runId, noneLeft ?? say.judgeDone, say) };
 
   function halt(reason: BulkHaltReason): BulkJudgeOutcome {
-    // Only a run still planned and not halted: a run superseded or stopped meanwhile keeps its reason.
+    // Only a run still planned and not halted: a run superseded or stopped meanwhile keeps its
+    // reason, which is not this pass's to tell; the worker reads it from the ledger (`gone`).
     ledger.haltPreview(runId, reason);
-    return { status: 'halted', summary: summarize(ledger, runId, say.halted('judge', reason), say) };
+    const held = ledger.getJudgeRun(runId);
+    const gone = held === null || held.phase !== 'planned' || held.haltReason !== reason;
+    return { status: 'halted', ...(gone ? { gone: true as const } : {}), summary: summarize(ledger, runId, say.halted('judge', reason), say) };
   }
   function pending(retryAt: number, lead: string): BulkJudgeOutcome {
     return { status: 'pending', summary: summarize(ledger, runId, lead), retryAt };

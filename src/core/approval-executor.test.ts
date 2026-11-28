@@ -15,6 +15,7 @@ import type { AuditEntry, AuditLog } from './audit-log.js';
 import { InMemoryMailRegistry } from '../integrations/mail/tools/registry.js';
 import { configureMailRateLimits, recordMailSend, resetMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
 import type { MailContext } from '../integrations/mail/context.js';
+import { MailStateDb } from '../integrations/mail/state.js';
 import type {
   MailEnvelope, MailFetchOptions, MailListOptions, MailMessage, MailProvider,
   MailSearchOptions, MailSearchQuery, MailSendInput, MailSendResult, MailWatchHandle,
@@ -178,6 +179,27 @@ describe('the executor sends an approved mail once, as it was filed', () => {
     expect(sent.references).toBe('<1@x>');
     expect(mail.notifyOutboundSent).toHaveBeenCalledTimes(1);
     expect(trail[0]!.action).toBe('mail_reply:reply');
+  });
+
+  it('mail_reply: the sent reply is written to the sent log, and the outbound history reads it back', async () => {
+    const stateDb = new MailStateDb({ path: ':memory:' });
+    try {
+      stateDb.upsertAccount({
+        id: 'acc-1', displayName: 'acc-1', address: 'acc-1@example.com', preset: 'custom',
+        imap: { host: 'i', port: 993, secure: true }, smtp: { host: 's', port: 465, secure: true },
+        authType: 'imap', type: 'business',
+      });
+      (mail as unknown as { stateDb: unknown }).stateDb = stateDb;
+      const id = approved(reply());
+      expect(await executor().tick()).toEqual({ id, status: 'done' });
+      const logged = stateDb.listOutboundForAddress('alice@example.com');
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toMatchObject({ accountId: 'acc-1', messageId: '<sent@x>', inReplyTo: '<1@x>', subject: 'Re: Angebot' });
+      // An approval on a card is not the owner naming the address.
+      expect(stateDb.isOwnerKnownRecipient('alice@example.com')).toBe(false);
+    } finally {
+      stateDb.close();
+    }
   });
 
   it('mail_send registers the follow-up it was filed with, and writes the sent log', async () => {
@@ -445,6 +467,21 @@ describe('attempts, the retry delay and the send deadline', () => {
 });
 
 describe('the send limit', () => {
+  it('without the history database holds approved mails, and sends them once a restart opens it', async () => {
+    // The boot without history.db: the limits are set, nothing counts against them.
+    configureMailRateLimits({ provider: null });
+    const id = approved(send());
+    expect(await executor().tick()).toBeNull();
+    expect(store.get(id)!.status).toBe('approved');
+    expect(store.get(id)!.heldReason).toBe('send_limit');
+    expect(provider.send).not.toHaveBeenCalled();
+    // The restart that opens it: the same limits, now counted.
+    configureMailRateLimits({ provider: { getToolCallCountSince: () => 0 } });
+    advance(APPROVAL_RETRY_DELAY_MS);
+    expect(await executor().tick()).toEqual({ id, status: 'done' });
+    expect(provider.send).toHaveBeenCalledOnce();
+  });
+
   it('holds an entry while the limit is reached and sends it once there is room', async () => {
     let calls = 1;
     configureMailRateLimits({ provider: { getToolCallCountSince: () => calls }, hourlyLimit: 2, dailyLimit: 100 });

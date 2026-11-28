@@ -31,10 +31,17 @@ describe('moving an approval entry to the chat (real engine)', () => {
   let dir: string | undefined;
   let ownerResolver: unknown;
 
-  type Engine = { getApprovalStore: () => ApprovalStore | null; getThreadStore: () => ThreadStore | null };
+  type Engine = { getApprovalStore: () => ApprovalStore | null; getThreadStore: () => ThreadStore | null; getMandateEnds: () => { record: (p: RequestPrincipal, issuedAtS: number) => void } | null };
   const engine = (): Engine => (api as unknown as { engine: Engine }).engine;
   const store = (): ApprovalStore => engine().getApprovalStore()!;
-  const as = (p: RequestPrincipal): void => { api!.setPrincipalResolverForTesting(() => p); };
+  /** Acts as `p`. A mandate's grant is recorded live first, as its sign-in records it. */
+  const as = (p: RequestPrincipal): void => {
+    if (p.kind === 'mandate') {
+      const now = Math.floor(Date.now() / 1000);
+      engine().getMandateEnds()?.record({ ...p, mandateExp: now + 3600 }, now);
+    }
+    api!.setPrincipalResolverForTesting(() => p);
+  };
 
   async function call(method: string, path: string, body?: Record<string, unknown>): Promise<{ status: number; text: string }> {
     const res = await fetch(`${baseUrl}${path}`, {

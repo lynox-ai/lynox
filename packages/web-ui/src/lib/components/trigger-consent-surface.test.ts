@@ -26,6 +26,11 @@ const VIEW = readFileSync(fileURLToPath(new URL('./TriggersView.svelte', import.
 const SCRIPT_END = VIEW.indexOf('</script>');
 const SCRIPT = VIEW.slice(0, SCRIPT_END);
 const TEMPLATE = VIEW.slice(SCRIPT_END).replace(/<!--[\s\S]*?-->/g, '');
+// The owner's confirm lives in `StampConfirm` since 641 4b (ii-a): it shows the schedule from the
+// stamp preview and confirms with its digest. Its behaviour is rendered in
+// `triggersview-stamp.svelte.test.ts`; what is held here is that it is the ONE confirm.
+const STAMP = readFileSync(fileURLToPath(new URL('./StampConfirm.svelte', import.meta.url)), 'utf-8');
+const STAMP_TEMPLATE = STAMP.slice(STAMP.indexOf('</script>')).replace(/<!--[\s\S]*?-->/g, '');
 
 /** The body of `{#if <cond>}` that opens on the line holding `marker`, up to its own `{/if}` at the same indent. */
 function ifBlockAround(marker: string): { cond: string; body: string } {
@@ -62,27 +67,44 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// behaviour tests. A copy in the component would be a second rule with no
 		// test, and the source assertions here cannot see what a copy does.
 		expect(SCRIPT).toContain(
-			"import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
+			"import { awaitsConfirmation, displaySafe, instructionOf, markHidden, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
 		);
-		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'offersConfirmation', 'showsInstruction', 'showsWatchTarget', 'watchOf']) {
+		expect(SCRIPT).toContain("import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';");
+		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'showsInstruction', 'showsWatchAddress', 'showsWatchTarget', 'watchOf', 'awaitsOwnerStamp', 'listedLine', 'listedNote', 'stampable', 'usesConnections']) {
 			expect(SCRIPT, name).not.toMatch(new RegExp(`function\\s+${name}|${name}\\s*=`));
 		}
+		// Who waits is the two tested rules together, nothing besides: an agent run nobody confirmed,
+		// and anything a mandate set up or last changed (engine `mandateNeedsOwnerStamp`).
+		const held = SCRIPT.slice(SCRIPT.indexOf('function held('), SCRIPT.indexOf('\n\t}', SCRIPT.indexOf('function held(')));
+		expect(held.split('\n').map((l) => l.trim()).slice(1).join(' ')).toBe('return awaitsConfirmation(trigger) || awaitsOwnerStamp(trigger);');
+	});
+
+	it('a confirmed watch names its page on its row (PRD B6)', () => {
+		// The escalation of a watch someone the owner let in set up leaves the address out and points
+		// here, so the row must show it once the watch is confirmed.
+		const { cond, body } = ifBlockAround('data-trigger-watch');
+		// Not while it waits: the held block names the address there (`StampConfirm` or the consent box), never twice.
+		expect(cond).toBe('showsWatchAddress(trigger) && !held(trigger)');
+		// Host and path through the address that keeps the host whole and set off.
+		expect(body).toContain(`<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="trigger-watch-address" />`);
 	});
 
 	it('a waiting trigger carries its own badge, whole', () => {
 		const { cond, body } = ifBlockAround("t('triggers.awaiting_confirmation')");
-		expect(cond).toBe('awaitsConfirmation(trigger)');
+		expect(cond).toBe('held(trigger)');
 		expect(body.trim()).toBe(
-			'<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">'
+			'<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-held>'
 			+ "{t('triggers.awaiting_confirmation')}</span>",
 		);
 	});
 
 	it('says nothing about WHEN the run comes', () => {
 		// Two earlier versions did, and both spoke for reasons consent does not
-		// settle. The scheduler's answer is not this block's to give.
+		// settle. The scheduler's answer is not this block's to give. (`StampConfirm` shows the
+		// schedule's cron, because the stamp holds it; never a next run.)
 		const { body } = ifBlockAround('data-trigger-consent');
 		expect(body).not.toMatch(/next_run_at|fmtDate|schedule_cron/);
+		expect(STAMP).not.toMatch(/next_run_at|fmtDate/);
 	});
 
 	it('the consent block is compared WHOLE — nothing may be added to it', () => {
@@ -102,41 +124,37 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		expect(shape).toBe([
 			'<div class="mt-2 space-y-1.5" data-trigger-consent>',
 			`<p class="text-xs text-warning" data-trigger-awaits>{t(ownerActs ? 'triggers.awaiting_hint' : 'triggers.confirm_owner_only_notice')}</p>`,
-			'{#if showsInstruction(trigger)}',
+			'{#if ownerStamps(trigger)}',
+			'<StampConfirm id={trigger.id} mode="held" cronText={cronToHuman} onstamped={() => void stamped(trigger)} />',
+			'{:else if showsInstruction(trigger)}',
 			'<div class="text-xs text-text-muted" data-consent-instruction>',
 			`<span class="font-medium" data-consent-label="instruction">{t('triggers.instruction')}:</span>`,
 			'<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{displaySafe(instructionOf(trigger))}</p>',
 			'</div>',
 			'{/if}',
-			'{#if showsWatchTarget(trigger)}',
+			'{#if !ownerStamps(trigger) && showsWatchTarget(trigger)}',
 			'<div class="text-xs text-text-muted" data-consent-watch>',
 			`<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>`,
 			'<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
-				+ `<span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>`,
+				+ `<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="consent-watch-address" /></p>`,
 			'{#if watchOf(trigger)?.intervalMinutes}',
 			`<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>`,
 			'{/if}',
 			'</div>',
 			'{/if}',
-			'{#if offersConfirmation(trigger) && ownerActs}',
-			'<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]}'
-				+ " aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')}"
-				+ ' class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text'
-				+ " hover:bg-accent/15 disabled:opacity-40\">{t('triggers.confirm')}</button>",
-			'{/if}',
 			'</div>',
 		].join('\n'));
 	});
 
-	it('confirming calls the existing confirm route with POST, and reports what it did', () => {
-		const start = SCRIPT.indexOf('async function confirmTrigger(');
-		expect(start, 'confirmTrigger is gone').toBeGreaterThan(-1);
-		const fn = SCRIPT.slice(start, SCRIPT.indexOf('\n\t}', start));
-		expect(fn).toContain("fetch(`${getApiBase()}/tasks/${trigger.id}/confirm`, { method: 'POST' })");
-		expect(fn).toContain('await loadTriggers()');
+	it('confirming sends the preview\'s digest to the confirm route, and reports what it did', () => {
+		const start = STAMP.indexOf('async function confirm(');
+		expect(start, 'confirm is gone from StampConfirm').toBeGreaterThan(-1);
+		const fn = STAMP.slice(start, STAMP.indexOf('\n\t}', start));
+		expect(fn).toContain("fetch(`${getApiBase()}/tasks/${encodeURIComponent(id)}/confirm`, {");
+		expect(fn).toContain("method: 'POST'");
+		expect(fn).toContain('body: JSON.stringify({ expect: shown.expect })');
 		// The message may not claim a schedule the scheduler does not honour.
 		expect(fn).toContain("addToast(t('triggers.confirmed'), 'success')");
-		expect(fn).toContain("addToast(t('triggers.confirm_failed'), 'error')");
 		expect(fn).toContain("addToast(t('triggers.confirm_failed'), 'error')");
 	});
 
@@ -144,9 +162,12 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const next = ifBlockAround("t('tasks.next_run')");
 		// The whole condition, not `toContain`: an `|| true` appended to it leaves the
 		// expected text in place and puts the date back on a waiting trigger.
-		expect(next.cond).toBe('trigger.next_run_at && trigger.enabled !== 0 && !awaitsConfirmation(trigger) && trigger.paused !== true');
+		expect(next.cond).toBe("trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.running !== true && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && !(trigger.status === 'failed' && !trigger.schedule_cron) && trigger.paused !== true");
 		const run = ifBlockAround('runNow(trigger)');
-		expect(run.cond).toBe('!awaitsConfirmation(trigger)');
+		// Nor at a completed plan that keeps its pause (U-179): the refusal names no way out there.
+		// Nor at a plan that waits for its takeover (U-410): the takeover is the way out.
+		// Nor at a watch the policy keeps from its page (U-392): the run would read nothing.
+		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !holdsNextRun(trigger.blocked_reason)');
 		expect(run.body.trim().startsWith('<button onclick={() => runNow(trigger)}')).toBe(true);
 	});
 
@@ -155,7 +176,10 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// `{#if !showsInstruction(trigger)}`, gives a watch the button that the gate
 		// exists to withhold — and every "pinned whole" assertion here reads the
 		// first match, so it went green.
-		expect(TEMPLATE.split('confirmTrigger(trigger)')).toHaveLength(2);
+		// Since 641 4b (ii-a) the view itself has none; `StampConfirm` has the one.
+		expect(TEMPLATE.split("t('triggers.confirm')")).toHaveLength(1);
+		expect(STAMP_TEMPLATE.split("t('triggers.confirm')")).toHaveLength(2);
+		expect(STAMP_TEMPLATE.split('confirm()')).toHaveLength(2);
 	});
 
 	it('the card stacks below `sm`, which is what makes the instruction readable there', () => {
@@ -175,17 +199,29 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		);
 	});
 
-	it('the controls hide on hover-capable pointers, not at a width', () => {
-		// A touch screen wider than `sm` has no hover either: keyed on the width, the
-		// controls were unreachable there with no rule left to bring them back.
-		for (const control of ['runNow(trigger)', 'togglePause(trigger)', 'manageInChat(trigger)', 'deleteTrigger(trigger)']) {
-			const tag = line(`<button onclick={() => ${control}}`);
-			expect(tag, control).toContain('[@media(hover:hover)]:opacity-0');
+	// The five controls that hide until hover, the check button only when its note does not ask for it.
+	const hiding = (): [string, string][] => [
+		...['runNow(trigger)', 'togglePause(trigger)', 'manageInChat(trigger)', 'deleteTrigger(trigger)'].map((c): [string, string] => [c, line(`<button onclick={() => ${c}}`)]),
+		['check', line('<button onclick={() => (checking[trigger.id] = !checking[trigger.id])}')],
+	];
+
+	it('below `sm` the controls stay visible with a mouse too, where their row wraps under the text', () => {
+		// The one way a control turns transparent is from `sm` up on a device that hovers. A plain
+		// or `max-sm:` hide would hide it in the wrapped row below `sm`, under the text; a hide
+		// keyed on a width alone would hide it on a touch screen wider than that width, where
+		// nothing brings it back.
+		for (const [control, tag] of hiding()) {
+			expect(tag.match(/[^\s"']*opacity-0\b/g), control).toEqual(['sm:[@media(hover:hover)]:opacity-0']);
+		}
+	});
+
+	it('the controls hide only where hovering exists, and hover or focus brings them back', () => {
+		// A touch screen wider than `sm` has no hover: a hide keyed on the width alone left
+		// the controls unreachable there with no rule to bring them back. The hide above is
+		// the only one, and it needs hover; this test holds what brings a control back.
+		for (const [control, tag] of hiding()) {
 			expect(tag, control).toContain('group-hover:opacity-100');
-			// Any width-keyed hide, not just the one that was there: `md:opacity-0`
-			// beside the pointer rule passed, and reintroduces the same dead end on a
-			// touch screen wider than that breakpoint.
-			expect(tag, control).not.toMatch(/(sm|md|lg|xl|2xl):opacity-0/);
+			expect(tag, control).toContain('focus-visible:opacity-100');
 		}
 	});
 });
