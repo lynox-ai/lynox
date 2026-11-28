@@ -68,6 +68,8 @@ async function mountPanel(answer: Response): Promise<void> {
 const heading = (): string | null | undefined => target.querySelector('h3')?.textContent;
 const region = (): string | null | undefined => target.querySelector('[role="region"]')?.getAttribute('aria-label');
 const topButton = (): string | null | undefined => target.querySelector('h3')?.parentElement?.querySelector('button')?.textContent;
+/** Whether the box and its heading carry the warning colour. */
+const warns = (): boolean[] => [target.querySelector('[role="region"]')?.classList.contains('border-danger/30') ?? false, target.querySelector('h3')?.classList.contains('text-danger') ?? false];
 
 async function confirmErasure(): Promise<void> {
 	const button = [...target.querySelectorAll('button')].find((b) => b.textContent?.includes(t('erasure.confirm')));
@@ -93,21 +95,31 @@ afterEach(() => {
 });
 
 describe('PersonErasurePanel once the erasure has answered', () => {
-	it('says it is done and offers to close, in heading, region label and button', async () => {
+	it('says it is finished and offers to close, in heading, region label and button, without the warning colour', async () => {
 		await mountPanel(json(RESULT));
 		expect([heading(), region(), topButton()], 'before: an open action').toEqual([t('erasure.title'), t('erasure.title'), t('erasure.cancel')]);
+		expect(warns(), 'before: in the warning colour').toEqual([true, true]);
 		await confirmErasure();
 		expect(target.querySelector('[role="status"]'), 'positive control: the done answer is shown').not.toBeNull();
-		expect([heading(), region(), topButton()]).toEqual([t('erasure.done_title'), t('erasure.done_title'), t('erasure.close')]);
+		expect([heading(), region(), topButton()]).toEqual(['Löschung abgeschlossen', 'Löschung abgeschlossen', 'Schliessen']);
+		expect(warns(), 'neutral once finished').toEqual([false, false]);
 		const before = closed;
 		target.querySelector('h3')?.parentElement?.querySelector('button')?.click();
 		expect(closed - before, 'the button closes the panel').toBe(1);
 	});
 
-	it('keeps the erase heading and the cancel button after a partial answer', async () => {
+	it('keeps the erase heading, the cancel button and the warning colour after a partial answer', async () => {
 		await mountPanel(json(PARTIAL, 500));
 		await confirmErasure();
 		expect(target.querySelector('[role="alert"]')?.textContent, 'positive control: the partial answer is shown').toContain(t('erasure.step.memories_legacy'));
 		expect([heading(), region(), topButton()]).toEqual([t('erasure.title'), t('erasure.title'), t('erasure.cancel')]);
+		expect(warns()).toEqual([true, true]);
+	});
+
+	it('names the finished state in English too', async () => {
+		(await import('../i18n.svelte.js')).setLocale('en');
+		await mountPanel(json(RESULT));
+		await confirmErasure();
+		expect([heading(), region(), topButton()]).toEqual(['Erasure finished', 'Erasure finished', 'Close']);
 	});
 });

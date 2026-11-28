@@ -1384,7 +1384,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'erasure.nc.audit_log': { de: 'Das Protokoll dieser Löschung (nur IDs)', en: 'The log of this erasure (ids only)' },
 	'erasure.confirm': { de: 'Endgültig löschen', en: 'Erase permanently' },
 	'erasure.cancel': { de: 'Abbrechen', en: 'Cancel' },
-	'erasure.done_title': { de: 'Aus dem Gedächtnis gelöscht', en: 'Erased from memory' },
+	'erasure.done_title': { de: 'Löschung abgeschlossen', en: 'Erasure finished' },
 	'erasure.close': { de: 'Schliessen', en: 'Close' },
 	'erasure.done': { de: 'Gelöscht: {parts}.', en: 'Erased: {parts}.' },
 	'erasure.done_both': { de: '{entries} und {memories}', en: '{entries} and {memories}' },

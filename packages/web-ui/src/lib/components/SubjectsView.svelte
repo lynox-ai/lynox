@@ -45,6 +45,7 @@
 		product: '#c026d3',
 		service: '#0891b2',
 		engagement: '#d97706',
+		other: 'var(--color-text-subtle)',
 	};
 
 	function kindLabel(kind: string): string {

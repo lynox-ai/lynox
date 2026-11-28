@@ -66,12 +66,13 @@ afterEach(() => {
 
 describe('SubjectsView kind chip', () => {
 	for (const locale of ['de', 'en'] as const) {
-		it(`shows each kind as a word in ${locale}, not in a code font, and an unknown kind as it came`, async () => {
+		it(`shows each kind as a tinted word in ${locale}, not in a code font, and an unknown kind as it came`, async () => {
 			setLocale(locale);
 			await mountList();
 			expect(chips().map((c) => c.textContent)).toEqual([...KINDS.map((k) => t(`subjects.kind.${k}`)), 'robot']);
 			expect(KINDS.every((k) => t(`subjects.kind.${k}`) !== `subjects.kind.${k}`), 'every kind has a word').toBe(true);
 			expect(chips().some((c) => c.classList.contains('font-mono')), 'no code font').toBe(false);
+			expect(chips().slice(0, KINDS.length).map((c) => (c as HTMLElement).getAttribute('style') ?? ''), 'every known kind, other included, is tinted').not.toContain('');
 		});
 	}
 
