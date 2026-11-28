@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -125,6 +125,33 @@ describe('AgentMemoryDb', () => {
       const again = new AgentMemoryDb(path);
       again.close();
       expect(state(), 'a second start changes nothing').toEqual(first);
+    });
+
+    it('counts the relations it moves only on the step to v8, not on the step from v8 to v9', () => {
+      const CHAIN_LOG = '[lynox:memory] agent-memory.db: relations of replaced memories moved';
+      const startLogs = (path: string): string[] => {
+        const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          new AgentMemoryDb(path).close();
+          return spy.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith(CHAIN_LOG));
+        } finally { spy.mockRestore(); }
+      };
+      // A file at v7: before the relations move, so without `origin_memory_id`.
+      const v7 = join(tempDir, 'at-v7.db');
+      new AgentMemoryDb(v7).close();
+      let raw = new Database(v7);
+      raw.exec('DROP TABLE untrusted_lines; DROP INDEX idx_relations_origin; ALTER TABLE relations DROP COLUMN origin_memory_id');
+      raw.prepare('DELETE FROM schema_version WHERE version >= 8').run();
+      raw.close();
+      expect(startLogs(v7), 'v7 → v9 counts once, before the move').toHaveLength(1);
+      // A file at v8: the move is done, so v9 alone runs and counts nothing.
+      const v8 = join(tempDir, 'at-v8.db');
+      new AgentMemoryDb(v8).close();
+      raw = new Database(v8);
+      raw.exec('DROP TABLE untrusted_lines');
+      raw.prepare('DELETE FROM schema_version WHERE version = 9').run();
+      raw.close();
+      expect(startLogs(v8), 'v8 → v9').toEqual([]);
     });
 
     it('idempotent init', () => {
