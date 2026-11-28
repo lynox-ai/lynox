@@ -43,12 +43,14 @@ let gates: Array<() => void> = [];
 let reviewStatus = 409;
 let finishRun: (() => void) | null = null;
 let emitRun: ((event: string, data: unknown) => void) | null = null;
+/** The id the server gives the next new chat. */
+let nextSession = 't1';
 
 function serve(): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
 		calls.push(`${init?.method ?? 'GET'} ${url}`);
-		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
+		if (url.endsWith('/sessions')) return json({ sessionId: nextSession });
 		if (init?.method === 'DELETE' && holdDelete) await holdDelete;
 		if (url.endsWith('/runs/active')) {
 			if (gateEach) await new Promise<void>((r) => { gates.push(r); });
@@ -132,6 +134,7 @@ beforeEach(async () => {
 	gateEach = false;
 	gates = [];
 	reviewStatus = 409;
+	nextSession = 't1';
 	serve();
 });
 afterEach(() => { stopPoll?.(); stopPoll = null; vi.unstubAllGlobals(); });
@@ -211,6 +214,76 @@ describe('the tap on a failed message', () => {
 		await settle();
 	});
 
+	it('when a turn starts while the server is being asked: not sent again, and the running sentence once, at least 8 s', async () => {
+		await store.sendMessage('first');
+		await settle();
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const tap = store.retryFailedTurn(store.getMessages().find((m) => m.content === 'again')!, 'again');
+		await settle();
+		expect(calls.filter((c) => c.endsWith('/runs/active')), 'positive control: the server is being asked').toHaveLength(1);
+		holdActive = null;
+		openRun = true;
+		void store.sendMessage('working');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: a turn streams').toBe(true);
+		// The server names a running turn: the tap stops at the turn that started, not at this answer.
+		active = { runs: [{ runId: 'own', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] };
+		release();
+		await tap;
+		await settle();
+		expect(failedOne('again').map((m) => m.failed)).toEqual([true]);
+		expect(runPosts(), 'only the first message and the turn that started').toBe(2);
+		expect(calls.some((c) => c.includes('/runs/own/stream')), 'no second stream attached').toBe(false);
+		expect(toasts.map((x) => [x.message, x.ms])).toEqual([[i18n.t('chat.still_running'), 8000]]);
+		finishRun?.();
+		await settle();
+	});
+
+	it('when another chat is opened while the server is being asked: not sent, and nothing is said', async () => {
+		await store.sendMessage('first');
+		await settle();
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		const msg = store.getMessages().find((m) => m.content === 'again')!;
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const tap = store.retryFailedTurn(msg, 'again');
+		await settle();
+		expect(calls.filter((c) => c.endsWith('/runs/active')), 'positive control: the server is being asked').toHaveLength(1);
+		store.newChat();
+		release();
+		await tap;
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(toasts).toEqual([]);
+	});
+
+	it('when another chat is opened and a turn starts there while the server is being asked: nothing is said', async () => {
+		await store.sendMessage('first');
+		await settle();
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const tap = store.retryFailedTurn(store.getMessages().find((m) => m.content === 'again')!, 'again');
+		await settle();
+		expect(calls.filter((c) => c.endsWith('/runs/active')), 'positive control: the server is being asked').toHaveLength(1);
+		store.newChat();
+		nextSession = 't2';
+		holdActive = null;
+		openRun = true;
+		void store.sendMessage('other');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: a turn streams in the other chat').toBe(true);
+		release();
+		await tap;
+		await settle();
+		expect(runPosts(), 'the first message and the other chat’s turn, not the failed one').toBe(2);
+		expect(toasts).toEqual([]);
+		finishRun?.();
+		await settle();
+	});
+
 	it('with the chat’s own run working: the running sentence, long enough to read (at least 8 s)', async () => {
 		await questionWaits(QUESTION);
 		active = { runs: [{ runId: 'own', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] };
@@ -262,6 +335,32 @@ describe('the reconnect with a failed message', () => {
 		await settle();
 		expect(runPosts()).toBe(2);
 		expect(toasts).toEqual([]);
+	});
+
+	it('when a turn starts while the server is being asked: not sent again, and nothing is said', async () => {
+		await store.sendMessage('first');
+		await settle();
+		store.getMessages().push({ role: 'user', content: 'again', failed: true, sendUnconfirmed: true });
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		listeners.online!();
+		await settle();
+		expect(calls.filter((c) => c.endsWith('/runs/active')), 'positive control: the server is being asked').toHaveLength(1);
+		holdActive = null;
+		openRun = true;
+		void store.sendMessage('working');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: a turn streams').toBe(true);
+		release();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(failedOne('again').map((m) => m.failed), 'the failed message keeps its tap').toEqual([true]);
+		expect(runPosts(), 'only the first message and the turn that started').toBe(2);
+		expect(toasts).toEqual([]);
+		finishRun?.();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(runPosts(), 'not sent once that turn ends either').toBe(2);
 	});
 
 	it('with nothing waiting: sent again, as before', async () => {
@@ -421,6 +520,30 @@ describe('Retry on an interrupted run', () => {
 		await retry;
 		await settle();
 		expect(runPosts()).toBe(1);
+	});
+
+	it('when a turn starts while the server is being asked: the banner stays, nothing is sent, the running sentence once', async () => {
+		await questionWaits(QUESTION);
+		await interrupted();
+		active = NOTHING;
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const retry = store.retryInterruptedRun();
+		await settle();
+		holdActive = null;
+		openRun = true;
+		void store.sendMessage('working');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: a turn streams').toBe(true);
+		const before = runPosts();
+		release();
+		await retry;
+		await settle();
+		expect(runPosts(), 'the interrupted message is not sent again').toBe(before);
+		expect(calls.filter((c) => c.startsWith('DELETE')), 'the banner is not dismissed').toEqual([]);
+		expect(toasts.map((x) => [x.message, x.ms])).toEqual([[i18n.t('chat.still_running'), 8000]]);
+		finishRun?.();
+		await settle();
 	});
 
 	it('never goes into a chat opened while the banner was being dismissed', async () => {

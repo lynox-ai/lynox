@@ -35,6 +35,7 @@ import Database from 'better-sqlite3';
 import { CRYPTO_ALGORITHM, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { EXPORT_TABLES } from './export-tables.js';
+import { dropDeletedChatGuardDdl } from './deleted-chat-guard.js';
 
 /** The stores that may travel on the plaintext path. */
 export const PLAIN_STORES = ['engine.db', 'history.db'] as const;
@@ -302,6 +303,12 @@ export function reencryptColumns(
   const refuse = (what: string): PlainRefusal => new PlainRefusal(`Refusing to restore: ${store} in the bundle ${what} — import aborted before anything was replaced.`);
 
   const setTables = [...PLAIN_COLUMNS[store].keys()];
+  // The guard that keeps a deleted chat's runs blank is triggers on these tables
+  // (`deleted-chat-guard.ts`). They are dropped from the image by name, not let through: a dropped
+  // trigger does nothing whatever its body says, and history.db creates them again when it opens.
+  // Any other trigger on a table of the set is still refused below; one on a table outside the
+  // set is not checked here, as before.
+  if (store === 'history.db') db.exec(dropDeletedChatGuardDdl());
   const trigger = db.prepare(`SELECT tbl_name AS t FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN (${setTables.map(() => '?').join(', ')}) LIMIT 1`).get(...setTables.map((t) => t.toLowerCase())) as { t: string } | undefined;
   if (trigger) throw refuse(`carries a trigger on ${trigger.t}`);
   refuseUntrustedTables(db, refuse);

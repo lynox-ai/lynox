@@ -684,6 +684,28 @@ describe('the rewrite runs in steps of 1,000 rows, one transaction each', () => 
     cased.close();
   });
 
+  it('drops the deleted-chat guard\'s triggers from a history.db image by name, whatever their body, and refuses any other', () => {
+    const image = (): Database.Database => {
+      const db = new Database(':memory:');
+      db.exec(`CREATE TABLE runs (id TEXT PRIMARY KEY, task_text TEXT, response_text TEXT, error_text TEXT);
+        CREATE TABLE run_tool_calls (id TEXT PRIMARY KEY, input_json TEXT, output_json TEXT);
+        CREATE TABLE wire_snapshots (id TEXT PRIMARY KEY, user_message TEXT);`);
+      return db;
+    };
+    const key = deriveEngineEncKey(DST);
+    // The guard's name over a body that would write a plaintext back: dropped, so it never runs.
+    const named = image();
+    named.exec("CREATE TRIGGER deleted_chat_update_runs AFTER UPDATE OF task_text ON runs BEGIN UPDATE runs SET task_text = 'back' WHERE id = new.id; END");
+    expect(() => reencryptColumns(named, 'history.db', [], NONE, { key })).not.toThrow();
+    expect(named.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type = 'trigger'").get()).toEqual({ n: 0 });
+    named.close();
+    // Any other name on a table of the set is still refused.
+    const other = image();
+    other.exec("CREATE TRIGGER deleted_chat_update_runs_x AFTER UPDATE OF task_text ON runs BEGIN UPDATE runs SET task_text = 'back' WHERE id = new.id; END");
+    expect(() => reencryptColumns(other, 'history.db', [], NONE, { key })).toThrow(/carries a trigger on runs/);
+    other.close();
+  });
+
   it('encrypts plaintext in a column of the set the source did not name, and leaves its ciphertext as sent', () => {
     const src = encryptStoredText('under the source key', deriveEngineEncKey(SRC));
     const db = memDb('CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT)', [['a', 'never encrypted'], ['b', src], ['c', '']]);

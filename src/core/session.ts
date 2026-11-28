@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
+import { CONTENT_FLAG_DIALOG, contentFlagFound, contentFlagRefusal } from '../tools/dialog-text.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -90,7 +91,6 @@ import type { SecretStore } from './secret-store.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { DataStore } from './data-store.js';
-import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 import { MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, principalTag, runAuthorTag } from './request-principal.js';
@@ -1164,10 +1164,11 @@ export class Session {
         return msg;
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
+        const language = noticeLanguage(this.engine.config.language);
         let answer: string;
         try {
           answer = await this.agent.promptUser(
-            pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
+            CONTENT_FLAG_DIALOG[language].question(contentFlagFound(language, inputCheck.reason)),
             consentOptions('guard'),
             consentMeta('guard'),
           );
@@ -1183,9 +1184,10 @@ export class Session {
         }
         const outcome = decideConsent('guard', answer);
         if (outcome !== 'allow') {
-          // The run's result, read by the person, not by the model: no sentence for the model here
-          // (the reply route already tells the person an unrecognised answer allowed nothing).
-          const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
+          // The run's result, read by the person in the instance's language: the run ends here,
+          // before the model is called and before anything is stored, so the model never reads it.
+          const why = outcome === 'unrecognised' ? 'unrecognised' : outcome === 'dismissed' ? 'unanswered' : 'declined';
+          const msg = contentFlagRefusal(language, why, inputCheck.reason);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }

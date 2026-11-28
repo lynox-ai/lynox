@@ -269,7 +269,10 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
 
   it('memory_update keeps the KG-mirrored write trusted on a clean turn', async () => {
     const { channels } = await import('../../core/observability.js');
-    const agent = withKg(untrustedAgent(updateFallbackMemory(), {}));
+    // The replaced line came in clean too: its knowledge row says so.
+    const base = untrustedAgent(updateFallbackMemory(), {});
+    const sourceUntrustedOf = vi.fn(() => false);
+    const agent: IAgent = { ...base, toolContext: { ...createToolContext({}), knowledgeLayer: { ...makeKg(), sourceUntrustedOf } as unknown as IKnowledgeLayer } };
     await memoryUpdateTool.handler(
       { namespace: 'learnings', old_content: 'ProjectAlpha launch November', new_content: 'ProjectAlpha launch postponed to December' },
       agent,
@@ -927,9 +930,54 @@ describe('memoryPromoteTool', () => {
       scopeType: 'context',
       scopeId: 'proj1',
       sourceChannel: 'agent',
-      sourceUntrusted: false,
+      // No knowledge graph: the line's origin cannot be read, so the copy counts as untrusted.
+      sourceUntrusted: true,
       actor: { principal: OWNER_PRINCIPAL, runId: undefined },
     });
+  });
+
+  it('a line that is only a date is promoted as untrusted, without asking the graph', async () => {
+    const { channels } = await import('../../core/observability.js');
+    // An empty body would match every row of the scope, clean ones included.
+    const sourceUntrustedOf = vi.fn(() => false);
+    const base = makeAgent(makeMockMemory({
+      loadScoped: vi.fn().mockResolvedValue('[2026-10-01] '),
+      appendScoped: vi.fn().mockResolvedValue(undefined),
+      deleteScoped: vi.fn().mockResolvedValue(1),
+    }));
+    const agent: IAgent = {
+      ...base,
+      activeScopes: allScopes,
+      toolContext: { ...base.toolContext, knowledgeLayer: { retireForMove: vi.fn().mockResolvedValue([]), sourceUntrustedOf } as unknown as NonNullable<IAgent['toolContext']['knowledgeLayer']> },
+    };
+    await memoryPromoteTool.handler(
+      { namespace: 'methods', content_pattern: '2026', from_scope: 'user:alex', to_scope: 'context:proj1' },
+      agent,
+    );
+    expect(sourceUntrustedOf).not.toHaveBeenCalled();
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  it('a graph lookup that throws promotes the line as untrusted', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const base = makeAgent(makeMockMemory({
+      loadScoped: vi.fn().mockResolvedValue('User pattern B'),
+      appendScoped: vi.fn().mockResolvedValue(undefined),
+      deleteScoped: vi.fn().mockResolvedValue(1),
+    }));
+    const sourceUntrustedOf = vi.fn(() => { throw new Error('database is locked'); });
+    const agent: IAgent = {
+      ...base,
+      activeScopes: allScopes,
+      toolContext: { ...base.toolContext, knowledgeLayer: { retireForMove: vi.fn().mockResolvedValue([]), sourceUntrustedOf } as unknown as NonNullable<IAgent['toolContext']['knowledgeLayer']> },
+    };
+    const result = await memoryPromoteTool.handler(
+      { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+      agent,
+    );
+    expect(result).toContain('Promoted entry');
+    expect(sourceUntrustedOf).toHaveBeenCalledWith('User pattern B', 'methods', { type: 'user', id: 'alex' });
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
   });
 
   it('with a knowledge graph, retires the original at its scope and hands its ids to the copy', async () => {

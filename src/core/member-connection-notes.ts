@@ -59,7 +59,11 @@ export function withMemberNotes<S extends string>(result: string, status: S, not
   return { result: `${result}\n${notes.map((l) => `• ${l}`).join('\n')}`, status: status === 'success' ? 'halted' : status };
 }
 
-/** Whether the last run already halted on these same lines, so the owner was told once already. */
+/**
+ * Whether the last run ended `halted` on these same lines, as a run that finished with them is
+ * recorded, so the owner was told them once already. Asked only for a run that finished with
+ * lines: a real halt is told whatever the run before noted (its reason is its own).
+ */
 export function memberNotesRepeat(last: { last_run_status?: string | null | undefined; last_run_member_notes?: readonly string[] | undefined }, notes: readonly string[]): boolean {
   return notes.length > 0 && last.last_run_status === 'halted' && notes.every((l) => last.last_run_member_notes?.includes(l) === true);
 }
