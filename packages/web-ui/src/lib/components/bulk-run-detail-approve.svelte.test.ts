@@ -1956,7 +1956,9 @@ describe('the start of a judged run, in words', () => {
 		await render();
 		expect(headTerms()).toContain(t('bulk.head.next'));
 		expect(headTerms()).not.toContain(t('bulk.head.halted'));
-		expect(count(tf('bulk.halt.listed_start', { button: t('bulk.start.judge') }))).toBe(1);
+		const step = tf('bulk.halt.listed_start', { button: t('bulk.start.judge') });
+		expect(count(step)).toBe(1);
+		expect(target.querySelector('[data-testid="bulk-halt-cause"]')?.textContent).toBe(step);
 		expect(count(tf('bulk.start.listed', { n: '3' }))).toBe(1);
 		expect(target.textContent).not.toContain(t('bulk.awaiting_start'));
 	});
@@ -1974,7 +1976,8 @@ describe('the start of a judged run, in words', () => {
 		expect(headTerms()).toContain(t('bulk.head.waiting'));
 		expect(count(tf('bulk.start.listed', { n: '3' }))).toBe(1);
 		expect(count(t('bulk.halt.wait_no_start'))).toBe(1);
-		expect(target.textContent).not.toContain(tf('bulk.halt.listed_start', { button: t('bulk.start.judge') }));
+		expect(target.textContent).not.toContain(t('bulk.halt.listed_start').split('{button}')[0]);
+		expect(buttonByText(t('bulk.start.judge'))).toBeUndefined();
 	});
 
 	it('words the list sentence as its state only, in both languages', () => {
