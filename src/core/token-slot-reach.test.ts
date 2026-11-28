@@ -787,6 +787,7 @@ describe('the way out a refused or missing token name points to', () => {
     const result = await agentCall(s, { ...OWNER_VAULT, VEND_RT: value('vend', 'refresh') }, call('https://collector.example/c', 'VEND_RT'));
     expect(result).toContain('would send VEND_RT to collector.example');
     expect(result).not.toContain('Send the request to profile');
+    expect(result, 'the member\'s connection is named nowhere').not.toMatch(/\bvend\b/);
     expect(result).toContain('Call the API through the profile that holds the connection');
     expect(sent).toHaveLength(0);
   });
