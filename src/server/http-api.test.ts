@@ -831,8 +831,10 @@ beforeAll(async () => {
   vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
   api = new LynoxHTTPApi();
   // The whole file shares this instance's rate windows, and its tests pay back what they spend.
-  // A stopped clock keeps them from running out halfway through a test, which a file that runs
-  // past a minute otherwise does at a point that moves with the machine's load.
+  // Its clock stands still, so a window never runs out during the file: not halfway through a
+  // test, which a file that runs past a minute otherwise does at a point that moves with the
+  // machine's load, and not between tests either. On this instance the loopback window is 600
+  // requests for the whole run, and what the tests do not pay back adds up over all of them.
   (api as unknown as { rateNow: () => number }).rateNow = () => 0;
   await api.init();
   await api.start(0);
@@ -12465,7 +12467,8 @@ describe('LynoxHTTPApi', () => {
     }
 
     // ⚠ AND IT PAYS ITS OWN WAY. The per-IP window is 600 requests / 60 s
-    // (`RATE_MAX_LOOPBACK`), every request in this file comes from 127.0.0.1, so the
+    // (`RATE_MAX_LOOPBACK`; on this file's shared instance, whose clock stands still, 600 for
+    // the whole run, see the file's beforeAll), every request in this file comes from 127.0.0.1, so the
     // whole file shares ONE bucket — and at ~590 requests it already sat just under the
     // ceiling. Measured, not feared: with these cases added and no reset, seven
     // `GET /api/oauth/callback` tests several thousand lines below failed with 429,
@@ -18977,17 +18980,23 @@ describe('LynoxHTTPApi', () => {
           const [key, opened] = [...windowsOf(own)][0]!;
           const resetAt = opened.resetAt;
           const realNow = Date.now.bind(Date);
-          // 170 s ahead, past the window's minute on the wall clock.
-          const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 170_000);
+          // 170 s ahead, past the window's minute on the wall clock, then 170 s back.
+          let step = 170_000;
+          const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + step);
           try {
+            expect(await ask(own)).toBe(200);
+            const ahead = windowsOf(own).get(key)!;
+            expect(ahead, 'a step ahead opens no window early').toBe(opened);
+            expect(ahead.count).toBe(2);
+            step = -170_000;
             expect(await ask(own)).toBe(200);
           } finally {
             spy.mockRestore();
           }
           const after = windowsOf(own).get(key)!;
           expect(after, 'the same window is still open').toBe(opened);
-          expect(after.count).toBe(2);
-          expect(after.resetAt, 'and it ends when it did').toBe(resetAt);
+          expect(after.count).toBe(3);
+          expect(after.resetAt, 'and it ends when it did: a step back stretches nothing').toBe(resetAt);
         });
       });
 
@@ -19026,8 +19035,14 @@ describe('LynoxHTTPApi', () => {
           expect(await ask(own)).toBe(200);
           const second = windows.get(key)!;
           expect(second, 'the case: a new window opened after the snapshot').not.toBe(first);
+          // And a client the snapshot did not know yet.
+          const other = await fetch(`http://127.0.0.1:${portOf(own)}/api/secrets`, { headers: { ...authHeaders(), 'X-Forwarded-For': '203.0.113.77' } });
+          await other.text();
+          const newcomer = windows.get('203.0.113.77');
+          expect(newcomer?.count, 'positive control: the newcomer spent in its own window').toBe(1);
           restoreRateWindow(windows, before);
           expect(second.count, 'what the test spent in it is given back, and nothing is carried in').toBe(0);
+          expect(newcomer!.count, 'a window new since the snapshot is given back in full').toBe(0);
         });
       });
 
