@@ -24922,8 +24922,8 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         expect(((await (await jsonFetch('/api/tasks/p-eva/stamp-preview')).json()) as { asks: unknown }).asks).toBe('eva@kanzlei.example');
         expect((await ownerSessionFetch('/api/tasks/p-eva/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
-        // Eva changes the plan once more while the confirm reads it: it reads the person from the
-        // first read, so the change time it read last decides, and it refuses.
+        // Eva changes the plan once more while the confirm reads it: her change time moved between
+        // the confirm's two readings, and it refuses.
         const during = await (await jsonFetch('/api/tasks/p-eva/stamp-preview')).json() as { expect: string };
         let flipped = false;
         mockGetPipeline.mockImplementation((id: string) => {
@@ -24938,6 +24938,104 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         const again = await (await jsonFetch('/api/tasks/p-eva/stamp-preview')).json() as { expect: string };
         mockConfirmTrigger.mockReturnValueOnce({ ...trigger, confirmed_at: '2026-10-09T00:00:00.000Z' });
         expect((await ownerSessionFetch('/api/tasks/p-eva/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
+    });
+
+    it('refuses a plan\'s confirm when a takeover covers a mark between its two readings, with no change time moved', async () => {
+      freshRateWindow();
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const asking = { id: 'wf-arno', name: 'W', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, template: true, confirmedAt: '2026-10-07T00:00:00.000Z', mode: 'interactive', steps: [{ id: 's1', task: 'ask', tools: ['ask_user'] }] };
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-arno' ? asking : undefined));
+      // The owner's plan on Arno's workflow asks Arno; once the owner took the workflow over, only the owner.
+      const arnoWf = { createdBy: 'mandate:arno@kanzlei.example', createdMandateId: 'M-ARNO', createdAt: '2026-10-01 00:00:00', mandateEditor: null, mandateEditorId: null, mandateEditedAt: null };
+      let authorship: Record<string, unknown> = arnoWf;
+      const trigger = { id: 'p-own', effect: 'run_workflow', pipeline_id: 'wf-arno', title: 'Report', description: 'Weekly', created_by: 'owner', created_at: '2026-10-02T00:00:00.000Z' };
+      // `armed`: the confirm's second reading of the plan is where the takeover lands.
+      let armed = false;
+      let reads = 0;
+      ref['getRunHistory'] = () => ({
+        getTrigger: (id: string) => {
+          if (armed && ++reads === 2) authorship = { ...arnoWf, coveredCreatedBy: arnoWf.createdBy, coveredCreatedId: 'M-ARNO', coveredCreatedAt: arnoWf.createdAt };
+          return id === 'p-own' ? trigger : undefined;
+        },
+        getPlannedPipeline: () => undefined, getWorkflowAuthorship: () => authorship, getWorkflowExact: () => asking,
+      });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      ref['getMandateEnds'] = () => ({ isLive: () => true, record: (): void => {} });
+      try {
+        mockConfirmTrigger.mockClear();
+        const shown = await (await jsonFetch('/api/tasks/p-own/stamp-preview')).json() as { expect: string; asks: unknown };
+        expect(shown.asks).toBe('arno@kanzlei.example');
+        armed = true;
+        expect((await ownerSessionFetch('/api/tasks/p-own/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        expect(reads).toBeGreaterThanOrEqual(2);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
+        // The preview after the takeover names no one besides the owner, and that one is stamped.
+        armed = false;
+        const again = await (await jsonFetch('/api/tasks/p-own/stamp-preview')).json() as { expect: string; asks: unknown };
+        expect(again.asks).toBeNull();
+        mockConfirmTrigger.mockReturnValueOnce({ ...trigger, confirmed_at: '2026-10-09T00:00:00.000Z' });
+        expect((await ownerSessionFetch('/api/tasks/p-own/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
+    });
+
+    it('refuses a workflow\'s stamp when who besides the owner answers its questions changed since the preview, and says which part moved', async () => {
+      freshRateWindow();
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const asking = { id: 'wf-arno', name: 'W', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, template: true, confirmedAt: '2026-10-07T00:00:00.000Z', mode: 'interactive', steps: [{ id: 's1', task: 'ask', tools: ['ask_user'] }] };
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-arno' ? asking : undefined));
+      const arnoWf = { createdBy: 'mandate:arno@kanzlei.example', createdMandateId: 'M-ARNO', createdAt: '2026-10-01 00:00:00', mandateEditor: null, mandateEditorId: null, mandateEditedAt: null };
+      let plans: Array<Record<string, unknown>> = [];
+      let digest = 'd'.repeat(64);
+      const stamp = vi.fn((_id: string, _at: string, d?: string) => d === digest);
+      ref['getRunHistory'] = () => ({
+        getTrigger: (id: string) => plans.find((t) => t['id'] === id),
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => arnoWf,
+        getWorkflowExact: (id: string) => (id === 'wf-arno' ? asking : undefined),
+        workflowStampDigest: () => digest,
+        workflowStampState: () => 'awaits_owner_stamp',
+        workflowMandateShaped: () => true,
+        getPlansOfWorkflow: (id: string) => plans.filter((t) => t['pipeline_id'] === id),
+        setWorkflowConfirmedAt: stamp,
+      });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      ref['getMandateEnds'] = () => ({ isLive: () => true, record: (): void => {} });
+      const preview = async (): Promise<{ expect: string; asks: unknown }> => (await (await jsonFetch('/api/workflows/wf-arno/stamp-preview')).json()) as { expect: string; asks: unknown };
+      const confirm = async (expectSent: string): Promise<{ status: number; code: unknown }> => {
+        const res = await ownerSessionFetch('/api/workflows/wf-arno/confirm', { method: 'POST', body: JSON.stringify({ expect: expectSent }) });
+        return { status: res.status, code: ((await res.json()) as { code?: unknown }).code };
+      };
+      try {
+        const shown = await preview();
+        expect(shown.asks).toEqual({ count: 1, name: 'arno@kanzlei.example' });
+        // Eva sets up a plan on it after the preview: two people may answer now, not the one shown.
+        plans = [{ id: 'p-eva', effect: 'run_workflow', pipeline_id: 'wf-arno', title: 'Report', description: 'Weekly', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'M-EVA', created_at: '2026-10-05T00:00:00.000Z' }];
+        expect(await confirm(shown.expect)).toEqual({ status: 409, code: 'asks_changed' });
+        expect(stamp).not.toHaveBeenCalled();
+        // The steps moved too: that is said first.
+        digest = 'e'.repeat(64);
+        expect(await confirm(shown.expect)).toEqual({ status: 409, code: 'steps_changed' });
+        expect(stamp).not.toHaveBeenCalled();
+        // From the preview that counts both: stamped, held to the steps' digest alone.
+        const again = await preview();
+        expect(again.asks).toEqual({ count: 2, name: null });
+        expect((await confirm(again.expect)).status).toBe(200);
+        expect(stamp).toHaveBeenCalledWith('wf-arno', expect.any(String), digest);
+        // No one besides the owner answers: `expect` is the steps' digest, as before the line existed.
+        plans = [];
+        const lone = { ...arnoWf, createdBy: 'owner', createdMandateId: null };
+        const history = (ref['getRunHistory'] as () => Record<string, unknown>)();
+        ref['getRunHistory'] = () => ({ ...history, getWorkflowAuthorship: () => lone });
+        expect(await preview()).toMatchObject({ expect: digest, asks: null });
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();

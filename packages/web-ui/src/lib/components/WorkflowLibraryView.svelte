@@ -431,7 +431,7 @@
 	let stamping = $state(false);
 	// Why the view is open beyond the button: the steps changed under it, or a schedule was refused
 	// because the workflow waits for this stamp.
-	let stampLine = $state<'steps_changed' | 'awaits_at_schedule' | null>(null);
+	let stampLine = $state<'steps_changed' | 'asks_changed' | 'awaits_at_schedule' | null>(null);
 	// After `steps_changed`: what differs from the version shown before, marked in the steps.
 	let stampChangesShown = $state<StampChanges | null>(null);
 	let stampDialog = $state<HTMLElement | null>(null);
@@ -550,7 +550,7 @@
 				// The line says the new version is shown below, so it goes up only once it is.
 				stampLine = null;
 				if (await loadStampPreview(wf) && opening === stampOpening && stampPreview !== null) {
-					stampLine = 'steps_changed';
+					stampLine = outcome.line;
 					stampChangesShown = stampChanges(shown, stampPreview);
 					// Brought into sight and focused: the changed part is what the owner has to read again.
 					// It goes below the line above, which says why and stays in sight while it is short and
@@ -1231,8 +1231,8 @@
 		<div bind:this={stampFrame} class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 			<!-- Where the owner approves the steps: a name a person with access gave is set apart, whole. -->
 			<h2 id="workflow-stamp-title" bind:this={stampHeading} tabindex="-1" class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
-			{#if stampLine === 'steps_changed'}
-				<DialogStatusLine text={t('workflow_library.stamp.refused.steps_changed')} testid="stamp-line" bind:el={stampChangedLine} />
+			{#if stampLine === 'steps_changed' || stampLine === 'asks_changed'}
+				<DialogStatusLine text={t(stampLine === 'asks_changed' ? 'workflow_library.stamp.refused.asks_changed' : 'workflow_library.stamp.refused.steps_changed')} testid="stamp-line" bind:el={stampChangedLine} />
 			{:else if stampLine === 'awaits_at_schedule' && stampPreview}
 				<!-- Worded by who changed it, which only the preview says: the line waits for it. -->
 				<DialogStatusLine text={t(awaitsLineKey(stampPreview.changedBy))} testid="stamp-line" />
@@ -1252,7 +1252,7 @@
 			{#if stampLoading}
 				<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 			{:else if stampPreview}
-				<StampPreviewBody preview={stampPreview} changes={stampChangesShown} />
+				<StampPreviewBody preview={stampPreview} changes={stampChangesShown} asksNone={stampLine === 'asks_changed'} />
 			{/if}
 
 			<div data-dialog-foot class={DIALOG_FOOT_CLASS}>

@@ -14,10 +14,13 @@
 	// `stepNote`: a line at a step, by its position (the takeover marks a step on someone's connection).
 	// `changes`: after a refusal because what was shown moved, what differs from the version shown
 	// before; each changed part carries a mark, so the owner does not have to search for it.
-	let { preview: p, stepNote, changes = null }: {
+	// `asksNone`: after a refusal because who answers moved (asks_changed): with no one besides the
+	// owner left, the box says so, since the line the refusal points to would otherwise be missing.
+	let { preview: p, stepNote, changes = null, asksNone = false }: {
 		preview: StampPreview;
 		stepNote?: ((index: number) => string | null) | undefined;
 		changes?: StampChanges | null | undefined;
+		asksNone?: boolean | undefined;
 	} = $props();
 
 	// Names and lists wrap where they have a space or a separator, and inside a word only where one
@@ -55,6 +58,8 @@
 		{#if p.asks}
 			<!-- Who may answer its questions on a schedule besides the owner: a name only when it is one person; with more, each plan's stamp says who. -->
 			<dt class="sr-only">{t('workflow_library.stamp.asks')}</dt><dd data-testid="stamp-asks" data-asks-count={p.asks.count} class="col-span-2 {WRAP}"><MarkedLine text={p.asks.name !== null ? fillTemplate(t('workflow_library.stamp.asks_one'), { name: shownWhole(p.asks.name) }) : fillTemplate(t('workflow_library.stamp.asks_many'), { n: String(p.asks.count) })} /></dd>
+		{:else if asksNone}
+			<dt class="sr-only">{t('workflow_library.stamp.asks')}</dt><dd data-testid="stamp-asks-none" class="col-span-2 {WRAP}">{t('workflow_library.stamp.asks_none')}</dd>
 		{/if}
 		{#if p.onFailure}
 			{@const key = onFailureKey(p.onFailure)}

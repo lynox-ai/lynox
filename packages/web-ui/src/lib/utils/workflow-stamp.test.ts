@@ -330,12 +330,13 @@ describe('confirmOutcome — what an answer of the confirm route means', () => {
     expect(confirmOutcome(200, undefined)).toEqual({ kind: 'stamped' });
   });
 
-  it('reads 409 steps_changed as "load the new version and ask again"', () => {
-    expect(confirmOutcome(409, 'steps_changed')).toEqual({ kind: 'changed' });
+  it('reads 409 steps_changed and asks_changed as "load the new version and ask again", each with its line', () => {
+    expect(confirmOutcome(409, 'steps_changed')).toEqual({ kind: 'changed', line: 'steps_changed' });
+    expect(confirmOutcome(409, 'asks_changed')).toEqual({ kind: 'changed', line: 'asks_changed' });
   });
 
   it('reads every other answer as a failure, never as stamped', () => {
-    for (const [status, code] of [[409, undefined], [409, 'changed'], [409, 'workflow_awaits_stamp'], [400, 'expect_required'], [403, undefined], [500, 'steps_changed']] as const) {
+    for (const [status, code] of [[409, undefined], [409, 'changed'], [409, 'workflow_awaits_stamp'], [400, 'expect_required'], [403, undefined], [500, 'steps_changed'], [500, 'asks_changed']] as const) {
       expect(confirmOutcome(status, code).kind, `${status} ${String(code)}`).toBe('failed');
     }
   });

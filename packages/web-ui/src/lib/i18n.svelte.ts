@@ -3037,6 +3037,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.stamp.confirm': { de: 'Schritte bestätigen', en: 'Confirm steps' },
 	'workflow_library.stamp.awaits': { de: 'Läuft erst nach Prüfung', en: 'Runs only after review' },
 	'workflow_library.stamp.refused.steps_changed': { de: 'Die Schritte haben sich geändert, seit du sie geöffnet hast. Unten steht jetzt die neue Fassung. Prüf sie und bestätige noch einmal.', en: 'The steps changed since you opened them. The new version is shown below. Check it and confirm again.' },
+	'workflow_library.stamp.refused.asks_changed': { de: 'Wer ausser dir die Fragen dieses Workflows beantworten kann, hat sich geändert, seit du ihn geöffnet hast. Unten steht jetzt der neue Stand. Prüf ihn und bestätige noch einmal.', en: 'Who besides you can answer this workflow’s questions changed since you opened it. The new state is shown below. Check it and confirm again.' },
 	'workflow_library.stamp.awaits_at_schedule': { de: 'Eine Person mit Zugang hat diesen Workflow gebaut oder geändert. Bevor ein Plan ihn ausführen kann, prüfst du seine Schritte und bestätigst sie.', en: 'Someone you gave access to built or changed this workflow. Before a plan can run it, review its steps and confirm them.' },
 	'workflow_library.stamp.reopen_schedule': { de: 'Schritte bestätigt. Öffne „Planen“ noch einmal, um den Workflow zu planen.', en: 'Steps confirmed. Open Schedule again to schedule this workflow.' },
 	'workflow_library.stamp.awaits_owner': { de: 'Dieser Workflow wartet auf die Bestätigung des Inhabers. Ein Plan kann ihn erst danach ausführen. Wende dich an den Inhaber.', en: "This workflow is waiting for the owner's confirmation. A plan can run it only after that. Ask the owner." },
@@ -3113,6 +3114,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.stamp.runs_chat': { de: 'aus dem Chat und von einem Agenten im Hintergrund, nicht geplant', en: 'from a chat and by an agent in the background, not on a schedule' },
 	'workflow_library.stamp.asks': { de: 'Fragen', en: 'Questions' },
 	'workflow_library.stamp.asks_one': { de: 'Läuft er geplant, kann auch {name} seine Fragen beantworten; wer zuerst antwortet, lenkt den Lauf.', en: 'When it runs on a schedule, {name} can answer its questions too; whoever answers first steers the run.' },
+	// After asks_changed only (U-498): the line the box holds when no one besides the owner answers any more.
+	'workflow_library.stamp.asks_none': { de: 'Die Fragen dieses Workflows beantwortest jetzt nur du.', en: 'Only you answer this workflow’s questions now.' },
 	'workflow_library.stamp.asks_many': { de: 'Läuft er geplant, kann je nach Plan auch eine von {n}\u00a0Personen mit Zugang seine Fragen beantworten. Wer zuerst antwortet, lenkt den Lauf.', en: 'When it runs on a schedule, one of {n}\u00a0people with access may also answer its questions, depending on the plan. Whoever answers first steers the run.' },
 	'stamp.asks': { de: 'Fragen dieses Plans beantworten du und {name}. Wer zuerst antwortet, lenkt den Lauf.', en: 'You and {name} can answer this plan’s questions. Whoever answers first steers the run.' },
 	'workflow_library.stamp.on_failure': { de: 'Bei Fehler', en: 'On failure' },

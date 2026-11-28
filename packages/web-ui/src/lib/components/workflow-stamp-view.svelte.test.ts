@@ -675,6 +675,82 @@ describe('the stamp part names settings, and shows no stored value', () => {
 		expect(document.activeElement).toBe(q('stamp-settings'));
 	});
 
+	describe('after asks_changed (U-498)', () => {
+		const LINE_DE = 'Wer ausser dir die Fragen dieses Workflows beantworten kann, hat sich geändert, seit du ihn geöffnet hast. Unten steht jetzt der neue Stand. Prüf ihn und bestätige noch einmal.';
+		const LINE_EN = 'Who besides you can answer this workflow’s questions changed since you opened it. The new state is shown below. Check it and confirm again.';
+		const refusedTo = async (before: unknown, after: unknown): Promise<void> => {
+			await open('owner', WF, {
+				'GET /workflows/wf-1/stamp-preview': [
+					{ status: 200, body: twoSteps('d1', undefined, { asks: before }) },
+					{ status: 200, body: twoSteps('d1', undefined, { asks: after }) },
+				],
+				'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'asks_changed' } }],
+			});
+			await click(q('stamp-review'));
+			await click(q('stamp-confirm'));
+		};
+		const inEnglish = async (run: () => Promise<void>): Promise<void> => {
+			const { setLocale, getLocale } = await import('../i18n.svelte.js');
+			const was = getLocale();
+			setLocale('en');
+			try { await run(); } finally { setLocale(was); }
+		};
+
+		it('says who answers moved, not the steps, and marks the box with who answers, not a step', async () => {
+			await refusedTo({ count: 1, name: 'arno@kanzlei.example' }, { count: 2, name: null });
+			expect(q('stamp-line')?.textContent?.trim()).toBe(LINE_DE);
+			expect(q('stamp-asks')?.getAttribute('data-asks-count')).toBe('2');
+			expect(q('stamp-asks-none')).toBeNull();
+			expect(q('stamp-settings')?.hasAttribute('data-stamp-changed')).toBe(true);
+			expect(target.querySelector('[data-testid="stamp-step"][data-stamp-changed]')).toBeNull();
+			expect(document.activeElement).toBe(q('stamp-settings'));
+			if (component) unmount(component);
+			component = undefined;
+			target.innerHTML = '';
+			await inEnglish(async () => {
+				await refusedTo({ count: 1, name: 'arno@kanzlei.example' }, { count: 2, name: null });
+				expect(q('stamp-line')?.textContent?.trim()).toBe(LINE_EN);
+			});
+		});
+
+		it('with no one left besides the owner, the marked box says only the owner answers', async () => {
+			await refusedTo({ count: 1, name: 'arno@kanzlei.example' }, null);
+			expect(q('stamp-asks')).toBeNull();
+			expect(q('stamp-asks-none')?.textContent?.trim()).toBe('Die Fragen dieses Workflows beantwortest jetzt nur du.');
+			expect(q('stamp-settings')?.hasAttribute('data-stamp-changed')).toBe(true);
+			if (component) unmount(component);
+			component = undefined;
+			target.innerHTML = '';
+			await inEnglish(async () => {
+				await refusedTo({ count: 1, name: 'arno@kanzlei.example' }, null);
+				expect(q('stamp-asks-none')?.textContent?.trim()).toBe('Only you answer this workflow’s questions now.');
+			});
+		});
+
+		it('shows no line about who answers on a first look with no one besides the owner, nor the only-you line after a refusal for changed steps', async () => {
+			// A first look with no one besides the owner: no line in the box.
+			await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: twoSteps('d1') }] });
+			await click(q('stamp-review'));
+			expect(q('stamp-asks')).toBeNull();
+			expect(q('stamp-asks-none')).toBeNull();
+			if (component) unmount(component);
+			component = undefined;
+			target.innerHTML = '';
+			// The steps moved and who answers is now no one: the steps line, and no line about who answers.
+			await open('owner', WF, {
+				'GET /workflows/wf-1/stamp-preview': [
+					{ status: 200, body: twoSteps('d1', undefined, { asks: { count: 1, name: 'arno@kanzlei.example' } }) },
+					{ status: 200, body: twoSteps('d2', 'https://evil.example/upload') },
+				],
+				'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+			});
+			await click(q('stamp-review'));
+			await click(q('stamp-confirm'));
+			expect(q('stamp-line')?.textContent).toContain('Die Schritte haben sich geändert');
+			expect(q('stamp-asks-none')).toBeNull();
+		});
+	});
+
 	it('a new open of the view marks nothing from the last one', async () => {
 		await open('owner', WF, {
 			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: twoSteps('d1') }, { status: 200, body: twoSteps('d2', 'https://evil.example/upload') }],

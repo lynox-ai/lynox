@@ -295,7 +295,7 @@ export function stampChanges<P extends StampPreview>(before: P, after: P, stepKe
   const settingsOf = (p: P): string => JSON.stringify([
     p.mode === null ? null : shown(modeKey(p.mode), p.mode),
     p.onFailure === null ? null : shown(onFailureKey(p.onFailure), p.onFailure),
-    p.limits, p.parameters, p.contract,
+    p.limits, p.parameters, p.contract, p.asks,
   ]);
   const was = new Map<string, string>();
   before.steps.forEach((s, i) => { if (!was.has(s.id)) was.set(s.id, stepKey(before, i)); });
@@ -324,8 +324,9 @@ export function offersStamp(wf: { awaitsStamp?: boolean | undefined; runs_as?: {
 
 export type ConfirmOutcome =
   | { kind: 'stamped' }
-  /** The steps changed since they were shown: the view loads the new version and asks again. */
-  | { kind: 'changed' }
+  /** What was shown changed: the view loads the new version and asks again. `line` says what
+   *  moved — the steps (with the settings beside them), or only who besides the owner answers. */
+  | { kind: 'changed'; line: 'steps_changed' | 'asks_changed' }
   | { kind: 'failed'; key: string };
 
 /**
@@ -363,12 +364,13 @@ export function awaitsLineKey(changedBy: StampPreview['changedBy']): string {
 /**
  * What an answer of `POST /api/workflows/:id/confirm` means for the view.
  *
- * Only a 2xx stamps. `steps_changed` is the one refusal with a way forward inside the view; every
- * other answer, including a 409 with another code or none, is a failure — never read as "stamped".
+ * Only a 2xx stamps. `steps_changed` and `asks_changed` are the refusals with a way forward inside
+ * the view; every other answer, including a 409 with another code or none, is a failure — never
+ * read as "stamped".
  */
 export function confirmOutcome(status: number, code: string | undefined): ConfirmOutcome {
   if (status >= 200 && status < 300) return { kind: 'stamped' };
-  if (status === 409 && code === 'steps_changed') return { kind: 'changed' };
+  if (status === 409 && (code === 'steps_changed' || code === 'asks_changed')) return { kind: 'changed', line: code };
   return { kind: 'failed', key: 'common.save_failed' };
 }
 

@@ -7,7 +7,7 @@ import type { StampEntry } from './plan-run-context.js';
 import { bindingOf, connectionShown, connectionWaits, memberConnectionReader } from './profile-secret-view.js';
 import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { RunHistory } from './run-history.js';
-import type { InlinePipelineStep, PipelineMode, TriggerRecord } from '../types/index.js';
+import type { InlinePipelineStep, PipelineMode, PlannedPipeline, TriggerRecord } from '../types/index.js';
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 
 /**
@@ -107,6 +107,32 @@ export function stampExpect(trigger: TriggerRecord, wf: string | null, entries: 
   // not hold: held here, a change of that person between preview and confirm refuses the confirm.
   const read = asks === undefined ? [SUBJECT_ORDER.map((k) => subject[k]), entries] : [SUBJECT_ORDER.map((k) => subject[k]), entries, asks];
   return createHash('sha256').update(JSON.stringify(read)).digest('hex');
+}
+
+/**
+ * The `expect` a workflow's stamp preview sends: the digest of what its runs do
+ * (`RunHistory.workflowStampDigest`), and, when someone besides the owner may answer its questions
+ * on a schedule, a tag of the line that says so ({@link workflowAsks}, as the preview shows it). A
+ * change of either between the preview and the confirm refuses the confirm; each is told apart
+ * ({@link workflowStampExpected}), so the view can say which one moved.
+ */
+export function workflowStampExpect(digest: string, asks: { count: number; name: string | null } | null): string {
+  return asks === null ? digest : `${digest}.${asksTag(asks)}`;
+}
+
+/** {@link workflowStampExpect} read back: the steps' digest, and the tag of who answers or null. */
+export function workflowStampExpected(expect: string): { steps: string; asks: string | null } {
+  const m = /^(.+)\.([0-9a-f]{64})$/.exec(expect);
+  return m === null ? { steps: expect, asks: null } : { steps: m[1]!, asks: m[2]! };
+}
+
+/** The tag of who answers in {@link workflowStampExpect}, or null when that is no one. */
+export function workflowAsksTag(asks: { count: number; name: string | null } | null): string | null {
+  return asks === null ? null : asksTag(asks);
+}
+
+function asksTag(asks: { count: number; name: string | null }): string {
+  return createHash('sha256').update(JSON.stringify(['workflow-asks-v1', asks.count, asks.name])).digest('hex');
 }
 
 /** A watch's config without its baseline (`last_hash`, `last_summary`), which every run of the
@@ -237,21 +263,46 @@ export function stampListState(
 }
 
 /**
+ * How a run finds the workflow a schedule names (`getPipeline`): loaded once, before a reading that
+ * must not await between what it compares and what it writes (the stamp confirms). The readings
+ * below that take it are synchronous; their async forms load it themselves.
+ */
+export type PipelineReader = (id: string, runHistory?: RunHistory | null) => PlannedPipeline | undefined;
+
+export async function pipelineReader(): Promise<PipelineReader> {
+  return (await import('../tools/builtin/pipeline.js')).getPipeline;
+}
+
+/** {@link pipelineReader} for `task` when a reading of it needs one; null when loading it failed. */
+async function readerFor(task: TriggerRecord): Promise<PipelineReader | null> {
+  if (task.effect !== 'run_workflow' || !task.pipeline_id) return null;
+  try {
+    return await pipelineReader();
+  } catch {
+    return null;
+  }
+}
+
+type PlanOfTrigger = ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: string | null; workflowName: string | null; workflowMember: RequestPrincipal | undefined };
+
+/**
  * The mandates a trigger's plan depends on (`planMembers`): the schedule's, and for
  * `run_workflow` the workflow's, found the way the run will find it (`getPipeline`) and read
  * by its exact id, with that workflow's confirmation. Never throws: a workflow whose authorship
  * cannot be read gives `unreadable`, and the run does not start.
  */
-export async function planOfTrigger(
-  task: TriggerRecord,
-  runHistory: RunHistory | null,
-): Promise<ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: string | null; workflowName: string | null; workflowMember: RequestPrincipal | undefined }> {
+export async function planOfTrigger(task: TriggerRecord, runHistory: RunHistory | null): Promise<PlanOfTrigger> {
+  return planOfTriggerWith(await readerFor(task), task, runHistory);
+}
+
+/** {@link planOfTrigger} with the reader in hand, without an await; a null reader reads as unreadable. */
+export function planOfTriggerWith(read: PipelineReader | null, task: TriggerRecord, runHistory: RunHistory | null): PlanOfTrigger {
   const fromTrigger = planMandate(planAuthorshipOf(task));
   const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: null; workflowName: null; workflowMember: undefined } => ({ ...planMembers(fromTrigger, undefined), unreadable, workflowConfirmedAt: null, workflowName: null, workflowMember: undefined });
   if (task.effect !== 'run_workflow' || !task.pipeline_id) return only(false);
+  if (read === null) return only(true);
   try {
-    const { getPipeline } = await import('../tools/builtin/pipeline.js');
-    const planned = runHistory ? getPipeline(task.pipeline_id, runHistory) : undefined;
+    const planned = runHistory ? read(task.pipeline_id, runHistory) : undefined;
     // No workflow: the run itself reports it missing, and nothing of it runs.
     if (planned === undefined) return only(false);
     const a = runHistory?.getWorkflowAuthorship(planned.id);
@@ -276,8 +327,17 @@ export async function planActsFor(
   runHistory: RunHistory | null,
   isLive: (mandateId: string) => boolean,
 ): Promise<RequestPrincipal | undefined> {
+  return planActsForWith(await readerFor(task), task, runHistory, isLive);
+}
+
+function planActsForWith(
+  read: PipelineReader | null,
+  task: TriggerRecord,
+  runHistory: RunHistory | null,
+  isLive: (mandateId: string) => boolean,
+): RequestPrincipal | undefined {
   if (task.effect.startsWith('bulk_') || isPaused(task)) return undefined;
-  const plan = await planOfTrigger(task, runHistory);
+  const plan = planOfTriggerWith(read, task, runHistory);
   if (plan.unreadable || plan.of === undefined) return undefined;
   if (plan.members.some((m) => principalHasEnded(m, isLive))) return undefined;
   return plan.of;
@@ -295,16 +355,25 @@ export async function planAsks(
   runHistory: RunHistory | null,
   isLive: (mandateId: string) => boolean,
 ): Promise<RequestPrincipal | undefined> {
+  return planAsksWith(await pipelineReader(), task, runHistory, isLive);
+}
+
+/** {@link planAsks} with the reader in hand, without an await: for a confirm that writes what it read. */
+export function planAsksWith(
+  read: PipelineReader,
+  task: TriggerRecord,
+  runHistory: RunHistory | null,
+  isLive: (mandateId: string) => boolean,
+): RequestPrincipal | undefined {
   if (task.effect === 'run_workflow') {
     if (task.source === 'webhook' || !task.pipeline_id) return undefined;
-    const { getPipeline } = await import('../tools/builtin/pipeline.js');
     // A workflow that cannot be read throws on: the preview fails instead of saying no one else answers.
-    const planned = runHistory ? getPipeline(task.pipeline_id, runHistory) : undefined;
+    const planned = runHistory ? read(task.pipeline_id, runHistory) : undefined;
     if (planned === undefined || !workflowAsksOnSchedule(planned)) return undefined;
   } else if (task.effect !== 'run_agent' || task.source === 'watch') {
     return undefined;
   }
-  return planActsFor(task, runHistory, isLive);
+  return planActsForWith(read, task, runHistory, isLive);
 }
 
 /** Whether a workflow's questions reach anyone on a schedule: an interactive one a schedule may run. */
@@ -324,6 +393,17 @@ export async function workflowAsks(
   runHistory: RunHistory | null,
   isLive: (mandateId: string) => boolean,
 ): Promise<RequestPrincipal[]> {
+  return workflowAsksWith(await pipelineReader(), workflowId, plans, runHistory, isLive);
+}
+
+/** {@link workflowAsks} with the reader in hand, without an await: for the workflow's confirm. */
+export function workflowAsksWith(
+  read: PipelineReader,
+  workflowId: string,
+  plans: readonly TriggerRecord[],
+  runHistory: RunHistory | null,
+  isLive: (mandateId: string) => boolean,
+): RequestPrincipal[] {
   let a: ReturnType<RunHistory['getWorkflowAuthorship']>;
   try {
     a = runHistory?.getWorkflowAuthorship(workflowId);
@@ -337,7 +417,7 @@ export async function workflowAsks(
   if (own !== undefined) asked.set(principalTag(own), own);
   for (const t of plans) {
     if (t.effect !== 'run_workflow' || t.pipeline_id !== workflowId) continue;
-    const p = await planAsks(t, runHistory, isLive);
+    const p = planAsksWith(read, t, runHistory, isLive);
     if (p !== undefined) asked.set(principalTag(p), p);
   }
   return [...asked.values()];
