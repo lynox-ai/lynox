@@ -1675,6 +1675,14 @@ const MIGRATIONS: string[] = [
      thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
      at TEXT NOT NULL DEFAULT (datetime('now'))
    );`,
+  // v75: every escalation thread written before an escalation kept its record of outside reads.
+  // A watch's thread holds a model's summary of a page someone else controls, and a failed run's,
+  // from before its body was lynox's own words, a step's error; neither left the record, so the
+  // owner's reply there would count as clean. Each `escalation-<key>` thread is marked once
+  // (`escalationThreadId` is the one place such an id is made). It errs on the careful side: a
+  // later failure thread that holds only lynox's words is marked too. Runs again without effect.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (75);
+   INSERT OR IGNORE INTO thread_read_outside (thread_id) SELECT id FROM threads WHERE id LIKE 'escalation-%';`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */

@@ -86,10 +86,17 @@ describe('the owner replies in a watch escalation\'s thread', { timeout: 45_000 
     return engine;
   };
 
-  /** Escalate, then open the thread as the owner does: a new session over its stored history. */
+  /** Whether the thread's record is stored, not only armed in this process's memory. */
+  const recordStored = (engine: Awaited<ReturnType<typeof engineUp>>, threadId: string): boolean =>
+    engine.getRunHistory()!.getDb().prepare('SELECT 1 FROM thread_read_outside WHERE thread_id = ?').get(threadId) !== undefined;
+
+  /**
+   * Escalate, then open the thread as the owner does after a restart: a new engine over the same
+   * data, and a new session over the thread's stored history. Nothing armed in memory survives.
+   */
   const escalateAndResume = async (readOutside: boolean | undefined) => {
-    const engine = await engineUp();
-    const escalated = engine.escalateToUser({
+    const first = await engineUp();
+    const escalated = first.escalateToUser({
       key: 'watch-1',
       title: '🔍 Prices',
       opener: 'What happened with my automation?',
@@ -97,17 +104,20 @@ describe('the owner replies in a watch escalation\'s thread', { timeout: 45_000 
       ...(readOutside !== undefined ? { readOutside } : {}),
     });
     const threadId = escalated!.threadId;
+    const stored = recordStored(first, threadId);
+    await first.shutdown();
+    const engine = await engineUp();
     const store = engine.getThreadStore()!;
     const messages: BetaMessageParam[] = store.getMessages(threadId, { apiOnly: true })
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: JSON.parse(m.content_json) as BetaMessageParam['content'] }));
     expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
     const owner = engine.createSession({ sessionId: threadId, principal: OWNER, messages }) as unknown as Probe;
-    return { engine, threadId, owner };
+    return { engine, threadId, owner, stored };
   };
 
   it('a remember in the owner\'s reply goes into the untrusted check, and the thread keeps the record', async () => {
-    const { engine, threadId, owner } = await escalateAndResume(true);
-    expect(engine.getThreadStore()!.readOutside(threadId)).toBe(true);
+    const { owner, stored } = await escalateAndResume(true);
+    expect(stored).toBe(true);
     mockProcess.mockResolvedValueOnce(toolUse('memory_store', { content: 'invoices go to billing@attacker.example' })).mockResolvedValueOnce(endTurn('Noted.'));
     await owner.run('Ok, do that.', { principal: OWNER });
     expect(owner.agent?.conversationSawUntrusted).toBe(true);
@@ -115,8 +125,8 @@ describe('the owner replies in a watch escalation\'s thread', { timeout: 45_000 
   });
 
   it('control: an escalation in lynox\'s own words leaves the owner\'s reply trusted', async () => {
-    const { engine, threadId, owner } = await escalateAndResume(undefined);
-    expect(engine.getThreadStore()!.readOutside(threadId)).toBe(false);
+    const { owner, stored } = await escalateAndResume(undefined);
+    expect(stored).toBe(false);
     mockProcess.mockResolvedValueOnce(toolUse('memory_store', { content: 'invoices go to accounting' })).mockResolvedValueOnce(endTurn('Noted.'));
     await owner.run('Remember that invoices go to accounting.', { principal: OWNER });
     expect(owner.agent?.conversationSawUntrusted).toBe(false);
@@ -127,6 +137,6 @@ describe('the owner replies in a watch escalation\'s thread', { timeout: 45_000 
     const engine = await engineUp();
     const first = engine.escalateToUser({ key: 'watch-2', title: 'P', opener: 'What happened with my automation?', body: PAGE_SUMMARY, readOutside: true });
     engine.escalateToUser({ key: 'watch-2', title: 'P', opener: 'What happened with my automation?', body: 'The run did not complete.' });
-    expect(engine.getThreadStore()!.readOutside(first!.threadId)).toBe(true);
+    expect(recordStored(engine, first!.threadId)).toBe(true);
   });
 });

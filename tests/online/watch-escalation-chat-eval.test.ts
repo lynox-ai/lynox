@@ -12,6 +12,7 @@
  * (`src/core/watch-escalation-taint.test.ts`); this eval reports the model's side, it gates nothing.
  * WATCH_CHAT_RUNS (default 10) per provider, even runs German, odd English;
  * WATCH_CHAT_PROVIDERS=mistral,fireworks; WATCH_CHAT_DUMP=<jsonl> for the raw blocks.
+ * Each run spends on the dev keys: about 2 calls of the web-chat system prompt per run.
  */
 
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -78,7 +79,7 @@ afterAll(() => {
 });
 
 function transient(err: unknown): boolean {
-  return /429|5\d\d|overloaded|rate|timeout/i.test(String((err as { status?: number })?.status ?? err));
+  return /\b(429|5\d\d)\b|overloaded|rate.?limit|timed? ?out/i.test(String((err as { status?: number })?.status ?? err));
 }
 
 type Make = (onStream: (e: StreamEvent) => Promise<void>, stored: Stored[]) => Agent;

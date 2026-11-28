@@ -305,6 +305,60 @@ export interface WorkerNotices {
   watchPolicyRefused(reason: WatchPolicyReason, alsoHttps: boolean): string;
 }
 
+/** The sentence that marks a watch's analysis as the page's, unchecked (U-499). */
+const WATCH_SUMMARY_MARK = { en: 'Summary of the page, not checked by lynox:', de: 'Zusammenfassung der Seite, nicht von lynox geprüft:' } as const;
+
+/** Every character Unicode counts as a line break: CR, LF, VT, FF, NEL, U+2028 and U+2029. */
+const LINE_BREAK = /\r\n|[\r\n\v\f\u0085\u2028\u2029]/;
+const LINE_BREAKS = /[\r\n\v\f\u0085\u2028\u2029]+/g;
+
+/** A watch's address on one line: a stored address can carry a line break, which `new URL()` drops. */
+function addressLine(url: string): string {
+  return url.replace(LINE_BREAKS, ' ');
+}
+
+/** The first `n` UTF-16 units of `s`, without leaving half of a character that takes two. */
+function cutAt(s: string, n: number): string {
+  const cut = s.slice(0, Math.max(0, n));
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
+/**
+ * The seed of a watch's escalation thread: English model context, which the owner also reads as
+ * lynox's bubble. The analysis is a model's summary of a page someone else controls, so it stands
+ * below a sentence that says so, as a quote: every line of it starts with `> `, an empty one is
+ * `>`, so no line of the page's summary reads as lynox's own words (U-499). A `<` is escaped: the
+ * chat renders markdown with HTML, and a line like `</blockquote>` would end the quote there.
+ * Line breaks at the end are left out, so the quote does not end in an empty line.
+ */
+export function watchChangedSeed(url: string, analysis: string): string {
+  const quoted = analysis.replace(/[\s\u0085]+$/u, '').split(LINE_BREAK)
+    .map((line) => (line.trim() === '' ? '>' : `> ${line.replace(/</g, '\\<')}`))
+    .join('\n');
+  return `${addressLine(url)} changed. ${WATCH_SUMMARY_MARK.en}\n\n${quoted}`;
+}
+
+/**
+ * A watch's push: the lead and the marking sentence whole, then as much of the analysis as fits
+ * the push (`PUSH_BODY_MAX`). Only when the whole does not fit is anything cut: first an address
+ * too long to leave the analysis a few characters, then the analysis; never the sentence.
+ */
+function watchChangedPush(url: string, analysis: string, lead: (url: string) => string, mark: string): string {
+  const headOf = (u: string): string => `${lead(u)} ${mark}\n\n`;
+  const line = addressLine(url);
+  let head = headOf(line);
+  if (head.length + analysis.length <= PUSH_BODY_MAX) return `${head}${analysis}`;
+  const room = PUSH_BODY_MAX - 1;
+  // Leave the analysis at least a few characters: a push that is only the lead says nothing new.
+  const keep = 20;
+  if (head.length > room - keep) {
+    const over = head.length - (room - keep);
+    head = headOf(`${cutAt(line, line.length - over - 1)}…`);
+  }
+  return `${cutAt(`${head}${analysis}`, room)}…`;
+}
+
 /**
  * A title as it goes between quotes in a turn the model reads: without the characters that close
  * a quote or start a line, so a title cannot end its quote and go on as the turn's own words.
@@ -312,41 +366,6 @@ export interface WorkerNotices {
  * U+2028 and U+2029.
  * A title is set by the model or a delegated session and may carry text someone else wrote.
  */
-/** The sentence that marks a watch's analysis as the page's, unchecked (U-499). */
-const WATCH_SUMMARY_MARK = { en: 'Summary of the page, not checked by lynox:', de: 'Zusammenfassung der Seite, nicht von lynox geprüft:' } as const;
-
-/** Every character Unicode counts as a line break, as `inQuotes` reads them. */
-const LINE_BREAK = /\r\n|[\r\n\v\f\u0085\u2028\u2029]/;
-
-/**
- * The seed of a watch's escalation thread: English model context, which the owner also reads as
- * lynox's bubble. The analysis is a model's summary of a page someone else controls, so it stands
- * below a sentence that says so, as a quote: every line of it starts with `> `, an empty one is
- * `>`, so no line of the page's summary reads as lynox's own words (U-499).
- */
-export function watchChangedSeed(url: string, analysis: string): string {
-  const quoted = analysis.split(LINE_BREAK).map((line) => (line.trim() === '' ? '>' : `> ${line}`)).join('\n');
-  return `${url} changed. ${WATCH_SUMMARY_MARK.en}\n\n${quoted}`;
-}
-
-/**
- * A watch's push: the lead and the marking sentence whole, then as much of the analysis as fits
- * the push (`PUSH_BODY_MAX`). An address too long for that is cut itself, so the sentence stays.
- */
-function watchChangedPush(url: string, analysis: string, lead: (url: string) => string, mark: string): string {
-  const room = PUSH_BODY_MAX - 1;
-  const headOf = (u: string): string => `${lead(u)} ${mark}\n\n`;
-  let head = headOf(url);
-  // Leave the analysis at least a few characters: a push that is only the lead says nothing new.
-  const keep = 20;
-  if (head.length > room - keep) {
-    const over = head.length - (room - keep);
-    head = headOf(`${url.slice(0, Math.max(0, url.length - over - 1))}…`);
-  }
-  const full = `${head}${analysis}`;
-  return full.length <= PUSH_BODY_MAX ? full : `${full.slice(0, room)}…`;
-}
-
 export function inQuotes(title: string): string {
   return title.replace(/["\u201C\u201D\u201E\u201F\u00AB\u00BB\u2033\uFF02]/g, "'").replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, ' ');
 }

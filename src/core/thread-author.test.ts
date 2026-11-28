@@ -139,7 +139,7 @@ describe('migration v73', () => {
 
     const upgraded = new RunHistory(path);
     try {
-      expect((upgraded.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(74);
+      expect((upgraded.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(75);
       expect(new ThreadStore(upgraded.getDb()).getMessages('th').map((r) => r.author)).toEqual([null]);
     } finally {
       upgraded.close();
