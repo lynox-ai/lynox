@@ -353,8 +353,9 @@ describe('ClassifierQueue — serialKey', () => {
     q.enqueue({ key: 't1', name: 'a2' });
     q.enqueue({ key: 't2', name: 'b1' });
     q.enqueue({ name: 'no-key' });
-    // a2 waits for a1; b1 takes the second slot ahead of it.
-    await waitFor(() => calls.length === 2);
+    // a2 waits for a1; b1 takes the second slot ahead of it. A queue that only ever starts its
+    // head would stop at a1: the check below then names what ran instead of the wait timing out.
+    await waitFor(() => calls.length === 2).catch(() => undefined);
     expect(calls.map((c) => (c.input as { name: string }).name)).toEqual(['a1', 'b1']);
     calls[1]!.resolve(verdict());
     // b1's slot goes to the next startable job, the key-less one; a2 still waits for a1.
