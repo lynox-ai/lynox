@@ -13,11 +13,16 @@
 	content changes; mounting region + text together is the classic
 	unreliably-announced case). Error toasts additionally carry role="alert" for
 	an assertive interrupt. The empty container must not eat clicks across the
-	bottom of the screen, so it is pointer-events-none and each toast re-enables
+	screen edge it sits on, so it is pointer-events-none and each toast re-enables
 	pointer-events on itself.
+
+	Placement: below `sm` a toast sits at the top, under the app's 3rem header and the safe area,
+	newest first: at the bottom it covered the chat input, and the on-screen keyboard covers the
+	bottom too. From `sm` up it sits bottom right as before, newest last.
 -->
 <div
-	class="fixed bottom-4 right-4 left-4 sm:left-auto z-50 space-y-2 sm:max-w-sm pointer-events-none"
+	class="fixed top-[calc(env(safe-area-inset-top,0px)+3.5rem)] right-4 left-4 sm:top-auto sm:bottom-4 sm:left-auto z-50 flex flex-col-reverse sm:flex-col gap-2 sm:max-w-sm pointer-events-none"
+	data-testid="toast-container"
 	aria-live="polite"
 	aria-atomic="false"
 >
@@ -64,8 +69,17 @@
 	.animate-in {
 		animation: slideIn 0.2s ease-out;
 	}
+	/* Below `sm` the toasts hang from the top, so they come in from above. */
+	/* The exact complement of Tailwind's `sm` (width >= 40rem), so both follow the browser's default font size. */
+	@media (width < 40rem) {
+		.animate-in { animation-name: slideDown; }
+	}
 	@keyframes slideIn {
 		from { opacity: 0; transform: translateY(8px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+	@keyframes slideDown {
+		from { opacity: 0; transform: translateY(-8px); }
 		to { opacity: 1; transform: translateY(0); }
 	}
 </style>

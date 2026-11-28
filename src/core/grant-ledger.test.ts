@@ -191,6 +191,26 @@ describe('grant ledger', () => {
     expect(store.save(profile('other', { base_url: 'https://new.example' })).ok).toBe(true);
   });
 
+  it('a save that keeps the grant and whose row write throws leaves the profile in memory as it is stored', () => {
+    store.save(profile('shop'));
+    const g = grantOf('shop');
+    const storedDescription = (): unknown => (JSON.parse(conn.get('shop')!.configJson) as ApiProfile).description;
+    const before = store.get('shop');
+    // The real row write, refused by SQLite itself, as a full disk or a held lock would.
+    db.getDb().exec(`CREATE TRIGGER refuse_update BEFORE UPDATE ON connections BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`);
+    expect(() => store.save(profile('shop', { description: 'not stored' }))).toThrow('database or disk is full');
+    db.getDb().exec('DROP TRIGGER refuse_update');
+    // It was the save that keeps the grant: no mint was tried.
+    expect(ledger.forConnection('shop')).toHaveLength(1);
+    expect(store.get('shop')).toEqual(before);
+    expect(store.get('shop')?.description).toBe(storedDescription());
+    expect(storedDescription()).toBe('d');
+    expect(grantOf('shop')).toBe(g);
+    // A later save built from the profile in memory carries nothing of the one that was not stored.
+    expect(store.save({ ...store.get('shop')!, name: 'renamed' }).ok).toBe(true);
+    expect(storedDescription()).toBe('d');
+  });
+
   it('a save flipping the OAuth grant type mints', () => {
     const oauth = (grant_type: 'client_credentials' | 'refresh_token'): Partial<ApiProfile> =>
       ({ auth: { type: 'oauth2', vault_keys: [], oauth: { grant_type, client_id_key: 'C_ID' } } });
@@ -338,7 +358,7 @@ describe('grant ledger', () => {
     conn = new ConnectionStore(db);
     ledger = new GrantLedger(db.getDb());
     const v = db.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
-    expect(v.v).toBe(69);
+    expect(v.v).toBe(81);
     expect(ledger.get(g)).toMatchObject({ connection_id: 'shop' });
   });
 });

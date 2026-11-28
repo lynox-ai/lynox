@@ -97,14 +97,19 @@ export class RelationshipStore {
       if (prev === null && next !== null) description = null;
       else if (prev !== next) description = given;
       else description = given === '' ? null : given;
+      // The origin follows the description: it names the memory whose text the description is
+      // now, so a hard deletion of that memory takes the edge with it. A kept description keeps
+      // its origin; a written one takes the writer's (none for a sourceless writer).
+      const writesOrigin = description !== null;
       this.db.prepare(`
         UPDATE relationships
         SET description = COALESCE(?, description), source_memory_id = ?,
+            origin_memory_id = CASE WHEN ? = 1 THEN ? ELSE origin_memory_id END,
             confidence = COALESCE(?, confidence),
             since = COALESCE(?, since), until = COALESCE(?, until), notes = COALESCE(?, notes)
         WHERE id = ?
       `).run(
-        description, prev === null ? null : next, params.confidence ?? null,
+        description, prev === null ? null : next, writesOrigin ? 1 : 0, next, params.confidence ?? null,
         params.since ?? null, params.until ?? null, params.notes ?? null, existing.id,
       );
       return { id: existing.id, created: false };
@@ -113,11 +118,11 @@ export class RelationshipStore {
     const id = params.id ?? randomUUID();
     this.db.prepare(`
       INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description,
-        source_memory_id, confidence, since, until, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_memory_id, origin_memory_id, confidence, since, until, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, params.fromSubjectId, params.toSubjectId, params.kind,
-      params.description ?? '', params.sourceMemoryId ?? null,
+      params.description ?? '', params.sourceMemoryId ?? null, params.sourceMemoryId ?? null,
       params.confidence ?? 1.0, params.since ?? null, params.until ?? null, params.notes ?? null,
     );
     return { id, created: true };
@@ -165,9 +170,9 @@ export class RelationshipStore {
   }
 
   /**
-   * {@link getRelationshipsForSubject} for the data export: the edges of a deleted
-   * source included and marked, since what is still stored belongs in the export
-   * until the reap removes it.
+   * {@link getRelationshipsForSubject} for the data export: the edges of a retired
+   * source (deleted, or replaced by a contradiction) included and marked, since what
+   * is still stored belongs in the export until the reap removes it.
    */
   getRelationshipsForSubjectForExport(subjectId: string, limit: number): Array<RelationshipRow & { source_deleted: 0 | 1 }> {
     return this.db.prepare(

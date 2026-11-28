@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { defaultTreeAdapter, serialize, type DefaultTreeAdapterTypes } from 'parse5';
 import { BLOCK_ELEMENTS, CONTENT_CARRYING_ELEMENTS, canonicalHtml, normalizeHtml, parseHtmlFragment, walkHtml, type HtmlNodeRef } from './html-tree.js';
-import { checkMarkup, markupOf as markupOfA2 } from './bulk-html.js';
+import { checkMarkup, endsClosed, markupOf as markupOfA2 } from './bulk-html.js';
 
 /**
  * The fuzz of Shopify PRD §21.3 over `html-tree.ts`. It mutates seeds, it does not draw markup at
@@ -16,11 +16,14 @@ import { checkMarkup, markupOf as markupOfA2 } from './bulk-html.js';
  *   extractions as controls that the comparison must tell apart from A2;
  * - property 2 against A2's `checkMarkup`: an accepted value holds nothing outside the allowlist
  *   and the before-image (the oracle written here, apart from A2), is canonical-idempotent and
- *   ends in plain markup. Controls: a check without `not_canonical`, (d) a check that holds by
+ *   ends closed. Controls: a check without `not_canonical`, (d) a check that holds by
  *   name, (e) a check whose URL rule takes any target, and a check that lets a value end open.
- *   Two limits: the lists of counted and of URL attributes are A2's lists, so a gap in them passes
- *   both; and "ends in plain markup" is weaker than A2's end rule (an `a`, `form` or `table` left
- *   open passes here), which bulk-html.test.ts pins by example only;
+ *   The lists of counted and of URL attributes and the end rule are written here from the HTML
+ *   standard, not taken from A2: every listed attribute, held once and copied once, runs through
+ *   the property, so a gap in A2's lists is a value A2 takes and the oracle refuses;
+ * - the end rule: A2's `endsClosed` and the oracle's read every seed and generated value alike,
+ *   with three known-wrong end rules as controls (a formatting element left open, no form check,
+ *   nothing left open);
  * - property 3 over `normalizeHtml`, on the seeds and on generated values: tree-preserving
  *   mutations give the same string, one-change mutations a different one, with control (f) and the
  *   `pre` control, each counted only when found by the mutation it is about.
@@ -99,6 +102,11 @@ const SEEDS: readonly string[] = [
   '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>',
   '<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>',
   '<form id=a><div></form><form id=b><input></form>',
+  // A form closed by another element's end tag: the parser's form pointer stays set, and the page's
+  // next form is not created.
+  '<div><form><input name="q"></div>',
+  // Not canonical-idempotent, yet it ends closed: a list item inside a table moves out of it.
+  '<ul><li>a<table><li>b</table></li></ul>',
   // A foreign script with elements below it: where its text sits is part of its body.
   '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>',
   // Every attribute through which a value links somewhere.
@@ -487,8 +495,24 @@ function urlAllowed(value: string, hosts: Hosts | readonly string[]): boolean {
   return list.some((h) => t.host === h || t.host.endsWith(`.${h}`));
 }
 
-/** The attributes through which a before-image links somewhere (with the prefix: `xlink:href`). */
-const URL_ATTRS: ReadonlySet<string> = new Set(['href', 'xlink:href', 'src', 'poster', 'data', 'action', 'formaction', 'cite', 'background', 'ping']);
+/**
+ * The attributes through which a value links somewhere (with the prefix: `xlink:href`), written out
+ * here from the HTML standard's attribute index and not taken from A2, so that a gap in A2's list
+ * is a difference the fuzz can find. Each with what it does:
+ * - `href`: `a`, `area`, `link`, `base` navigate to it or load it; `xlink:href`: the SVG `a`,
+ *   `use` and `image` do the same;
+ * - `src`: `img`, `iframe`, `script`, `embed`, `audio`, `video`, `source`, `track`, `input` load it;
+ * - `action`, `formaction`: a form is sent to it; `ping`: a followed link posts to it;
+ * - `data`: an `object` loads it; `poster`: a `video` shows it; `background`: the rendering
+ *   section still loads it on `body`, `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`;
+ * - `cite`: `blockquote`, `q`, `del`, `ins` name a source a reader can follow.
+ * Left out on purpose, so a copy of one only needs to be held at all: `itemid` and `itemtype`,
+ * URL-valued in the index but microdata names that nothing loads or follows. `srcset` is counted
+ * below on its own; its value is a list, not one URL.
+ */
+const URL_ATTRS: ReadonlySet<string> = new Set(['href', 'xlink:href', 'src', 'action', 'formaction', 'ping', 'data', 'poster', 'background', 'cite']);
+/** URL-valued in the index, not links (see above): a copy is held like a `class`. */
+const URL_VALUED_NOT_LINKS: readonly string[] = ['itemid', 'itemtype'];
 const attrName = (a: { prefix?: string; name: string }): string => (a.prefix ? `${a.prefix}:${a.name}` : a.name);
 
 /** The hosts a field's before-image already links to, by kind, from every URL attribute of the walk. */
@@ -507,12 +531,24 @@ function linkHosts(nodes: readonly HtmlNodeRef[]): Hosts {
 }
 
 /**
- * Attributes that count per element: they run code, style the page, load something, or name an
- * element the page's scripts look up. Held once, such an attribute is not copied onto a second
- * element; any other attribute (a `class`) only needs to be held at all.
+ * Attributes that count per element: they run code (every event handler content attribute of the
+ * standard is named `on…`), style the page (`style`), load something (`srcdoc`, `srcset` and
+ * {@link URL_ATTRS}), or name an element the page's scripts look up (`id`, `name`). Held once,
+ * such an attribute is not copied onto a second element; any other attribute (a `class`) only
+ * needs to be held at all. Written here, not taken from A2: the comparison below holds A2 to it.
  */
+const COUNTED_BY_NAME: readonly string[] = ['style', 'srcdoc', 'srcset', 'id', 'name'];
 const counted = (name: string): boolean =>
-  /^on/i.test(name) || ['style', 'srcdoc', 'srcset', 'id', 'name'].includes(name) || URL_ATTRS.has(name);
+  /^on/i.test(name) || COUNTED_BY_NAME.includes(name) || URL_ATTRS.has(name);
+
+/** Every attribute the oracle counts, by name (event handlers by a few of theirs), and some it does
+ *  not: each, held once in a `p`, copied onto a second `p`. */
+const COUNTED_SAMPLES: readonly string[] = [...URL_ATTRS, ...COUNTED_BY_NAME, 'onclick', 'onerror', 'onmouseover', 'ONLOAD', 'onfocus', 'onanimationstart', 'onpointerdown', 'ontoggle', 'onbeforetoggle'];
+const HELD_ONLY_SAMPLES: readonly string[] = ['class', 'title', 'lang', 'dir', ...URL_VALUED_NOT_LINKS];
+const copyPair = (name: string): [string, string] => {
+  const one = `<p ${name}="https://shop.example/x">a</p>`;
+  return [one, `${one}<p ${name}="https://shop.example/x">b</p>`];
+};
 
 /** Known-wrong checks, for the controls of property 2. */
 interface WrongCheck {
@@ -585,15 +621,61 @@ function endsPlain(v: string): boolean {
     && plus(own.triples, markOnly.triples) === JSON.stringify([...marked.triples].sort());
 }
 
+/**
+ * The end rule, from the standard's tree construction and not from A2. Beyond {@link endsPlain},
+ * what the value leaves open around the mark must be something the page's next closing tag ends
+ * without carrying it onto what follows:
+ * - each element open around the mark is an HTML element of `ALLOW_BARE` that is neither void nor
+ *   one of the standard's formatting elements (the list of active formatting elements: those the
+ *   parser opens again around what follows a misnested end tag);
+ * - no `form` stays open: while the parser's form element pointer is set, a form after the value
+ *   is not created, whatever end tag closed the element that held it.
+ * A template, a foreign element or anything else open around the mark fails the first; the mark
+ * for it is a custom element, which stays inside an `svg` or `math` left open (an `em` would break
+ * out of it). A table left open moves the mark before itself, so it must also be the last node.
+ */
+const FORMATTING_ELEMENTS: ReadonlySet<string> = new Set(['a', 'b', 'big', 'code', 'em', 'font', 'i', 'nobr', 's', 'small', 'strike', 'strong', 'tt', 'u']);
+const VOID_ELEMENTS: ReadonlySet<string> = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+const MAY_STAY_OPEN: ReadonlySet<string> = new Set([...ALLOW_BARE].filter((n) => !FORMATTING_ELEMENTS.has(n) && !VOID_ELEMENTS.has(n)));
+/** A custom element: not one of the tags that break out of foreign content, so in an `svg` or a
+ *  `math` left open it stays inside, as what the page puts after the value would. */
+const OPEN_MARK = '<page-mark></page-mark>';
+function openAroundMark(v: string): HtmlNodeRef[] | null {
+  const nodes = walkHtml(parseHtmlFragment(v + OPEN_MARK));
+  let at = -1;
+  nodes.forEach((n, i) => { if (n.kind === 'element' && n.name === 'page-mark') at = i; });
+  if (at < 0) return null;
+  // The mark must be the last thing in the tree: a table left open moves it before itself (foster
+  // parenting), where it comes out below nothing, while what follows is still the table's.
+  const markDepth = nodes[at]!.depth;
+  if (nodes.slice(at + 1).some((n) => n.depth <= markDepth)) return null;
+  const open: HtmlNodeRef[] = [];
+  let want = nodes[at]!.depth - 1;
+  for (let i = at - 1; i >= 0 && want >= 0; i--) {
+    const n = nodes[i]!;
+    if (n.kind === 'element' && n.depth === want) { open.push(n); want--; }
+  }
+  return open;
+}
+const formCount = (v: string): number =>
+  walkHtml(parseHtmlFragment(v)).filter((n) => n.kind === 'element' && n.namespace === HTML_NS && n.name === 'form').length;
+function endsClosedHere(v: string, wrong: { mayStayOpen?: ReadonlySet<string>; noFormCheck?: true } = {}): boolean {
+  if (!endsPlain(v)) return false;
+  const open = openAroundMark(v);
+  const may = wrong.mayStayOpen ?? MAY_STAY_OPEN;
+  if (open === null || open.some((n) => n.kind !== 'element' || n.namespace !== HTML_NS || !may.has(n.name))) return false;
+  return wrong.noFormCheck === true || formCount(`${v}<form></form>`) === formCount(v) + 1;
+}
+
 type Check = (before: string | null, after: string) => boolean;
 const a2: Check = (before, after) => checkMarkup({ before, after, storeHost: STORE_HOST, startDomains: START_DOMAINS }).ok;
 const wrongCheck = (w: WrongCheck, opts: { canonical?: false; end?: false } = {}): Check => (before, after) =>
-  violations(before, after, w).length === 0 && (opts.canonical === false || idempotent(after)) && (opts.end === false || endsPlain(after));
+  violations(before, after, w).length === 0 && (opts.canonical === false || idempotent(after)) && (opts.end === false || endsClosedHere(after));
 
 /** Each control: a known-wrong check, and what property 2 must find against it. */
 const PROPERTY_2_CONTROLS: readonly (readonly [string, Check, (before: string | null, after: string) => boolean])[] = [
   ['a check without not_canonical', wrongCheck({}, { canonical: false }), (_b, a) => !idempotent(a)],
-  ['a check that lets a value end open', wrongCheck({}, { end: false }), (_b, a) => !endsPlain(a)],
+  ['a check that lets a value end open', wrongCheck({}, { end: false }), (_b, a) => !endsClosedHere(a)],
   ['(d) a check that holds by element name', wrongCheck({ holdByName: true }), (b, a) => violations(b, a).length > 0],
   ['(e) a check whose URL rule takes any target', wrongCheck({ anyUrl: true }), (b, a) => violations(b, a).length > 0],
   ['a check that holds a counted attribute once for every element', wrongCheck({ everyAttributeOnce: true }), (b, a) => violations(b, a).length > 0],
@@ -629,11 +711,14 @@ function pairs(rng: Rng): [string | null, string][] {
     else if (extra < 0.5 && before !== null) after = `${before}${before.match(/<[a-z][^>]*>[^<]*<\/[a-z]+>/i)?.[0] ?? ''}`;
     out.push([before, after]);
   }
+  // Every attribute the oracle counts and some it does not, held once and copied once, in every
+  // run: a gap in A2's own lists is then a value A2 takes and the oracle refuses.
+  for (const name of [...COUNTED_SAMPLES, ...HELD_ONLY_SAMPLES]) out.push(copyPair(name));
   return out;
 }
 
 describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => {
-  it('an accepted value holds nothing outside the allowlist and the before-image, is canonical-idempotent and ends plain', () => {
+  it('an accepted value holds nothing outside the allowlist and the before-image, is canonical-idempotent and ends closed', () => {
     const all = pairs(sfc32(SEED ^ 0x2));
     let accepted = 0;
     let acceptedChanged = 0;
@@ -645,7 +730,7 @@ describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => 
         if (before !== after) acceptedChanged++;
         expect(violations(before, after), `${before} → ${after}`).toEqual([]);
         expect(idempotent(after), after).toBe(true);
-        expect(endsPlain(after), after).toBe(true);
+        expect(endsClosedHere(after), after).toBe(true);
       } else refused++;
       for (const [name, check, wrongWhere] of PROPERTY_2_CONTROLS) {
         if (!found.has(name) && check(before, after) && wrongWhere(before, after)) found.set(name, after);
@@ -659,6 +744,24 @@ describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => 
     expect(acceptedChanged).toBeGreaterThan(PAIRS / 20);
     expect(refused).toBeGreaterThan(PAIRS / 10);
     expect(PROPERTY_2_CONTROLS.map(([name]) => [name, found.has(name)])).toEqual(PROPERTY_2_CONTROLS.map(([name]) => [name, true]));
+  });
+
+  it('the oracle\'s attribute lists hold A2 to them: a copied counted attribute is refused, a copied held-only one taken', () => {
+    const wrong: string[] = [];
+    for (const name of COUNTED_SAMPLES) {
+      const [before, after] = copyPair(name);
+      if (violations(before, after).length === 0) wrong.push(`oracle takes a copied ${name}`);
+      const r = checkMarkup({ before, after, storeHost: STORE_HOST, startDomains: START_DOMAINS });
+      // Refused for the copy and for nothing else: the value held as it is passes.
+      if (r.ok || r.reason !== 'attribute_not_allowed') wrong.push(`A2 on a copied ${name}: ${JSON.stringify(r)}`);
+      if (!a2(before, before)) wrong.push(`A2 refuses a held ${name}`);
+    }
+    for (const name of HELD_ONLY_SAMPLES) {
+      const [before, after] = copyPair(name);
+      if (violations(before, after).length > 0) wrong.push(`oracle refuses a copied ${name}`);
+      if (!a2(before, after)) wrong.push(`A2 refuses a copied ${name}`);
+    }
+    expect(wrong).toEqual([]);
   });
 
   it('the controls\' named values: each wrong check takes it, checkMarkup and the property do not', () => {
@@ -738,6 +841,39 @@ describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => 
     expect(a2(before, moved)).toBe(false);
     // Control: the same carrier, held as it is, passes.
     expect(a2(before, before)).toBe(true);
+  });
+});
+
+const END_SAMPLES = 3000;
+
+describe(`the end rule: A2's endsClosed against the oracle (seed ${SEED}, the seeds and ${END_SAMPLES} values)`, () => {
+  it('both read every value the same, and every known-wrong end rule reads one value otherwise', () => {
+    const rng = sfc32(SEED ^ 0x4);
+    const values = [...SEEDS, ...Array.from({ length: END_SAMPLES }, () => generate(rng))];
+    // Known-wrong end rules: a formatting element may stay open (the parser opens it again around
+    // what follows), and a form left open passes (the page's next form is swallowed).
+    const controls: readonly (readonly [string, (v: string) => boolean])[] = [
+      ['a rule that lets a formatting element stay open', (v) => endsClosedHere(v, { mayStayOpen: new Set([...MAY_STAY_OPEN, ...FORMATTING_ELEMENTS]) })],
+      ['a rule without the form check', (v) => endsClosedHere(v, { noFormCheck: true })],
+      ['a rule that lets nothing stay open', (v) => endsClosedHere(v, { mayStayOpen: new Set() })],
+    ];
+    const differ: string[] = [];
+    const found = new Map<string, string>();
+    let closed = 0;
+    let openInBlock = 0;
+    for (const v of values) {
+      const here = endsClosedHere(v);
+      if (endsClosed(v) !== here) differ.push(`${JSON.stringify(v)}: A2 ${String(!here)}, oracle ${String(here)}`);
+      if (here) { closed++; if ((openAroundMark(v) ?? []).length > 0) openInBlock++; }
+      for (const [name, rule] of controls) if (!found.has(name) && rule(v) !== here) found.set(name, v);
+    }
+    expect(differ.slice(0, 10)).toEqual([]);
+    // Both kinds occur, and some values end open inside an allowed block: without them a rule that
+    // lets nothing stay open would read every value alike.
+    expect(closed).toBeGreaterThan(values.length / 10);
+    expect(values.length - closed).toBeGreaterThan(values.length / 10);
+    expect(openInBlock).toBeGreaterThan(0);
+    expect(controls.map(([name]) => [name, found.has(name)])).toEqual(controls.map(([name]) => [name, true]));
   });
 });
 

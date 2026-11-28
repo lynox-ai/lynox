@@ -6,6 +6,14 @@
 export const WORKFLOW_STOPPED_ERROR = 'Workflow stopped by its owner.';
 
 /**
+ * The error a workflow run started from a chat ends with when that chat's run ended while it was
+ * running — the owner stopped the chat, a time limit ended it, or a step that ran it timed out.
+ * No step starts after it; a step already running may still finish. The cause is the caller's,
+ * so the text does not name the owner; only the runner's check writes it.
+ */
+export const WORKFLOW_CALLER_ENDED_ERROR = 'Workflow ended: the chat or workflow step that started it stopped, so no further step started.';
+
+/**
  * The error a scheduled workflow run ends with when a question it asked went unanswered until
  * its TTL ran out (PRD 3b-2 §4.5). Only the runner's check writes it; the worker records the run
  * as failed with it, and no later step runs.
@@ -26,3 +34,13 @@ export const WORKFLOW_QUESTION_NOT_ASKED_ERROR = 'Question not asked: the workfl
  * worker records this without a retry or an escalation, and without saying they stopped it.
  */
 export const WORKFLOW_QUESTION_THREAD_DELETED_ERROR = 'Question withdrawn: the conversation it was asked in was deleted, so the workflow stopped before acting without an answer.';
+
+/** A run that hit one of its bounds (`workflowBoundExceeded`): the run's error, written by the runner. */
+export function workflowBoundError(kind: 'step' | 'wall-clock' | 'spend', value: string): string {
+  return `Workflow exceeded its ${kind} limit (${value}) — aborting to prevent a runaway.`;
+}
+
+/** Whether `text` is word for word one of the errors {@link workflowBoundError} writes for the runner. */
+export function isWorkflowBoundError(text: string): boolean {
+  return /^Workflow exceeded its (?:step limit \(\d+\)|wall-clock limit \(\d+s\)|spend limit \(\$\d+\.\d{2}\)) — aborting to prevent a runaway\.$/.test(text);
+}

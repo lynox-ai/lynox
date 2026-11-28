@@ -472,7 +472,7 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     expect(at(sc)).toBe('shortcode_changed');
     expect(at(`${sc}<p><a href="https://evil.example/x">x</a></p>`)).toBe('new_link_domain');
     expect(at(`${sc}<script>x()</script>`)).toBe('element_not_allowed');
-    expect(at(`<p>a‮b</p>${sc}`)).toBe('hidden_char');
+    expect(at(`<p>a\u202Eb</p>${sc}`)).toBe('hidden_char');
     // Across fields: the other field's reason wins, whichever field comes first.
     const run = { listForm: 'woocommerce' as const, storeHost: HOST, startDomains: [] as string[] };
     expect(verdictTextRefusal({ description: sc, short_description: '<p><a href="https://evil.example/x">x</a></p>' }, before, run)).toBe('new_link_domain');

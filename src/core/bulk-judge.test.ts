@@ -6,7 +6,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
-import { BulkLedger, BULK_HALT_REASONS, BULK_JUDGED_RETENTION_MS, BULK_MAX_PREVIEWED_RUNS } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_JUDGED_RETENTION_MS, BULK_MAX_PREVIEWED_RUNS, OUTLIER_CHUNK } from './bulk-ledger.js';
 import { BULK_NOTICES } from './bulk-notices.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
@@ -16,12 +16,15 @@ import { judgeCallSchema, judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRul
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, attachExtractionSpend, validateAgainstSchema, type callForStructuredJson,
 } from './llm-helper.js';
-import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
+import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, verdictTextRefusal, emptiesDescription, type BulkJudgeDeps } from './bulk-judge.js';
+import { isEmptyShopifyDescription } from './bulk-list.js';
+import { MARKUP_MAX_DEPTH } from './html-tree.js';
 import { getPricing } from './pricing.js';
 import { abortedCallCounts } from './aborted-call.js';
 import { modelCapability, type IAgent, type MemoryScopeRef } from '../types/index.js';
 import { createManagedHook } from './managed-hook.js';
-import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
+import { fireBeforeRunGate, reportMeteredCost, type MeteredGateResult } from './metered-request.js';
+import { SINGLE_CALL_WORST_CASE_CENTS } from './run-admission.js';
 import type { LynoxHooks } from './engine.js';
 import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
@@ -147,7 +150,7 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
     const s = ledger.getStatus(id)!;
     expect(s.phase).toBe('planned');
     expect(s.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
-    expect(s.judge).toEqual({ tier: 'fast', unjudged: 2 });
+    expect(s.judge).toEqual({ tier: 'fast', unjudged: 2, judged: 0 });
     // A target without its verdict shows no after-state and no changed fields.
     const p = ledger.getPreview(id);
     expect(p.map((t) => [t.after, t.changedFields])).toEqual([[null, null], [null, null]]);
@@ -258,6 +261,144 @@ describe('the start: rule hash, a limit in whole cents, supersedes', () => {
   });
 });
 
+describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
+  const skus = Array.from({ length: 30 }, (_, i) => `P${String(i + 1).padStart(2, '0')}`);
+  const seed = (): void => {
+    store.insertRecords({
+      collection: 'products',
+      records: skus.map((sku, i) => ({ sku, title: `old ${sku.toLowerCase()} ${'tea '.repeat(i % 3)}`.trim(), note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+  };
+
+  it('flags the one verdict among 30 that adds a link its row did not hold, by its seq, with the reason', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const seq17 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'P17')!.seq;
+    expect(await ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [{ seq: seq17, reasons: ['new_link', 'length_jump'] }], spread: [] });
+  });
+
+  it('flags no verdict of 30 that only reword their row, and counts them as measured', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(await ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [], spread: [] });
+  });
+
+  it('keeps a target the owner took out in the statistics and flagged, so the marks do not move under the owner\'s hand', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const seq17 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'P17')!.seq;
+    expect(ledger.deselectTarget(id, seq17, { checksum: ledger.computeChecksum(id)! }).ok).toBe(true);
+    expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 30, flagged: [{ seq: seq17 }] });
+  });
+
+  it('counts a link to a start domain the owner gave as the run\'s own, not as new', async () => {
+    seed();
+    const id = await plan(skus);
+    engineDb.getDb().prepare('UPDATE bulk_runs SET start_domains = ? WHERE id = ?').run(engineDb.enc(JSON.stringify(['tea-deals.example.net'])), id);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect((await ledger.judgeOutliersOf(id))!.flagged.flatMap((f) => f.reasons)).not.toContain('new_link');
+  });
+
+  it('computes a run\'s marks once and gives the same result while its verdicts stand', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(ledger.judgeOutliersOf(id)).toBe(ledger.judgeOutliersOf(id));
+    expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 30 });
+  });
+
+  it('reads a run whose markup costs more than its length in parts by time, letting other work run', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => `N${String(i + 1).padStart(3, '0')}`);
+    // Short titles of deeply nested markup: far below one part in characters, slow for the parser.
+    const deep = '<div>'.repeat(1500);
+    store.insertRecords({
+      collection: 'products',
+      records: many.map((sku) => ({ sku, title: `old ${sku.toLowerCase()} ${deep}`, note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+    const id = await plan(many);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(30 * (deep.length + 20)).toBeLessThan(OUTLIER_CHUNK);
+
+    let done = false;
+    let turns = 0;
+    const other = (): void => { if (!done) { turns += 1; setImmediate(other); } };
+    setImmediate(other);
+    const result = await ledger.judgeOutliersOf(id);
+    done = true;
+    expect(result).toMatchObject({ decided: 30 });
+    expect(turns).toBeGreaterThanOrEqual(2);
+  });
+
+  it('reads a run whose texts exceed one part in parts, letting other work run before it is done', async () => {
+    const many = Array.from({ length: 60 }, (_, i) => `Q${String(i + 1).padStart(3, '0')}`);
+    // Long titles, so the run's text is more than one part.
+    const long = 'Grüntee aus Japan, mild und frisch. '.repeat(Math.ceil(2 * OUTLIER_CHUNK / many.length / 36));
+    store.insertRecords({
+      collection: 'products',
+      records: many.map((sku) => ({ sku, title: `old ${sku.toLowerCase()} ${long}`, note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+    const id = await plan(many);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+
+    // Other work, run again whenever the process is free: it runs between the parts, more than once.
+    let done = false;
+    let turns = 0;
+    const other = (): void => { if (!done) { turns += 1; setImmediate(other); } };
+    setImmediate(other);
+    const result = await ledger.judgeOutliersOf(id);
+    done = true;
+    expect(result).toMatchObject({ decided: 60, measured: true });
+    expect(turns).toBeGreaterThanOrEqual(2);
+  });
+
+  it('reads every page of a run of more than 200 verdicts, and flags a link added past the first', async () => {
+    const many = Array.from({ length: 210 }, (_, i) => `R${String(i + 1).padStart(3, '0')}`);
+    store.insertRecords({
+      collection: 'products',
+      records: many.map((sku) => ({ sku, title: `old ${sku.toLowerCase()}`, note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+    const id = await plan(many);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old r205') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const seq205 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'R205')!.seq;
+    expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 210, flagged: [{ seq: seq205, reasons: ['new_link', 'length_jump'] }] });
+  });
+
+  it('is null for a run without a rule', async () => {
+    expect(await ledger.judgeOutliersOf('no-such-run')).toBeNull();
+  });
+});
+
 describe('runBulkJudge over data-store rows', () => {
   it('judges every target, merges the verdict into the row without nulling another column, books every call', async () => {
     const id = await plan(['A', 'B']);
@@ -317,6 +458,27 @@ describe('runBulkJudge over data-store rows', () => {
     await runBulkJudge(id, h.deps);
     expect(h.calls).toHaveLength(1);
     expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
+  });
+
+  it('counts each verdict as it lands, a refused target included, out of the targets the judge reads', async () => {
+    const id = await plan(['A', 'B']);
+    expect(ledger.getStatus(id)!.judge).toMatchObject({ judged: 0, unjudged: 2 });
+    expect(start(id).ok).toBe(true);
+    // The first target read as absent: the judge refuses it without a call (seam as below).
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = (SELECT MIN(seq) FROM bulk_targets WHERE run_id = ?)')
+      .run(engineDb.enc(JSON.stringify({ absent: true })), id, id);
+    const seen: { judged: number; unjudged: number }[] = [];
+    const h = harness((user) => {
+      const j = ledger.getStatus(id)!.judge!;
+      seen.push({ judged: j.judged, unjudged: j.unjudged });
+      return { data: change({ title: title(user) }), costUsd: 0.01 };
+    });
+    await runBulkJudge(id, h.deps);
+    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
+    // While the second target is judged, the refused first one already counts.
+    expect(seen).toEqual([{ judged: 1, unjudged: 1 }]);
+    expect(ledger.getStatus(id)!.judge).toMatchObject({ judged: 2, unjudged: 0 });
   });
 
   it('a target read as absent (an external read that found nothing) is invalid not_found, without a call', async () => {
@@ -406,6 +568,51 @@ describe('runBulkJudge over data-store rows', () => {
     expect(h.booked.map((b) => [b.tokensIn, b.tokensOut])).toEqual([[700, 30], [700, 30], [700, 30]]);
     // A run with nothing valid left closes with nothing to write.
     expect(ledger.getStatus(id)!.phase).toBe('previewed');
+  });
+
+  it('an answer the rule refuses keeps the field, the rule and its bound, never the value, and the tracker reads the same once per refusal', async () => {
+    store.insertRecords({ collection: 'products', records: [{ sku: 'D', title: 'old d', note: `${MARK}-d` }], stamp: TEST_STAMP });
+    const id = await plan(['A', 'B', 'C', 'D']);
+    expect(start(id).ok).toBe(true);
+    // A credential-shaped value over the rule's bound: refused by the real validator, as the call would be.
+    const refusedValue = `sk-live-${'Q'.repeat(60)}`;
+    const schema = judgeCallSchema(ledger.getJudgeRun(id)!.rule);
+    const h = harness((_u, n) => {
+      let e: Error = new ExtractShapeError('no tool call');
+      if (n <= 2) {
+        try { validateAgainstSchema(change({ title: refusedValue }), schema); } catch (err: unknown) { e = err as Error; }
+      }
+      // The same class and field, another rule: its own event.
+      if (n === 4) e = new SchemaValueError('short', 'after.title', 'shorter than 2 characters', { kind: 'minLength', limit: 2 });
+      attachExtractionSpend(e, { costUsd: 0.01, tier: 'fast', inputTokens: 700, outputTokens: 30 });
+      throw e;
+    });
+    await runBulkJudge(id, h.deps);
+    const [a, b, c, d] = ledger.getPreview(id);
+    expect(d!.refusalDetail).toEqual({ field: 'title', kind: 'minLength', limit: 2 });
+    for (const refused of [a, b]) {
+      expect(refused!.error).toBe('verdict_invalid');
+      expect(refused!.refusalDetail).toEqual({ field: 'title', kind: 'maxLength', limit: 40 });
+    }
+    // An answer refused without a field of the rule keeps none.
+    expect(c!.error).toBe('verdict_invalid');
+    expect(c!.refusalDetail).toBeUndefined();
+    const cells = engineDb.getDb().prepare('SELECT refusal_detail FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(id) as { refusal_detail: string | null }[];
+    expect(cells[2]!.refusal_detail).toBeNull();
+    const kept = cells[0]!.refusal_detail!;
+    expect(JSON.parse(engineDb.dec(kept))).toEqual({ field: 'title', kind: 'maxLength', limit: 40 });
+    for (const text of [kept, engineDb.dec(kept)]) {
+      expect(text).not.toContain('sk-live');
+      expect(text).not.toContain('QQQQ');
+    }
+    // Two targets refused the same way are one event; another rule on the same field, or an
+    // answer refused without a field, is its own.
+    expect(h.captured.map((e) => e.message)).toEqual([
+      'bulk_judge verdict failed: SchemaValueError at after.title (maxLength 40)',
+      'bulk_judge verdict failed: ExtractShapeError',
+      'bulk_judge verdict failed: SchemaValueError at after.title (minLength 2)',
+    ]);
+    expect(h.captured.some((e) => e.message.includes('sk-live') || e.message.includes('QQQQ'))).toBe(false);
   });
 
   it('bulk_status shows, while a judge is running, what is judged, what is invalid, the spend and the limit', async () => {
@@ -526,6 +733,23 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.costCap);
     expect(gates).toBe(h.calls.length);
     expect(ledger.getStatus(id)!.costUsd).toBeLessThanOrEqual(0.01);
+  });
+
+  it('tells the gate each call\'s own worst case in cents: the amount it then books provisionally', async () => {
+    // Kills: a gate asked without the call's worst case (the default single-call amount would be held).
+    const id = await plan(['A', 'B']);
+    expect(start(id).ok).toBe(true);
+    const asked: (number | undefined)[] = [];
+    const provisional: number[] = [];
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }), {
+      gate: async (_tier, maxCostCents) => { asked.push(maxCostCents); return { runId: `g${String(asked.length)}`, blockedReason: null, capReached: null, refusedWithinBalance: false }; },
+    });
+    const book = h.deps.bookSpend;
+    h.deps = { ...h.deps, bookSpend: (e) => { provisional.push(e.costUsd); return book(e); } };
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(provisional).toHaveLength(2);
+    expect(provisional.every((c) => c > 0)).toBe(true);
+    expect(asked).toEqual(provisional.map((c) => Math.ceil(c * 100)));
   });
 
   it('the daily limit and a refused gate halt with fixed reasons, before the call', async () => {
@@ -970,7 +1194,7 @@ describe('against the real managed hook (PRD §6(e)): what reaches the control p
     // Exact in micro-cents, so rounding does not carry the test: 1.234 + 0.567 cents, alternating.
     const costs = skus.map((_, i) => (i % 2 === 0 ? 0.01234 : 0.00567));
     const h = harness((user, n) => ({ data: change({ title: title(user) }), costUsd: costs[n - 1]! }), {
-      gate: (tier) => fireBeforeRunGate(host as never, tier),
+      gate: (tier, maxCostCents) => fireBeforeRunGate(host as never, tier, { maxCostCents }),
       report: (gateRunId, usd, tier) => reportMeteredCost(host as never, gateRunId, usd, tier),
     });
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
@@ -988,13 +1212,77 @@ describe('against the real managed hook (PRD §6(e)): what reaches the control p
     expect(start(id).ok).toBe(true);
     const { host, hook } = await hookHost();
     const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }), {
-      gate: (tier) => fireBeforeRunGate(host as never, tier),
+      gate: (tier, maxCostCents) => fireBeforeRunGate(host as never, tier, { maxCostCents }),
       report: (gateRunId, usd, tier) => reportMeteredCost(host as never, gateRunId, usd, tier),
     });
     await runBulkJudge(id, h.deps);
     await hook.onShutdown?.();
     expect(h.calls).toHaveLength(0);
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.creditRefused);
+  });
+
+  it('within the balance, a call is held to its own worst case: a balance below the default amount still carries it', async () => {
+    // Kills: a gate that holds the default single-call amount — the balance here is below it, so
+    // that gate refuses a call whose own worst case fits.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, json: async () => ({ allowed: true, balance_cents: 2, spend_gate: 'balance', overrun_hold: true }),
+    })));
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const { host, hook } = await hookHost();
+    const provisional: number[] = [];
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }), {
+      gate: (tier, maxCostCents) => fireBeforeRunGate(host as never, tier, { maxCostCents }),
+      report: (gateRunId, usd, tier) => reportMeteredCost(host as never, gateRunId, usd, tier),
+    });
+    const book = h.deps.bookSpend;
+    h.deps = { ...h.deps, bookSpend: (e) => { provisional.push(e.costUsd); return book(e); } };
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    await hook.onShutdown?.();
+    expect(h.calls).toHaveLength(1);
+    expect(Math.ceil(provisional[0]! * 100)).toBeLessThanOrEqual(2);
+  });
+
+  it('within the balance, a call whose own worst case does not fit is refused, though the default amount would fit', async () => {
+    // Kills: a judge that asks the gate without its worst case. The balance is above the default
+    // single-call amount, so that gate would admit a call the balance cannot carry.
+    let balance = SINGLE_CALL_WORST_CASE_CENTS + 1;
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, json: async () => ({ allowed: true, balance_cents: balance, spend_gate: 'balance', overrun_hold: true }),
+    })));
+    // A large title makes this call's worst case far above the balance.
+    const big = 'w'.repeat(300_000);
+    store.insertRecords({ collection: 'products', records: [{ sku: 'Y', title: big, note: 'n' }, { sku: 'Z', title: big, note: 'n' }], stamp: TEST_STAMP });
+    async function judgeOnce(sku: string, supersedes?: string): Promise<{ asked: (number | undefined)[]; gates: MeteredGateResult[]; h: Harness; id: string }> {
+      const id = await plan([sku]);
+      expect(start(id, 5, supersedes).ok).toBe(true);
+      const { host, hook } = await hookHost();
+      const asked: (number | undefined)[] = [];
+      const gates: MeteredGateResult[] = [];
+      const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }), {
+        gate: async (tier, maxCostCents) => {
+          asked.push(maxCostCents);
+          const g = await fireBeforeRunGate(host as never, tier, { maxCostCents });
+          gates.push(g);
+          return g;
+        },
+        report: (gateRunId, usd, tier) => reportMeteredCost(host as never, gateRunId, usd, tier),
+      });
+      await runBulkJudge(id, h.deps);
+      await hook.onShutdown?.();
+      return { asked, gates, h, id };
+    }
+    const refused = await judgeOnce('Z');
+    expect(refused.h.calls).toHaveLength(0);
+    expect(ledger.getStatus(refused.id)!.haltReason).toBe(BULK_HALT_REASONS.creditRefused);
+    // Refused for the amount, not for a stale control plane.
+    expect(refused.gates[0]!.refusedWithinBalance).toBe(true);
+    expect(refused.asked[0]).toBeGreaterThan(balance);
+    // Control: the same call on a twin target, with a balance that carries its worst case, goes through.
+    balance = refused.asked[0]! + 1;
+    const carried = await judgeOnce('Y', refused.id);
+    expect(carried.asked[0]).toBe(refused.asked[0]);
+    expect(carried.h.calls).toHaveLength(1);
   });
 });
 
@@ -1026,6 +1314,52 @@ describe('what a verdict\'s text may not add (PRD shopify-preset §20.2 item 5)'
     expect(verdictTextRefusal({ description: '<p>New <strong>text</strong></p>' }, before, woo)).toBeNull();
   });
 
+  // M6b (iii): Shopify ignores a null description and clears it on "". A verdict that turns a
+  // description into either gave no new text. Asked of a verdict only: a judged target's planned
+  // after-state is the rule's template, every field null, and passes the preview's check.
+  it('names a verdict that sets a Shopify description to null or an empty text, and keeps one already empty', () => {
+    const before = { title: 'T', descriptionHtml: '<p>Old</p>' };
+    for (const listForm of ['shopify', 'shopify_filtered'] as const) {
+      for (const empty of [null, '']) {
+        expect(emptiesDescription(listForm, { descriptionHtml: empty }, before), `${listForm} ${String(empty)}`).toBe(true);
+        expect(emptiesDescription(listForm, { title: 'Neu', descriptionHtml: empty }, before)).toBe(true);
+      }
+      expect(emptiesDescription(listForm, { descriptionHtml: '' }, { descriptionHtml: '' })).toBe(false);
+      expect(emptiesDescription(listForm, { descriptionHtml: '<p>Neu</p>' }, before)).toBe(false);
+      expect(emptiesDescription(listForm, { seo_title: '' }, { seo_title: 'S' })).toBe(false);
+      const shop = { listForm, storeHost: 'acme.myshopify.com', startDomains: [] as string[] };
+      expect(verdictTextRefusal({ descriptionHtml: null, title: null }, before, shop)).toBeNull();
+    }
+    // A field of the same name elsewhere is no Shopify description: a data-store column, a WooCommerce field, an image.
+    expect(emptiesDescription(null, { descriptionHtml: '' }, before)).toBe(false);
+    expect(emptiesDescription('woocommerce', { descriptionHtml: '' }, before)).toBe(false);
+    expect(emptiesDescription('woocommerce', { description: '' }, { description: '<p>Old</p>' })).toBe(false);
+    expect(emptiesDescription('shopify_media', { alt: '' }, { alt: 'Bild' })).toBe(false);
+  });
+
+  // A description of text elements and white space only leaves the product page as empty as "".
+  it('names a verdict whose description shows nothing as emptying it, and keeps an image or an attribute', () => {
+    const before = { descriptionHtml: '<p>Old</p>' };
+    for (const blank of [' ', '<p></p>', '<br>', '<p><br></p>', '<p>&nbsp;</p>', '<div><span>\u200b</span></div><!-- x -->']) {
+      expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', blank), JSON.stringify(blank)).toBe(true);
+      expect(emptiesDescription('shopify', { descriptionHtml: blank }, before), JSON.stringify(blank)).toBe(true);
+    }
+    // Control: an image, an embed or an attribute shows or carries something.
+    for (const shown of ['<p><img src="a.jpg"></p>', '<iframe src="https://v.example/1"></iframe>', '<p class="x"></p>', '<p>a</p>']) {
+      expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', shown), shown).toBe(false);
+      expect(emptiesDescription('shopify', { descriptionHtml: shown }, before), shown).toBe(false);
+    }
+    // Past the reading bounds the value is not walked and counts as not blank: the markup check
+    // refuses it before it is written (bulk-shopify.test.ts, "past the reading bounds").
+    const deep = '<div>'.repeat(MARKUP_MAX_DEPTH + 1);
+    expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', deep)).toBe(false);
+    // Control: the same shape within the bounds shows nothing.
+    expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', '<div>'.repeat(8))).toBe(true);
+    // A description that already showed nothing is not emptied by another blank one.
+    expect(emptiesDescription('shopify', { descriptionHtml: '<p></p>' }, { descriptionHtml: '' })).toBe(false);
+    expect(emptiesDescription('shopify', { descriptionHtml: '' }, { descriptionHtml: '<p><br></p>' })).toBe(false);
+  });
+
   it('checks only a field whose value changes: a description the store holds open at its end stays as it is', () => {
     const held = { description: '<p>Old <span', name: 'A <b>' };
     expect(verdictTextRefusal({ description: held.description, name: held.name }, held, woo)).toBeNull();
@@ -1036,7 +1370,7 @@ describe('what a verdict\'s text may not add (PRD shopify-preset §20.2 item 5)'
   it('holds a data-store run (no host, no list form) to hidden characters only: no plain-text markup rule there', () => {
     const store = { listForm: null, storeHost: null, startDomains: [] as string[] };
     expect(verdictTextRefusal({ note: 'a <b> c' }, { note: 'x' }, store)).toBeNull();
-    expect(verdictTextRefusal({ note: 'a​b' }, { note: 'x' }, store)).toBe('hidden_char');
+    expect(verdictTextRefusal({ note: 'a\u200Bb' }, { note: 'x' }, store)).toBe('hidden_char');
   });
 
   // An external run whose targets come from a file or a collection has no form that says which

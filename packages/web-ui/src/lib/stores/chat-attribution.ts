@@ -89,9 +89,6 @@ export type ContentBlock =
 	/** A delegation, placed where it happened so the sub-agent panel renders in
 	 *  chronological order instead of being pinned to a tool row. */
 	| { type: 'spawn'; spawnId: string }
-	/** Text the person typed into the chat as the answer to one of the engine's confirmations,
-	 *  shown where the question stood. Client-only: a chat loaded from the server has none. */
-	| { type: 'answer'; text: string }
 	/** The run ended with a sentence of lynox's own instead of a model reply (`done.notice`):
 	 *  shown as a lynox note, without the AI mark. `code` is the note code it renders as. */
 	| { type: 'notice'; code: string; text: string };

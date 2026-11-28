@@ -782,6 +782,31 @@ describe('an update that ends sharing empties the reader\'s token slots before i
     expect(result).toContain('None of them was emptied');
   });
 
+  // After the delete, whether a value is still there is asked without reading it
+  // out where the store can (`holds`), and as before where it cannot.
+  it.each([
+    ['asks holds, and reads no slot out', true],
+    ['control: a store without holds is asked as before', false],
+  ])('a delete that leaves the values in place is not taken for an emptying: %s', async (_label, withHolds) => {
+    const store = booted();
+    const base = vaultOf(VAULT());
+    const kept = base.entries();
+    const read: string[] = [];
+    const vault = {
+      ...base,
+      deleteSecret: () => true,
+      resolve: (name: string) => { read.push(name); return kept[name] ?? null; },
+      ...(withHolds ? { holds: (name: string) => kept[name] !== undefined } : {}),
+    } as Vault;
+    const result = await update(store, vault, bexio('bexio-b'));
+    // Every slot that held a value still does; the one that held none counts as emptied.
+    expect(result).toContain('so BEXIO_B_ACCESS_TOKEN, B_OUT must be emptied first');
+    expect(result).toContain('Nothing was saved');
+    const slots = ['BEXIO_B_ACCESS_TOKEN', 'BEXIO_B_REFRESH_TOKEN', 'B_OUT'];
+    if (withHolds) expect(read.filter((n) => slots.includes(n))).toEqual([]);
+    else expect(read.filter((n) => slots.includes(n)).length).toBeGreaterThan(0);
+  });
+
   it('the admission asked before the emptying registers nothing and stores nothing', () => {
     const store = new ApiStore();
     expect(store.saveRefusal(oauth('fresh'))).toBeNull();

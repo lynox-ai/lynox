@@ -7,7 +7,7 @@ import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance
 import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
 import { isTopicShapedName } from './kg-stopwords.js';
-import { maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
+import { GENERIC_SHAPE_MIN_TEXT, maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import { collapseToSingleLine } from './sanitize.js';
 import type { SecretStoreLike } from '../types/security.js';
@@ -200,8 +200,12 @@ export class KnowledgeStore {
     private readonly engine: EngineDb,
     private readonly subjects: SubjectStore,
     private readonly secretStore: SecretStoreLike | null = null,
+    opts: { readOnly?: boolean } = {},
   ) {
     this.db = engine.getDb();
+    // A store built only to read (the data export while durable knowledge is switched off)
+    // writes nothing, the backfill included.
+    if (opts.readOnly === true) return;
     // Once per database, and never fatal: a store that cannot backfill still works, and the
     // marker stays at 0 so the next boot tries again.
     try {
@@ -981,7 +985,7 @@ export class KnowledgeStore {
    * redacted when approved and in the clear while it waits.
    */
   listPendingMasked(limit = 100): KnowledgeEntry[] {
-    return this.listPending(limit).map(e => ({ ...e, text: this._maskText(e.text) }));
+    return this.listPending(limit).map(e => this._maskListed(e));
   }
 
   /**
@@ -992,7 +996,24 @@ export class KnowledgeStore {
    * `listPendingForThread` would carry vault values into a file that gets forwarded.
    */
   listPendingForThreadMasked(threadId: string, limit = 100): KnowledgeEntry[] {
-    return this.listPendingForThread(threadId, limit).map(e => ({ ...e, text: this._maskText(e.text) }));
+    return this.listPendingForThread(threadId, limit).map(e => this._maskListed(e));
+  }
+
+  /**
+   * The entries still stored that no other list here returns: rejected by the owner, or
+   * retired (`superseded`; `supersededBy` names a successor where one was recorded, and is null
+   * where the entry was retired without one). Each carries its `status`. MASKED, as
+   * the active list is: the reader is the data export, a file that gets stored and forwarded.
+   * Newest change first, capped at 500 like the other lists.
+   */
+  listRejectedOrSupersededMasked(limit = 200): KnowledgeEntry[] {
+    const capped = Math.max(1, Math.min(limit, 500));
+    const rows = this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status IN ('rejected', 'superseded') ORDER BY updated_at DESC, rowid DESC LIMIT ?",
+    ).all(capped) as KnowledgeRow[];
+    return rows.map(r => {
+      return this._maskListed(this._rowToEntry(r));
+    });
   }
 
   listActive(limit = 200): Array<KnowledgeEntry & { subjectName: string | null }> {
@@ -1008,7 +1029,7 @@ export class KnowledgeStore {
       const subjectName = e.subjectId
         ? this.subjects.getSubject(this.subjects.resolveActiveSubject(e.subjectId))?.name ?? null
         : null;
-      return { ...e, text: this._maskText(e.text), subjectName };
+      return { ...this._maskListed(e), subjectName: subjectName === null ? null : this._maskListedText(subjectName) };
     });
   }
 
@@ -1048,6 +1069,13 @@ export class KnowledgeStore {
       if (text.startsWith(prefix)) return { id: r.id, text, sourceType: r.source_type as ProvenanceKind };
     }
     return null;
+  }
+
+  /** One block's content, decrypted and masked as {@link readSurfaceBlocks} masks it, for a
+   *  file that gets stored and forwarded (the data export); null when the block was never set. */
+  getBlockMasked(id: MemoryBlockId): string | null {
+    const block = this.getBlock(id);
+    return block === null ? null : this._maskText(block.content);
   }
 
   /** The always-loaded blocks (profile + playbook) for the read-surface, decrypted AND
@@ -1702,10 +1730,24 @@ export class KnowledgeStore {
 
   /** Two-layer secret masking for display surfaces (H7): tenant-known secret VALUES
    *  (`maskSecrets`) then secret-SHAPED tokens (`maskSecretPatterns` — API keys, JWTs,
-   *  Bearer). Shared by {@link renderBlocks} and the read-surface reads. */
+   *  Bearer). Used by {@link renderBlocks}, the blocks, the sources and the search results;
+   *  the entry lists use {@link _maskListedText}. */
   private _maskText(text: string): string {
     const tenantMasked = this.secretStore ? this.secretStore.maskSecrets(text) : text;
     return maskSecretPatterns(tenantMasked);
+  }
+
+  /** The lists' masker: the tenant's secret values, then every shape {@link checkKnowledgeText}
+   *  refuses (the long-token one included on a text long enough for that check to read it), so a
+   *  list carries nothing its write check would have refused. Read over the text as stored. */
+  private _maskListedText(text: string): string {
+    const tenantMasked = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+    return maskSecretPatterns(tenantMasked, { includeGeneric: text.length >= GENERIC_SHAPE_MIN_TEXT });
+  }
+
+  /** An entry as a list carries it: its text and the subject name it was filed under, masked. */
+  private _maskListed<E extends KnowledgeEntry>(e: E): E {
+    return { ...e, text: this._maskListedText(e.text), subjectHint: e.subjectHint === null ? null : this._maskListedText(e.subjectHint) };
   }
 
   private _overlap(queryTokens: Set<string>, docTokens: string[]): number {

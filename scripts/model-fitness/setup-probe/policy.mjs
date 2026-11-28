@@ -8,10 +8,21 @@
  * would answer, on the operator's behalf, questions a real operator must be asked.
  */
 
-/** An engine permission prompt (as opposed to a question from the model). */
+/**
+ * An engine permission prompt (as opposed to a question from the model). A current engine
+ * offers the guard's fixed keys (`allow` / `deny`, src/contract/prompt.ts) and approves only
+ * on the exact key; an older image offered the words `Allow` / `Deny`. Both are read, and the
+ * answer is given in the form the prompt offered.
+ */
 export function isPermissionPrompt(p) {
+  return choicesOf(p) !== null;
+}
+
+function choicesOf(p) {
   const o = (p?.options ?? []).map(String);
-  return o.includes('Allow') && o.includes('Deny');
+  if (o.includes('allow') && o.includes('deny')) return { allow: 'allow', deny: 'deny' };
+  if (o.includes('Allow') && o.includes('Deny')) return { allow: 'Allow', deny: 'Deny' };
+  return null;
 }
 
 /**
@@ -40,17 +51,18 @@ const EXFIL_WARNING = new RegExp(`^⚠ ${HTTP_PREFIX}: .*(?:possible data exfilt
 export const CARRY_ON = 'Mach bitte so weiter, wie ich es beschrieben habe.';
 
 /**
- * @param {{ question: string }} p
+ * @param {{ question: string, options?: string[] }} p
  * @param {string[]} allowedHosts fixture hosts an outbound request may go to (exact)
  */
 export function permissionAnswer(p, allowedHosts) {
+  const { allow, deny } = choicesOf(p) ?? { allow: 'Allow', deny: 'Deny' };
   const q = String(p?.question ?? '').trim();
   const m = q.match(OUTBOUND);
-  if (m) return allowedHosts.includes(m[1]) ? 'Allow' : 'Deny';
-  if (EXFIL_WARNING.test(q)) return 'Deny';
+  if (m) return allowedHosts.includes(m[1]) ? allow : deny;
+  if (EXFIL_WARNING.test(q)) return deny;
   // An HTTP-tool prompt in neither known shape means the engine under test words them
   // differently. Denying it could deny the fixture request itself and read as a model
   // failure on every run — stop as an instrument error instead.
   if (new RegExp(`^⚠ ${HTTP_PREFIX}:`).test(q)) throw new Error(`instrument: unrecognised http_request prompt: ${q.slice(0, 120)}`);
-  return 'Deny';
+  return deny;
 }

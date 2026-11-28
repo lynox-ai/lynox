@@ -1,14 +1,21 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { t, getLocale } from '../i18n.svelte.js';
+	import { page } from '$app/stores';
+	import { get } from 'svelte/store';
+	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { listInboxRules } from '../api/inbox-rules-read.js';
+	import { getApiBase } from '../config.svelte.js';
 	import { isRaisedOpen } from '../utils/inbox-raised.js';
+	import { followUpLine, withFollowUpLine } from '../utils/inbox-follow-up.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
 		closeItem,
 		dismissReclassifyBanner,
 		getInboxCounts,
 		getInboxItems,
+		getInboxRuleFilter,
+		getRulesPendingCount,
 		getLastAction,
 		getReclassifyBanner,
 		getSelectedItemId,
@@ -23,7 +30,9 @@
 		loadSnoozedItems,
 		onColdStartCompletion,
 		openItem,
+		rulesPendingLabel,
 		runColdStartBackfillForAllAccounts,
+		setInboxRuleFilter,
 		setItemAction,
 		setItemSnooze,
 		startColdStartPolling,
@@ -38,7 +47,7 @@
 	} from '../stores/inbox.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { accountShortLabel } from '../utils/account-label.js';
-	import { inboxHeadline } from '../utils/inbox-headline.js';
+	import { rowHeadline, rowLabel, rowOwnDate, rowSender, shownIsSensitive, shownReplyFraming } from '../utils/inbox-shown.js';
 	import { keyToInboxAction, shouldIgnoreShortcut } from '../utils/inbox-shortcuts.js';
 	import { isTouchPrimary } from '../utils/touch-detect.js';
 	import Checkbox from '../primitives/Checkbox.svelte';
@@ -67,12 +76,86 @@
 	let countsLoaded = $state(false);
 	const touchPrimary = isTouchPrimary();
 
+	// "Mail from this rule": `?ruleId=` filters the bucket lists to the items that rule filed;
+	// `zone` opens the bucket it files into, `accountId` finds its name. Read once, on arrival:
+	// the store keeps the filter for every later load until it is cleared.
+	const BUCKET_ZONES: ReadonlyArray<InboxZone> = ['requires_user', 'draft_ready', 'auto_handled'];
+	const arrival = get(page).url.searchParams;
+	setInboxRuleFilter(arrival.get('ruleId'));
+	const arrivalZone = BUCKET_ZONES.find((z) => z === arrival.get('zone'));
+	if (getInboxRuleFilter() !== null && arrivalZone !== undefined) zone = arrivalZone;
+	let ruleFilterId = $state<string | null>(getInboxRuleFilter());
+	let ruleFilterName = $state<string | null>(null);
+
+	// The mobile zone pills scroll sideways at narrow widths. The active one is brought into view
+	// once the row is built (counts loaded, so the badges stand, and the web font in, which widens
+	// the pills; a link may open "Handled today", past the edge) and when the zone changes; never
+	// on a later count change. Only the row scrolls, sideways: the list around it keeps its place.
+	let mobileZoneRow = $state<HTMLElement | null>(null);
+	let zoneRowBuilt = $state(false);
+	$effect(() => {
+		if (!countsLoaded || zoneRowBuilt) return;
+		const fontsIn = typeof document !== 'undefined' && 'fonts' in document ? document.fonts.ready : Promise.resolve();
+		const built = (): void => { zoneRowBuilt = true; };
+		void fontsIn.then(built, built);
+	});
+	$effect(() => {
+		const active = zone;
+		const row = mobileZoneRow;
+		if (!zoneRowBuilt || row === null) return;
+		const tab = row.querySelector<HTMLElement>(`[data-zone="${active}"]`);
+		if (tab === null) return;
+		const start = tab.offsetLeft;
+		const end = start + tab.offsetWidth;
+		if (start < row.scrollLeft) row.scrollLeft = start;
+		else if (end > row.scrollLeft + row.clientWidth) row.scrollLeft = end - row.clientWidth;
+		updateZoneRowCut();
+	});
+
+	// A pill cut at either edge of the row gets a fade there, so the cut reads as "more this way".
+	let zoneRowCutStart = $state(false);
+	let zoneRowCutEnd = $state(false);
+	function updateZoneRowCut(): void {
+		const row = mobileZoneRow;
+		if (row === null) return;
+		zoneRowCutStart = row.scrollLeft > 1;
+		zoneRowCutEnd = row.scrollLeft + row.clientWidth < row.scrollWidth - 1;
+	}
+	$effect(() => {
+		const row = mobileZoneRow;
+		if (row === null || typeof ResizeObserver === 'undefined') return;
+		// The row's own box and its content: a badge that appears later widens the pills without
+		// resizing the row.
+		const ro = new ResizeObserver(() => updateZoneRowCut());
+		ro.observe(row);
+		for (const child of row.children) ro.observe(child);
+		return () => ro.disconnect();
+	});
+
+	async function resolveRuleFilterName(ruleId: string, accountId: string): Promise<void> {
+		const list = await listInboxRules(getApiBase(), accountId);
+		const rule = list?.find((r) => r.id === ruleId);
+		if (rule === undefined || ruleFilterId !== ruleId) return;
+		ruleFilterName = rule.name !== undefined && rule.name.length > 0 ? rule.name : rule.matcherValue;
+	}
+
+	function clearRuleFilter(): void {
+		setInboxRuleFilter(null);
+		ruleFilterId = null;
+		ruleFilterName = null;
+		void goto('/app/inbox', { replaceState: true, keepFocus: true, noScroll: true });
+	}
+
 	let cleanupVisibility: (() => void) | undefined;
 	let cleanupColdStart: (() => void) | undefined;
 	let cleanupColdStartListener: (() => void) | undefined;
 	let cleanupKeyHandler: (() => void) | undefined;
 
 	onMount(async () => {
+		const arrivalAccount = arrival.get('accountId');
+		if (ruleFilterId !== null && arrivalAccount !== null && arrivalAccount.length > 0) {
+			void resolveRuleFilterName(ruleFilterId, arrivalAccount);
+		}
 		await loadInboxCounts();
 		countsLoaded = true;
 		cleanupColdStart = startColdStartPolling();
@@ -89,14 +172,23 @@
 	});
 
 	onDestroy(() => {
+		// The filter belongs to this visit of the inbox, not to the next one.
+		setInboxRuleFilter(null);
 		cleanupVisibility?.();
 		cleanupColdStart?.();
 		cleanupColdStartListener?.();
 		cleanupKeyHandler?.();
 	});
 
+	// The snoozed list cannot be filtered by rule (the server refuses the pair): leaving for it
+	// clears the filter rather than showing every snoozed mail under the rule's chip.
+	$effect(() => {
+		if (zone === 'snoozed' && ruleFilterId !== null) clearRuleFilter();
+	});
+
 	$effect(() => {
 		if (!countsLoaded) return;
+		void ruleFilterId;
 		if (zone && isInboxAvailable()) {
 			if (zone === 'snoozed') {
 				void loadSnoozedItems(50, 0);
@@ -228,7 +320,9 @@
 	// mail_reply), or a blank compose chat for a brand-new mail.
 	function replyInChat(item: InboxItem): void {
 		newChat();
-		const framing = `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
+		// A row that shows another mail than the item's own names none of its values here: the
+		// server's context for the item carries them (see shownReplyFraming).
+		const framing = shownReplyFraming(item, t) ?? `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
 		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
 		void goto('/app');
 	}
@@ -341,6 +435,14 @@
 		return sameDay
 			? d.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })
 			: d.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+	}
+
+	/** The row's time: that of the newest message where the row announces one, else the mail the
+	 *  row shows (the item's own, or the one shown in place of a delivery failure notice). */
+	function rowTime(item: InboxItem): string {
+		const latest = item.followUps?.latestAt;
+		if (latest !== undefined && followUpLine(item, t, tf) !== undefined) return latest;
+		return rowOwnDate(item);
 	}
 
 	function channelLabel(_c: InboxItem['channel']): string {
@@ -497,57 +599,96 @@
 						</div>
 					{/if}
 
-					<!-- Mobile-only zone pills (md+ uses InboxZoneRail). -->
-					<div
-						class="md:hidden flex gap-1 mb-3 overflow-x-auto scrollbar-none -mx-4 px-4 py-1"
-						role="tablist"
-						aria-label={t('inbox.title')}
-					>
-						<button
-							role="tab"
-							aria-selected={zone === 'requires_user'}
-							onclick={() => (zone = 'requires_user')}
-							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'requires_user' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+					<!-- Mobile-only zone pills (md+ uses InboxZoneRail), then the rules entry the rail
+						carries on md+. -->
+					<div class="md:hidden relative mb-3 -mx-4">
+					<div class="relative flex items-center gap-1 overflow-x-auto scrollbar-none px-4 py-1" bind:this={mobileZoneRow} onscroll={updateZoneRowCut} data-testid="inbox-zone-row">
+						<div
+							class="flex shrink-0 gap-1"
+							role="tablist"
+							aria-label={t('inbox.title')}
 						>
-							<span>{t('inbox.zone_needs_you')}</span>
-							{#if counts.requires_user > 0}
-								<span class="rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono">{counts.requires_user}</span>
-							{/if}
-						</button>
-						<button
-							role="tab"
-							aria-selected={zone === 'draft_ready'}
-							onclick={() => (zone = 'draft_ready')}
-							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'draft_ready' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							<button
+								role="tab"
+								data-zone="requires_user"
+								aria-selected={zone === 'requires_user'}
+								onclick={() => (zone = 'requires_user')}
+								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'requires_user' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							>
+								<span>{t('inbox.zone_needs_you')}</span>
+								{#if counts.requires_user > 0}
+									<span class="rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono">{counts.requires_user}</span>
+								{/if}
+							</button>
+							<button
+								role="tab"
+								data-zone="draft_ready"
+								aria-selected={zone === 'draft_ready'}
+								onclick={() => (zone = 'draft_ready')}
+								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'draft_ready' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							>
+								<span>{t('inbox.zone_drafted')}</span>
+								{#if counts.draft_ready > 0}
+									<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.draft_ready}</span>
+								{/if}
+							</button>
+							<button
+								role="tab"
+								data-zone="auto_handled"
+								aria-selected={zone === 'auto_handled'}
+								onclick={() => (zone = 'auto_handled')}
+								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'auto_handled' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							>
+								<span>{t('inbox.zone_handled')}</span>
+								{#if counts.auto_handled > 0}
+									<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.auto_handled}</span>
+								{/if}
+							</button>
+							<button
+								role="tab"
+								data-zone="snoozed"
+								aria-selected={zone === 'snoozed'}
+								onclick={() => (zone = 'snoozed')}
+								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'snoozed' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							>
+								<span>{t('inbox.zone_snoozed')}</span>
+								{#if getSnoozedCount() > 0}
+									<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{getSnoozedCount()}</span>
+								{/if}
+							</button>
+						</div>
+						<a
+							href="/app/inbox/rules"
+							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm text-text-muted hover:text-text flex items-center gap-2"
+							data-testid="inbox-pill-rules"
 						>
-							<span>{t('inbox.zone_drafted')}</span>
-							{#if counts.draft_ready > 0}
-								<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.draft_ready}</span>
+							<span>{t('inbox.rules_link')}</span>
+							{#if getRulesPendingCount() > 0}
+								<span class="rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono" aria-hidden="true">{getRulesPendingCount()}</span>
+								<span class="sr-only">{rulesPendingLabel(getRulesPendingCount())}</span>
 							{/if}
-						</button>
-						<button
-							role="tab"
-							aria-selected={zone === 'auto_handled'}
-							onclick={() => (zone = 'auto_handled')}
-							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'auto_handled' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-						>
-							<span>{t('inbox.zone_handled')}</span>
-							{#if counts.auto_handled > 0}
-								<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.auto_handled}</span>
-							{/if}
-						</button>
-						<button
-							role="tab"
-							aria-selected={zone === 'snoozed'}
-							onclick={() => (zone = 'snoozed')}
-							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'snoozed' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-						>
-							<span>{t('inbox.zone_snoozed')}</span>
-							{#if getSnoozedCount() > 0}
-								<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{getSnoozedCount()}</span>
-							{/if}
-						</button>
+						</a>
 					</div>
+					{#if zoneRowCutStart}
+						<div class="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-bg to-transparent" aria-hidden="true" data-testid="inbox-zone-row-cut-start"></div>
+					{/if}
+					{#if zoneRowCutEnd}
+						<div class="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent" aria-hidden="true" data-testid="inbox-zone-row-cut-end"></div>
+					{/if}
+					</div>
+
+					{#if ruleFilterId !== null}
+						<div class="mb-3 flex items-center gap-2" data-testid="inbox-rule-filter">
+							<span class="inline-flex min-w-0 items-center rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-[12px] text-accent-text">
+								<span class="truncate">{tf('inbox.rule_filter_chip', { name: ruleFilterName ?? ruleFilterId })}</span>
+							</span>
+							<button
+								type="button"
+								onclick={clearRuleFilter}
+								class="shrink-0 rounded-[var(--radius-sm)] px-2 py-1 text-[11px] text-text-subtle hover:text-text min-h-[32px] pointer-coarse:min-h-[44px]"
+							>{t('inbox.rule_filter_clear')}</button>
+						</div>
+					{/if}
 
 					{#if zone === 'snoozed' ? isLoadingSnoozed() : isLoading(zone)}
 						<p class="text-text-subtle text-sm">{t('inbox.loading')}</p>
@@ -557,14 +698,15 @@
 						{@const items = zone === 'snoozed' ? getSnoozedItems() : getInboxItems(zone).filter((i) => !i.userAction)}
 						{#if items.length === 0}
 							<p class="text-text-subtle text-sm">
-								{#if zone === 'requires_user'}{t('inbox.empty_needs_you')}
+								{#if ruleFilterId !== null}{t('inbox.rule_filter_empty')}
+								{:else if zone === 'requires_user'}{t('inbox.empty_needs_you')}
 								{:else if zone === 'draft_ready'}{t('inbox.empty_drafted')}
 								{:else if zone === 'snoozed'}{t('inbox.empty_snoozed')}
 								{:else}{t('inbox.empty_handled')}
 								{/if}
 							</p>
 							{@const allEmpty = counts.requires_user === 0 && counts.draft_ready === 0 && counts.auto_handled === 0}
-							{#if allEmpty}
+							{#if allEmpty && ruleFilterId === null}
 								<div class="mt-3">
 									<button
 										type="button"
@@ -592,6 +734,7 @@
 							<ul class="space-y-0.5" role="list">
 								{#each items as item (item.id)}
 									{@const isActiveSelection = (zone === 'requires_user' && selectedItemId === item.id) || (readingOpen && getSelectedItemId() === item.id)}
+									{@const sender = rowSender(item)}
 									<li
 										role="listitem"
 										data-inbox-item-id={item.id}
@@ -607,7 +750,7 @@
 													<Checkbox
 														checked={isSelectedForBulk(item.id)}
 														onclick={(e) => toggleBulkSelection(item.id, visibleIds, e.shiftKey)}
-														ariaLabel={`Auswählen: ${item.subject || item.reasonDe}`}
+														ariaLabel={tf('inbox.select_item', { label: withFollowUpLine(item, rowLabel(item, t), t, tf) })}
 													/>
 												</div>
 											{/if}
@@ -618,36 +761,38 @@
 													selectedItemId = item.id;
 													void openItem(item.id);
 												}}
-												aria-label={`${t('inbox.reading_open')}: ${item.subject || item.reasonDe}`}
+												aria-label={`${t('inbox.reading_open')}: ${withFollowUpLine(item, rowLabel(item, t), t, tf)}`}
 											>
 												<div class="flex items-baseline justify-between gap-2 mb-0.5">
-													<p class="text-sm font-medium text-text leading-snug truncate flex items-center gap-1.5" title={item.subject || item.reasonDe}>
+													<p class="text-sm font-medium text-text leading-snug truncate flex items-center gap-1.5" title={item.shown !== undefined ? rowHeadline(item, t) : item.subject?.trim() ? item.subject : withFollowUpLine(item, item.reasonDe, t, tf)}>
 														{#if zone === 'snoozed' && item.notifyOnUnsnooze === true}
 															<!-- Reminder badge — distinguishes "remind me at X" from silent
 															     snooze in the same Snoozed zone. -->
 															<span class="shrink-0 inline-block w-1.5 h-1.5 rounded-full bg-accent-text" aria-label={t('inbox.reminder_badge_label')} title={t('inbox.reminder_badge_label')}></span>
 														{/if}
-														<span class="truncate">{inboxHeadline(item)}</span>
+														<span class="truncate">{rowHeadline(item, t)}</span>
 													</p>
 													<span class="shrink-0 text-[11px] text-text-subtle tabular-nums">
 														{zone === 'snoozed' && item.snoozeUntil
 															? snoozeCountdown(item.snoozeUntil)
-															: dateFormat(item.mailDate ?? item.classifiedAt)}
+															: dateFormat(rowTime(item))}
 													</span>
 												</div>
 												<div class="flex items-center gap-1.5 text-[11px] text-text-subtle min-w-0">
-													<span class="truncate" title={item.fromAddress || item.accountId}>
-														{item.fromName || item.fromAddress || accountShortLabel(item.accountId)}
+													<span class="truncate" title={sender.address || item.accountId}>
+														{sender.label || accountShortLabel(item.accountId)}
 													</span>
 													<span aria-hidden="true">·</span>
 													<span class="shrink-0">{channelLabel(item.channel)}</span>
-													{#if item.classifierVersion === 'sensitive-prefilter' || isRaisedOpen(item)}
+													{#if item.classifierVersion === 'sensitive-prefilter' || isRaisedOpen(item) || shownIsSensitive(item)}
 														<span aria-hidden="true">·</span>
-														<span class="shrink-0 text-warning" aria-label="sensitive content">⚠</span>
+														<span class="shrink-0 text-warning" role="img" aria-label={t('inbox.sensitive_mark')}>⚠</span>
 													{/if}
 												</div>
 												{#if isRaisedOpen(item)}
 													<p class="mt-0.5 text-[11px] text-text-subtle min-w-0 break-words [overflow-wrap:anywhere]">{t('inbox.raised_reason')}</p>
+												{:else if followUpLine(item, t, tf) !== undefined}
+													<p class="mt-0.5 text-[11px] text-text-subtle min-w-0 break-words [overflow-wrap:anywhere]" data-testid="inbox-follow-up-line">{followUpLine(item, t, tf)}</p>
 												{/if}
 											</button>
 										</div>

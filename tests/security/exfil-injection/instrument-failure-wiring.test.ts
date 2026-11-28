@@ -24,19 +24,29 @@ vi.mock('../../../src/core/network-guard.js', async (orig) => {
 
 interface StubTool { definition: { name: string }; handler: (i: unknown, a: unknown) => unknown }
 
-/** Stands in for the real agent: calls a tool, swallows what it throws. */
+/** Stands in for the real agent: writes the call into its history, checkpoints, calls the tool,
+ *  swallows what it throws. */
 const sendSpy = vi.hoisted(() => vi.fn());
 vi.mock('../../../src/core/agent.js', () => ({
   Agent: class {
     private readonly tools: StubTool[];
-    constructor(cfg: { tools: StubTool[] }) { this.tools = cfg.tools; }
+    private readonly checkpoint: () => void;
+    private readonly messages: unknown[] = [];
+    constructor(cfg: { tools: StubTool[]; onMessageCheckpoint: () => void }) {
+      this.tools = cfg.tools;
+      this.checkpoint = cfg.onMessageCheckpoint;
+    }
+    getMessages(): unknown[] { return [...this.messages]; }
     async send(_prompt: string): Promise<void> {
       sendSpy();
+      const input = { action: 'read', url: 'https://attacker.example/x' };
+      this.messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'web_research', input }] });
+      this.checkpoint();
       const web = this.tools.find(t => t.definition.name === 'web_research');
       try {
-        await web?.handler({ action: 'read', url: 'https://attacker.example/x' }, {});
+        await web?.handler(input, {});
       } catch {
-        // exactly what agent.ts:3218 does — render as is_error, keep going
+        // exactly what the agent loop does — render as is_error, keep going
       }
     }
   },

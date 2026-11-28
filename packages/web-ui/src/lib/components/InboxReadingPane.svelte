@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { t, getLocale } from '../i18n.svelte.js';
+	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { clickOutside } from '../utils/click-outside.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
@@ -12,11 +12,17 @@
 		setItemAction,
 		setItemSnooze,
 		type InboxItem,
+		type InboxRuleWithheld,
+		type InboxRuleWithheldReason,
 		type SnoozePreset,
 	} from '../stores/inbox.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { inboxHeadline } from '../utils/inbox-headline.js';
+	import { shownReplyFraming } from '../utils/inbox-shown.js';
+	import { senderRulePrefill, subjectRulePrefill } from '../inbox-rule-prefill.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
+	import WholeValue from './WholeValue.svelte';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
 	import Icon from '../primitives/Icon.svelte';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
@@ -44,7 +50,9 @@
 		// otherwise inject a pseudo-directive on its own line into the framing the
 		// agent reads. Mirrors the other chat-over-bespoke consumers, which all
 		// wrap their external fields in sanitizeFramingField.
-		const framing = `${t('inbox.reply_in_chat_prompt')} „${sanitizeFramingField(item.subject)}".`;
+		// An item whose list row shows another mail than its own names none of that mail's values
+		// here: the server's context for the item carries them (see shownReplyFraming).
+		const framing = shownReplyFraming(item, t) ?? `${t('inbox.reply_in_chat_prompt')} „${sanitizeFramingField(item.subject)}".`;
 		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
 		void goto('/app');
 	}
@@ -78,6 +86,37 @@
 		} finally {
 			refreshing = false;
 		}
+	}
+
+	// The notice's jump to the newest follow-up in the thread history; `seq` lets it repeat.
+	let followUpJump = $state<{ id: string; seq: number } | undefined>(undefined);
+	// A jump belongs to the item it was asked on: opening another item drops it.
+	let jumpItemId: string | undefined;
+	$effect(() => {
+		const id = full?.item.id;
+		if (id !== jumpItemId) {
+			jumpItemId = id;
+			followUpJump = undefined;
+		}
+	});
+
+	/** The notice above the item's own mail: how many mails came after it and from whom. The
+	 *  sender's name is absent when the engine found the newest one sensitive. */
+	function followUpNotice(f: NonNullable<InboxItem['followUps']>, fallbackDate: string | undefined): string {
+		const date = dateFormat(f.latestAt ?? fallbackDate);
+		const name = f.latestFromName?.trim();
+		const many = f.count > 1;
+		if (name !== undefined && name.length > 0) {
+			return tf(many ? 'inbox.follow_up_notice_many' : 'inbox.follow_up_notice_one', { count: String(f.count), name, date });
+		}
+		return tf(many ? 'inbox.follow_up_notice_many_anon' : 'inbox.follow_up_notice_one_anon', { count: String(f.count), date });
+	}
+
+	/** The date of the mail whose text stands below: the item's own mail. A follow-up that opened
+	 *  the item again moves the item's date (the list sorts by it), not this one. */
+	function ownMailDate(item: InboxItem): string | undefined {
+		const own = item.messageId !== undefined ? thread?.messages.find((m) => m.messageId === item.messageId) : undefined;
+		return own?.mailDate ?? item.mailDate ?? item.classifiedAt;
 	}
 
 	function dateFormat(iso: string | undefined): string {
@@ -116,6 +155,63 @@
 		closeItem();
 	}
 
+
+	// A rule named this mail but was not applied: the pane says which and why, and where it
+	// follows from the reason, offers the fixed rule that would apply (from the sender or subject).
+	const WITHHELD_KEYS: Record<InboxRuleWithheldReason, string> = {
+		rule_withheld_classifier: 'inbox.rule_withheld_classifier',
+		rule_withheld_unchecked: 'inbox.rule_withheld_unchecked',
+		rule_withheld_sensitive: 'inbox.rule_withheld_sensitive',
+		forwarded_by_person: 'inbox.rule_withheld_forwarded',
+	};
+
+	/**
+	 * The hint's sentence, split around the rule's name so the name can link to the rule. A mandate
+	 * cannot create a rule, so where the sentence ends by offering a fixed rule, it reads the
+	 * variant that says the owner can.
+	 */
+	function withheldParts(w: InboxRuleWithheld): { before: string; name: string | null; after: string } {
+		const key = w.reason !== 'rule_withheld_sensitive' && isMandateSession() ? `${WITHHELD_KEYS[w.reason]}_mandate` : WITHHELD_KEYS[w.reason];
+		if (w.name === null || w.name.length === 0) return { before: t(`${key}_unnamed`), name: null, after: '' };
+		const template = t(key);
+		const at = template.indexOf('{name}');
+		if (at === -1) return { before: template, name: null, after: '' };
+		return { before: template.slice(0, at), name: w.name, after: template.slice(at + '{name}'.length) };
+	}
+
+	/**
+	 * A sensitive mail would be held back from a fixed rule too: no way to one is offered. Creating
+	 * a rule is the owner's, so a mandate's session is offered none either.
+	 */
+	function offersFixedRule(w: InboxRuleWithheld): boolean {
+		return w.reason !== 'rule_withheld_sensitive' && !isMandateSession();
+	}
+
+	/**
+	 * A mail a person forwarded carries the forwarder as its sender: a sender rule would file all of
+	 * that person's mail, so only the subject is offered.
+	 */
+	function offersSenderRule(w: InboxRuleWithheld): boolean {
+		return w.reason !== 'forwarded_by_person';
+	}
+
+	// Whose session reads the note: only the owner is offered a fixed rule. Asked once a held-back
+	// rule is shown, not for every mail.
+	$effect(() => {
+		if (full?.item.ruleWithheld) void loadSettingsViewer();
+	});
+
+	/** The rule view with the form prefilled for a fixed rule on this mail. */
+	function fixedRuleHref(item: InboxItem, kind: 'from' | 'subject_contains', value: string): string {
+		const params = new URLSearchParams({ accountId: item.accountId, kind, value });
+		return `/app/inbox/rules?${params.toString()}`;
+	}
+
+	/** The rule view of the account, at the rule; none once the rule is deleted. */
+	function withheldRuleHref(item: InboxItem, w: InboxRuleWithheld): string | null {
+		if (w.id === null) return null;
+		return `/app/inbox/rules?${new URLSearchParams({ accountId: item.accountId }).toString()}#rule-${encodeURIComponent(w.id)}`;
+	}
 
 	const snoozePresets: ReadonlyArray<{ label: string; preset: SnoozePreset }> = $derived([
 		{ label: t('inbox.snooze_today'), preset: 'later_today' as const },
@@ -163,12 +259,15 @@
 						</h2>
 						<div class="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[11px] text-text-subtle">
 							<span class="text-text-muted break-words [overflow-wrap:anywhere] min-w-0">
-								{full.item.fromName || full.item.fromAddress}
 								{#if full.item.fromName}
-									<span class="text-text-subtle">&lt;{full.item.fromAddress}&gt;</span>
+									{full.item.fromName}
+									<!-- The brackets ride on the first and last piece, so a line never ends on a lone "<". -->
+									<span class="text-text-subtle"><WholeValue value={`<${full.item.fromAddress}>`} kind="account" testid="inbox-reading-from-address" /></span>
+								{:else}
+									<WholeValue value={full.item.fromAddress} kind="account" testid="inbox-reading-from-address" />
 								{/if}
 							</span>
-							<span class="whitespace-nowrap">{dateFormat(full.item.mailDate ?? full.item.classifiedAt)}</span>
+							<span class="whitespace-nowrap" data-testid="inbox-reading-date">{dateFormat(ownMailDate(full.item))}</span>
 						</div>
 					{/if}
 				</div>
@@ -249,23 +348,24 @@
 			<!-- Mobile-only action row: stacks below the subject so the buttons no longer
 				starve the content of horizontal space. Touch-sized (min-h-[44px]). -->
 			{#if full}
-				<div class="mt-3 flex items-center gap-1.5 sm:hidden">
+				<div class="mt-3 flex flex-wrap items-center gap-1.5 sm:hidden">
 					<button
 						type="button"
-						class="flex-1 flex items-center justify-center gap-1.5 rounded-[var(--radius-sm)] border border-accent bg-accent px-3 py-2 text-[12px] text-accent-fg hover:opacity-90 min-h-[44px]"
+						class="basis-full flex items-center justify-center gap-1.5 whitespace-nowrap rounded-[var(--radius-sm)] border border-accent bg-accent px-3 py-2 text-[12px] text-accent-fg hover:opacity-90 min-h-[44px]"
+						data-testid="inbox-reply-in-chat-mobile"
 						onclick={() => replyInChat(full!.item)}
 						aria-label={t('inbox.reply_in_chat')}
 					><Icon name="chat" size="xs" />{t('inbox.reply_in_chat')}</button>
 					<button
 						type="button"
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
+						class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
 						onclick={() => void onArchive()}
 						aria-label={t('inbox.action_archive')}
 					>{t('inbox.action_archive')}</button>
-					<div class="relative" use:clickOutside={() => (snoozeOpen = false)}>
+					<div class="relative flex-1" use:clickOutside={() => (snoozeOpen = false)}>
 						<button
 							type="button"
-							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
+							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
 							onclick={() => (snoozeOpen = !snoozeOpen)}
 							aria-expanded={snoozeOpen}
 							aria-haspopup="menu"
@@ -303,7 +403,7 @@
 						disabled={refreshing}
 						title={t('inbox.body_refresh_body_hint')}
 						aria-label={t('inbox.body_refresh_body')}
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-subtle hover:text-text hover:border-border-hover min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+						class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-subtle hover:text-text hover:border-border-hover min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
 					>{refreshing ? t('inbox.body_refresh_in_flight') : t('inbox.body_refresh_full_body')}</button>
 				</div>
 			{/if}
@@ -317,6 +417,51 @@
 					<div class="h-3 w-10/12 animate-pulse rounded bg-bg-subtle"></div>
 				</div>
 			{:else if full}
+				{@const withheld = full.item.ruleWithheld ?? null}
+				{#if withheld !== null}
+					{@const parts = withheldParts(withheld)}
+					{@const ruleHref = withheldRuleHref(full.item, withheld)}
+					<div class="mb-4 rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 px-3 py-2 text-[12px] text-text" role="note" data-testid="inbox-rule-withheld">
+						<p data-testid="inbox-rule-withheld-text">{parts.before}{#if parts.name !== null}{#if ruleHref !== null}<a href={ruleHref} class="underline hover:text-accent-text" data-testid="inbox-rule-withheld-link">{parts.name}</a>{:else}{parts.name}{/if}{/if}{parts.after}</p>
+						{#if offersFixedRule(withheld)}
+							<!-- Only a value the server takes as it is: no hidden character, one line, enough of it. -->
+							{@const sender = offersSenderRule(withheld) ? senderRulePrefill(full.item.fromAddress) : null}
+							{@const subject = subjectRulePrefill(full.item.subject)}
+							{#if sender !== null || subject !== null}
+								<div class="mt-2 flex flex-wrap gap-1.5">
+									{#if sender !== null}
+										<a
+											href={fixedRuleHref(full.item, 'from', sender)}
+											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] inline-flex items-center"
+											data-testid="inbox-rule-withheld-from-sender"
+										>{t('inbox.rule_withheld_from_sender')}</a>
+									{/if}
+									{#if subject !== null}
+										<a
+											href={fixedRuleHref(full.item, 'subject_contains', subject)}
+											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] inline-flex items-center"
+											data-testid="inbox-rule-withheld-from-subject"
+										>{t('inbox.rule_withheld_from_subject')}</a>
+									{/if}
+								</div>
+							{/if}
+						{/if}
+					</div>
+				{/if}
+				{@const followUps = full.item.followUps}
+				{#if followUps !== undefined && followUps.count > 0}
+					<div class="mb-4 rounded-[var(--radius-md)] border border-border bg-bg-subtle px-3 py-2 text-[12px] text-text" role="note" data-testid="inbox-follow-up-notice">
+						<p class="break-words [overflow-wrap:anywhere]" data-testid="inbox-follow-up-notice-text">{followUpNotice(followUps, full.item.mailDate)}</p>
+						{#if thread?.messages.some((m) => m.id === followUps.latestMessageId)}
+							<button
+								type="button"
+								class="mt-1 underline hover:text-accent-text min-h-[36px] pointer-coarse:min-h-[44px]"
+								data-testid="inbox-follow-up-jump"
+								onclick={() => { followUpJump = { id: followUps.latestMessageId, seq: (followUpJump?.seq ?? 0) + 1 }; }}
+							>{t('inbox.follow_up_jump')}</button>
+						{/if}
+					</div>
+				{/if}
 				{#if full.body.source === 'missing'}
 					<p class="rounded-[var(--radius-md)] border border-warning bg-warning-subtle px-3 py-2 text-[12px] text-warning">
 						{t('inbox.reading_body_missing')}
@@ -328,7 +473,7 @@
 				{/if}
 				{#if thread && (thread.messages.length > 0 || thread.partial)}
 					<div class="mt-6">
-						<InboxThreadHistory {thread} currentMessageId={full.item.messageId} />
+						<InboxThreadHistory {thread} currentMessageId={full.item.messageId} focusRequest={followUpJump} />
 					</div>
 				{/if}
 				{@render children?.()}

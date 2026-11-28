@@ -446,6 +446,11 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
 
   // Before-images in batches of the query's own maximum page size.
   const beforeByKey = new Map<string, Record<string, unknown>>();
+  // And the stamp each row holds (`_source_grants`), which no query returns. A run only updates
+  // or creates a data-store row; an undo of an update, or an atomic rollback of one, writes this
+  // stamp back with the row's earlier values (beside the run's grants, which the store's union
+  // keeps).
+  const grantsByKey = new Map<string, string[] | null>();
   const lookups = keyed.filter((k) => k.key !== null);
   for (let i = 0; i < lookups.length; i += BULK_QUERY_PAGE) {
     const batch = lookups.slice(i, i + BULK_QUERY_PAGE).map((k) => k.stored);
@@ -455,6 +460,7 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
       for (const [k, v] of Object.entries(r)) if (!META_FIELDS.has(k)) clean[k] = v;
       beforeByKey.set(String(r[keyCol]), clean);
     }
+    for (const [k, g] of store.sourceGrantsByKey(collection, keyCol, batch)) grantsByKey.set(k, g);
   }
 
   const budget = new ByteBudget();
@@ -472,6 +478,7 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
     if (fullBytes > BULK_MAX_TARGET_BYTES) return { key, invalid: 'target_too_large' };
     budget.charge(fullBytes);
     if (existing) budget.charge(imageBytes(existing));
-    return { key, before, after: full };
+    // An absent row has no stamp to restore: its undo deletes it.
+    return existing ? { key, before, after: full, beforeGrants: grantsByKey.get(key) ?? null } : { key, before, after: full };
   }));
 }

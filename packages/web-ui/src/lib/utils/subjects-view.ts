@@ -11,3 +11,16 @@ export function subjectsBody(loading: boolean, listed: number, detailOpen: boole
 	if (listed === 0 && !detailOpen) return 'empty';
 	return 'list';
 }
+
+/**
+ * The kind a subject's chip shows, for its word and its tint. The store narrows every kind to one
+ * of core's `KNOWN_SUBJECT_KINDS`, which this list mirrors (a test holds the two equal). Anything
+ * else is shown as "other": the stored value may come from outside, and the chip only ever shows
+ * a word from this list.
+ */
+export const SUBJECT_KINDS = ['person', 'organization', 'engagement', 'product', 'service', 'other'] as const;
+export type ShownSubjectKind = (typeof SUBJECT_KINDS)[number];
+
+export function shownSubjectKind(kind: string): ShownSubjectKind {
+	return (SUBJECT_KINDS as readonly string[]).includes(kind) ? (kind as ShownSubjectKind) : 'other';
+}

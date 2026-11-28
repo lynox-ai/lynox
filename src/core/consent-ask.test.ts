@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { IAgent, PromptMeta, ToolEntry } from '../types/index.js';
-import { CONSENT_KEYS, consentAnswer, isConsentKind } from '../contract/prompt.js';
+import { CONSENT_KEYS, consentAnswer, consentTakesText, isConsentAction, isConsentKind } from '../contract/prompt.js';
 import { CONSENT_UNRECOGNISED_SENTENCE, consentMeta, consentOptions, consentRefusal, decideConsent } from './consent-ask.js';
-import { CONSENT_LABELS } from '../tools/dialog-text.js';
+import { CONSENT_LABELS, consentLabel } from '../tools/dialog-text.js';
 
 vi.mock('@anthropic-ai/sdk', () => {
   class MockAnthropic { beta = { messages: { stream: vi.fn() } }; }
@@ -16,15 +16,15 @@ vi.mock('./stream.js', () => ({ StreamProcessor: vi.fn() }));
 
 import { Agent } from './agent.js';
 import { RunHistory } from './run-history.js';
-import { PromptStore, consentOfPayload, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
+import { PromptStore, consentActionOfPayload, consentOfPayload, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 
 // The engine's own confirmations offer fixed keys and approve only on one of them. Every other
 // answer — a label, the other language's word, typed text, an older client's `y` — approves
-// nothing, and is told apart from a plain "no" so the person learns why.
+// nothing, and is told apart from the deny key so the person learns why.
 
-/** Answers that once approved, or read like an approval, and approve nothing now. */
-const NOT_KEYS = ['y', 'yes', 'Yes', 'Allow', 'ALLOW', ' allow', 'allow ', 'Erlauben', 'ja', 'ok', '1', 'allow deep', 'run on balanced', 'Allow deep', 'Run on balanced', '["allow"]'];
+/** Answers that are none of the keys: some once approved or read like an approval, some read like a refusal. None approves, and none counts as the deny key. */
+const NOT_KEYS = ['y', 'yes', 'Yes', 'no', 'No', 'Allow', 'ALLOW', ' allow', 'allow ', 'Erlauben', 'ja', 'ok', '1', 'allow deep', 'run on balanced', 'Allow deep', 'Run on balanced', '["allow"]'];
 
 describe('the contract keys', () => {
   it('approve only as themselves, exactly', () => {
@@ -48,10 +48,47 @@ describe('the contract keys', () => {
     expect(consentAnswer('guard', undefined)).toBeUndefined();
   });
 
-  it('name only the two kinds', () => {
-    expect(isConsentKind('guard')).toBe(true);
-    expect(isConsentKind('deep')).toBe(true);
-    for (const v of ['Guard', 'permission', '', null, undefined, 1, {}]) expect(isConsentKind(v), String(v)).toBe(false);
+  it('name exactly the engine\'s and the tools\' own kinds', () => {
+    for (const kind of ['guard', 'deep', 'send', 'google', 'merge', 'apply', 'retire', 'plan', 'formula', 'formula-text']) expect(isConsentKind(kind), kind).toBe(true);
+    expect(Object.keys(CONSENT_KEYS).sort()).toEqual(['apply', 'deep', 'formula', 'formula-text', 'google', 'guard', 'merge', 'plan', 'retire', 'send']);
+    for (const v of ['Guard', 'permission', 'Send', 'mail', 'toString', 'constructor', '', null, undefined, 1, {}]) expect(isConsentKind(v), String(v)).toBe(false);
+  });
+
+  it('names the formula question\'s way out as writing nothing, and every other cancel as cancelling', () => {
+    expect(consentLabel('formula', 'cancel', 'de')).toBe('Nicht schreiben');
+    expect(consentLabel('formula-text', 'cancel', 'en')).toBe("Don't write");
+    expect(consentLabel('google', 'cancel', 'de')).toBe(CONSENT_LABELS.de.cancel);
+    expect(consentLabel('formula', 'as-formulas', 'de')).toBe('Als Formeln schreiben');
+  });
+
+  it('the formula question takes only its own keys, and the one without formulas has no key that writes them', () => {
+    expect(CONSENT_KEYS.formula).toEqual(['as-text', 'as-formulas', 'cancel']);
+    expect(CONSENT_KEYS['formula-text']).toEqual(['as-text', 'cancel']);
+    expect(decideConsent('formula', 'as-formulas')).toBe('as-formulas');
+    expect(decideConsent('formula-text', 'as-formulas')).toBe('unrecognised');
+    expect(decideConsent('formula-text', 'as-text')).toBe('as-text');
+    for (const answer of ['1', '2', 'text', 'formulas', 'Write as text', 'Write as formulas', 'Als Text schreiben', 'Don\'t write', 'AS-TEXT', ' as-text']) {
+      expect(decideConsent('formula', answer), answer).toBe('unrecognised');
+      expect(decideConsent('formula-text', answer), answer).toBe('unrecognised');
+    }
+    // Never the outcome a plan's typed change has: no key of these kinds is that word.
+    expect(decideConsent('formula', 'text')).not.toBe('text');
+  });
+
+  it('a tool kind approves only on its own key, exactly', () => {
+    const approving = { send: 'send', google: 'confirm', merge: 'merge', apply: 'apply', retire: 'retire', plan: 'proceed' } as const;
+    for (const [kind, key] of Object.entries(approving) as [keyof typeof approving, string][]) {
+      expect(consentAnswer(kind, key), kind).toBe(key);
+      for (const answer of [...NOT_KEYS, 'Yes', 'ja', 'senden', 'Senden', 'Send', 'Merge', 'Apply', 'Retire', 'Proceed', 'confirm ', 'allow']) {
+        if (answer === key) continue;
+        expect(consentAnswer(kind, answer) === key, `${kind} ${answer}`).toBe(false);
+      }
+    }
+  });
+
+  it('names a consent action only from its own set', () => {
+    for (const action of ['upload', 'create', 'move', 'share', 'overwrite', 'append', 'format', 'update', 'delete']) expect(isConsentAction(action), action).toBe(true);
+    for (const v of ['Delete', 'write', 'remove', '', null, undefined, 1, {}, 'toString']) expect(isConsentAction(v), String(v)).toBe(false);
   });
 });
 
@@ -61,6 +98,19 @@ describe('decideConsent', () => {
     expect(decideConsent('guard', 'deny')).toBe('deny');
     for (const answer of ['', '__dismissed__', UNATTENDED_BLOCK_ANSWER]) expect(decideConsent('guard', answer), answer).toBe('dismissed');
     for (const answer of NOT_KEYS) expect(decideConsent('guard', answer), answer).toBe('unrecognised');
+  });
+
+  it('a plan takes typed text as the change asked for: neither an approval nor unrecognised', () => {
+    expect(consentTakesText('plan')).toBe(true);
+    for (const kind of ['guard', 'deep', 'send', 'google', 'merge', 'apply', 'retire'] as const) expect(consentTakesText(kind), kind).toBe(false);
+    expect(decideConsent('plan', 'proceed')).toBe('proceed');
+    expect(decideConsent('plan', 'adjust')).toBe('adjust');
+    expect(decideConsent('plan', 'cancel')).toBe('cancel');
+    for (const answer of ['', '__dismissed__', UNATTENDED_BLOCK_ANSWER]) expect(decideConsent('plan', answer), answer).toBe('dismissed');
+    for (const answer of ['yes', 'Proceed', 'ja, aber ohne Schritt 2', 'allow']) expect(decideConsent('plan', answer), answer).toBe('text');
+    for (const answer of ['yes', 'Send', 'ja']) expect(decideConsent('send', answer), answer).toBe('unrecognised');
+    // Typed text is no refusal to explain.
+    expect(consentRefusal('text', 'x.')).toBe('x.');
   });
 
   it('says why only after an unrecognised answer, as a sentence of its own after the refusal', () => {
@@ -77,6 +127,8 @@ describe('decideConsent', () => {
     expect(consentOptions('guard')).toEqual(['allow', 'deny']);
     expect(consentOptions('deep')).toEqual(['deep', 'balanced', 'cancel']);
     expect(consentMeta('guard', { blocked: true })).toEqual({ blocked: true, consent: 'guard' });
+    expect(consentMeta('google', undefined, 'delete')).toEqual({ consent: 'google', consentAction: 'delete' });
+    expect(consentMeta('send')).toEqual({ consent: 'send' });
   });
 
   it('has a word for every key in both languages', () => {
@@ -103,6 +155,17 @@ describe('the stored marker', () => {
       expect(store.getById(model)!.payload_json).toBeNull();
       expect(consentOfPayload(store.getById(model)!.payload_json)).toBeUndefined();
     });
+  });
+
+  it('keeps a Google consent\'s action with its marker, and reads it back only from there', () => {
+    withStore((store) => {
+      const id = store.insertQuestion({ blocked: false, attended: true }, 's1', 'Delete event e1', ['confirm', 'cancel'], false, undefined, undefined, undefined, undefined, 'google', 'delete');
+      expect(consentOfPayload(store.getById(id)!.payload_json)).toBe('google');
+      expect(consentActionOfPayload(store.getById(id)!.payload_json)).toBe('delete');
+    });
+    for (const payload of ['{"kind":"consent","consent":"google","action":"Delete"}', '{"kind":"consent","consent":"google"}', '{"kind":"other","consent":"google","action":"delete"}', '{"action":"delete"}', 'not json', null]) {
+      expect(consentActionOfPayload(payload), String(payload)).toBeUndefined();
+    }
   });
 
   it('a question stored before the marker existed is no consent, whatever its options: it fails closed', () => {

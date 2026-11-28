@@ -147,7 +147,7 @@ Returns `{"pending": false}` or the full prompt data:
 
 #### Replying to prompts
 
-Include `promptId` for idempotent replies (prevents double-answer race conditions):
+A reply names its question with `promptId` (from the `prompt` event or `/pending-prompt`); a repeat with the same `promptId` is idempotent. A reply without `promptId` answers nothing: while a single question is open it gets `409` with code `prompt_id_required`; otherwise `404`.
 
 ```bash
 POST /api/sessions/:id/reply

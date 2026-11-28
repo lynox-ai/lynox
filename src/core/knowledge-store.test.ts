@@ -10,6 +10,9 @@ import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTR
 import { deriveProvenanceTier } from './provenance.js';
 import { channels } from './observability.js';
 import { MEMORY_BLOCK_CHAR_LIMITS } from '../types/memory.js';
+import type { SecretStoreLike } from '../types/security.js';
+import { GENERIC_SHAPE_MIN_TEXT, maskSecretPatterns, matchesSecretPattern } from './secret-store.js';
+import { randomBytes } from 'node:crypto';
 
 describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
   const tmpDirs: string[] = [];
@@ -24,6 +27,101 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
 
   afterEach(() => {
     for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it('a store built only to read skips the backfill, its one write at construction; a full one runs it', () => {
+    const done = (e: EngineDb): number | undefined =>
+      (e.getDb().prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number } | undefined)?.done;
+    expect(done(make().engine), 'a full store marks its backfill done').toBe(1);
+    // A database no full store has opened.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-'));
+    tmpDirs.push(dir);
+    const ro = new EngineDb(join(dir, 'engine.db'), '');
+    const before = done(ro);
+    expect(before).not.toBe(1);
+    new KnowledgeStore(ro, new SubjectStore(ro), null, { readOnly: true });
+    expect(done(ro)).toBe(before);
+  });
+
+  it('lists the rejected and superseded entries it still holds, masked, with status and the successor where one is recorded, and no active or pending one', () => {
+    const { ks, engine } = make();
+    const a = ks.write({ text: 'Ships from Basel', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(ks.listRejectedOrSupersededMasked(), 'an active entry is not listed').toEqual([]);
+    const b = ks.write({ text: 'The invoice address is in Bern', subjectName: 'Muster AG', sourceChannel: 'agent', sourceUntrusted: false });
+    const c = ks.write({ text: 'Orders above 500 need a second signature', subjectName: 'Lager', sourceChannel: 'agent', sourceUntrusted: false });
+    expect([a, b, c].some((r) => r.deduped === true), 'fixture: three separate entries').toBe(false);
+    const db = engine.getDb();
+    // A key-shaped value in the rejected entry, built at runtime (this repo is public).
+    const key = `ghp_${'a1B2c3D4e5'.repeat(4)}`;
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(`The invoice address is in Bern, token ${key}`), b.id);
+    db.prepare("UPDATE knowledge_entries SET status = 'rejected', updated_at = '2026-01-01 00:00:01' WHERE id = ?").run(b.id);
+    db.prepare("UPDATE knowledge_entries SET status = 'superseded', superseded_by = ?, updated_at = '2026-01-01 00:00:02' WHERE id = ?").run(a.id, c.id);
+    db.prepare("UPDATE knowledge_entries SET status = 'pending_review' WHERE id = ?").run(a.id);
+    const listed = ks.listRejectedOrSupersededMasked();
+    expect(listed.map(e => [e.id, e.status, e.supersededBy, e.text]), 'newest change first; the pending one is not listed').toEqual([
+      [c.id, 'superseded', a.id, 'Orders above 500 need a second signature'],
+      [b.id, 'rejected', null, `The invoice address is in Bern, token ***${key.slice(-4)}`],
+    ]);
+    expect(ks.listRejectedOrSupersededMasked(1).map(e => e.id), 'the limit holds').toEqual([c.id]);
+  });
+
+  it('masks in its lists what its write check refuses: a long token without a prefix in a pending, a rejected and an active entry from the check\'s length on, and a known secret in the subject name', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    // Built at runtime: a credential-shaped literal is what the commit-time scan looks for.
+    const known = `kv${randomBytes(8).toString('hex')}`;
+    const secrets = {
+      maskSecrets: (t: string) => t.split(known).join('***'),
+      containsSecret: (t: string) => t.includes(known),
+      getMasked: () => null, resolve: () => null, listNames: () => [],
+    } as unknown as SecretStoreLike;
+    const ks = new KnowledgeStore(engine, subjects, secrets);
+    const token = randomBytes(24).toString('hex');
+    const long = `The warehouse system was migrated last spring and the export job now signs in with ${token}`;
+    expect(long.length, 'fixture: long enough for the check to read the long-token shape').toBeGreaterThanOrEqual(GENERIC_SHAPE_MIN_TEXT);
+    expect(matchesSecretPattern(long), 'fixture: the write check refuses it').not.toBeNull();
+    expect(maskSecretPatterns(long), 'fixture: the narrower mask leaves it').toBe(long);
+    const short = `Build ${token}`;
+    expect(matchesSecretPattern(short), 'fixture: the check lets a short text with it through').toBeNull();
+
+    const db = engine.getDb();
+    const pending = ks.write({ text: 'pending', subjectName: 'Lager', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 't-1' });
+    const rejected = ks.write({ text: 'rejected', subjectName: 'Muster', sourceChannel: 'agent', sourceUntrusted: true });
+    const shortOne = ks.write({ text: 'short', subjectName: 'Kurz', sourceChannel: 'agent', sourceUntrusted: true });
+    db.prepare('UPDATE knowledge_entries SET text = ?, subject_hint = ? WHERE id = ?').run(engine.enc(long), `Lager ${known}`, pending.id);
+    db.prepare("UPDATE knowledge_entries SET text = ?, subject_hint = ?, status = 'rejected' WHERE id = ?").run(engine.enc(long), `Muster ${known}`, rejected.id);
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(short), shortOne.id);
+    const active = ks.write({ text: 'Ships from Basel', subjectName: 'Acme', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(active.status, 'fixture: an active entry').toBe('active');
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(long), active.id);
+    // At the check's own length, and one character under it.
+    const sized = (n: number): string => `${'ab '.repeat(40).slice(0, n - token.length - 1).padEnd(n - token.length - 1, '.')} ${token}`;
+    const atEdge = ks.write({ text: 'edge', subjectName: 'Rand', sourceChannel: 'agent', sourceUntrusted: true });
+    const underEdge = ks.write({ text: 'under', subjectName: 'Unter', sourceChannel: 'agent', sourceUntrusted: true });
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(sized(GENERIC_SHAPE_MIN_TEXT)), atEdge.id);
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(sized(GENERIC_SHAPE_MIN_TEXT - 1)), underEdge.id);
+    expect([sized(GENERIC_SHAPE_MIN_TEXT).length, matchesSecretPattern(sized(GENERIC_SHAPE_MIN_TEXT)) !== null], 'fixture: refused at the edge').toEqual([GENERIC_SHAPE_MIN_TEXT, true]);
+    expect([sized(GENERIC_SHAPE_MIN_TEXT - 1).length, matchesSecretPattern(sized(GENERIC_SHAPE_MIN_TEXT - 1))], 'fixture: let through under it').toEqual([GENERIC_SHAPE_MIN_TEXT - 1, null]);
+    const filedUnder = subjects.findOrCreate({ kind: 'organization', name: `Acme ${known}` });
+    if (filedUnder.ambiguous) throw new Error('fixture: one subject');
+    db.prepare('UPDATE knowledge_entries SET subject_id = ? WHERE id = ?').run(filedUnder.id, active.id);
+
+    const masked = `${long.slice(0, -token.length)}***${token.slice(-4)}`;
+    const queue = ks.listPendingMasked();
+    expect(queue.find(e => e.id === pending.id)?.text, 'the pending entry').toBe(masked);
+    expect(queue.find(e => e.id === pending.id)?.subjectHint, 'its subject name').toBe('Lager ***');
+    expect(queue.find(e => e.id === shortOne.id)?.text, 'a text the check lets through stays as it is').toBe(short);
+    expect(queue.find(e => e.id === atEdge.id)?.text, 'at the check\'s length, masked').toBe(`${sized(GENERIC_SHAPE_MIN_TEXT).slice(0, -token.length)}***${token.slice(-4)}`);
+    expect(queue.find(e => e.id === underEdge.id)?.text, 'one under it, as the check lets it through').toBe(sized(GENERIC_SHAPE_MIN_TEXT - 1));
+    const thread = ks.listPendingForThreadMasked('t-1');
+    expect(thread.map(e => [e.text, e.subjectHint]), 'the thread\'s queue').toEqual([[masked, 'Lager ***']]);
+    const retired = ks.listRejectedOrSupersededMasked();
+    expect(retired.map(e => [e.id, e.text, e.subjectHint]), 'the rejected entry').toEqual([[rejected.id, masked, 'Muster ***']]);
+    const listed = ks.listActive().find(e => e.id === active.id);
+    expect(listed?.text, 'an active entry').toBe(masked);
+    expect(listed?.subjectName, 'the subject an active entry is filed under').toBe('Acme ***');
   });
 
   // ── Tier derivation + routing (D-3/D-6, acceptance §7) ──
@@ -587,6 +685,16 @@ describe('KnowledgeStore read-surface (DK-UX — listActive / readSurfaceBlocks)
     expect(blocks.profile).toContain('terse replies');
     expect(blocks.playbook).not.toContain('sk-ant-api03-ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210');
     expect(blocks.playbook).toContain('***');
+  });
+
+  it('getBlockMasked masks a secret-shaped token and is null for a block never set', () => {
+    const { ks } = make();
+    // Built at runtime: a key-shaped literal is what the commit-time secret scan looks for.
+    const key = `${['sk', 'ant', 'api03'].join('-')}-${'Z'.repeat(40)}`;
+    ks.setBlockContent('playbook', `Never paste ${key} into a rule.`);
+    expect(ks.getBlockMasked('playbook')).not.toContain(key);
+    expect(ks.getBlockMasked('playbook')).toContain('***');
+    expect(ks.getBlockMasked('profile')).toBeNull();
   });
 
   it('readSurfaceBlocks returns empty strings when no blocks are set', () => {

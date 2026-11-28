@@ -79,7 +79,7 @@ afterEach(() => {
 });
 
 const EVA = 'eva@kanzlei.example';
-const ENDED_A = `${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Darum lässt er sich nicht mehr ausführen, auch nicht als Kopie. Beschreib lynox im Chat in deinen eigenen Worten, was er tun soll, und bitte lynox, dafür einen neuen Workflow zu schreiben, statt diesen zu kopieren oder zu ändern. Ein neu geschriebener Workflow gehört dir und läuft unter dir.`;
+const ENDED_A = `${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Er läuft erst wieder, wenn du ihn übernimmst.`;
 
 describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)', () => {
 	it('marks it, turns off Run, Schedule and Edit, keeps Rename and Delete, and says why under the buttons', async () => {
@@ -88,7 +88,7 @@ describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)
 			{ ...base('wf-l', 'Live one'), runs_as: { person: 'jan@kanzlei.example', ended: false } },
 		]);
 		const ended = card('Ended one');
-		expect(ended.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe(`Zugang beendet: ${EVA}`);
+		expect(ended.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Zugang beendet');
 		expect(ended.querySelector('[data-testid="runs-as-badge"]')).toBeNull();
 		expect([button(ended, 'workflow_library.run')?.disabled, button(ended, 'workflow_library.schedule')?.disabled, button(ended, 'workflow_library.edit_in_chat')?.disabled]).toEqual([true, true, true]);
 		expect([button(ended, 'workflow_library.rename')?.disabled, button(ended, 'workflow_library.delete')?.disabled]).toEqual([false, false]);
@@ -114,23 +114,23 @@ describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)
 			{ ...base('wf-1', 'One plan'), runs_as: { person: EVA, ended: true, covered_by_takeover: 1 } },
 			{ ...base('wf-2', 'Two plans'), runs_as: { person: EVA, ended: true, covered_by_takeover: 2 } },
 		]);
-		expect(note(card('One plan'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Ein Plan, der ihn ausführt, ist deshalb pausiert. Übernimmst du diesen Plan unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir.`);
-		expect(note(card('Two plans'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. 2 Pläne, die ihn ausführen, sind deshalb pausiert. Übernimmst du einen davon unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir.`);
+		expect(note(card('One plan'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Ein Plan, der ihn ausführt, ist deshalb pausiert. Übernimmst du diesen Plan unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir. Hier ausführen kannst du ihn danach erst, wenn du seine Schritte mit „Schritte prüfen“ bestätigt hast.`);
+		expect(note(card('Two plans'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. 2 Pläne, die ihn ausführen, sind deshalb pausiert. Übernimmst du einen davon unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir. Hier ausführen kannst du ihn danach erst, wenn du seine Schritte mit „Schritte prüfen“ bestätigt hast.`);
 	});
 
 	it('without a name says "a person with access", in the mark and the sentence', async () => {
 		await open('owner', [{ ...base('wf-u', 'Nameless'), runs_as: { person: '', ended: true, covered_by_takeover: 0 } }]);
 		const c = card('Nameless');
 		expect(c.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Zugang beendet');
-		expect(note(c)?.startsWith('Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Darum')).toBe(true);
+		expect(note(c)).toBe('Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst.');
 	});
 
 	it('in English', async () => {
 		setLocale('en');
 		await open('owner', [{ ...base('wf-e', 'Ended one'), runs_as: { person: EVA, ended: true, covered_by_takeover: 1 } }]);
 		const c = card('Ended one');
-		expect(c.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe(`Access ended: ${EVA}`);
-		expect(note(c)).toBe(`${EVA} created or last changed this workflow, and their access has ended. One schedule that runs it is paused for that reason. If you take that schedule over under “Triggers” with “Take over”, this workflow runs under you afterwards too.`);
+		expect(c.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Access ended');
+		expect(note(c)).toBe(`${EVA} created or last changed this workflow, and their access has ended. One plan that runs it is paused for that reason. If you take that plan over under “Triggers” with “Take over”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “Review steps”.`);
 	});
 });
 
@@ -197,5 +197,44 @@ describe('a schedule refused after it was sent, in the reader\'s language (ux U-
 
 	it('CONTROL: a refusal without a known code still shows the engine\'s sentence', async () => {
 		expect(await sendSchedule({ error: 'engine sentence' })).toContain('engine sentence');
+	});
+});
+
+describe('a grant preview refused, in the reader\'s language like the schedule (U-085, U-372)', () => {
+	async function preview(body: unknown, status = 403): Promise<string> {
+		vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+			const path = new URL(String(input), 'http://localhost').pathname.replace(/^\/api/, '');
+			const method = init?.method ?? 'GET';
+			if (method === 'GET' && path === '/workflows/library') return new Response(JSON.stringify({ workflows: [base('wf-m', 'Mine')], viewer: 'mandate', grantEnabled: true }), { status: 200 });
+			if (method === 'POST' && path === '/workflows/wf-m/grant-preview') return new Response(JSON.stringify(body), { status });
+			return new Response('{}', { status: 404 });
+		}));
+		const { default: WorkflowLibraryView } = await import('./WorkflowLibraryView.svelte');
+		component = mount(WorkflowLibraryView, { target });
+		await settle();
+		button(card('Mine'), 'workflow_library.schedule')!.click();
+		await settle();
+		const toggle = [...target.querySelectorAll<HTMLLabelElement>('label')].find((l) => l.textContent?.trim() === t('workflow_library.grant_toggle'))?.querySelector('input');
+		expect(toggle, 'the grant toggle').toBeDefined();
+		toggle!.click();
+		await settle();
+		const go = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === t('workflow_library.grant_preview'));
+		expect(go, 'the preview button').toBeDefined();
+		go!.click();
+		await settle();
+		return target.querySelector('[data-schedule-error]')?.textContent?.trim() ?? '';
+	}
+
+	it('names another person\'s workflow and an unreadable one by their code, not the engine\'s English', async () => {
+		expect(await preview({ error: 'Not scheduled: engine sentence', code: 'foreign_workflow' })).toBe(`Nicht geplant: ${FOREIGN}`);
+		if (component) unmount(component);
+		component = undefined;
+		const unreadable = await preview({ error: 'engine sentence', code: 'unreadable_workflow' });
+		expect(unreadable).toContain('Nicht geplant: lynox konnte nicht lesen, wer diesen Workflow angelegt hat.');
+		expect(unreadable).not.toContain('engine sentence');
+	});
+
+	it('CONTROL: a refusal without a known code still shows the engine\'s sentence', async () => {
+		expect(await preview({ error: 'engine sentence' }, 400)).toBe('engine sentence');
 	});
 });
