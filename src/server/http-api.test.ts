@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, o
 import { recipientConfirmDigest } from '../core/recipient-confirm.js';
 import { CP_ADMIN_PRINCIPAL, principalFromTag, principalTag, OWNER_PRINCIPAL, ownerInstructionCounts, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartTokenV2 } from '../contract/broker-start.js';
-import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
+import { exportMaskValues, maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
@@ -369,6 +369,12 @@ vi.mock('../core/engine.js', () => ({
       containsSecret: mockSecretContains,
       maskSecrets: mockSecretMask,
       maskAll: mockSecretMask,
+      // The export's masker (`SecretStore.exportGuard`), over the same value list and its written forms.
+      exportGuard: () => ({
+        mask: (t: string) => maskSecretsAndPatterns(t, exportMaskValues(mockStoreValues)),
+        holds: () => false,
+        maxNeedle: 0,
+      }),
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       // No workflow run in this history: every id is a chat's own (register 1112).
@@ -12983,7 +12989,7 @@ describe('LynoxHTTPApi', () => {
         const res = await fetch(`${baseUrl}/api/triggers`, { headers: { cookie: `lynox_session=${mandate}` } });
         expect(res.status).toBe(200);
         const asMandate = (await res.json()) as Flags;
-        expect(asMandate.triggers[0]!['last_run_result']).toBe(WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates);
+        expect(asMandate.triggers[0]!['last_run_result']).toBe(WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates('ended'));
         expect(JSON.stringify(asMandate)).not.toContain('jo@kanzlei.example');
         expect(JSON.stringify(asMandate)).not.toContain('shop-jo');
       });

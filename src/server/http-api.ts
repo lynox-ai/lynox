@@ -117,7 +117,7 @@ import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orch
 import { runAsPlanOf } from '../core/plan-run-context.js';
 import { MEMBER_CONNECTION_PREFIX, lastRunResultFor } from '../core/member-connection-notes.js';
 import { noticeLanguage } from '../core/notice-language.js';
-import { WORKER_NOTICES } from '../core/worker-notices.js';
+import { WORKER_NOTICES, memberEndOfStatus } from '../core/worker-notices.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
@@ -495,7 +495,7 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
   // result, anyone else a fixed sentence in place of a result that has them (`lastRunResultFor`).
   const owner = isOwnerPrincipal(principal);
   const lastRunResult = memberNotes === undefined || memberNotes.length === 0 ? shaped.last_run_result
-    : lastRunResultFor(trigger, owner, WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates);
+    : lastRunResultFor(trigger, owner, WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates(memberEndOfStatus(trigger.last_run_status)));
   const stored = { ...shaped, last_run_result: lastRunResult };
   // Whether a wakeup reached the owner, why it did not, the step to take then (their push
   // subscription) and the chat it points to are the owner's: a mandate reading them would be
@@ -15269,9 +15269,9 @@ export class LynoxHTTPApi {
       // text could not be decrypted. `enabled` is the setting, as on the durable knowledge block:
       // whether the graph is switched on in the config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
-      // The remembered texts both stores hold, read the same way on either path and masked as the
-      // durable knowledge block is; read before the graph, so a graph read that fails does not
-      // take them with it.
+      // The remembered texts both stores hold, read the same way on either path and masked with the
+      // graph block's mask below; read before the graph, so a graph read that fails does not take
+      // them with it.
       // With the subject graph on, the older store's entities and relations are carried here too.
       // Graph rows no block carries (subjects the graph block does not list) are counted, and any
       // marks the block too: the export says "complete" only when nothing stored is left out.
@@ -15282,16 +15282,22 @@ export class LynoxHTTPApi {
       const exportLayer = engine.getKnowledgeLayer();
       const subjectGraph = (exportLayer ? exportLayer.readsSubjectGraph === true && !exportLayer.subjectGraphUnavailable : engine.getUserConfig().subject_graph_enabled === true)
         && engine.getEngineDb() !== null;
+      // One mask for the whole block, the remembered texts and the graph's entities and relations
+      // alike: the vault's values in every form the export looks for (escaped inside a JSON text
+      // as well as written as is) and the secret shapes. Built once; the values stay inside it.
+      const graphExportSecrets = engine.getSecretStore();
+      const graphExportMask: (text: string) => string = graphExportSecrets
+        ? graphExportSecrets.exportGuard().mask
+        : (t: string) => maskSecretPatterns(t);
       let memoryTexts: { block: Record<string, unknown>; mayBeIncomplete: boolean };
       try {
         const { graphHoldsRowsNotExported, readMemoryTextsForExport } = await import('../core/graph-export.js');
-        const exportSecrets = engine.getSecretStore();
         const agentMemoryFile = join(getLynoxDir(), 'agent-memory.db');
         // What this block and the count read must agree with what the graph block lists.
         const read = readMemoryTextsForExport({
           agentMemoryFile,
           engineDb: engine.getEngineDb(),
-          mask: (t: string) => maskSecretPatterns(exportSecrets ? exportSecrets.maskSecrets(t) : t),
+          mask: graphExportMask,
           subjectGraph,
         });
         const notExported = graphHoldsRowsNotExported({
@@ -15308,8 +15314,10 @@ export class LynoxHTTPApi {
       if (kg) {
         const fallbacksBefore = kg.readFallbackCount;
         try {
-          const { EXPORT_RELATIONSHIPS_NOTE, collectGraphForExport } = await import('../core/graph-export.js');
-          const { entities, relationships, truncated, relationCapHit } = await collectGraphForExport(kg);
+          const { EXPORT_RELATIONSHIPS_NOTE, collectGraphForExport, maskGraphForExport } = await import('../core/graph-export.js');
+          const collected = await collectGraphForExport(kg);
+          const { truncated, relationCapHit } = collected;
+          const { entities, relationships } = maskGraphForExport(collected, graphExportMask);
           const stats = await kg.stats();
           exportData['knowledge_graph'] = {
             entities,
@@ -15336,15 +15344,16 @@ export class LynoxHTTPApi {
         // here from its stores, the way the layer reads them, without opening a layer.
         if (graphEnabled) process.stderr.write('⚠ /api/export: knowledge graph layer unavailable — read from its stores\n');
         try {
-          const { EXPORT_RELATIONSHIPS_NOTE, readHeldGraph } = await import('../core/graph-export.js');
+          const { EXPORT_RELATIONSHIPS_NOTE, maskGraphForExport, readHeldGraph } = await import('../core/graph-export.js');
           const held = await readHeldGraph({
             agentMemoryFile: join(getLynoxDir(), 'agent-memory.db'),
             engineDb: engine.getEngineDb(),
             subjectGraph: engine.getUserConfig().subject_graph_enabled === true,
           });
+          const masked = maskGraphForExport(held, graphExportMask);
           exportData['knowledge_graph'] = {
-            entities: held.entities,
-            relationships: held.relationships,
+            entities: masked.entities,
+            relationships: masked.relationships,
             relationships_note: EXPORT_RELATIONSHIPS_NOTE,
             stats: held.stats,
             memories: memoryTexts.block,

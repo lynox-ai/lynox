@@ -179,7 +179,7 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
       }).done;
       expect(h.sent.map((m) => [m.audience, m.mandateId, m.body]), plannedBy).toEqual([
         ['owner', undefined, `${summary}\n• ${NOTE.de}`],
-        ['all_mandates', undefined, WORKER_NOTICES.de.memberEndForMandates],
+        ['all_mandates', undefined, WORKER_NOTICES.de.memberEndForMandates('failed')],
       ]);
     }
   });
