@@ -1665,7 +1665,7 @@ describe('what the preview says about a target lynox leaves out', () => {
 	it('holds the released link sentences word for word, in both languages', () => {
 		const released: [string, string, string][] = [
 			["new_link_domain", "Der neue Text verweist auf eine Domain, auf die dieses Produkt bisher nicht verweist: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf ohne diesen Verweis neu zu planen. Gehört er so hinein, schreib den Text von Hand {where}.", "The new text points to a domain this product did not point to before: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. lynox does not write the text. Ask lynox in the chat to plan the run again without it. If it belongs there as it is, write the text by hand {where}."],
-			["new_link_domain_judged", "Der neue Text verweist auf eine Domain, auf die dieses Produkt bisher nicht verweist und die nicht unter den erlaubten Link-Domains des Laufs steht: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf neu zu planen: ohne diesen Verweis, oder, wenn er so hineingehört, mit der Domain unter „Erlaubte Link-Domains“, die du beim Start des Beurteilens einträgst. Du kannst den Text auch von Hand schreiben {where}.", "The new text points to a domain this product did not point to before and that is not among the run's allowed link domains: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. lynox does not write the text. Ask lynox in the chat to plan the run again: without it, or, if it belongs there as it is, with the domain added under “Allowed link domains” when you start judging. You can also write the text by hand {where}."],
+			["new_link_domain_judged", "Der neue Text verweist auf eine Domain, auf die dieses Produkt bisher nicht verweist und die nicht unter den erlaubten Link-Domains des Laufs steht: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf neu zu planen: ohne diesen Verweis, oder, wenn er so hineingehört, mit der Domain unter „Erlaubte Link-Domains“, die du beim Start der Beurteilung einträgst. Du kannst den Text auch von Hand schreiben {where}.", "The new text points to a domain this product did not point to before and that is not among the run's allowed link domains: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. lynox does not write the text. Ask lynox in the chat to plan the run again: without it, or, if it belongs there as it is, with the domain added under “Allowed link domains” when you start judging. You can also write the text by hand {where}."],
 			["url_scheme", "Der neue Text enthält eine Adresse, die kein gewöhnlicher Web- oder Mail-Link ist, etwa „javascript:“, oder in einem Shortcode einen Wert mit Doppelpunkt wie „a:b“. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf ohne diese Adresse neu zu planen. Gehört der Wert so in den Shortcode, schreib den Text von Hand {where}.", "The new text contains an address that is not a plain web or mail link, such as “javascript:”, or a value with a colon in a shortcode, such as “a:b”. lynox does not write it. Ask lynox in the chat to plan the run again without this address. If the value belongs in the shortcode as it is, write the text by hand {where}."],
 			["url_control_char", "Der neue Text enthält in einer Adresse oder einem Shortcode-Wert unsichtbare Steuerzeichen, das Ersatzzeichen � oder einen Backslash \\, oder eine Mail-Adresse mit Leerzeichen. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf neu zu planen, und sag dazu, dass Adressen und Shortcode-Werte keine solchen Zeichen und Mail-Adressen keine Leerzeichen enthalten sollen.", "The new text contains invisible control characters, the replacement character � or a backslash \\ in an address or a shortcode value, or a mail address with a space. lynox does not write it. Ask lynox in the chat to plan the run again and say that addresses and shortcode values must not contain such characters, and mail addresses no spaces."],
 		];
@@ -1982,7 +1982,7 @@ describe('the sentences the page words by the list\'s form, the judge and the re
 	it('names a refused link\'s domain in both sentences and languages, and falls back to the sentence without it (U-311)', () => {
 		const named = { de: 'Der neue Text verweist auf „fremd.example“, eine Domain, auf die dieses Produkt bisher nicht verweist: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. Gibt es weitere solche Verweise, nennt lynox sie erst, wenn du den Lauf neu planen lässt. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf ohne diesen Verweis neu zu planen. Gehört er so hinein, schreib den Text von Hand im Shopify-Admin.',
 			en: 'The new text points to “fremd.example”, a domain this product did not point to before: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. If there are more such references, lynox names them only once you have the run planned again. lynox does not write the text. Ask lynox in the chat to plan the run again without it. If it belongs there as it is, write the text by hand in the Shopify admin.' };
-		const judgedNamed = { de: 'Der neue Text verweist auf „fremd.example“, eine Domain, auf die dieses Produkt bisher nicht verweist und die nicht unter den erlaubten Link-Domains des Laufs steht: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. Gibt es weitere solche Verweise, nennt lynox sie erst, wenn du den Lauf neu planen lässt. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf neu zu planen: ohne diesen Verweis, oder, wenn er so hineingehört, mit „fremd.example“ unter „Erlaubte Link-Domains“, die du beim Start des Beurteilens einträgst. Du kannst den Text auch von Hand schreiben im Shopify-Admin.',
+		const judgedNamed = { de: 'Der neue Text verweist auf „fremd.example“, eine Domain, auf die dieses Produkt bisher nicht verweist und die nicht unter den erlaubten Link-Domains des Laufs steht: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. Gibt es weitere solche Verweise, nennt lynox sie erst, wenn du den Lauf neu planen lässt. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf neu zu planen: ohne diesen Verweis, oder, wenn er so hineingehört, mit „fremd.example“ unter „Erlaubte Link-Domains“, die du beim Start der Beurteilung einträgst. Du kannst den Text auch von Hand schreiben im Shopify-Admin.',
 			en: 'The new text points to “fremd.example”, a domain this product did not point to before and that is not among the run\'s allowed link domains: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. If there are more such references, lynox names them only once you have the run planned again. lynox does not write the text. Ask lynox in the chat to plan the run again: without it, or, if it belongs there as it is, with “fremd.example” added under “Allowed link domains” when you start judging. You can also write the text by hand in the Shopify admin.' };
 		const linkDomain = 'fremd.example';
 		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ linkDomain }))).toBe(named.de);
@@ -2224,7 +2224,7 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 	// the sentence says the rule was taken when the run was planned, with no pointer to Artifacts (U-461).
 	it('says at a restart and at the approval that the rule was taken when the run was planned, word for word', () => {
 		const fr = 'Prüf, ob sie sagt, was du willst, bevor du die Beurteilung fortsetzt.';
-		const fe = 'Check that it says what you want before you continue the judging.';
+		const fe = 'Check that it says what you want before you continue judging.';
 		const ar = 'Prüf, ob sie sagt, was du willst, bevor du freigibst.';
 		const ae = 'Check that it says what you want before you approve.';
 		expect([de['bulk.restart.rule_from_artifact'], en['bulk.restart.rule_from_artifact']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus {title} übernommen. ${fr}`, `This rule was taken word for word from {title} when the run was planned. ${fe}`]);
@@ -2346,5 +2346,71 @@ describe('the sentence for an answer the rule refused', () => {
 		);
 		// A Shopify run keeps its own sentence about the product.
 		expect(bulkInvalidText('verdict_invalid', true, true, EN)).toBe(en['bulk.invalid.verdict_invalid']);
+	});
+});
+
+// The step that decides each target's values has one name: „Beurteilung“ / "judging" (U-339).
+// „Urteil“ stays for the result of one target. A sweep over every bulk sentence, so a sentence
+// that arrives later with another word for the step fails here, not in a review.
+describe('every bulk sentence names the judging step with one word', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const Q = String.raw`'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"`;
+	// Some keys are aligned with more than one space before their brace.
+	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.[^']+)':\s+\{ de: (?:${Q}), en: (?:${Q}) \},$`);
+	const KEY = /^\s*'(bulk\.[^']+)':\s+\{/;
+	const read = (lines: readonly string[]): Record<string, { de: string; en: string }> => {
+		const out: Record<string, { de: string; en: string }> = {};
+		for (const l of lines) {
+			const m = ENTRY.exec(l);
+			if (m) out[m[1]!] = { de: (m[2] ?? m[3])!, en: (m[4] ?? m[5])! };
+		}
+		return out;
+	};
+	const sentences = read(source.split('\n'));
+	// „urteilt“ only as a word of its own, so „beurteilt“ passes; „bewertet“ in any case.
+	const banned = (s: { de: string; en: string }): string[] => [
+		...(/(?<!\p{L})urteilt/u.test(s.de) ? ['urteilt'] : []),
+		...(/(?<!\p{L})[Bb]ewertet/u.test(s.de) ? ['bewertet'] : []),
+		...(/the judging/.test(s.en) ? ['the judging'] : []),
+	];
+
+	it('reads every bulk sentence of the table, one line each, as many as a plain count of the keys finds', () => {
+		const lines = source.split('\n');
+		const keys = lines.flatMap((l) => KEY.exec(l)?.[1] ?? []);
+		// A count that knows nothing of the format: every line that starts with a bulk key.
+		const counted = lines.filter((l) => /^\s*'bulk\./.test(l)).length;
+		expect(keys.length).toBeGreaterThan(500);
+		expect(keys.length).toBe(counted);
+		expect(Object.keys(sentences).length).toBe(counted);
+		expect(Object.keys(sentences).sort()).toEqual([...new Set(keys)].sort());
+	});
+
+	it('reads an aligned line and one in double quotes with an escape', () => {
+		expect(read([
+			"\t'bulk.x.aligned':        { de: 'ausgerichtet', en: 'aligned' },",
+			`\t'bulk.x.quoted': { de: "Er sagt \\"nein\\" und es\\'s", en: "it\\'s" },`,
+		])).toEqual({
+			'bulk.x.aligned': { de: 'ausgerichtet', en: 'aligned' },
+			'bulk.x.quoted': { de: 'Er sagt \\"nein\\" und es\\\'s', en: "it\\'s" },
+		});
+	});
+
+	it('says neither „urteilt“ nor „bewertet“ in German, nor "the judging" in English, in any bulk sentence', () => {
+		expect(Object.entries(sentences).flatMap(([k, s]) => banned(s).map((w) => `${k}: ${w}`))).toEqual([]);
+	});
+
+	it('catches each word it bans, and lets „beurteilt“ and „Urteil“ pass', () => {
+		expect(banned({ de: 'lynox urteilt …', en: '' })).toEqual(['urteilt']);
+		expect(banned({ de: 'Bewertet wurde nichts.', en: '' })).toEqual(['bewertet']);
+		expect(banned({ de: 'nichts bewertet', en: '' })).toEqual(['bewertet']);
+		expect(banned({ de: '', en: 'before you start the judging.' })).toEqual(['the judging']);
+		expect(banned({ de: 'lynox beurteilt die Ziele … das Urteil steht', en: 'start judging' })).toEqual([]);
+	});
+
+	it('words the sentences bound for the working line, an unreadable rule and a missing model', () => {
+		expect(sentences['bulk.working.judge']!.de).toBe('lynox beurteilt die Ziele … {k} von {n}');
+		expect(sentences['bulk.working.judge_open']!.de).toBe('lynox beurteilt die Ziele …');
+		expect(sentences['bulk.rule_source.unreadable']!.de).toContain(' Beurteilt wurde nichts. ');
+		expect(sentences['bulk.start.no_judge_model']!.en).toMatch(/^No AI model is available right now to judge the targets of this run, so it cannot be started\. /);
 	});
 });

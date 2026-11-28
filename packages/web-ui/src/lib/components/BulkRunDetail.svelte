@@ -8,7 +8,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
-	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
@@ -859,7 +858,7 @@
 				{/if}
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
 					<dt class="text-text-subtle">{t('bulk.head.cost')}</dt>
-					<dd class="font-mono">{formatCost(run.costUsd)}{run.costCapUsd !== null ? ` / ${formatCost(run.costCapUsd)}` : ''}</dd>
+					<dd class="font-mono" data-testid="bulk-head-cost">{`${bulkUsd(run.costUsd)} USD`}{run.costCapUsd !== null ? ` / ${bulkUsd(run.costCapUsd)} USD` : ''}</dd>
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run, startButton !== null && ownerActs))}</dt>
@@ -1127,7 +1126,7 @@
 					{/if}
 					{#if supersedable}
 						<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-							<p>{tf('bulk.start.supersede', { cost: formatCost(supersedable.costUsd) })}</p>
+							<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)} USD` })}</p>
 							<div class="flex flex-wrap gap-2">
 								<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null || !startDomainsValid} aria-describedby={startHint === null ? undefined : 'bulk-start-hint'} onclick={() => start(supersedable!.id)}>{t(startButton ?? 'bulk.start.supersede_yes')}</button>
 								<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
@@ -1191,7 +1190,7 @@
 						<p class="text-sm text-text-muted">{t(restartKind === 'list' ? 'bulk.restart.kept_list' : 'bulk.restart.kept')}</p>
 						{#if supersedable}
 							<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-								<p>{tf('bulk.start.supersede', { cost: formatCost(supersedable.costUsd) })}</p>
+								<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)} USD` })}</p>
 								<div class="flex flex-wrap gap-2">
 									<button type="button" class={btnPrimary} disabled={busy || (restartKind === 'judge_cap' && bulkRestartCap(capInput, run.costCapUsd) === null)} onclick={() => restart(supersedable!.id)}>{t('bulk.start.supersede_yes')}</button>
 									<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
