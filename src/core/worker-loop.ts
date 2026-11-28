@@ -170,8 +170,10 @@ const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access,
 /**
  * Whether a parked trigger is due on its own schedule at `now`: a cron or a watch whose next run
  * has come. A one-shot is not: its one run is the one that asked. A next run that cannot be read
- * counts as due, so such a row runs as it did before. A process that died while the run waited
- * wrote no end, so its row still holds the time that started the run, and reads as due here.
+ * counts as due, so such a row runs as it did before. A run whose process went away while it
+ * waited (a deploy's shutdown keeps the question for the next process, a crash writes no end at
+ * all) may leave the row on the time that started it: a cron or a watch then reads as due here
+ * and runs as before, without the answer.
  */
 export function dueOnItsOwn(trigger: Pick<TriggerRecord, 'schedule_cron' | 'watch_config' | 'next_run_at'>, now: number): boolean {
   if (!trigger.schedule_cron && !trigger.watch_config) return false;

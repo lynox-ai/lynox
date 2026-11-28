@@ -258,6 +258,7 @@ describe('dueOnItsOwn', () => {
     expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-09T09:00:00.000Z' }, now)).toBe(false);
     expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:00:00.000Z' }, now)).toBe(true);
     expect(dueOnItsOwn({ schedule_cron: undefined, watch_config: '{"interval_minutes":60}', next_run_at: '2026-03-02T10:30:00.000Z' }, now)).toBe(false);
+    expect(dueOnItsOwn({ schedule_cron: undefined, watch_config: '{"interval_minutes":60}', next_run_at: '2026-03-02T09:30:00.000Z' }, now)).toBe(true);
   });
   it('a next run that cannot be read counts as due, so the row runs as before', () => {
     expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: null }, now)).toBe(true);
