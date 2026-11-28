@@ -6288,6 +6288,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     expect(rearmed).not.toBeNull();
     expect(Date.parse(rearmed!)).toBeGreaterThanOrEqual(before - 1000);
     expect(Date.parse(rearmed!)).toBeLessThan(Date.now() + 60_000);
+    expect(rearmed).not.toBe('2030-01-01T00:00:00.000Z');
     b.loop.stop();
   });
 
@@ -6399,6 +6400,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     expect(next).not.toBeNull();
     expect(Date.parse(next!)).toBeGreaterThanOrEqual(before - 1000);
     expect(Date.parse(next!)).toBeLessThan(Date.now() + 60_000);
+    expect(next).not.toBe('2030-01-01T00:00:00.000Z');
     h.loop.stop();
   });
 
