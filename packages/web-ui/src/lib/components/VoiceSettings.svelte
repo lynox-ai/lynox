@@ -7,12 +7,13 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
-	import { t } from '../i18n.svelte.js';
+	import { getLocale, t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { optionLabel } from './settings-readonly/values.js';
+	import { defaultVoice, voiceLabel } from '../voice-label.js';
 
 	interface VoiceInfo {
 		/** The instance is connected to a Shopify store: no text or audio goes to a speech
@@ -55,6 +56,13 @@
 	// "Save" is shown.
 	const sttChoosable = $derived(info?.stt.providers.some((p) => p.available) ?? false);
 	const ttsChoosable = $derived(info?.tts.providers.some((p) => p.available) ?? false);
+	// The hint under the voice picker names the voice the engine falls back to as the picker names it.
+	const fallbackHint = $derived.by(() => {
+		const d = defaultVoice(info?.tts.voices ?? [], getLocale());
+		return d.name !== undefined
+			? tf('voice.tts_voice_hint', { name: d.name, language: d.language })
+			: tf('voice.tts_voice_hint_unnamed', { language: d.language });
+	});
 	let config = $state<Config>({});
 	let loaded = $state(false);
 	let saving = $state(false);
@@ -136,7 +144,7 @@
 		if (sttChoosable) rows.push(providerRow(t('voice.stt_heading'), info.stt, config.transcription_provider));
 		if (ttsChoosable) rows.push(providerRow(t('voice.tts_heading'), info.tts, config.tts_provider));
 		if (ttsChoosable && info.tts.voices.length > 0) {
-			const voices = info.tts.voices.map((v) => ({ value: v.id, label: `${v.id}${v.language ? ' (' + v.language + ')' : ''}` }));
+			const voices = info.tts.voices.map((v) => ({ value: v.id, label: voiceLabel(v, getLocale()) }));
 			rows.push({ label: t('voice.tts_voice'), value: config.tts_voice ? optionLabel(config.tts_voice, voices) : t('voice.default') });
 		}
 		return rows;
@@ -227,10 +235,10 @@
 						class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 						<option value={undefined}>{t('voice.default')}</option>
 						{#each info.tts.voices as v (v.id)}
-							<option value={v.id}>{v.id}{v.language ? ' (' + v.language + ')' : ''}</option>
+							<option value={v.id}>{voiceLabel(v, getLocale())}</option>
 						{/each}
 					</select>
-					<span class="block text-xs text-text-muted mt-1">{t('voice.tts_voice_hint')}</span>
+					<span class="block text-xs text-text-muted mt-1">{fallbackHint}</span>
 				</label>
 			{/if}
 		</section>

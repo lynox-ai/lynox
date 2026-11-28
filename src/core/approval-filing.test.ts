@@ -156,7 +156,7 @@ describe('a plugin tool is never queueable', () => {
 describe('the danger check lets a queueable call of a filing run through, marked', () => {
   it('files the mail: the handler runs marked, asks nobody, and one entry waits', async () => {
     const seen = newSeen();
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     const agent = agentWith([mailTool(seen)], { promptUser });
     const result = await call(agent, 'mail_send', { to: 'bob@example.com', subject: 's', body: 'b' });
     expect(String(result.content)).toMatch(/^Queued for the owner's approval \(entry [0-9a-f-]{36}\)\. Nothing was sent\.$/);
@@ -170,7 +170,11 @@ describe('the danger check lets a queueable call of a filing run through, marked
     const agent = agentWith([mailTool(seen)], { approvalFiling: ctx({ rootRunId: 'root-9', threadId: 'th-1' }) });
     const result = await call(agent, 'mail_send', {});
     const id = /entry ([0-9a-f-]{36})/.exec(String(result.content))![1]!;
-    expect(store.get(id)!.origin).toEqual({ source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'root-9', threadId: 'th-1', afterUntrusted: false });
+    // The recipient is one the owner did not name (this agent knows none): the card says so.
+    expect(store.get(id)!.origin).toEqual({
+      source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'root-9', threadId: 'th-1', afterUntrusted: false,
+      targetOrigin: { unnamed: ['bob@example.com'], origin: { kind: 'unknown' } },
+    });
   });
 
   it('without a filing context the call is refused as today, and the handler does not run', async () => {
@@ -185,7 +189,7 @@ describe('the danger check lets a queueable call of a filing run through, marked
 
   it('without a filing context but with someone to ask, it asks as today', async () => {
     const seen = newSeen();
-    const promptUser = vi.fn(async () => 'Deny');
+    const promptUser = vi.fn(async () => 'deny');
     const agent = agentWith([mailTool(seen)], { approvalFiling: undefined, promptUser });
     const result = await call(agent, 'mail_send', {});
     expect(promptUser).toHaveBeenCalledTimes(1);
@@ -239,7 +243,7 @@ describe('the danger check lets a queueable call of a filing run through, marked
     // the call must be asked about, not let through to be filed.
     const seen = newSeen();
     const tool = { ...otherTool('note', seen), queueable: true, destructive: { mode: 'data', check: () => '' } } as unknown as ToolEntry;
-    const promptUser = vi.fn(async () => 'Deny');
+    const promptUser = vi.fn(async () => 'deny');
     const result = await call(agentWith([tool], { autonomy: 'guided', promptUser }), 'note', {});
     expect(promptUser).toHaveBeenCalledTimes(1);
     expect(String(result.content)).toBe('Permission denied by user: note');

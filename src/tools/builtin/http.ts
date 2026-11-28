@@ -1,21 +1,24 @@
 import type { ToolEntry } from '../../types/index.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent, type ConsentOutcome } from '../../core/consent-ask.js';
+import { HTTP_DIALOG, exfilWarning as exfilWarningText } from '../dialog-text.js';
 import { DEFAULT_MAX_TOOL_RESULT_CHARS } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
 import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
-import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
+import type { StoreRefreshOutcome } from '../../core/store-token-refresh.js';
+import { accessTokenKey, hasRevokedGrant, readersRefreshSlot, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
 // Not from `types/index.js`: `ApiProfile` is one of the exported types that
 // does not live in the barrel, which `CLAUDE.md` says to look for rather than
 // assume. The barrel import typechecks as a namespace and fails on the member.
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, PRESET_ID_PATTERN, builtInPresetOf, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, PRESET_ID_PATTERN, builtInPresetOf, retiredPresetIdOf, connectCallText, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { clientlessSlot, requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
+import { clientlessSlot, requestMatchesBase, secretsForProfile, sharesAnotherGrant, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
 import { outsideMemberNotes, refuseMemberConnection } from '../../core/member-connection-notes.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -39,18 +42,20 @@ import {
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
+import { toolWordFrame } from '../tool-words.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTargetOrigin, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
+import { CrossHostHopRefused, crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, overrideUnreadInPath, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, pathReadable, URL_MAX_BYTES, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_SET_UP, storeClearanceHeld, storeSetupRefusal } from '../../core/shopify-host.js';
+import { clearanceRefusalCause, clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_CLEARED, SHOPIFY_NOT_SET_UP, SHOPIFY_SELF_HOSTED, SHOPIFY_UNCONFIRMED, storeClearanceHeld, storeSetupRefusal, type StoreAttachRefusal } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
 import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
-import { hostTargets } from '../../core/send-target.js';
+import { carriesAddress, hostTargets } from '../../core/send-target.js';
 import { timingSafeEqual } from 'node:crypto';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -346,9 +351,17 @@ function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: st
         (mandate
           ? `Shorten it, or let this host's API profile attach the key.`
           : `Store a long key in the vault and send it as secret:NAME (the question shows it masked), let an API profile attach it, or put the value into the body.`);
+    case 'name-too-long':
+      // The same for owner and mandate: neither the vault nor the body shortens a name.
+      return `Blocked: this ${write} to ${service} sets a header whose name is ${u.length} characters long, more than the ${SHOWN_HEADER_MAX_CHARS} the approval question shows. Nothing was sent. Use the header name the service documents.`;
     case 'escaped-secret':
       return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Write the value plainly.`);
+    case 'unreadable':
+      // Refused for the owner too, unlike an unreadable body: a header the question cannot show was
+      // always refused, and enough headers before it would otherwise turn that refusal into a
+      // question that shows none of them.
+      return `Blocked: the headers of this ${write} to ${service} are too many or too heavily encoded for the approval question to check them for a stored secret. Nothing was sent. Send fewer headers, with plain values. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in ${service}.`;
     case 'secret-name':
       return `Blocked: this ${write} to ${service} sets a header whose name holds a stored secret. A header name is shown in the approval question as it is. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Put the secret in the value, as secret:NAME.`);
@@ -434,7 +447,7 @@ function onlyProfileQueryCredential(url: string, toolContext: ToolContext | unde
 const deniedInBatch = new WeakMap<object, Set<string>>();
 /** In-flight consent questions of a tool batch, keyed like `deniedInBatch`, by the question:
  *  parallel calls with the same question share one answer instead of asking twice. */
-const pendingInBatch = new WeakMap<object, Map<string, Promise<boolean>>>();
+const pendingInBatch = new WeakMap<object, Map<string, Promise<ConsentOutcome>>>();
 /** Write approvals given in a tool batch, keyed like `deniedInBatch`: per question, how many sends
  *  are left. An Allow adds as many as its question named and each send takes one, so an Allow
  *  never covers a call of another batch or a send more than it named. */
@@ -485,6 +498,18 @@ function sameTarget(a: string, b: string): boolean {
   const x = new URL(a);
   const y = new URL(b);
   return x.origin === y.origin && x.pathname === y.pathname && x.search === y.search;
+}
+
+/**
+ * The hops that answered before a redirect ride ended in an error, first to last: every request a
+ * server received, the first included. A refusal after one of them ends the call, and the call
+ * still counts the request a priced API answered (the cost in the `http_request` handler).
+ */
+const answeredHops = new WeakMap<object, readonly string[]>();
+
+/** {@link answeredHops} for an error a redirect ride threw; empty for any other. */
+export function answeredHopsOf(err: unknown): readonly string[] {
+  return typeof err === 'object' && err !== null ? answeredHops.get(err) ?? [] : [];
 }
 
 export async function fetchWithValidatedRedirects(
@@ -552,7 +577,8 @@ export async function fetchWithValidatedRedirects(
   // because the origin changed. The write was not sent there, and the response is that GET's —
   // unless a GET from there on carried an override (`sent.again.carried`), which a server may run.
   // `sent`: the write this call sent and a server answered, with a second sending on a redirect.
-): Promise<{ response: Response; finalUrl: string; writeFollowedAsRead?: string; sent?: SentWrite }> {
+  // `answered`: every hop a server answered, first to last, the final one included.
+): Promise<{ response: Response; finalUrl: string; answered: readonly string[]; writeFollowedAsRead?: string; sent?: SentWrite }> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   const originalMethod = method;
@@ -582,6 +608,8 @@ export async function fetchWithValidatedRedirects(
   // yet and carries no write of its own: only a failure there is one where the write "was not
   // sent". A failure further on, or on a hop that kept an override, is worded without it.
   let unansweredDowngrade: string | undefined;
+  // Every hop a server answered, for the error that ends the ride (`answeredHopsOf`).
+  const answered: string[] = [];
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
     try {
@@ -601,6 +629,7 @@ export async function fetchWithValidatedRedirects(
       // A hop to a store, from a request that was not one, is a redirect the engine does not follow.
       if (redirects > 0 && pass === undefined) refuseRedirectToStore(currentUrl);
       const response = await fetchPinned(currentUrl, requestInit, pass);
+      answered.push(currentUrl);
       sent ??= ownWrite ?? overrideHop;
       if (pendingAgain !== undefined && sent !== undefined) sent = { ...sent, again: pendingAgain };
       if (pendingAgain !== undefined) onSendAgain?.({ ...pendingAgain, answered: true });
@@ -611,6 +640,7 @@ export async function fetchWithValidatedRedirects(
         return {
           response,
           finalUrl: currentUrl,
+          answered: [...answered],
           ...(writeFollowedAsRead === undefined ? {} : { writeFollowedAsRead }),
           ...(sent === undefined ? {} : { sent }),
         };
@@ -719,8 +749,11 @@ export async function fetchWithValidatedRedirects(
       // Anything else that ends the call after a write was answered (the next host's policy, the
       // network, a redirect without a target) ends it with the note as well: the generic error
       // alone reads as "nothing happened". An abort is the caller's own limit and keeps its form.
+      if (answered.length > 0 && typeof err === 'object' && err !== null) answeredHops.set(err, [...answered]);
       if (sent === undefined || err instanceof RedirectRefusedAfterWrite || init.signal?.aborted === true) throw err;
-      throw new RedirectRefusedAfterWrite(sent, sent.via === undefined ? unansweredDowngrade : undefined, 'failed', err);
+      const failed = new RedirectRefusedAfterWrite(sent, sent.via === undefined ? unansweredDowngrade : undefined, 'failed', err);
+      answeredHops.set(failed, [...answered]);
+      throw failed;
     }
   }
 
@@ -1013,7 +1046,9 @@ export function detectSecretInContent(content: string): string | null {
   return null;
 }
 
-const BASE64_RUN = /[A-Za-z0-9+/=]{64,}/;
+/** The two shapes of a GET query the exfiltration check flags; exported so a measurement can use the same values. */
+export const GET_QUERY_MAX_CHARS = 500;
+export const BASE64_RUN = /[A-Za-z0-9+/=]{64,}/;
 
 /** A run of 64+ base64 characters that mixes upper case, lower case and digits. */
 function hasBase64ShapedRun(text: string): boolean {
@@ -1030,7 +1065,7 @@ function detectGetExfiltration(url: string): string | null {
     // Flag query strings >500 chars (heuristic for encoded data exfil), measured on the query
     // as sent: percent-decoding only ever shortens a string (each `%XX` becomes one character or
     // one byte), so the form as sent is the upper bound and the conservative one to measure.
-    if (parsed.search.length > 500) {
+    if (parsed.search.length > GET_QUERY_MAX_CHARS) {
       return 'suspiciously long query string (>500 chars, possible data exfiltration)';
     }
     // Detect base64-looking blobs in URL params — in the query as sent, and in the forms
@@ -1077,6 +1112,19 @@ interface AttachedAuth {
    * refuses the store without it.
    */
   pass?: StorePass | undefined;
+  /**
+   * For a request to a store whose token expires: renews this profile's token once, after the
+   * store answered 401 to it (`store-token-refresh.ts`), with the vault view this attach read it
+   * through. True when a new token is stored. Absent for any other request.
+   */
+  renew?: (() => Promise<StoreRefreshOutcome>) | undefined;
+  /**
+   * With a refusal of a store connection whose token expires: why only connecting the store again
+   * helps. `ended`: the store refused the refresh, or the refresh ended the connection;
+   * `client-misnamed`: the app's client is not under the provider's vault names. A bulk run halts
+   * on it with a reason of its own.
+   */
+  reconnect?: 'ended' | 'client-misnamed' | undefined;
   /**
    * The profile whose credential filled {@link slot}: set with it and only with it. For an
    * oauth2 profile it is read after the renewal, in the same synchronous stretch as the token
@@ -1255,19 +1303,75 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
 }
 
 /**
+ * The way forward for a profile whose renewal would swap a user's authorization for an app token,
+ * as one sentence: `fetch_token` ends with it, and so does the 401 reminder of a built-in
+ * provider's profile, so the two never name different ways for the same profile.
+ * `preset` is the profile's built-in provider, or undefined.
+ */
+export function delegatedRenewalWay(profile: ApiProfile, preset: OAuthPreset | undefined, apiStore: Parameters<typeof sharesAnotherGrant>[0] | undefined): string {
+  return DELEGATED_RENEWAL_WAYS[delegatedRenewalKind(profile, preset, apiStore)](profile.id);
+}
+
+const DELEGATED_RENEWAL_WAYS = {
+  owner: (): string => 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.',
+  shares: (): string => 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.',
+  // The connect call is worded by `connectCallText`, as everywhere that sends the model there.
+  removeFirst: (id: string): string => `Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, ${connectCallText(id)} While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.`,
+  connect: (id: string): string => `To connect it, ${connectCallText(id)}`,
+} as const;
+
+function delegatedRenewalKind(profile: ApiProfile, preset: OAuthPreset | undefined, apiStore: Parameters<typeof sharesAnotherGrant>[0] | undefined): keyof typeof DELEGATED_RENEWAL_WAYS {
+  if (preset === undefined) return 'owner';
+  // A preset profile that reads its refresh token from a name of its own: a connect stores the
+  // token under the derived name and, since this profile does not read that one, leaves it
+  // without a grant type again (`readersRefreshSlot`, the OAuth callback). Sending it to
+  // connect alone would bring it back here; the field has to go first. Unless the slot is
+  // another profile's grant this one shares through the same provider: that sharing is on
+  // purpose, and what it lacks is the grant type, not a connection of its own.
+  const ownReadSlot = readersRefreshSlot(profile) !== refreshTokenKey(profile.id);
+  if (ownReadSlot && apiStore !== undefined && sharesAnotherGrant(apiStore, profile)) return 'shares';
+  return ownReadSlot ? 'removeFirst' : 'connect';
+}
+
+/**
+ * The 401 reminder of a built-in provider's profile whose renewal would swap a user's grant:
+ * the way {@link delegatedRenewalWay} names, and, where that way ends in connect, what to
+ * make of connect calling the profile connected. Only here, not in fetch_token: fetch_token can be
+ * called with no 401 before it, and "just refused" would be false there.
+ */
+export function presetDelegatedReminder(profile: ApiProfile, preset: OAuthPreset, apiStore: Parameters<typeof sharesAnotherGrant>[0] | undefined): string {
+  const kind = delegatedRenewalKind(profile, preset, apiStore);
+  const afterConnect = kind === 'connect' || kind === 'removeFirst'
+    ? ' If connect answers that this profile is already connected, that is the token this API just refused: show the user the link from that answer. Do not offer to renew the token instead; fetch_token refuses for this profile.'
+    : '';
+  return `\n\n**[Agent reminder: OAuth2 401, and fetch_token is the wrong move here]**\nThis URL maps to api_profile "${profile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do not call api_setup fetch_token for it as the profile stands, and change nothing on the profile beyond the step below. ${DELEGATED_RENEWAL_WAYS[kind](profile.id)}${afterConnect} The engine has written the details to its log.`;
+}
+
+/**
+ * The 401 reminder of a profile set up through a provider this engine no longer has
+ * (`retiredPresetIdOf`): nothing renews its token here, and nothing on the profile changes that.
+ * Only the profile id is named; the store pins its shape.
+ */
+export function retiredProviderReminder(profileId: string): string {
+  return `\n\n**[Agent reminder: OAuth2 401, and this connection cannot be renewed here]**\nThis URL maps to api_profile "${profileId}". It was set up through a built-in provider this engine no longer has, so no token is requested for it: do not call api_setup fetch_token or connect for it, and do not edit the profile to make a renewal pass. Tell the user. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+}
+
+/**
  * Did a USER give this grant, so that an app-level token would replace their consent?
  *
  * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
  * writes it; an incoming value is discarded on create and update) and a BUILT-IN preset
- * (`builtInPresetOf`: an oauth2 profile whose `auth.oauth.preset_id` the register knows): the built-in presets are
+ * (`builtInPresetOf`: an oauth2 profile whose `auth.oauth.preset_id` the register knows, or `retiredPresetIdOf`:
+ * one this engine once shipped): the built-in presets are
  * authorization-code flows, and the preset also marks a profile that re-entered the store
  * without its grant record (a JSON in the apis directory). A preset whose provider issues
  * app tokens would be refused here too, so adding one means revisiting this.
  *
- * ⚠ Known presets only. A profile may be saved naming a provider this engine does not have
- * (the save only notes it), and `connect` refuses such a profile — so reading any
- * `preset_id` as a user's consent would refuse an app-only profile's exchange and send it
- * to a `connect` that cannot run.
+ * ⚠ Known presets only, and the ones this engine once shipped (`retiredPresetIdOf`): a
+ * provider removed from the register leaves profiles whose grant a user gave through it.
+ * A profile may be saved naming a provider this engine never had (the save only notes it),
+ * and `connect` refuses such a profile — so reading any `preset_id` as a user's consent
+ * would refuse an app-only profile's exchange and send it to a `connect` that cannot run.
  *
  * ⚠ NOT "has an `oauth_grant`": `fetch_token` writes one after every successful exchange,
  * app-only profiles included (`written`, `connected_by`), and the renewal on attach runs the
@@ -1282,7 +1386,7 @@ export function oauthGrantIsUserDelegated(profile: {
   oauth_grant?: { origin?: 'callback' | undefined } | undefined;
 }): boolean {
   if (profile.oauth_grant?.origin === 'callback') return true;
-  return builtInPresetOf(profile) !== undefined;
+  return builtInPresetOf(profile) !== undefined || retiredPresetIdOf(profile) !== undefined;
 }
 
 /**
@@ -1368,6 +1472,15 @@ export function oauthProfileMayBeRenewedUnattended(
 }
 
 /**
+ * The sentence a delegated 401 reminder ends with when the token went out as `Authorization: Bearer`:
+ * shared by {@link oauth401Reminder} and a built-in provider's reminder, so both say it alike.
+ * A choice between constants on `auth.header_name`; no part of its value reaches the text.
+ */
+export function oauth401DelegatedHeaderHint(profile: { auth?: { header_name?: string | undefined } | undefined }): string {
+  return typeof profile.auth?.header_name !== 'string' || profile.auth?.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : '';
+}
+
+/**
  * The reminder appended to a 401 from an OAuth2 api_profile, outside the untrusted-data wrap
  * (see the call site for why it is fixed text with the profile id as its only interpolation).
  * `wouldSwap` is {@link oauthFetchTokenWouldSwapDelegatedAccess} for this profile. Exported so a
@@ -1375,7 +1488,7 @@ export function oauthProfileMayBeRenewedUnattended(
  */
 export function oauth401Reminder(profile: { id: string; auth?: { header_name?: string | undefined } | undefined }, wouldSwap: boolean): string {
   return wouldSwap
-    ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${profile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.${typeof profile.auth?.header_name !== 'string' || profile.auth?.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`
+    ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${profile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.${oauth401DelegatedHeaderHint(profile)}`
     : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${profile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${profile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (TikTok and others) don't expose long-lived tokens there anymore.${typeof profile.auth?.header_name !== 'string' || profile.auth?.header_name.toLowerCase() === 'authorization' ? '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Check the API\'s docs and set `auth.header_name` on this profile.' : ''}`;
 }
 
@@ -1562,7 +1675,7 @@ export type DeclinedFact =
        *  user's authorization issues — the reason the gate refuses it (`oauthGrantIsUserDelegated`).
        *  `none`: neither. */
       readonly consent: 'callback' | 'preset' | 'none';
-      /** The built-in provider's id, set only with `preset`; it is one of the register's own ids. */
+      /** The built-in provider's id, set only with `preset`; it is one of the register's own ids or a retired one. */
       readonly preset: string | undefined;
     }
   | { readonly kind: 'grant'; readonly named: string | undefined; readonly runnable: boolean }
@@ -1586,12 +1699,13 @@ export function declinedFacts(
   const rawSlot: unknown = profile.auth?.oauth?.refresh_token_key;
   const slot = typeof rawSlot === 'string' ? rawSlot : derived;
   const state = profile.oauth_grant?.state;
-  const preset = builtInPresetOf(profile);
+  // A provider this engine once shipped refuses for the same reason as one it has.
+  const presetId = builtInPresetOf(profile)?.id ?? retiredPresetIdOf(profile);
   return [
     profile.oauth_grant?.origin === 'callback'
       ? { kind: 'consent', consent: 'callback', preset: undefined }
-      : preset !== undefined
-        ? { kind: 'consent', consent: 'preset', preset: preset.id }
+      : presetId !== undefined
+        ? { kind: 'consent', consent: 'preset', preset: presetId }
         : { kind: 'consent', consent: 'none', preset: undefined },
     { kind: 'grant', named, runnable: named === undefined || named === 'refresh_token' || named === 'client_credentials' },
     { kind: 'slot', slot, derived, diverges: slot !== derived },
@@ -2082,7 +2196,10 @@ function storePassPrecheck(url: string, headers: Record<string, string>, toolCon
     if (QUERY_CREDENTIAL.test(name)) return 'a request to a Shopify store may not carry a credential in its address. Remove it; the engine attaches the store connection itself.';
   }
   for (const name of Object.keys(headers)) {
-    if (STORE_CREDENTIAL_HEADERS.has(name.toLowerCase())) return `a request to a Shopify store may not carry a credential header of its own (${shapedForLog(name, DERIVED_NAME_SHAPE, 60)}). Remove it; the engine attaches the store connection itself.`;
+    // The name printed is the entry of the fixed set it matched, never the model's own spelling:
+    // a header name the set does not hold never reaches this text.
+    const known = name.toLowerCase();
+    if (STORE_CREDENTIAL_HEADERS.has(known)) return `a request to a Shopify store may not carry a credential header of its own (${known}). Remove it; the engine attaches the store connection itself.`;
   }
   return storeClearanceHeld(toolContext!);
 }
@@ -2150,6 +2267,24 @@ async function mintStorePassFor(
 
 const CONTAINMENT_UNWRITABLE = 'this engine could not record that this chat or run reads the store, so nothing was sent to the store. Try again later.';
 
+/** The store refusals a bulk run halts on by name, keyed by their text (each one constant). */
+const STORE_ATTACH_REFUSALS: ReadonlyMap<string, StoreAttachRefusal> = new Map<string, StoreAttachRefusal>([
+  [SHOPIFY_SELF_HOSTED, 'shopifySelfHosted'],
+  [SHOPIFY_NOT_SET_UP, 'shopifyNotSetUp'],
+  [SHOPIFY_UNCONFIRMED, 'shopifyUnconfirmed'],
+  [SHOPIFY_NOT_CLEARED, 'shopifyNotCleared'],
+  [CONTAINMENT_UNWRITABLE, 'containmentUnwritable'],
+]);
+
+/**
+ * The cause behind a refusal of {@link attachEngineManagedAuth}, when it is one of the store's
+ * own: compared to the whole text, with or without the `Error: ` the refusal carries. Null for
+ * any other refusal (no connection, a credential of the request's own, a profile's).
+ */
+export function storeAttachRefusal(refusal: string): StoreAttachRefusal | null {
+  return STORE_ATTACH_REFUSALS.get(refusal.startsWith('Error: ') ? refusal.slice('Error: '.length) : refusal) ?? null;
+}
+
 /**
  * Whether the switch of {@link storeExchangePassFor}'s step 0 is on, read at each call. The one
  * reading of it: the exchange asks it, and so does the session that decides whether the system
@@ -2162,9 +2297,16 @@ export function shopifyExchangeSwitchOn(): boolean {
 }
 
 /**
+ * Why {@link storeExchangePassFor} minted no pass, for the connect callback's page: the switch is
+ * off, a self-hosted instance, a managed one that misses a part, the control plane did not answer
+ * or refused, or the callback, its token URL and the profile on the host are not one store.
+ */
+export type StoreExchangeRefusal = 'switched_off' | 'self_hosted' | 'not_set_up' | 'unconfirmed' | 'not_cleared' | 'not_this_store';
+
+/**
  * The token exchange's pass (PRD Appendix B4), for the connect callback alone, once the store's
- * signature on the callback held (`callback`). `undefined` when any condition fails; the
- * exchange is then refused as before. In this order:
+ * signature on the callback held (`callback`). When any condition fails, the cause instead
+ * ({@link StoreExchangeRefusal}), and the exchange is then refused as before. In this order:
  *  0. the switch `LYNOX_SHOPIFY_EXCHANGE` is on (`1` or `true`); off by default;
  *  1. a provisioned managed instance, with the clearance and the store binding;
  *  2. the shell-exec sidecar;
@@ -2182,18 +2324,19 @@ export async function storeExchangePassFor(
   tokenUrl: string,
   body: string,
   toolContext: ToolContext | undefined,
-): Promise<StorePass | undefined> {
-  if (!shopifyExchangeSwitchOn()) return undefined;
-  if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return undefined;
-  if (toolContext.shellIsolation.kind !== 'sidecar') return undefined;
+): Promise<StorePass | StoreExchangeRefusal> {
+  if (!shopifyExchangeSwitchOn()) return 'switched_off';
+  if (controlPlaneFromEnv() === null) return 'self_hosted';
+  if (!toolContext?.exactClearance || !toolContext.storeBindingDigest) return 'not_set_up';
+  if (toolContext.shellIsolation.kind !== 'sidecar') return 'not_set_up';
   let parsed: URL;
-  try { parsed = new URL(tokenUrl); } catch { return undefined; }
+  try { parsed = new URL(tokenUrl); } catch { return 'not_this_store'; }
   const origin = storeOriginOf(parsed);
-  if (origin === null || origin !== callback.origin || parsed.pathname !== STORE_EXCHANGE_PATH || parsed.href.includes('?')) return undefined;
+  if (origin === null || origin !== callback.origin || parsed.pathname !== STORE_EXCHANGE_PATH || parsed.href.includes('?')) return 'not_this_store';
   const profile = toolContext.apiStore?.getByHostname(parsed.hostname);
-  if (profile === undefined || profile.id !== callback.profileId || presetStoreHost(profile) !== normalizeHostForMatch(parsed.hostname)) return undefined;
+  if (profile === undefined || profile.id !== callback.profileId || presetStoreHost(profile) !== normalizeHostForMatch(parsed.hostname)) return 'not_this_store';
   const clearance = await toolContext.exactClearance.ensure();
-  if (!clearance.ok) return undefined;
+  if (!clearance.ok) return clearanceRefusalCause(clearance.reason, toolContext.exactClearance.heldRefusal());
   return mintStoreExchangePass(origin, body);
 }
 
@@ -2374,6 +2517,13 @@ async function attachEngineManagedAuth(
       const refreshKey = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
       const current = secretStore.resolve(refreshKey);
       if (current === null || tokenFingerprint(current) === profile.oauth_grant?.revoked_fp) {
+        // A provider this engine once shipped: neither a new consent nor a pasted token renews
+        // it here, so the refusal names the way that exists (the 401 reminder's, as fixed text).
+        // Its one value is the profile id, which the store admits only in its pinned shape
+        // (`PROFILE_ID_PATTERN`, at save and at load); nothing the provider sent goes in.
+        if (retiredPresetIdOf(profile) !== undefined) {
+          return { refusal: `Error: the provider rejected the stored refresh token of api_profile "${profile.id}" as revoked or expired, and this profile was set up through a built-in provider this engine no longer has, so it cannot be renewed here. Do not ask the user for a token, and do not call api_setup fetch_token or connect for it. Tell the user. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.` };
+        }
         // Both values are profile-controlled and this refusal is the model's to read,
         // outside the untrusted-data wrap: `revokedGrantMessage` shapes them, for this
         // caller and for `fetch_token` alike.
@@ -2383,7 +2533,7 @@ async function attachEngineManagedAuth(
           refreshTokenKey(profile.id),
           profile.oauth_grant?.revoked_at,
           OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '') !== undefined,
-        ) };
+        ), reconnect: attachPreset?.expiringParam !== undefined && attachPreset.apiOnDerivedHost === true ? 'ended' : undefined };
       }
     }
     // Profile drives — the agent should NOT have to remember which vault key holds
@@ -2427,11 +2577,21 @@ async function attachEngineManagedAuth(
     // `secretAccess` audit event in the real store, so the swap buys three vault
     // reads of a credential on a request that was never going to be sent.
     const expiresAt = profile.auth?.oauth?.token_expires_at;
-    // A store preset's token is never renewed here (B3): only the callback mints it, and it
-    // binds it to the store there. A renewal would replace a bound token with an unbound one.
-    // Asked before the refresh slot is read, so a store connection costs no vault read for it.
+    // A store preset's token is never renewed by the exchange below (B3): only the callback mints
+    // it, and it binds it to the store there. A store whose tokens expire is refreshed in the
+    // engine instead (`store-token-refresh.ts`), under a pass that only a connection whose binding
+    // holds gets, and the refresh binds the new token again. Asked before the refresh slot is
+    // read, so a store connection costs no vault read for the exchange's checks.
     if (attachPreset?.apiOnDerivedHost === true && typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
-      process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
+      if (attachPreset.expiringParam !== undefined && toolContext !== undefined) {
+        const { refreshStoreToken, storeClientMisnamedText } = await import('../../core/store-token-refresh.js');
+        const outcome = await refreshStoreToken(profile.id, 'due', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
+        // Named, not silent: a token that cannot be renewed for this reason would fail on its own
+        // within minutes, with nothing to say why.
+        if (outcome === 'client-misnamed') return { refusal: `Error: ${storeClientMisnamedText(profile.id, false)}`, reconnect: 'client-misnamed' };
+      } else {
+        process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
+      }
     } else if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
       // Asked HERE rather than inside the renewal because only this scope can
       // answer the second argument: whether the vault actually holds a refresh
@@ -2510,10 +2670,14 @@ async function attachEngineManagedAuth(
       // Step 7: the token in the slot is the one the callback bound to this profile and store.
       const storeHost = presetStoreHost(profile);
       const origin = storeHost === null ? null : `https://${storeHost}`;
-      const bound = profile.oauth_grant?.store_binding;
+      // From the profile as read after the refresh above, with the token: a refresh binds its new
+      // token in the same save, and the profile this attach began with still holds the old binding.
+      const bound = held.oauth_grant?.store_binding;
       const digest = origin === null ? null : toolContext?.storeBindingDigest?.(profile.id, origin, resolved) ?? null;
       if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
-        return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".` };
+        // An expiring connection whose binding a refresh took away ended there: a bulk run says so.
+        const ended = typeof bound !== 'string' && attachPreset?.expiringParam !== undefined && (held.oauth_grant?.state === 'refresh-dead' || typeof held.auth?.oauth?.token_expires_at === 'number');
+        return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".`, reconnect: ended ? 'ended' : undefined };
       }
       // Step 6b, the containment and the pass: after every refusal above, so a request refused
       // there records nothing and contains nothing (`mintStorePassFor`). The pass's own checks
@@ -2521,7 +2685,13 @@ async function attachEngineManagedAuth(
       // they refuse has contained the chat without anything sent, the safe direction.
       const minted = await mintStorePassFor(toolContext!, container, { kind: 'api', connectionId: profile.id }, origin, oauthSlot, oauthValue);
       if ('refusal' in minted) return { refusal: `Error: ${minted.refusal}` };
-      return { ...put(oauthSlot, oauthValue), pass: minted.pass };
+      const renew = attachPreset?.expiringParam !== undefined && toolContext !== undefined
+        ? async (): Promise<StoreRefreshOutcome> => {
+          const { refreshStoreToken } = await import('../../core/store-token-refresh.js');
+          return refreshStoreToken(profile.id, 'unauthorized', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
+        }
+        : undefined;
+      return { ...put(oauthSlot, oauthValue), pass: minted.pass, renew };
     }
     return put(oauthSlot, oauthValue);
   }
@@ -2936,6 +3106,8 @@ function slotReachRefusal(profileId: string, name: string, hostname: string, cli
  * path is not repeated; the model wrote it and knows it.
  */
 function storePathRefusal(profile: ApiProfile, url: string): string | null {
+  // Deliberately keyed on preset_id alone, not on `builtInPresetOf`: it refuses also where auth is
+  // not oauth2. The sole caller sits inside the oauth2 branch; a new caller errs toward refusing.
   const preset = OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '');
   const prefix = preset?.apiPathPrefix;
   if (preset === undefined || prefix === undefined) return null;
@@ -2998,6 +3170,17 @@ function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes
 }
 
 /** The profile of `url`'s host when it has a cost; `undefined` for any other URL. */
+/** The priced profile of the last hop in `hops` that has one: the API a redirect ride reached
+ *  last, which the call counts when the final answer came from elsewhere. */
+function lastPricedHop(hops: readonly string[] | undefined, toolContext: ToolContext | undefined): ApiProfile | undefined {
+  const list = hops ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const profile = apiProfileOfUrl(list[i]!, toolContext);
+    if (profile !== undefined) return profile;
+  }
+  return undefined;
+}
+
 function apiProfileOfUrl(url: string, toolContext: ToolContext | undefined): ApiProfile | undefined {
   try {
     const profile = toolContext?.apiStore?.getByHostname(new URL(url).hostname);
@@ -3131,8 +3314,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   // not. Declaring it here a second time is what let the two drift.
   undo: (input) => undoClassFor(input.method ?? 'GET'),
   outwardWrite: (input) => httpOutwardWrite(input),
-  // A write sends to the host of its URL. A read (GET, HEAD) declares no target here.
+  // A write sends to the host of its URL. A read (GET, HEAD) declares no target here: once foreign
+  // content is in the conversation, its URL can carry data out like a page read's, and it goes
+  // through the same origin check (`sendTargetsWhenLatched`). Its headers and body can carry data
+  // too, so only a read without them can pass as an address a search listed (`readAddress`).
   sendTargets: (input) => (httpOutwardWrite(input) === null ? null : hostTargets(input.url)),
+  sendTargetsWhenLatched: (input) => (httpOutwardWrite(input) === null ? hostTargets(input.url) : null),
+  // Only a read reaches this (a write declares its own `sendTargets`), with or without headers.
+  readCarriesAddress: (input) => carriesAddress(input.url),
+  readAddress: (input) => (httpOutwardWrite(input) === null && Object.keys(input.headers ?? {}).length === 0 && (input.body ?? '') === '' ? input.url : null),
   // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
   outwardRead: (input) => {
     const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
@@ -3149,7 +3339,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // route it described now stops at a consent step this text cannot grant. A
     // wrong instruction is worse than none; naming a new one is a decision about
     // who may give that consent, and that decision is not this file's to make.
-    description: `Make an HTTP request to a specific API endpoint. Use for authenticated APIs, custom endpoints, or structured data fetching. For general web search or reading public pages, use web_research instead. Capped at ${MAX_REQUESTS_PER_SESSION} per conversation, shared with sub-agents (so splitting into sub-agents buys nothing).`,
+    description: `Make an HTTP request to a specific API endpoint. Use for authenticated APIs, custom endpoints, or structured data fetching. For general web search or reading public pages, use web_research instead. For an API profile with auth bearer, header or oauth2, the engine attaches its credential (and renews an oauth2 token when it can): write no auth header, secret: reference or token request for it. Capped at ${MAX_REQUESTS_PER_SESSION} per conversation, shared with sub-agents (so splitting into sub-agents buys nothing).`,
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -3201,6 +3391,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
+    // A URL past the bound is refused before the handler parses or reads it: the gates parse it on
+    // every call site, and the question reads its path in every way a server may decode it
+    // too. The guard hooks (outwardWrite, outwardRead) parse it before this, linearly and within
+    // the reading budget. Measured on the URL as given, in bytes.
+    const urlBytes = typeof input.url === 'string' ? sentBytes(input.url) : 0;
+    if (urlBytes > URL_MAX_BYTES) {
+      blockedVerbatim(`Blocked: the URL of this request is ${urlBytes} bytes, longer than the ${URL_MAX_BYTES} bytes a request may have. Nothing was sent. Send fewer values in the URL, or put them in the body where the service accepts them there, or split the work into several requests.`);
+    }
+
     // Per-API rate limiting + profile enforcement (from API Store)
     if (toolContext?.apiStore && toolContext.apiStore.size > 0) {
       try {
@@ -3248,11 +3447,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // request carries (`outbound-write.ts`). It is what is sent that stays `method`; every gate
     // below that asks "is this a write, and which one" reads `gatedMethod`.
     const effective = effectiveWriteMethod(method, headers, input.url, gateBodyReadings(input.body, headers));
-    if (effective === null) {
-      // The value is not repeated: it is whatever the request put there.
-      blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header, or a `_method` query parameter or body field), is not an HTTP method. Send the request with a method name, or without the override.');
-    }
-    const gatedMethod = effective;
     // The write as the refusals below name it: with every write an override names, not only the
     // one it is gated as (`writeForNote`).
     // The service these refusals name, as the question and the gate's refusals do (`approvalOrigin`):
@@ -3273,6 +3467,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         || hostShowsStoredValue(input.url, maskOf);
     };
     const service = (): string => (hostHoldsSecret() ? 'this service' : approvalOrigin(new URL(input.url)));
+    if (effective === null) {
+      // A path too costly to read may hide an override: named as such, since the request may carry
+      // none. The method is named only when it is one (`overrideUnreadInPath`), and the URL then parses.
+      if (overrideUnreadInPath(method, input.url)) {
+        blockedVerbatim(`Blocked: the path of this ${method.trim().toUpperCase()} to ${service()} is too long to check for a method override. Nothing was sent. Send it with a shorter path or with fewer percent-encoded characters in it.`);
+      }
+      // The value is not repeated: it is whatever the request put there.
+      blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header, or a `_method` query parameter or body field), is not an HTTP method. Send the request with a method name, or without the override.');
+    }
+    const gatedMethod = effective;
     const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
     // The approval and the outbound-effect table are keyed by the URL's host. A header a
     // server or proxy routes on instead (`Host`, `X-Forwarded-Host`, `X-Original-URL`, …)
@@ -3496,12 +3700,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         if (!agent.promptUser) {
           blockedVerbatim(`Blocked: ${exfilWarning}`);
         }
+        const language = agent.dialogLanguage ?? 'en';
         const answer = await agent.promptUser(
-          pv`⚠ http_request: ${exfilWarning} — Allow?`,
-          ['Allow', 'Deny', '\x00'],
+          HTTP_DIALOG[language].exfil(toolWordFrame('http_request', language), exfilWarningText(exfilWarning, language)),
+          consentOptions('guard'),
+          consentMeta('guard'),
         );
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          blockedVerbatim(`Blocked: ${exfilWarning} — denied by user.`);
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          blockedVerbatim(consentRefusal(outcome, `Blocked: ${exfilWarning} — denied by user.`));
         }
       }
     }
@@ -3776,9 +3983,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const sentQuery = new URL(input.url).search;
         const querySize = sentBytes(sentQuery.slice(1));
         const query = sentQuery === '' || querySize > SHOWN_BODY_MAX_BYTES ? undefined : queryForQuestion(sentQuery, mask);
+        const said = HTTP_DIALOG[agent.dialogLanguage ?? 'en'];
         const queryBlock = sentQuery === '' ? pv``
-          : query === undefined ? pv` The query (${querySize} bytes) is too large to show; the path above names its keys, cut short where it is long.`
-            : pv`${onBoxBlock(query.text)}${query.secret ? pv` A stored secret is sent in this query; it is shown masked (***).` : pv``}`;
+          : query === undefined ? said.queryTooLarge(querySize)
+            : query.unreadable ? said.queryUnreadable
+              : pv`${onBoxBlock(query.text)}${query.secret ? said.querySecret : pv``}`;
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
         // N12-4 (2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
@@ -3824,7 +4033,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const pathSecret = mandate && pathHoldsSecret(pathOnly.href, mask);
           // The host goes out in DNS and TLS and is named in the question unmasked (`hostHoldsSecret`).
           const hostSecret = mandate && hostHoldsSecret();
-          const refusal = bodyGoesOut && shown === undefined
+          // A part too costly to read for the question (`READING_BUDGET_CHARS`) may hide a stored
+          // secret no one can see: refused like one, with its own way out.
+          const unreadablePart = shown !== undefined && 'unshowable' in shown && shown.unshowable === 'unreadable' ? 'body'
+            : query?.unreadable === true ? 'query'
+              // The URL as the question reads it: the path with the query's keys (`pathForQuestion`).
+              : !pathReadable(input.url, mask) ? 'path'
+                : undefined;
+          const refusal = unreadablePart !== undefined
+            ? `Blocked: the ${unreadablePart} of this ${refusedAs} to ${service()} has too many percent-encoded characters for the approval question to check it for a stored secret. Nothing was sent. Send the values as plain text where the service accepts that, or fewer of them per request. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in ${service()}.`
+            : bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
               ? `Blocked: the body of this ${refusedAs} to ${service()} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
               : `Blocked: the body of this ${refusedAs} to ${service()} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`)
@@ -3859,13 +4077,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
         // The headers' names leave the box with the question; their values stay on it, like the body's.
         const headersBlock = 'lines' in askedHeaders && askedHeaders.lines.length > 0
-          ? pv` It sets the headers ${askedHeaders.names.join(', ')}.${onBoxBlock(askedHeaders.lines.join('\n'))}`
+          ? said.headers(askedHeaders.names.join(', '), onBoxBlock(askedHeaders.lines.join('\n')))
           : pv``;
         const bodyBlock = shown !== undefined && 'text' in shown
           ? onBoxBlock(shown.text)
           : !bodyGoesOut ? pv``
-            : shown !== undefined ? pv` The body holds a stored secret and is not shown.`
-              : pv` The body (${bodySize} bytes) is too large to show; its field names are listed.`;
+            : shown !== undefined && 'unshowable' in shown && shown.unshowable === 'unreadable' ? said.bodyUnreadable
+              : shown !== undefined ? said.bodySecret
+              : said.bodyTooLarge(bodySize);
         // Parallel calls of the same batch with the SAME question share one answer, and an Allow
         // sends that write as many times as the question named: the number of calls that are this
         // same call. A call that only asks the same question (the same write, written another way)
@@ -3899,23 +4118,23 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // How far an Allow reaches, or why this write is asked every time. Engine text, so
             // spliced in as frame (a nested `pv`), never as a value.
             const note = remembers
-              ? (twins === 1
-                ? pv` Allowing sends this request once, now; it will ask again next time.`
-                : pv` This step makes the same request ${String(twins)} times; allowing sends all ${String(twins)} now, and it will ask again next time.`)
-              : outboundEffect ? pv` This sends or issues something and is asked every time.`
-                : gatedMethod === 'DELETE' ? pv` A DELETE is asked every time.`
-                  : connectedAccount ? pv` A write to a connected account is asked every time.`
-                  : pv` In this session every write is asked.`;
+              ? (twins === 1 ? said.noteOnce : said.noteTwins(String(twins)))
+              : outboundEffect ? said.noteEffect
+                : gatedMethod === 'DELETE' ? said.noteDelete
+                  : connectedAccount ? said.noteConnected
+                  : said.noteSession;
             // What goes on the wire when an override names other methods: a server may run any of
             // them, so the question names them all.
             const alsoNamed = named.filter((m) => m !== sentMethod);
             const sentNote = alsoNamed.length === 0 ? pv``
-              : pv` It is sent as a ${sentMethod} that also names ${alsoNamed.join(', ')}; a server may run any of these.`;
+              : said.sentNote(sentMethod, alsoNamed.join(', '));
             const answer = await promptUser(
-              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`,
-              ['Allow', 'Deny', '\x00'],
+              HTTP_DIALOG[agent.dialogLanguage ?? 'en'].outbound(toolWordFrame('http_request', agent.dialogLanguage ?? 'en'), gatedMethod, hostname, path, fields, pv`${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`),
+              consentOptions('guard'),
+              consentMeta('guard'),
             );
-            const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
+            const outcome = decideConsent('guard', answer);
+            const allowed = outcome === 'allow';
             if (remembers && allowed && batch !== undefined) {
               let tickets = approvedInBatch.get(batch);
               if (!tickets) { tickets = new Map(); approvedInBatch.set(batch, tickets); }
@@ -3930,13 +4149,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               // Each write the request named, so a later request naming any of them is not asked.
               for (const m of named) denied.add(approvalKey(approvalMethod(m), hostname));
             }
-            return allowed;
+            // The outcome, not a yes/no: a twin awaiting this same question is told why, too.
+            return outcome;
           }).finally(() => { if (shareKey !== undefined) pendingMap?.delete(shareKey); });
           if (shareKey !== undefined) pendingMap?.set(shareKey, pending);
         }
-        const allowed = await pending;
-        if (!allowed) {
-          blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} denied by user.`);
+        const outcome = await pending;
+        if (outcome !== 'allow') {
+          blockedVerbatim(consentRefusal(outcome, `Blocked: outbound ${refusedAs} to ${service()} denied by user.`));
         }
         // Outside a batch, and for a write asked every time, the answer covers this call alone.
         if (!remembers || batch === undefined) break;
@@ -3958,6 +4178,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // chunked-transfer stall is invisible to the timeout below. Race below
     // is the wrap-around guarantee: no matter where in the pipeline things
     // hang, the fetch resolves within HARD_CAP plus HTTP_WALL_GRACE_MS of the timers starting.
+    // The session limit again, now with no await left before the count below: the check at the
+    // top ran before the questions and readings above, and calls of the same turn run side by
+    // side, so each of them could have passed it at 99. Checked and counted in one synchronous
+    // step, only one of them sends the 100th request. A call refused here sent nothing.
+    if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
+      blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+    }
     const requestedTimeout = input.timeout_ms ?? 30_000;
     const timeoutMs = Math.min(Math.max(1, requestedTimeout), HTTP_HARD_CAP_MS);
     const controller = new AbortController();
@@ -4010,6 +4237,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     stopped.catch(() => {});
 
     try {
+      // No await between the limit check before the timers and this line (see there).
       agent.sessionCounters.httpRequests++;
       // For a contract-governed write, re-validate every redirect hop against
       // the contract so a 307/308 can't carry the body past the host/path pin.
@@ -4070,19 +4298,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
             }
           : undefined;
-      const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, sent } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
+      const { response, finalUrl: finalRequestUrl, answered: answeredHopUrls, writeFollowedAsRead, sent } = await Promise.race([
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, crossHostRedirectGuard(input.url, httpOutwardWrite(input) === null && readHopsGuarded(currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect'))), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
         wallTimeout,
         stopped,
       ]);
       const status = `${response.status} ${response.statusText}`;
       // After a write turned into a GET on another origin, the answer is that GET's, not the write's.
       answeredStatus = writeFollowedAsRead === undefined ? status : `${status} to the GET it was redirected to on ${urlForNote(finalRequestUrl)}`;
-      // Attributed to the final URL after redirects; when that host has no cost but the first one
+      // Attributed to the final URL after redirects; when that host has no cost but an earlier hop
       // has, the request still went to the priced API (a redirect to a CDN or a signed link). The
       // answer is then another party's, so its cost field is not read: only the profile rate counts.
       const answeringProfile = apiProfileOfUrl(finalRequestUrl, toolContext);
-      const costProfile = answeringProfile ?? apiProfileOfUrl(input.url, toolContext);
+      const costProfile = answeringProfile ?? lastPricedHop(answeredHopUrls, toolContext) ?? apiProfileOfUrl(input.url, toolContext);
       const costInAnswer = answeringProfile !== undefined;
       apiCost = costProfile === undefined ? undefined : apiCostOfAnswer(costProfile, undefined);
       // Strip sensitive response headers to prevent credential leakage to agent
@@ -4243,18 +4471,48 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         wrapped += `\n\n**[Agent reminder — the engine did not attach this profile's credential]**\n${auth.hint({ crossOriginRedirect })}\nUntil then the request goes out with only the headers you set yourself.`;
       }
 
+      // A store whose token expires answers 401 once the hour is up: the engine refreshes it here,
+      // at most once a minute per store, and says so outside the wrap. The request is not sent
+      // again by the engine; the model sends it once more, and a second 401 stays a 401.
+      let storeRenewed = false;
+      if (response.status === 401 && auth.renew !== undefined) {
+        const renewal = await auth.renew();
+        if (renewal === 'renewed') {
+          storeRenewed = true;
+          wrapped += '\n\n**[Engine note — the store\'s access was renewed]**\nThe access token for this store had expired and the engine has renewed it. Send the same request once more; nothing was changed by the request above.';
+        } else if (renewal === 'client-misnamed') {
+          // Named, and in place of the reminder below: connecting again would not fix it.
+          storeRenewed = true;
+          const { storeClientMisnamedText } = await import('../../core/store-token-refresh.js');
+          wrapped += `\n\n**[Engine note — the store's access could not be renewed]**\nThe ${storeClientMisnamedText(auth.profile?.id ?? '', true)}`;
+        } else if (renewal === 'not-run') {
+          // The renewal did not run this time, for a cause outside the connection: within the
+          // minute of the last one, a 429 or 5xx from the store, a connect in progress, the
+          // control plane. The reminder below says to connect again, which would not help, so the
+          // note says neither: send once more, and tell the user if the store refuses again.
+          // `ineligible` and `dead` (the connection cannot go on as it is) leave the reminder to speak.
+          storeRenewed = true;
+          wrapped += '\n\n**[Engine note — the store\'s access was not renewed this time]**\nThe engine did not renew the access token for this store this time. Send the same request once more; if the store answers 401 again, tell the user that the store refused the request, and do not change the profile for it.';
+        }
+      }
+
       // OAuth2 401-hint: append OUTSIDE the untrusted_data wrap so the
       // agent treats it as system guidance, not external response data.
       // Fires when an http_request hits 401 against an URL matched by an
       // api_profile with `auth.type: 'oauth2'` AND `auth.oauth.token_url`
-      // set — the 2026-05-18 Shopify failure mode: stale vault
+      // set, or a built-in provider's profile — the 2026-05-18 Shopify failure mode: stale vault
       // access_token + agent ping-ponged the user through "re-paste from
       // admin UI" instead of calling `api_setup fetch_token`.
-      if (response.status === 401 && toolContext?.apiStore) {
+      // Not after a renewal, nor after one that did not run this time: the note above already
+      // says what to do, and this reminder would say the opposite (connect again, or fetch a token).
+      if (response.status === 401 && toolContext?.apiStore && !storeRenewed) {
         try {
           const reqHostname = new URL(input.url).hostname;
           const matchedProfile = toolContext.apiStore.getByHostname(reqHostname);
-          if (matchedProfile?.auth?.type === 'oauth2' && matchedProfile.auth.oauth?.token_url) {
+          // A built-in provider's profile counts without a token_url: it derives its endpoint from
+          // the provider and usually stores none, and it is exactly the profile the delegated
+          // reminder below is for. The managed reminder stays with a configured token_url.
+          if (matchedProfile?.auth?.type === 'oauth2' && (matchedProfile.auth.oauth?.token_url || builtInPresetOf(matchedProfile) !== undefined || retiredPresetIdOf(matchedProfile) !== undefined)) {
             // Which of two reminders, and the split is load-bearing. The text
             // below the `else` has been here since the 2026-05-18 Shopify
             // failure and is right for an app-only profile. For a profile a USER
@@ -4269,11 +4527,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // it: a hand-configured profile holding an undeclared refresh token
             // is the second shape whose access token `fetch_token` would
             // overwrite, and nothing on this path knew that before.
-            const mpSlot = typeof matchedProfile.auth.oauth.refresh_token_key === 'string'
+            const mpSlot = typeof matchedProfile.auth.oauth?.refresh_token_key === 'string'
               ? matchedProfile.auth.oauth.refresh_token_key
               : refreshTokenKey(matchedProfile.id);
-            const mpStored = (() => {
-              try { return agent.secretStore?.resolve?.(mpSlot) ?? null; } catch { return null; }
+            // Whether a refresh token is there, asked without reading it out where the store can, so
+            // a 401 is not recorded as a credential read; a store that cannot is asked as before.
+            const mpHeld = ((): boolean => {
+              try {
+                const store = agent.secretStore;
+                if (store?.holds !== undefined) return store.holds(mpSlot);
+                return (store?.resolve?.(mpSlot) ?? null) !== null;
+              } catch { return false; }
             })();
             // ⚠ FIXED TEXT, and the only interpolation is the profile id.
             //
@@ -4300,7 +4564,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // went out as Bearer) to pick a second fixed sentence each. That is a
             // choice between constants, not an interpolation: no part of the
             // field's value reaches the text. Keep it that way.
-            wrapped += oauth401Reminder(matchedProfile, oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpStored !== null));
+            const swapPreset = builtInPresetOf(matchedProfile);
+            const wouldSwap = oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpHeld);
+            // A provider this engine once shipped: fetch_token refuses every exchange for it, so
+            // neither reminder below would name a way that works.
+            // A built-in provider's profile is told the way fetch_token would name, so the two
+            // never disagree; the profile may need the update that way names. A profile with no
+            // token_url that would not swap gets no reminder: there is nothing to renew it with.
+            wrapped += retiredPresetIdOf(matchedProfile) !== undefined
+              ? retiredProviderReminder(matchedProfile.id)
+              : wouldSwap && swapPreset !== undefined
+              ? presetDelegatedReminder(matchedProfile, swapPreset, toolContext.apiStore) + oauth401DelegatedHeaderHint(matchedProfile)
+              : !wouldSwap && !matchedProfile.auth.oauth?.token_url ? ''
+              : oauth401Reminder(matchedProfile, wouldSwap);
           }
         } catch {
           // Bad URL fell through earlier; nothing to do.
@@ -4344,8 +4620,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
       // So does a write whose redirect hop was refused: it was sent and answered before the hop.
       // And a read whose override hop was refused: the read went out and was answered.
-      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused) {
-        const sentTo = apiProfileOfUrl(input.url, toolContext);
+      // And a read whose hop to another host was refused (`CrossHostHopRefused`): the hops before it were answered.
+      // Counted at the last answered hop on a priced API: a write to a host without a profile that a
+      // redirect sends on to one was answered there before the next hop was refused.
+      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused || err instanceof CrossHostHopRefused) {
+        const sentTo = lastPricedHop(answeredHopsOf(err), toolContext) ?? apiProfileOfUrl(input.url, toolContext);
         if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
       }
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
@@ -4479,7 +4758,9 @@ async function describeConnectedWrite(
  * Only an attached credential counts. A `refusal`, a `hint` and no profile at all
  * are one answer here — the bulk path has no model header to fall back on, so any
  * of them would send the request without the credential the run was planned with.
- * No text is returned: the caller reports a fixed reason, never a profile's wording.
+ * No text is returned: the caller reports a fixed reason, never a profile's wording. For a
+ * refusal of a store's own (self-hosted, a part missing, the control plane), `out.refusal` names
+ * its cause, so the run halts on it rather than on a missing credential.
  *
  * Returns the profile whose credential was attached, or null for every other answer. Null and
  * not an object with a flag, so every refusal stays falsy: a caller that tests the result as
@@ -4510,12 +4791,17 @@ export async function attachStoredCredential(
     /** The process's shell mode; a store gets a pass only in sidecar mode. Defaults to the
      *  process's own object (`shell-isolation.ts`), never to "local". */
     shellIsolation?: ToolContext['shellIsolation'] | undefined;
+    /** The instance's network policy. Required: a store refresh this attach starts goes out under
+     *  it, and an attach built by hand without it would send that refresh unchecked. */
+    hostPolicy: Pick<ToolContext, 'networkPolicy' | 'allowedHosts' | 'allowedWildcards' | 'enforceHttps'>;
   },
   /** The bulk run this request is for. The agent below is built by hand and has no thread, so
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
   container: { bulkRunId: string },
-  /** Receives the store pass minted for this request, which the caller hands to its send. */
-  out?: { pass?: StorePass | undefined } | undefined,
+  /** Receives the store pass minted for this request, which the caller hands to its send; on a
+   *  refusal, either why only connecting again helps (`reconnect`) or the cause a store refused it
+   *  for ({@link storeAttachRefusal}), never both. */
+  out?: { pass?: StorePass | undefined; renew?: (() => Promise<StoreRefreshOutcome>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined; refusal?: StoreAttachRefusal | undefined } | undefined,
 ): Promise<ApiProfile | null> {
   const auth = await attachEngineManagedAuth(
     url,
@@ -4526,13 +4812,23 @@ export async function attachStoredCredential(
       containment: stores.containment ?? null,
       vaultNameBindings: stores.vaultNameBindings,
       shellIsolation: stores.shellIsolation ?? shellIsolation(),
+      networkPolicy: stores.hostPolicy.networkPolicy, allowedHosts: stores.hostPolicy.allowedHosts,
+      allowedWildcards: stores.hostPolicy.allowedWildcards, enforceHttps: stores.hostPolicy.enforceHttps,
       // A bulk run is not a chat: nothing of a thread is written for it.
       threadStore: null,
-    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation'> as ToolContext,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation' | 'networkPolicy' | 'allowedHosts' | 'allowedWildcards' | 'enforceHttps'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
     { bulkRunId: container.bulkRunId },
   );
-  if (out !== undefined && auth.refusal === undefined) out.pass = auth.pass;
+  if (out !== undefined && auth.refusal === undefined) {
+    out.pass = auth.pass;
+    out.renew = auth.renew;
+  }
+  if (out !== undefined && auth.refusal !== undefined) {
+    out.reconnect = auth.reconnect;
+    // A store's own cause only where connecting again is not what helps.
+    if (auth.reconnect === undefined) out.refusal = storeAttachRefusal(auth.refusal) ?? undefined;
+  }
   return auth.slot !== undefined && auth.refusal === undefined ? auth.profile ?? null : null;
 }

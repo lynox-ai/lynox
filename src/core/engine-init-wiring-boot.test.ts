@@ -185,14 +185,23 @@ describe('Engine boot — the init() data-protection gates are actually wired', 
     let engine: Engine;
     let hourly: Array<Parameters<typeof setInterval>>;
     let handle: unknown;
+    let auditHandle: unknown;
     try {
       engine = await boot();
       hourly = spy.mock.calls.filter(c => c[1] === 60 * 60_000);
-      handle = spy.mock.results[spy.mock.calls.findIndex(c => c[1] === 60 * 60_000)]?.value;
+      const at = spy.mock.calls.flatMap((c, i) => (c[1] === 60 * 60_000 ? [i] : []));
+      handle = spy.mock.results[at[0]!]?.value;
+      auditHandle = spy.mock.results[at[1]!]?.value;
     } finally {
       spy.mockRestore();
     }
-    expect(hourly).toHaveLength(1);
+    // Two hourly sweeps start at boot: the debug captures' first, then the instance log's.
+    expect(hourly).toHaveLength(2);
+    const db = engine.getEngineDb()!.getDb();
+    db.prepare("INSERT INTO audit_log (ts, actor_kind, actor_email, action, phase, correlation_id) VALUES (?, 'mandate', 'helper@example.invalid', 'GET /api/inbox/items', 'read', 'c-late')")
+      .run(new Date(Date.now() - 366 * 24 * 60 * 60_000).toISOString());
+    (hourly[1]![0] as () => void)();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE correlation_id = 'c-late'").get()).toEqual({ n: 0 });
     // A row that expires after boot — the boot sweep cannot have seen it.
     engine.getRunHistory()!.insertWireSnapshot(wireSnap('run-late', Date.now() - WIRE_CAPTURE_RETENTION_MS - 60_000));
     expect(wireRunIds(engine)).toEqual(['run-late']);
@@ -204,6 +213,7 @@ describe('Engine boot — the init() data-protection gates are actually wired', 
     try {
       await engine.shutdown();
       expect(clear.mock.calls.some(c => c[0] === handle)).toBe(true);
+      expect(clear.mock.calls.some(c => c[0] === auditHandle)).toBe(true);
     } finally {
       clear.mockRestore();
     }

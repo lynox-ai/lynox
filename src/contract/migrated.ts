@@ -82,6 +82,8 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'ExactAttachResponse', contractFile: 'http.ts', twinPattern: typeTwin('ExactAttachResponse') },
   { name: 'isExactAttachCleared', contractFile: 'http.ts', twinPattern: valueTwin('isExactAttachCleared') },
   { name: 'readExactHeld', contractFile: 'http.ts', twinPattern: valueTwin('readExactHeld') },
+  // Born in the contract: the reader of `overrun_hold` (usage flush + status answers).
+  { name: 'readOverrunHold', contractFile: 'http.ts', twinPattern: valueTwin('readOverrunHold') },
   { name: 'UsageSummaryPeriod', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryPeriod') },
   { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },
   { name: 'HealthBody', contractFile: 'http.ts', twinPattern: typeTwin('HealthBody') },
