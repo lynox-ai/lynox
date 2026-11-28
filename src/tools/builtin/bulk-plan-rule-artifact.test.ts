@@ -107,7 +107,7 @@ describe('bulk_plan takes a judge rule from a saved artifact', () => {
     expect([b.rule, b.source]).toEqual([RULE_TEXT, source]);
   });
 
-  it('a data-store run whose rule is read from an artifact stamps its writes unknown beside the conversation\'s grants; a typed rule does not', async () => {
+  it('a data-store run whose rule is read from an artifact records unknown in the run\'s stamp beside the conversation\'s grants; a typed rule does not', async () => {
     const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
     data.createCollection({ name: 'products', scope, columns: [{ name: 'sku', type: 'string' }, { name: 'title', type: 'string' }], uniqueKey: ['sku'] });
     data.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }], uniqueKey: ['target'] });
