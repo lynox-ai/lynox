@@ -14107,6 +14107,27 @@ describe('LynoxHTTPApi', () => {
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
     });
 
+    it('sends a refused approval and a refused resume with their reason as the code the page words', async () => {
+      const id = planRun();
+      const checksum = bulkLedger.computeChecksum(id)!;
+      const approve = vi.spyOn(bulkLedger, 'approve').mockReturnValue({ ok: false, reason: 'shopify_off' });
+      const resume = vi.spyOn(bulkLedger, 'resume').mockReturnValue({ ok: false, reason: 'shopify_off' });
+      try {
+        const msg = 'Bulk runs on a Shopify store are switched off on this instance, so this run cannot be approved or resumed.';
+        for (const act of ['approve', 'resume']) {
+          const res = await jsonFetch(`/api/bulk/runs/${id}/${act}`, { method: 'POST', body: JSON.stringify({ checksum }) });
+          expect([act, res.status, await res.json()]).toEqual([act, 409, { error: msg, code: 'shopify_off' }]);
+        }
+        // A reason the table does not know keeps its generic refusal, with no code.
+        approve.mockReturnValue({ ok: false, reason: 'no_such_reason' } as unknown as ReturnType<typeof bulkLedger.approve>);
+        const unknown = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect([unknown.status, await unknown.json()]).toEqual([400, { error: 'Refused.' }]);
+      } finally {
+        approve.mockRestore();
+        resume.mockRestore();
+      }
+    });
+
     it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb, and its filters as an empty set', async () => {
       const host = 'acme.myshopify.com';
       const source = parseListSource(host, { form: 'shopify', after: { seo_title: 'x' } }, 'PATCH', () => null);
