@@ -7,9 +7,11 @@ import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted
 import { logErrorChain } from '../../core/utils.js';
 import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag, setUpByOther, shownMandate } from '../../core/request-principal.js';
 import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, isPaused, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
+import { foreignWorkflowScheduleRefusalKind } from '../../core/plan-stamp.js';
 import { lastRunResultFor } from '../../core/member-connection-notes.js';
 import { noticeLanguage } from '../../core/notice-language.js';
 import { MANDATE_ENDED_RESULT, MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WAIT_EXPIRED_RESULT, WATCH_READ_UNRECORDED_RESULT, WATCH_URL_MISSING_RESULT, WEBHOOK_ASKS_RESULT, WORKER_NOTICES } from '../../core/worker-notices.js';
+import { withoutForeignMarks } from '../../core/foreign-marks.js';
 import { otherRunTextBlock, setUpByPhrase } from '../../core/other-run-text.js';
 import { planMakerOf } from './diagnose-workflow.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
@@ -288,9 +290,17 @@ export function otherRunOf(
   return undefined;
 }
 
-/** What a completed paused plan's line reads its workflow's case with (`pausedDoneWorkflow`). */
+/**
+ * What a completed paused plan's line reads its workflow's case with (`pausedDoneWorkflow`). For a
+ * person with access it also asks whether a new plan of theirs on that workflow would be refused,
+ * by the rule `task_create` refuses by (U-489).
+ */
 function doneReader(agent: IAgent): PausedDoneWorkflowReader | null {
-  return pausedDoneReaderOf(agent.toolContext.runHistory, agent.toolContext.mandateEnds);
+  const principal = agent.principal;
+  const history = agent.toolContext.runHistory;
+  // Asked only at a completed paused workflow plan, as `owner` in taskReaderOf is: the owner may plan on any workflow.
+  return pausedDoneReaderOf(history, agent.toolContext.mandateEnds,
+    (id) => (isOwnerPrincipal(principal) ? null : foreignWorkflowScheduleRefusalKind(principal, id, history)));
 }
 
 // Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger
@@ -862,7 +872,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (input.status === 'completed') {
           const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal, mark), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
-          return `Task completed: ${formatTaskLine(task, taskReaderOf(agent), '', doneReader(agent))}`;
+          return `Task completed: ${formatTaskLine(withoutForeignMarks(task, agent.principal), taskReaderOf(agent), '', doneReader(agent))}`;
         }
 
         const task = w.run('apply', () => managerRef.update(input.task_id, {
@@ -897,7 +907,8 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         // An edit can re-open consent: changing what a trigger RUNS clears the stamp
         // (`trigger-store.ts`), so the row just edited may be held back again — and
         // this report is the only place that says so.
-        return `Task updated: ${formatTaskLine(task, taskReaderOf(agent), `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
+        // A mandate may change another mandate's schedule; the report reads it as the trigger list does.
+        return `Task updated: ${formatTaskLine(withoutForeignMarks(task, agent.principal), taskReaderOf(agent), `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);
@@ -992,7 +1003,8 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     // with ≥20 TODOs truncate every trigger off the default-20 slice below;
     // putting them first guarantees they're never starved by the limit. Any
     // overflowing TODOs are still accounted for by the "... and N more" line.
-    const tasks = [...triggers, ...todos];
+    // A mandate's chat reads another mandate's schedules as the trigger list does (`withoutForeignMarks`).
+    const tasks = [...triggers.map((t) => withoutForeignMarks(t, agent.principal)), ...todos];
 
     const limited = tasks.slice(0, input.limit ?? 20);
     if (limited.length === 0) return 'No tasks found.';

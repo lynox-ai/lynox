@@ -163,6 +163,17 @@ describe('OAuthGmailProvider — list', () => {
     expect(envs[1]?.uid).not.toBe(envs[0]?.uid);
   });
 
+  it('sets the arrival from internalDate, the time Gmail took the mail in', async () => {
+    const received = Date.parse('2026-04-27T06:00:00Z');
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds=INBOX')) return Promise.resolve(respondJson({ messages: [{ id: 'm1', threadId: 't1' }] }));
+      if (url.includes('messages/m1')) return Promise.resolve(respondJson(metadataMessage('m1', { internalDate: String(received) })));
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const [env] = await new OAuthGmailProvider(makeAccount(), makeAuth()).list();
+    expect(env?.arrivedAt?.getTime()).toBe(received);
+  });
+
   it('passes since + unseenOnly into the q parameter', async () => {
     fetchMock.mockResolvedValue(respondJson({ messages: [] }));
     const provider = new OAuthGmailProvider(makeAccount(), makeAuth());

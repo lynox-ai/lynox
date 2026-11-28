@@ -43,7 +43,7 @@ import type { MailStateDb, MailFollowup } from './state.js';
 import { createMailTools, InMemoryMailRegistry } from './tools/index.js';
 import { MailWatcher, type MailWatcherHandler } from './watch.js';
 import { googleFetch } from '../../core/connector-egress.js';
-import { parentMessageIds } from './thread-key.js';
+import { inArrivalOrder, parentMessageIds } from './thread-key.js';
 
 /** Most From addresses of one inbound mail a waiting follow-up is matched against. */
 const MAX_REPLY_SENDERS = 5;
@@ -388,7 +388,9 @@ export class MailContext {
     // Wrap the user handler so that every inbound envelope also fires
     // onInboundMail hooks AND resolves any matching follow-ups.
     const wrappedHandler: MailWatcherHandler = async (accountId, envelopes) => {
-      for (const env of envelopes) {
+      // Oldest arrival first, as the server dated them: a provider lists the newest first, and the
+      // first mail of a thread handed to the inbox is the one that becomes its item.
+      for (const env of inArrivalOrder(envelopes)) {
         // Resolve any pending follow-ups in this thread that were waiting
         // for a reply from the sender of this inbound. A follow-up is kept under the sent mail's
         // Message-ID, which an answer's thread key is not wherever the server gives no thread id or

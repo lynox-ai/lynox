@@ -4066,9 +4066,11 @@ export class WorkerLoop {
     // push per order would be noise, and its success is in the run history, where the
     // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
-    // Not again for a halt on the same lines as the run before (also one that finished with them);
-    // an end that failed or was interrupted is told even then.
-    if (this.notificationRouter.hasChannels() && !(told.status === 'halted' && memberNotesRepeat(task, notes))) {
+    // Not again for a run that finished on the same lines as the run before: the refusal is all
+    // that run has to say, and the owner was told it once. Any other end is told even then: a
+    // real halt has a reason of its own, which the lines only come along with, so the same lines
+    // do not make it the same halt; a failed or interrupted end did not finish.
+    if (this.notificationRouter.hasChannels() && !(finishedWithNote && memberNotesRepeat(task, notes))) {
       const shownEnd: BulkPushEnd = finishedWithNote ? 'noted'
         : told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
