@@ -183,8 +183,9 @@ export function createFollowUpRecorder(opts: FollowUpRecorderOptions): RecordFol
         try { p = JSON.parse(a.payloadJson); } catch { continue; }
         if (typeof p !== 'object' || p === null) continue;
         const entry = p as { raised?: unknown; announced?: unknown };
-        if (entry.announced === true) return false;
-        if (entry.raised === true) silent = true;
+        // The latest entry decides: an announcement, or a raise after it that sent no push.
+        if (entry.announced === true) silent = false;
+        else if (entry.raised === true) silent = true;
       }
       return silent;
     };
@@ -260,7 +261,8 @@ export function createFollowUpRecorder(opts: FollowUpRecorderOptions): RecordFol
           // Open in "requires you" already: no second push, unless the item was created without one
           // and no joined mail has announced it since. Read from the audit inside this write, so
           // two joined mails announce it once, also across a restart.
-          if (openNow) return current !== undefined && current !== null && unannounced(current) ? 'announced' : 'none';
+          // A mail that pushes nothing (a drain) does not count as the announcement: the next one does.
+          if (openNow) return join.push !== false && current !== undefined && current !== null && unannounced(current) ? 'announced' : 'none';
           // The item keeps its own reason and version; this mail's verdict is in its audit entry.
           // Its mail date stays too: the joined mail's Date header is its sender's word.
           return opts.state.raiseForJoinedMail(existing.id, existing.tenantId, new Date(now)) ? 'raised' : 'none';

@@ -319,6 +319,69 @@ describe('an item created without a push is announced once by a joined mail that
     expect(joined.map((j) => [j['message_id'], j['announced']])).toEqual([['<zebra@x>', true], ['<quokka@x>', false]]);
   });
 
+  /** Hands a mail of the thread to a queue directly and drains it at shutdown, as a mail waiting when the process ends. */
+  async function drainedJoiner(tag: string, from: string, name: string): Promise<void> {
+    const { llm } = gatedLlm();
+    const { queue } = setup('oauth_google', llm);
+    const env = envelope({ tag, uid: 9, from, name, threadKey: THREAD, date: T1, arrivedAt: T1 });
+    queue.enqueue({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD,
+      classifierInput: { accountAddress: ACCOUNT.address, accountDisplayName: 'Me', subject: env.subject, fromAddress: from, fromDisplayName: name, body: env.snippet },
+      envelope: { fromAddress: from, fromName: name, subject: env.subject, mailDate: T1, snippet: env.snippet, messageId: env.messageId, inReplyTo: undefined },
+      mail: env,
+    });
+    await queue.drain({ deadLetterPending: new DrainedForShutdownError() });
+  }
+
+  it('a mail drained at shutdown does not use up the announcement: the real mail after it still pushes once', async () => {
+    const { llm, release } = gatedLlm();
+    const { queue, hook } = setup('oauth_google', llm);
+    expect(await hook(envelope({ tag: 'ZEBRA', uid: 1, from: 'anna@kunde.example', name: 'Anna', threadKey: THREAD, date: T0, arrivedAt: T0, subject: 'Frage zur Offerte' }))).toBe('enqueued');
+    expect(await hook(bounce())).toBe('prefilter_filed');
+    await drainedJoiner('OKAPI', 'cleo@kunde.example', 'Cleo');
+    expect(pushes, 'the drained mail pushes nothing').toHaveLength(0);
+
+    release('ZEBRA', 'requires_user');
+    await queue.drain();
+
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]!.opts?.sender?.address).toBe('anna@kunde.example');
+    const item = inbox.listItems()[0]!;
+    const joined = inbox.listAuditForItem(item.id).filter((a) => a.action === 'joined_thread').map((a) => JSON.parse(a.payloadJson) as Record<string, unknown>);
+    expect(joined.map((j) => [j['message_id'], j['announced']])).toEqual([['<okapi@x>', false], ['<zebra@x>', true]]);
+  });
+
+  it('an item raised without a push after its announcement is announced again by the next mail that needs the owner', async () => {
+    const { llm, release } = gatedLlm();
+    const { queue, hook } = setup('oauth_google', llm);
+    await hook(envelope({ tag: 'ZEBRA', uid: 1, from: 'anna@kunde.example', name: 'Anna', threadKey: THREAD, date: T0, arrivedAt: T0 }));
+    await hook(bounce());
+    release('ZEBRA', 'requires_user');
+    await queue.drain();
+    expect(pushes).toHaveLength(1);
+    // The owner deals with it; a mail drained at shutdown then raises it again, with no push.
+    const filed = inbox.listItems()[0]!;
+    inbox.updateUserAction(filed.id, 'archived', new Date(), filed.tenantId);
+    await drainedJoiner('OKAPI', 'cleo@kunde.example', 'Cleo');
+    expect(inbox.getItem(filed.id)!.bucket).toBe('requires_user');
+    expect(pushes).toHaveLength(1);
+
+    const next = gatedLlm();
+    const later = setup('oauth_google', next.llm);
+    const env = envelope({ tag: 'QUOKKA', uid: 3, from: 'ben@kunde.example', name: 'Ben', threadKey: THREAD, date: T1, arrivedAt: T1 });
+    later.queue.enqueue({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD,
+      classifierInput: { accountAddress: ACCOUNT.address, accountDisplayName: 'Me', subject: env.subject, fromAddress: 'ben@kunde.example', fromDisplayName: 'Ben', body: env.snippet },
+      envelope: { fromAddress: 'ben@kunde.example', fromName: 'Ben', subject: env.subject, mailDate: T1, snippet: env.snippet, messageId: env.messageId, inReplyTo: undefined },
+      mail: env,
+    });
+    next.release('QUOKKA', 'requires_user');
+    await later.queue.drain();
+
+    expect(pushes, 'the owner is told the item is back').toHaveLength(2);
+    expect(pushes[1]!.opts?.sender?.address).toBe('ben@kunde.example');
+  });
+
   it('the real mail filed first and the delivery notice after it: still one push', async () => {
     const { llm, release } = gatedLlm();
     const { queue, hook } = setup('oauth_google', llm);
