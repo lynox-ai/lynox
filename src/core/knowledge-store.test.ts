@@ -10,6 +10,9 @@ import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTR
 import { deriveProvenanceTier } from './provenance.js';
 import { channels } from './observability.js';
 import { MEMORY_BLOCK_CHAR_LIMITS } from '../types/memory.js';
+import type { SecretStoreLike } from '../types/security.js';
+import { GENERIC_SHAPE_MIN_TEXT, maskSecretPatterns, matchesSecretPattern } from './secret-store.js';
+import { randomBytes } from 'node:crypto';
 
 describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
   const tmpDirs: string[] = [];
@@ -60,6 +63,52 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
       [b.id, 'rejected', null, `The invoice address is in Bern, token ***${key.slice(-4)}`],
     ]);
     expect(ks.listRejectedOrSupersededMasked(1).map(e => e.id), 'the limit holds').toEqual([c.id]);
+  });
+
+  it('masks in its lists what its write check refuses: a long token without a prefix in a pending and a rejected entry, and a known secret in the subject name', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    // Built at runtime: a credential-shaped literal is what the commit-time scan looks for.
+    const known = `kv${randomBytes(8).toString('hex')}`;
+    const secrets = {
+      maskSecrets: (t: string) => t.split(known).join('***'),
+      containsSecret: (t: string) => t.includes(known),
+      getMasked: () => null, resolve: () => null, listNames: () => [],
+    } as unknown as SecretStoreLike;
+    const ks = new KnowledgeStore(engine, subjects, secrets);
+    const token = randomBytes(24).toString('hex');
+    const long = `The warehouse system was migrated last spring and the export job now signs in with ${token}`;
+    expect(long.length, 'fixture: long enough for the check to read the long-token shape').toBeGreaterThanOrEqual(GENERIC_SHAPE_MIN_TEXT);
+    expect(matchesSecretPattern(long), 'fixture: the write check refuses it').not.toBeNull();
+    expect(maskSecretPatterns(long), 'fixture: the narrower mask leaves it').toBe(long);
+    const short = `Build ${token}`;
+    expect(matchesSecretPattern(short), 'fixture: the check lets a short text with it through').toBeNull();
+
+    const db = engine.getDb();
+    const pending = ks.write({ text: 'pending', subjectName: 'Lager', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 't-1' });
+    const rejected = ks.write({ text: 'rejected', subjectName: 'Muster', sourceChannel: 'agent', sourceUntrusted: true });
+    const shortOne = ks.write({ text: 'short', subjectName: 'Kurz', sourceChannel: 'agent', sourceUntrusted: true });
+    db.prepare('UPDATE knowledge_entries SET text = ?, subject_hint = ? WHERE id = ?').run(engine.enc(long), `Lager ${known}`, pending.id);
+    db.prepare("UPDATE knowledge_entries SET text = ?, subject_hint = ?, status = 'rejected' WHERE id = ?").run(engine.enc(long), `Muster ${known}`, rejected.id);
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(short), shortOne.id);
+    const active = ks.write({ text: 'Ships from Basel', subjectName: 'Acme', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(active.status, 'fixture: an active entry').toBe('active');
+    const filedUnder = subjects.findOrCreate({ kind: 'organization', name: `Acme ${known}` });
+    if (filedUnder.ambiguous) throw new Error('fixture: one subject');
+    db.prepare('UPDATE knowledge_entries SET subject_id = ? WHERE id = ?').run(filedUnder.id, active.id);
+
+    const masked = `${long.slice(0, -token.length)}***${token.slice(-4)}`;
+    const queue = ks.listPendingMasked();
+    expect(queue.find(e => e.id === pending.id)?.text, 'the pending entry').toBe(masked);
+    expect(queue.find(e => e.id === pending.id)?.subjectHint, 'its subject name').toBe('Lager ***');
+    expect(queue.find(e => e.id === shortOne.id)?.text, 'a text the check lets through stays as it is').toBe(short);
+    const thread = ks.listPendingForThreadMasked('t-1');
+    expect(thread.map(e => [e.text, e.subjectHint]), 'the thread\'s queue').toEqual([[masked, 'Lager ***']]);
+    const retired = ks.listRejectedOrSupersededMasked();
+    expect(retired.map(e => [e.id, e.text, e.subjectHint]), 'the rejected entry').toEqual([[rejected.id, masked, 'Muster ***']]);
+    expect(ks.listActive().find(e => e.id === active.id)?.subjectName, 'the subject an active entry is filed under').toBe('Acme ***');
   });
 
   // ── Tier derivation + routing (D-3/D-6, acceptance §7) ──

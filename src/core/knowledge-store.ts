@@ -7,7 +7,7 @@ import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance
 import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
 import { isTopicShapedName } from './kg-stopwords.js';
-import { maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
+import { GENERIC_SHAPE_MIN_TEXT, maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import { collapseToSingleLine } from './sanitize.js';
 import type { SecretStoreLike } from '../types/security.js';
@@ -985,7 +985,7 @@ export class KnowledgeStore {
    * redacted when approved and in the clear while it waits.
    */
   listPendingMasked(limit = 100): KnowledgeEntry[] {
-    return this.listPending(limit).map(e => ({ ...e, text: this._maskText(e.text) }));
+    return this.listPending(limit).map(e => this._maskListed(e));
   }
 
   /**
@@ -996,7 +996,7 @@ export class KnowledgeStore {
    * `listPendingForThread` would carry vault values into a file that gets forwarded.
    */
   listPendingForThreadMasked(threadId: string, limit = 100): KnowledgeEntry[] {
-    return this.listPendingForThread(threadId, limit).map(e => ({ ...e, text: this._maskText(e.text) }));
+    return this.listPendingForThread(threadId, limit).map(e => this._maskListed(e));
   }
 
   /**
@@ -1012,8 +1012,7 @@ export class KnowledgeStore {
       "SELECT * FROM knowledge_entries WHERE status IN ('rejected', 'superseded') ORDER BY updated_at DESC, rowid DESC LIMIT ?",
     ).all(capped) as KnowledgeRow[];
     return rows.map(r => {
-      const e = this._rowToEntry(r);
-      return { ...e, text: this._maskText(e.text) };
+      return this._maskListed(this._rowToEntry(r));
     });
   }
 
@@ -1030,7 +1029,7 @@ export class KnowledgeStore {
       const subjectName = e.subjectId
         ? this.subjects.getSubject(this.subjects.resolveActiveSubject(e.subjectId))?.name ?? null
         : null;
-      return { ...e, text: this._maskText(e.text), subjectName };
+      return { ...this._maskListed(e), subjectName: subjectName === null ? null : this._maskListedText(subjectName) };
     });
   }
 
@@ -1735,6 +1734,19 @@ export class KnowledgeStore {
   private _maskText(text: string): string {
     const tenantMasked = this.secretStore ? this.secretStore.maskSecrets(text) : text;
     return maskSecretPatterns(tenantMasked);
+  }
+
+  /** The lists' masker: the tenant's secret values, then every shape {@link checkKnowledgeText}
+   *  refuses (the long-token one included on a text long enough for that check to read it), so a
+   *  list carries nothing its write check would have refused. Read over the text as stored. */
+  private _maskListedText(text: string): string {
+    const tenantMasked = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+    return maskSecretPatterns(tenantMasked, { includeGeneric: text.length >= GENERIC_SHAPE_MIN_TEXT });
+  }
+
+  /** An entry as a list carries it: its text and the subject name it was filed under, masked. */
+  private _maskListed<E extends KnowledgeEntry>(e: E): E {
+    return { ...e, text: this._maskListedText(e.text), subjectHint: e.subjectHint === null ? null : this._maskListedText(e.subjectHint) };
   }
 
   private _overlap(queryTokens: Set<string>, docTokens: string[]): number {
