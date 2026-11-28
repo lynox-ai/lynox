@@ -11,7 +11,8 @@ import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import { reportedErrorStep, reportedFailureForCaller } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
-import { getErrorMessage } from '../../core/utils.js';
+import { formatUsdAmount, getErrorMessage } from '../../core/utils.js';
+import { getSessionCostCeiling } from '../../core/session-budget.js';
 import { asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { withWorkflowDefaults, workflowAwaitsStampResult, workflowStampState } from '../../core/workflow-stamp.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
@@ -25,7 +26,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
-import { templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
+import { stepIdCollision, templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
 import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepRunNames } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
@@ -159,11 +160,46 @@ export function storePipeline(id: string, pipeline: PlannedPipeline): void {
  *  of distinct workflows doesn't evict each other's still-retriable state. */
 export function recordExecutedState(id: string, value: ExecutedState): void {
   executedStates.delete(id);
+  // A run a deleted chat started that ends after the delete: its outputs are not kept for a retry.
+  if (value.originThreadId !== undefined && deletedChats.has(value.originThreadId)) return;
   if (executedStates.size >= MAX_EXECUTED_STATES) {
     const oldest = executedStates.keys().next().value;
     if (oldest !== undefined) executedStates.delete(oldest);
   }
   executedStates.set(id, value);
+}
+
+/** Chats deleted in this process, whose workflow outputs are no longer kept for a retry. Ids only. */
+const deletedChats = new Set<string>();
+const MAX_DELETED_CHATS = 10_000;
+
+function remember(set: Set<string>, value: string): void {
+  if (set.size >= MAX_DELETED_CHATS) {
+    const oldest = set.values().next().value;
+    if (oldest !== undefined) set.delete(oldest);
+  }
+  set.add(value);
+}
+// A run without a chat records no origin and has none in history.db either, so no chat delete
+// reaches it; a run nested under one is the runner's, and records nothing here.
+
+/**
+ * Forgets what the workflows a deleted chat started produced, and keeps forgetting what one still
+ * going records when it ends. A retry reads a run's step outputs from here, not from history.db,
+ * so without this a retry from another chat would write the deleted chat's outputs into a new run.
+ * Returns how many were forgotten now.
+ */
+export function forgetExecutedStatesOfChat(threadId: string, workflowIds: readonly string[]): number {
+  remember(deletedChats, threadId);
+  // By workflow as well as by origin: a retry from another chat makes that chat the origin of the
+  // state (see the retry's record), while the outputs it holds are still the ones this chat's run
+  // made. That forgets another chat's state of the same workflow too: its retry then asks for a run.
+  const ids = new Set(workflowIds);
+  let forgotten = 0;
+  for (const [id, entry] of executedStates) {
+    if (ids.has(id) || entry.originThreadId === threadId) { executedStates.delete(id); forgotten += 1; }
+  }
+  return forgotten;
 }
 
 /** Get the pipeline store for listing */
@@ -407,6 +443,14 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
 // ===== Private execution helpers =====
 
 /**
+ * What `run_workflow` answers in a run admitted with a spending bound of its own. `capUsd` is
+ * the amount a saved workflow started from the Workflows page is admitted on.
+ */
+export function workflowUnderRunCeiling(capUsd: number): string {
+  return `Not run: in this conversation lynox may spend only what is left of the AI budget, and a workflow's steps cannot be kept within that. Tell the user the workflow was not run for this reason. If it is a saved workflow, they can start it from the Workflows page once at least ${formatUsdAmount(capUsd)} of AI budget is left; otherwise they can run it here in the next billing period.`;
+}
+
+/**
  * Debit the aggregated cost of an IN-SESSION `run_workflow` execution.
  *
  * Workflow steps run as sub-agents whose token streams are never seen by the
@@ -477,6 +521,12 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   const shapeIssue = stepIdIssue(steps);
   if (shapeIssue) return `Error: ${shapeIssue}`;
 
+  // A step id the run's context already uses (`template-refs.ts`): an inline context key, or `params`
+  // beside it. Refused here, by the place in the list the model wrote, before anything is estimated.
+  const inlineContext = input.context ?? {};
+  const collision = stepIdCollision(steps, { ...inlineContext, params: inlineContext }, 'steps', { saved: false });
+  if (collision) return `Error: ${collision}`;
+
   // Validate unique IDs
   const ids = new Set<string>();
   for (const step of steps) {
@@ -519,6 +569,9 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     // step's durable-write routing. See RunTaint in runtime-adapter.ts.
     const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
+      // The chat's run ending (its stop, its time limit): without it a stop between steps, or under `on_failure:
+      // continue`, lets the next step start (the scope below only ends the agents already in it).
+      endSignal: deps.parentAgent?.runSignal,
       // Steps this agent wrote for the run, which no saved workflow shaped.
       source: { kind: 'adhoc' },
       autonomy: deps.autonomy,
@@ -666,6 +719,9 @@ export interface RunSavedWorkflowResult {
   /** For a refusal because a step refers to the output of a step its run cannot read
    *  (`templateRefIssue`): that step's position, 1-based, which the owner is told in fixed words. */
   unresolvedRefStep?: number | undefined;
+  /** For a refusal because a step's id is one a run already uses (`stepIdCollision`): that step's
+   *  position, 1-based, which the owner is told in fixed words. */
+  reservedIdStep?: number | undefined;
 }
 
 /**
@@ -903,6 +959,7 @@ export async function runSavedWorkflow(
 
   // Asked of the workflow as read here, so no edit can fall between the check and the run. As stored:
   // the owner's stamp binds the stored definition, so the check must see that, not a renamed copy.
+  // A check that needs the steps as the run executes them builds that copy itself (`runStepIds`).
   const refused = runtime?.checkWorkflow?.(planned) ?? null;
   if (refused !== null) return { ok: false, error: refused };
 
@@ -971,9 +1028,15 @@ export async function runSavedWorkflow(
   // also when the run then throws.
   const originRefusals: import('../../core/origin-notices.js').OriginRefusal[] = [];
 
-  // A reference no run resolves (`template-refs.ts`), here before `validateManifest` refuses it, so
-  // the caller can tell the owner which step in fixed words (`unresolvedRefStep`).
-  const refIssue = templateRefIssue(steps, { params: bound.params });
+  // A step id the run's context already uses, or a reference no run resolves (`template-refs.ts`),
+  // here before the runner refuses it, so the caller can tell the owner which step and why in fixed
+  // words (`reservedIdStep`, `unresolvedRefStep`) and does not retry a run that cannot start.
+  const runContext = { params: bound.params };
+  const collision = stepIdCollision(steps, runContext, 'steps');
+  if (collision !== null) {
+    return { ok: false, error: `Workflow execution failed: Invalid manifest: ${collision}`, reservedIdStep: templateRefStep(collision) };
+  }
+  const refIssue = templateRefIssue(steps, runContext);
   if (refIssue !== null) {
     return { ok: false, error: `Workflow execution failed: Invalid manifest: ${refIssue}`, unresolvedRefStep: templateRefStep(refIssue) };
   }
@@ -1346,6 +1409,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       if (prevGrants !== undefined) for (const id of prevGrants.members()) retryGrants?.add(id);
       else retryGrants?.add(UNKNOWN_GRANT);
       const state = await asPlanOfAuthor(retryTrail, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+        // The chat's run ending (its stop, its time limit): without it a stop between steps, or under `on_failure:
+        // continue`, lets the next step start (the scope below only ends the agents already in it).
+        endSignal: deps.parentAgent?.runSignal,
         source,
         autonomy: deps.autonomy,
         parentTools: deps.tools,
@@ -1380,7 +1446,10 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // this chat is its origin from here on: it carries the first origin's rows if that one was
       // contained, and its own if a re-run step contained it. Keeping the first origin would let
       // the next retry from a third chat skip the check while this chat is contained.
-      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs), ranDigest: prev.ranDigest });
+      // Forgotten while this retry ran (a chat whose outputs it carries was deleted): not kept again.
+      if (executedStates.get(planned.id) === prev) {
+        recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs), ranDigest: prev.ranDigest });
+      }
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents, prev.state.outputs);
       const text = formatResult(state, planned.name, resultLimit, prev.manifest.agents.map(a => a.id));
       // Set last: a throw above returns an error, and the end row must not say success then.
@@ -1439,8 +1508,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   for (const s of steps) s.task = stripHidden(s.task);
   // A step id stored before ids had a shape runs as `step-<n>`, after the modifications (which
   // address steps by their stored id), so nothing the run writes quotes it. The names come from the
-  // stored plan, so a removed step does not shift them.
-  const runSteps = runStepIds(steps, stepRunNames(planned.steps));
+  // stored plan, so a removed step does not shift them; the ids a stored id is read against come
+  // from the stored plan too.
+  const runSteps = runStepIds(steps, stepRunNames(planned.steps), planned.steps.map(s => s.id));
 
   if (runSteps.length === 0) {
     return 'Error: All steps were removed. Nothing to execute.';
@@ -1480,6 +1550,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const runTaint = newRunTaint(deps.parentAgent);
     const state = await asPlanOfAuthor(trail, () => runManifest(manifest, deps.config, buildRunCtx({
+      // The chat's run ending (its stop, its time limit): without it a stop between steps, or under `on_failure:
+      // continue`, lets the next step start (the scope below only ends the agents already in it).
+      endSignal: deps.parentAgent?.runSignal,
       source,
       autonomy: deps.autonomy,
       parentTools: deps.tools,
@@ -1624,6 +1697,11 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     },
   },
   handler: async (input: RunPipelineInput, agent): Promise<string> => {
+    // A workflow's steps run on agents of their own, whose spend this run's cost guard never
+    // sees. A run admitted with a spending bound of its own could pass it through them, so
+    // such a run does not start one: not a first run, a retry or a continuation.
+    // An agent that cannot say (no such method) is treated as bounded: refused, never waved through.
+    if (typeof agent.hasRunCostCeiling !== 'function' || agent.hasRunCostCeiling()) return workflowUnderRunCeiling(getSessionCostCeiling());
     const rawPipelineConfig = agent.toolContext.userConfig;
     // `getAvailableTools()`, not `toolContext.tools`: that context carries the ENGINE's
     // registry, which for a child agent is wider than the child's own grant — a workflow step

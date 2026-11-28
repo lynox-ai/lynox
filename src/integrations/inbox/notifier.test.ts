@@ -45,10 +45,10 @@ describe('sanitisePushText', () => {
 
   it('strips Unicode bidi/format overrides (no RTL spoofing)', () => {
     // U+202E = RIGHT-TO-LEFT OVERRIDE — without this filter, a sender
-    // name like "evil‮gro.acme" reverse-renders as "acme.gro.live"
+    // name like "evil\u202Egro.acme" reverse-renders as "acme.gro.live"
     // in the OS toast and can pretend to be a known contact.
-    expect(sanitisePushText('evil‮gro.acme')).toBe('evilgro.acme');
-    expect(sanitisePushText('zwj‍joiner')).toBe('zwjjoiner');
+    expect(sanitisePushText('evil\u202Egro.acme')).toBe('evilgro.acme');
+    expect(sanitisePushText('zwj\u200Djoiner')).toBe('zwjjoiner');
   });
 });
 
@@ -84,6 +84,18 @@ describe('createInboxNotifier — a mail the sensitive check flagged', () => {
       await notifier.notifyNewItem(item);
       expect(sent.map((m) => m.body)).toEqual(['Praxis Dr. Muster: Ihr Befund 482917']);
     }
+  });
+});
+
+describe('createInboxNotifier — a push for another message of the item', () => {
+  it('names that message\'s sender and subject, not the item\'s', async () => {
+    const router = new NotificationRouter();
+    const sent: NotificationMessage[] = [];
+    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return 'delivered' as const; } });
+    const notifier = createInboxNotifier({ router, language: () => 'de' });
+    const item = fakeItem({ fromName: 'Mail Delivery System', fromAddress: 'mailer-daemon@post.example', subject: 'Undelivered Mail Returned to Sender' });
+    await notifier.notifyNewItem(item, { sender: { address: 'anna@kunde.example', name: 'Anna' }, subject: 'Frage zur Offerte' });
+    expect(sent.map((m) => m.body)).toEqual(['Anna: Frage zur Offerte']);
   });
 });
 

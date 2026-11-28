@@ -11,7 +11,7 @@ import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scru
 import type { CallApiCost, CallContract, CallFiled, GrantLift } from './call-connection.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier, PlannedPipeline } from '../types/index.js';
 import { workflowStampState, type WorkflowStampState } from './workflow-stamp.js';
-import type { DeliverySummary } from './notification-router.js';
+import type { DeliveryDetail, DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
@@ -25,6 +25,7 @@ import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
+import { deletedChatGuardDdl, dropDeletedChatGuardDdl } from './deleted-chat-guard.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
 import { stepIdIssue } from '../orchestrator/step-id.js';
 import { templateRefIssue } from '../orchestrator/template-refs.js';
@@ -1842,7 +1843,17 @@ export class RunHistory {
       zeroDeletedContent(db);
       db.pragma('foreign_keys = ON');
       this.db = db;
-      this._migrate();
+      // The guard's triggers name content tables and columns (`deleted-chat-guard.ts`); a migration
+      // may drop or rename those, which SQLite refuses while a trigger names them. So they go, the
+      // migrations run (each one a savepoint) and they come back, in one transaction: another
+      // connection to a live file sees the old triggers or the new ones, never none, and a
+      // migration that fails leaves them as they were.
+      db.transaction(() => {
+        db.exec(dropDeletedChatGuardDdl());
+        this._migrate();
+        const tables = new Set((db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((r) => r.name));
+        db.exec(deletedChatGuardDdl(tables));
+      })();
     } catch (err) {
       try { db.close(); } catch { /* best-effort */ }
       throw err;
@@ -3483,7 +3494,7 @@ export class RunHistory {
       parameters: (planned as { parameters?: unknown }).parameters,
     }) ?? planned.steps.reduce<ReturnType<typeof findHiddenInName>>(
       (hit, s, i) => hit ?? (typeof s.id === 'string' ? findHiddenInName(s.id, `steps[${i}].id`) : null), null);
-    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
+    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden, { steps: true }));
     // A step's id has a limited shape (`step-id.ts`): it reaches the model next to lynox's own words.
     // Every producer saves here, so no new plan carries a free-form id; one stored before the limit
     // is shown by its position, and `update_workflow_steps` names the rename it needs first.
@@ -3806,14 +3817,14 @@ export class RunHistory {
 
   /** Mark that an escalation of a trigger started — see {@link TriggerStore.startEscalation}.
    *  False without a trigger store. */
-  startEscalation(id: string, at: string, onlyIfLater = false): boolean {
-    return this._triggerStore?.startEscalation(id, at, onlyIfLater) ?? false;
+  startEscalation(id: string, at: string, onlyIfLater = false, chat?: DeliveryDetail['chat']): boolean {
+    return this._triggerStore?.startEscalation(id, at, onlyIfLater, chat) ?? false;
   }
 
   /** Record whether the escalation that started at `startedAt` reached anyone — see
    *  {@link TriggerStore.recordEscalationOutcome}. False without a trigger store. */
-  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string): boolean {
-    return this._triggerStore?.recordEscalationOutcome(id, outcome, startedAt) ?? false;
+  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string, detail?: DeliveryDetail): boolean {
+    return this._triggerStore?.recordEscalationOutcome(id, outcome, startedAt, detail) ?? false;
   }
 
   /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The
@@ -3898,6 +3909,11 @@ export class RunHistory {
     return this._triggerStore?.getDue() ?? [];
   }
 
+  /** Every plan of a workflow that may still run, switched off ones included (`getPlansOfWorkflow`). */
+  getPlansOfWorkflow(workflowId: string): TriggerRecord[] {
+    return this._triggerStore?.getPlansOfWorkflow(workflowId) ?? [];
+  }
+
   /** Triggers that actively reference a saved workflow (Slice C destructive-edit
    *  guard): enabled + not-completed rows whose `pipeline_id` matches. */
   getTriggersByPipelineId(pipelineId: string): TriggerRecord[] {
@@ -3908,6 +3924,9 @@ export class RunHistory {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
+    /** The cause of a failed run (`RunCause`, as JSON), or null: written on every run end. */
+    lastRunCause: string | null;
+    lastRunMemberNotes?: readonly string[] | undefined;
     // `undefined` leaves next_run_at unchanged; `null` clears it.
     // Clearing is required after a one-shot trigger reaches a terminal
     // state, otherwise getDueTriggers would re-select it forever.

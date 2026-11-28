@@ -53,7 +53,7 @@ export interface IMemory {
    * and the log each namespace's write is recorded in (`capture#extract`). Without an actor the
    * namespaces are written as before, unrecorded, with a line on stderr.
    */
-  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined, actor?: import('../core/instance-trail.js').InstanceActor | undefined, auditLog?: import('../core/audit-log.js').AuditLog | null | undefined): Promise<void>;
+  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined, actor?: import('../core/instance-trail.js').InstanceActor | undefined, auditLog?: import('../core/audit-log.js').AuditLog | null | undefined, heldRetry?: MemoryExtractionRetry | undefined): Promise<void>;
   // Scope-aware methods (Phase 1)
   appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<boolean | void>;
   loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef):                            Promise<string | null>;
@@ -358,6 +358,10 @@ export interface IKnowledgeLayer {
   deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   /** Retire the original of a move at its scope; the ids go with the copy's store, which names the copy their successor. */
   retireForMove(pattern: string, namespace: MemoryNamespace, scope: MemoryScopeRef): Promise<string[]>;
+  /** Whether the active memories matching `pattern` were written untrusted; `null` when none
+   *  match. Optional so a test double need not wire it: a caller without it, like a caller that
+   *  gets `null`, treats the text as untrusted. */
+  sourceUntrustedOf?(pattern: string, namespace: MemoryNamespace, scope?: MemoryScopeRef | undefined): boolean | null;
   eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   updateMemoryText(
     oldText: string,
@@ -386,4 +390,14 @@ export interface IKnowledgeLayer {
   runIntelligence(): void;
   feedbackOnRetrieval(memoryIds: string[], signal: 'useful' | 'wrong'): void;
   consolidateMemories(namespace: MemoryNamespace, scopeType: string, scopeId: string): number;
+}
+
+/**
+ * An extraction refused only because a run held the balance (a refusal within the balance)
+ * can be tried once more. `onRefused` receives that one retry; `isRetry` marks the retry
+ * itself, which is never deferred again and skips the extraction throttle.
+ */
+export interface MemoryExtractionRetry {
+  onRefused?: ((retry: () => void) => void) | undefined;
+  isRetry?: boolean | undefined;
 }

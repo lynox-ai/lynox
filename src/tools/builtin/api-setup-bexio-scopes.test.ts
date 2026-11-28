@@ -137,7 +137,7 @@ describe('the bexio API is reached only through the provider', () => {
   const rest = { endpoints: [{ method: 'POST', path: '/2.0/contact', description: 'create a contact' }], guidelines: ['x'], avoid: ['x'] };
   const save = async (action: 'create' | 'update', profile: ApiProfile, store = new ApiStore()): Promise<{ out: string; store: ApiStore }> => {
     // A person accepts the hosts when asked, so a refusal here is this check's and not that gate's.
-    const agent = Object.assign(agentWith(store) as object, { promptUser: async (): Promise<string> => 'Allow' }) as never;
+    const agent = Object.assign(agentWith(store) as object, { promptUser: async (): Promise<string> => 'allow' }) as never;
     const out = await apiSetupTool.handler({ action, profile: { ...profile, ...rest } }, agent) as string;
     return { out, store };
   };

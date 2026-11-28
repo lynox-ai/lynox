@@ -396,7 +396,7 @@ describe('a new question that arrives while an answer is being saved', () => {
 describe('why a question was closed, and the lost answer as a draft (UX-064, UX-068)', () => {
 	const say = async (key: string): Promise<string> => (await import('../i18n.svelte.js')).t(key);
 	/** Answers 'my answer' (or `answer`) to a question the server reports closed with `code`, as `viewer`. */
-	async function closedWith(code: string, opts: { viewer?: 'owner' | 'mandate'; field?: string; answer?: string; tabs?: boolean; options?: string[] } = {}): Promise<{ field: string; asked: number }> {
+	async function closedWith(code: string, opts: { viewer?: 'owner' | 'mandate'; field?: string; answer?: string; tabs?: boolean; options?: string[]; consent?: 'guard' | 'deep' } = {}): Promise<{ field: string; asked: number }> {
 		let field = opts.field ?? '';
 		let asked = 0;
 		store.registerComposerDraft((text) => { asked++; if (field.trim() !== '') return false; field = text; return true; });
@@ -412,7 +412,7 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 			await settle();
 			await store.replyPermissionTabs(['my answer']);
 		} else {
-			run.send('prompt', { promptId: 'p1', question: 'Which?', ...(opts.options !== undefined ? { options: opts.options } : {}) });
+			run.send('prompt', { promptId: 'p1', question: 'Which?', ...(opts.options !== undefined ? { options: opts.options } : {}), ...(opts.consent !== undefined ? { consent: opts.consent } : {}) });
 			await settle();
 			await store.replyPermission(opts.answer ?? 'my answer');
 		}
@@ -462,10 +462,10 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 	});
 
 	it('a consent card\'s answer is no draft: typed into the chat it would approve nothing', async () => {
-		for (const options of [['Allow', 'Deny'], ['Run on balanced', 'Cancel']]) {
+		for (const [options, consent] of [[['allow', 'deny'], 'guard'], [['deep', 'balanced', 'cancel'], 'deep']] as const) {
 			vi.resetModules();
 			store = await import('./chat.svelte.js');
-			const { field, asked } = await closedWith('timed_out', { answer: 'y', options });
+			const { field, asked } = await closedWith('timed_out', { answer: 'allow', options: [...options], consent });
 			expect(asked, options.join('/')).toBe(0);
 			expect(field).toBe('');
 			expect(store.getChatError()).toBe(await say('chat.prompt_closed.timed_out'));
@@ -507,6 +507,59 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 		const { field } = await closedWith('something_new');
 		expect(store.getChatError()).toBe((await say('chat.prompt_expired')) + (await say('chat.prompt_closed.draft')));
 		expect(field).toBe('my answer');
+	});
+});
+
+describe('the card of a prompt that is already open', () => {
+	// A reconnect re-attaches the run, which replays its events and asks for the pending prompt
+	// again. The card the user is typing into stays as it is: its generation bumps only for a
+	// different prompt, since a bump clears the secret field and the mail password in ChatView.
+	const SECRET = { name: 'API_KEY', prompt: 'key?', promptId: 'p1' };
+	const MAIL = { promptId: 'm1', id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom' };
+
+	it('stays when the run replays it, and is set anew for a different prompt', async () => {
+		const run = openRun(() => json({}));
+		void store.sendMessage('go');
+		await settle();
+		run.send('secret_prompt', SECRET);
+		run.send('mail_connect_prompt', MAIL);
+		await settle();
+		const secretGen = store.getSecretPromptGeneration();
+		const mailGen = store.getMailConnectGeneration();
+		run.send('secret_prompt', SECRET);
+		run.send('mail_connect_prompt', MAIL);
+		await settle();
+		expect([store.getSecretPromptGeneration(), store.getMailConnectGeneration()]).toEqual([secretGen, mailGen]);
+		run.send('secret_prompt', { ...SECRET, promptId: 'p2' });
+		run.send('mail_connect_prompt', { ...MAIL, promptId: 'm2' });
+		await settle();
+		expect([store.getSecretPromptGeneration(), store.getMailConnectGeneration()]).toEqual([secretGen + 1, mailGen + 1]);
+		expect([store.getPendingSecretPrompt()?.promptId, store.getPendingMailConnect()?.promptId]).toEqual(['p2', 'm2']);
+	});
+
+	it('stays when the pending prompt is asked for again, and is set anew for a different one', async () => {
+		let pending: unknown = { pending: true, promptType: 'ask_secret', promptId: 'p1', secretName: 'API_KEY', question: 'key?' };
+		const run = openRun((url) => (url.endsWith('/pending-prompt') ? json(pending) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('secret_prompt', SECRET);
+		await settle();
+		const secretGen = store.getSecretPromptGeneration();
+		await expect(store.checkPendingPrompt()).resolves.toBe('other');
+		expect(store.getSecretPromptGeneration()).toBe(secretGen);
+		pending = { pending: true, promptType: 'ask_secret', promptId: 'p2', secretName: 'API_KEY', question: 'key?' };
+		await store.checkPendingPrompt();
+		expect(store.getSecretPromptGeneration()).toBe(secretGen + 1);
+
+		run.send('mail_connect_prompt', MAIL);
+		await settle();
+		const mailGen = store.getMailConnectGeneration();
+		pending = { pending: true, promptType: 'connect_mail', promptId: 'm1', mailConnect: { id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom', type: 'personal' } };
+		await expect(store.checkPendingPrompt()).resolves.toBe('other');
+		expect(store.getMailConnectGeneration()).toBe(mailGen);
+		pending = { ...pending as object, promptId: 'm2' };
+		await store.checkPendingPrompt();
+		expect(store.getMailConnectGeneration()).toBe(mailGen + 1);
 	});
 });
 

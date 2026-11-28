@@ -231,7 +231,7 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
     const { records, notes } = await tick(id);
     // The handler's own sentence: the throw reached its catch, not the loop's.
-    expect(records).toEqual(['AI model or target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, try again later.']);
+    expect(records).toEqual(['AI model or target system not reachable, or an error in lynox.']);
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
     await vi.waitFor(() => { if (captured.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
     expect(captured.map((e) => e.message)).toEqual(['bulk_judge call failed: Error']);
@@ -243,11 +243,16 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     const id = startedRun();
     vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
     const { records, notes } = await tick(id, [], 'de');
-    const de = 'KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.';
+    const de = 'KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox.';
+    // The history keeps the fact; the owner's push keeps the way on, every mandate's says the owner
+    // continues the run (U-383).
     expect(records).toEqual([de]);
-    expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual([de]);
-    // Its run is held halted: the title says so, the mark that it was a failure (U-324).
-    expect(notes.map((n) => n.slice(0, n.indexOf('\n')).split(' · ')[0])).toEqual(['\u2717 Beurteilung angehalten']);
+    expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual([
+      `${de} Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.`,
+      `${de} Der Inhaber kann den Lauf fortsetzen; hält der Lauf gleich wieder an, kann der Inhaber es später erneut versuchen.`,
+    ]);
+    // Its run is held halted: the title says so, the mark that it was a failure (U-324), on both.
+    expect(notes.map((n) => n.slice(0, n.indexOf('\n')).split(' · ')[0])).toEqual(['\u2717 Beurteilung angehalten', '\u2717 Beurteilung angehalten']);
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
   });
 
@@ -259,6 +264,20 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     await tick(id);
     await vi.waitFor(() => { if (captured.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
     expect(captured.map((e) => e.message)).toContain('bulk_judge call failed: Error');
+  });
+
+  // The halt in the catch is one UPDATE and can throw itself: the owner still hears the handler's
+  // fixed sentence, recorded and pushed, never the raw error the dispatch would report.
+  it('a halt that throws in the catch still records and pushes the handler\'s fixed sentence', async () => {
+    model.create = async () => ({});
+    const id = startedRun();
+    vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
+    vi.spyOn(ledger, 'haltPreview').mockImplementation(() => { throw new Error('SQLITE_BUSY'); });
+    const { records, notes } = await tick(id);
+    expect(records).toEqual(['Bulk judge stopped.']);
+    await vi.waitFor(() => { if (notes.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
+    expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual(['Bulk judge stopped.']);
+    for (const text of [...records, ...notes]) expect(text).not.toContain('SQLITE_BUSY');
   });
 });
 

@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
+import { CONTENT_FLAG_DIALOG, contentFlagFound, contentFlagRefusal } from '../tools/dialog-text.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -17,7 +19,6 @@ import type {
   EffortLevel,
   ThinkingMode,
   TabQuestion,
-  IAgent,
   PromptUserFn,
   PromptTabsFn,
   PromptSecretFn,
@@ -31,13 +32,15 @@ import { effectiveContextWindow, profileNamed } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError, raceRunAbort } from './agent.js';
+import { currentCallSignal } from './call-connection.js';
 import { isInputRequired } from './input-required.js';
 import { loopGuardStopReason } from './loop-guard-stop.js';
 import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
+import { fireAdmissionHooks, RunAdmissionRefusedError, type CombinedAdmission } from './run-admission.js';
 import { openPendingRunGroup, RUN_GROUP_ID_FORMAT, settleRunGroup } from './run-group.js';
 import { channels } from './observability.js';
 import { containsUntrustedMarker, detectInjectionAttempt } from './data-boundary.js';
@@ -88,7 +91,6 @@ import type { SecretStore } from './secret-store.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { DataStore } from './data-store.js';
-import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 import { MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, principalTag, runAuthorTag } from './request-principal.js';
@@ -97,6 +99,8 @@ import { ConversationLatch } from './conversation-latch.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { turnIsLocked } from './mandate-tool-lock.js';
 import { ConversationGrants } from './conversation-grants.js';
+import { SearchResultAddresses } from './search-result-addresses.js';
+import { wrapHandler } from '../tools/wrap-handler.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -144,6 +148,13 @@ export interface CompactionResult {
 }
 
 const DEFAULT_COMPACTION_MODEL: ModelTier = 'fast';
+
+/** A run refused because the bound an admission hook set leaves nothing to spend. */
+const RUN_CEILING_NOTHING_FREE = 'Nothing is left of the AI budget for this run right now. If another task is running, you can continue once it has finished; otherwise buy a credit pack or wait for your next billing period.';
+/** The `reason` a `run_blocked` warning carries when the run was refused within the balance. */
+export const RUN_BLOCKED_HOLD_EXHAUSTED = 'hold_exhausted';
+/** A run refused because its spending bound cannot be enforced: the agent has no cost guard. */
+const RUN_CEILING_WITHOUT_GUARD = 'This run has a spending bound, but nothing in this session can hold it to it.';
 
 /** Thrown by `run()` when an `internal: true` run (only compaction, today) is
  *  stopped by a pre-run GUARD (persistent budget, a tenant/budget `onBeforeRun`
@@ -376,6 +387,11 @@ export interface RunUsageSummary {
   durationMs?: number;
 }
 
+/** How long a plugin's tool gate may take before the call is refused. The gate sits in front of
+ *  every tool, also the ones without the per-tool time limit (`ask_user`, `run_workflow`, …), so
+ *  without its own bound a gate that never answers would hold the call, and a stopped run, open. */
+export const PLUGIN_GATE_TIMEOUT_MS = 30_000;
+
 /**
  * Wrap each tool's handler with the plugin tool-gate, preserving the REST of the
  * ToolEntry via a spread. Spreading `...entry` — not cherry-picking a field subset —
@@ -386,15 +402,26 @@ export interface RunUsageSummary {
  * plugin-enabled instance. The spread keeps those, and any field added to ToolEntry later.
  */
 export function applyPluginToolGate(entries: ToolEntry[], pluginManager: PluginManager): ToolEntry[] {
-  return entries.map(entry => ({
-    ...entry,
-    handler: async (input: unknown, agent: IAgent): Promise<string> => {
-      const gate = await pluginManager.fireToolGate(entry.definition.name, input);
-      if (gate === false) {
-        throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
-      }
-      return entry.handler(input, agent);
-    },
+  return entries.map(entry => wrapHandler(entry, async (input, _agent, run): Promise<string> => {
+    // The gate is plugin code and gets no signal, so the wait on it hears the run's stop here
+    // and ends at its own bound; a gate that gives no answer in time refuses the call.
+    const call = currentCallSignal();
+    const bound = new AbortController();
+    // run-group-starter: cleared in this handler's `finally`; it only ends the wait on this gate and reports no spend.
+    const timer = setTimeout(() => { bound.abort(); }, PLUGIN_GATE_TIMEOUT_MS);
+    let gate: boolean | undefined;
+    try {
+      gate = await raceRunAbort(pluginManager.fireToolGate(entry.definition.name, input), call ? AbortSignal.any([call, bound.signal]) : bound.signal);
+    } catch (err: unknown) {
+      if (call?.aborted === true) throw err;
+      throw new Error(`Tool "${entry.definition.name}" blocked: the plugin gate gave no answer within ${String(PLUGIN_GATE_TIMEOUT_MS / 1000)} s; the call was not made.`);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (gate === false) {
+      throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
+    }
+    return run();
   }));
 }
 
@@ -535,6 +562,14 @@ export class Session {
    *  compaction's session-shared mutations — the cheap-tier `_model`/agent swap
    *  AND the buffer reset+reload. Cleared when the compaction settles. */
   private _compactionInFlight: Promise<void> | null = null;
+  /** Runs of this session whose admission is held (set aside, not yet given back). */
+  private _admissionsHeld = 0;
+  /**
+   * Work refused only because a run of this session held the balance (an LLM title, a memory
+   * extraction): each runs once when the last held admission is given back. A retry that is
+   * refused again is not queued again.
+   */
+  private _afterRelease: Array<() => void> = [];
   /**
    * A stop that arrived while this turn had not yet reached the agent. `Agent.send` starts
    * each run on a fresh controller, so an `abort()` landing in the awaits before it (a
@@ -566,6 +601,7 @@ export class Session {
    * state in tools/builtin/http.ts and tools/builtin/fs.ts and grew
    * (or, in the Set/Map's case, leaked) for the lifetime of the process.
    */
+  private readonly _searchResultAddresses = new SearchResultAddresses();
   private readonly _sessionCounters: import('../types/agent.js').SessionCounters = {
     httpRequests: 0,
     writeBytes: 0,
@@ -914,7 +950,44 @@ export class Session {
     return openPendingRunGroup(() => this._run(task, runOptions));
   }
 
+  /**
+   * What the admission hooks set aside for a run is given back however the run ends — a
+   * result, an early return before the model is asked (a content-policy block, a denied
+   * flag), a refusal or a throw — and only after the run's own cost was reported.
+   */
   private async _run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
+    const admission: { current: CombinedAdmission | null } = { current: null };
+    try {
+      return await this._runAdmitted(task, runOptions, admission);
+    } finally {
+      if (admission.current !== null) {
+        admission.current.release();
+        this._admissionsHeld--;
+        if (this._admissionsHeld === 0) this._runAfterRelease();
+      }
+    }
+  }
+
+  /** Runs `retry` once no run of this session holds the balance: now, or at the release. */
+  private _whenBalanceFree(retry: () => void): void {
+    this._afterRelease.push(retry);
+    if (this._admissionsHeld === 0) this._runAfterRelease();
+  }
+
+  /** Runs what waited for the release, each once; see {@link _afterRelease}. */
+  private _runAfterRelease(): void {
+    for (const retry of this._afterRelease.splice(0)) {
+      try {
+        retry();
+      } catch { /* best-effort enrichment: a failed retry stays skipped */ }
+    }
+  }
+
+  private async _runAdmitted(
+    task: string | unknown[],
+    runOptions: RunOptions | undefined,
+    admission: { current: CombinedAdmission | null },
+  ): Promise<string> {
     if (!this.agent) throw new Error('Session not initialized — agent missing');
     // Before anything that could rebuild the agent below, so every rebuild of this run is
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
@@ -1004,7 +1077,10 @@ export class Session {
         const runId = randomUUID();
         // Relative to the workspace the files live in, not to the process: in the image the
         // process runs in /app and every workspace path would start with `../`.
-        runChangeset = workspaceChangeset(runId);
+        // Who made this review and whether this run's client shows it travel with the manager:
+        // the principal set above is this run's, and a later run that fails before it gets
+        // here must not change who may answer this one.
+        runChangeset = workspaceChangeset(runId, { createdBy: principalTag(this._principal), shownForReview: this._runShowsReview });
         this._changesetManager = runChangeset;
         this._recreateAgent();
       } else {
@@ -1038,30 +1114,43 @@ export class Session {
       source: context?.source ?? 'cli',
       tenantId: this._tenantId ?? undefined,
     };
-    for (const hook of this.engine.getHooks()) {
-      if (hook.onBeforeRun) {
-        try {
-          await hook.onBeforeRun(preRunContext.runId, preRunContext);
-        } catch (err: unknown) {
-          const reason = err instanceof Error ? err.message : String(err);
-          // An internal (compaction) run blocked by a tenant/budget hook: do NOT
-          // emit a user-facing `run_blocked` warning (no user turn was blocked)
-          // and do NOT return the block string (compaction would inject it as an
-          // authoritative summary and wipe the thread). Throw so compact() keeps
-          // the history and simply retries next turn.
-          if (runOptions?.internal === true) throw new InternalRunBlockedError(`Run blocked: ${reason}`);
-          // Surface the block as a `warning` SSE event so the web-UI shows a
-          // distinct, localized banner/toast instead of letting the reason
-          // string slip through as a `done.result` that the chat used to
-          // render as total silence (2026-05-29, first-session
-          // fail-closed credit check). The returned string is still the
-          // single source for non-SSE callers (CLI) and the `done.result`
-          // inline render fallback. `warning` (not `error`) keeps the failed
-          // user turn intact — the block is transient (credit re-syncs).
-          await this.onStream?.({ type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox' });
-          return `Run blocked: ${reason}`;
-        }
+    // A hook may bound what this run may spend (the smallest bound wins); the bound is
+    // applied to this run's cost guard below. Without a cost guard nothing would hold the
+    // run to it, so the run is refused, like a refusal by the hook itself.
+    let runCostCeilingUSD: number | undefined;
+    try {
+      admission.current = await fireAdmissionHooks(this.engine.getHooks(), preRunContext.runId, preRunContext);
+      this._admissionsHeld++;
+      const ceilingCents = admission.current.maxCostCents;
+      if (ceilingCents !== undefined) {
+        if (!(ceilingCents > 0)) throw new RunAdmissionRefusedError(RUN_CEILING_NOTHING_FREE);
+        if (this.agent.hasCostGuard?.() !== true) throw new Error(RUN_CEILING_WITHOUT_GUARD);
+        runCostCeilingUSD = ceilingCents / 100;
       }
+    } catch (err: unknown) {
+      // Refused within the balance (a hook's refusal, or a bound with nothing in it): one sentence,
+      // the same for both, and a reason code the chat shows in the owner's language.
+      const holdExhausted = err instanceof RunAdmissionRefusedError;
+      const reason = holdExhausted ? RUN_CEILING_NOTHING_FREE : err instanceof Error ? err.message : String(err);
+      // An internal (compaction) run blocked by a tenant/budget hook: do NOT
+      // emit a user-facing `run_blocked` warning (no user turn was blocked)
+      // and do NOT return the block string (compaction would inject it as an
+      // authoritative summary and wipe the thread). Throw so compact() keeps
+      // the history and simply retries next turn.
+      if (runOptions?.internal === true) throw new InternalRunBlockedError(`Run blocked: ${reason}`);
+      // Surface the block as a `warning` SSE event so the web-UI shows a
+      // distinct, localized banner/toast instead of letting the reason
+      // string slip through as a `done.result` that the chat used to
+      // render as total silence (2026-05-29, first-session
+      // fail-closed credit check). The returned string is still the
+      // single source for non-SSE callers (CLI) and the `done.result`
+      // inline render fallback. `warning` (not `error`) keeps the failed
+      // user turn intact — the block is transient (credit re-syncs).
+      await this.onStream?.({
+        type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox',
+        ...(holdExhausted ? { reason: RUN_BLOCKED_HOLD_EXHAUSTED } : {}),
+      });
+      return `Run blocked: ${reason}`;
     }
 
     // Content policy: check user input for malware/exploit/phishing intent BEFORE sending to LLM
@@ -1075,11 +1164,13 @@ export class Session {
         return msg;
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
+        const language = noticeLanguage(this.engine.config.language);
         let answer: string;
         try {
           answer = await this.agent.promptUser(
-            pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
-            ['Allow', 'Deny', '\x00'],
+            CONTENT_FLAG_DIALOG[language].question(contentFlagFound(language, inputCheck.reason)),
+            consentOptions('guard'),
+            consentMeta('guard'),
           );
         } catch (err: unknown) {
           // A prompt path that cannot reach anyone (an HTTP engine without its prompt store)
@@ -1091,8 +1182,12 @@ export class Session {
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          // The run's result, read by the person in the instance's language: the run ends here,
+          // before the model is called and before anything is stored, so the model never reads it.
+          const why = outcome === 'unrecognised' ? 'unrecognised' : outcome === 'dismissed' ? 'unanswered' : 'declined';
+          const msg = contentFlagRefusal(language, why, inputCheck.reason);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }
@@ -1336,7 +1431,10 @@ export class Session {
           const result = await knowledgeLayer.retrieve(task, this.engine.getActiveScopes(), {
             topK: 8,
             threshold: 0.55,
-            useHyDE: true,
+            // Not for a run with a bound of its own: the HyDE call is spent before the run's guard
+            // is reset for the run, so no ceiling of the run could count it. Retrieval runs on the
+            // question alone then.
+            useHyDE: runCostCeilingUSD === undefined,
             useGraphExpansion: true,
             threadAnchorSubjectId,
             // Wave 0 shadow mode records this (plaintext) to correlate the admission
@@ -1449,6 +1547,7 @@ export class Session {
           // Tell the agent its first pushed user message is already on disk, so
           // the identity-based eager-persist delta won't write it a second time.
           userMessagePrePersisted: userTurnPrePersisted,
+          ...(runCostCeilingUSD !== undefined ? { runCostCeilingUSD } : {}),
         },
       );
       // Why and how THIS run ended, kept where the caller can still reach it. The
@@ -2595,7 +2694,7 @@ export class Session {
    * caller. `fast` resolves against the active provider, so under hybrid it
    * follows the configured fast-tier model.
    */
-  private async _generateLLMTitle(firstMessage: string, placeholder: string): Promise<void> {
+  private async _generateLLMTitle(firstMessage: string, placeholder: string, isRetry = false): Promise<void> {
     try {
       const provider = getActiveProvider();
       // `fast` may map to a different provider under a hybrid tier_set — build
@@ -2612,7 +2711,19 @@ export class Session {
       // worth spending against an empty balance. The gate also checks the
       // instance's spending caps, which this run already passed at its start.
       const titleGate = await fireBeforeRunGate(this.engine, 'fast');
-      if (titleGate.blockedReason !== null) return;
+      if (titleGate.blockedReason !== null) {
+        // Refused only because the balance is held by a run of this session (the run that
+        // asked for the title holds all of it while it runs): wait for that run to give it
+        // back and try ONCE more, through the same gate. Refused again, it stays silent.
+        if (titleGate.refusedWithinBalance && !isRetry) {
+          this._whenBalanceFree(() => {
+            // Only while the thread still carries the placeholder: a rename or a later title wins.
+            if (this.engine.getThreadStore()?.getThread(this.sessionId)?.title !== placeholder) return;
+            void this._generateLLMTitle(firstMessage, placeholder, true);
+          });
+        }
+        return;
+      }
       const prompt = LLM_TITLE_PROMPT;
       const stream = titleClient.beta.messages.stream({
         model: fastSnap.modelId,
@@ -2733,9 +2844,13 @@ export class Session {
   private _rebuildAgentKeepingConversation(): void {
     const messages = this.saveMessages();
     const tainted = this.agent?.conversationSawUntrusted ?? false;
+    const searched = this.agent?.heldProviderSearch() ?? false;
     this._createAgent();
     this.loadMessages(messages);
     if (tainted) this.agent?.restoreConversationTaint();
+    // Likewise a server tool the provider ran (its web search), whose blocks the context window
+    // may have dropped.
+    if (searched) this.agent?.restoreProviderSearch();
   }
 
   /**
@@ -2994,6 +3109,7 @@ export class Session {
       // the reason the plain read replaced a conditional spread that was doing nothing.
       abortScope: this.agent?.abortScope,
       name: 'lynox',
+      language: this.engine.config.language,
       model,
       // A background slot on another endpoint pins the pair the same way a profile does.
       modelPinnedByProfile: this._profileOverride !== null || (this._backgroundSlot !== null && slotCfg.crossProviderSlot),
@@ -3106,6 +3222,8 @@ export class Session {
       changesetReviewedAfterRun: this._changesetManager !== null && this._runShowsReview,
       toolContext,
       sessionCounters: this._sessionCounters,
+      // The same record of what this conversation's searches listed, for every agent built for it.
+      searchResultAddresses: this._searchResultAddresses,
       // Phase 2: same blob-store reference across every Agent recreation so
       // `recall_tool_result` resolves handles minted by a prior `compact()`.
       toolResultBlobStore: this._toolResultBlobStore,
@@ -3115,6 +3233,7 @@ export class Session {
       userTimezone: this._userTimezone ?? undefined,
     });
     this._agentChangeset = this._changesetManager;
+    this.agent.deferUntilBalanceFree = (retry) => { this._whenBalanceFree(retry); };
 
     // Respect memory_extraction config (default: true)
     if (userConfig.memory_extraction === false) {
