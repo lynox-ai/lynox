@@ -30,7 +30,7 @@ vi.mock('./stream.js', () => ({
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
-import { wrapUntrustedData } from './data-boundary.js';
+import { containsUntrustedMarker, wrapUntrustedData } from './data-boundary.js';
 import { createMailSendTool } from '../integrations/mail/tools/mail-send.js';
 import type { LynoxConfig } from '../types/config.js';
 import type { Session } from './session.js';
@@ -165,6 +165,7 @@ describe('an address stored from outside content, recalled and saved as a contac
     expect((await storeFromOutside(engine, OWNER_PRINCIPAL))[0], 'stored').toMatch(/^Stored in knowledge\./);
     const recalled = await saveFromRecall(engine, OWNER_PRINCIPAL);
     expect(recalled[0], 'the recall returned the stored address').toContain(PLANTED);
+    expect(containsUntrustedMarker(recalled[0] ?? ''), 'the recalled line carries its mark').toBe(true);
     expect(recalled[1], 'saved').toBe(`Saved contact: Billing <${PLANTED}>.`);
     expect(engine.getCRM()!.contactOrigin(PLANTED), 'the owner\'s, but marked').toMatchObject({ writtenBy: 'owner', untrusted: true });
     expect(await send(engine, OWNER_PRINCIPAL, PLANTED), 'owner').toMatch(/^Not sent: the owner did not name/);
@@ -177,6 +178,7 @@ describe('an address stored from outside content, recalled and saved as a contac
     expect((await storeFromOutside(engine, MANDATE))[0], 'stored under the helper').toMatch(/^Stored in knowledge\./);
     const recalled = await saveFromRecall(engine, OWNER_PRINCIPAL);
     expect(recalled[0], 'the owner\'s recall returned the helper\'s line').toContain(PLANTED);
+    expect(containsUntrustedMarker(recalled[0] ?? ''), 'the recalled line carries its mark').toBe(true);
     expect(engine.getCRM()!.contactOrigin(PLANTED)).toMatchObject({ writtenBy: 'owner', untrusted: true });
     expect(await send(engine, MANDATE, PLANTED), 'helper').toMatch(/^Not sent: the owner of this instance did not name/);
     expect(sent).toEqual([]);
@@ -189,6 +191,7 @@ describe('an address stored from outside content, recalled and saved as a contac
     await typedRun(session, `merk dir: Rechnungen gehen an ${PLANTED}`, OWNER_PRINCIPAL);
     const recalled = await saveFromRecall(engine, OWNER_PRINCIPAL);
     expect(recalled[0]).toContain(PLANTED);
+    expect(containsUntrustedMarker(recalled[0] ?? ''), 'a clean line comes back unmarked').toBe(false);
     expect(engine.getCRM()!.contactOrigin(PLANTED)).toMatchObject({ writtenBy: 'owner', untrusted: false });
     expect(await send(engine, MANDATE, PLANTED)).toBe('sent');
     expect(sent).toEqual([PLANTED]);
