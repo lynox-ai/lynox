@@ -62,6 +62,7 @@ const SUPERSEDED_PREFIX_RE = /^\[SUPERSEDED \d{4}-\d{2}-\d{2}\]\s*/;
  *  (`status` lines get one even in front of a `[SUPERSEDED …]` marker) and the marker. */
 function stripLinePrefixes(line: string): string {
   let rest = line.trim();
+  // run-group-starter: a synchronous loop that ends when no prefix is left; it starts nothing.
   for (;;) {
     const next = rest.replace(SUPERSEDED_PREFIX_RE, '').replace(DATE_PREFIX_RE, '');
     if (next === rest) return rest;
