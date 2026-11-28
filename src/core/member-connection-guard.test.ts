@@ -277,7 +277,7 @@ describe('saves that change a profile\'s author (A7)', () => {
 
   it('each removal of the author stands behind its check', () => {
     // The owner-save check is the shared helper; it must still hold the connection condition.
-    expect(files.get('core/profile-secret-view.ts')).toContain('return isMandateConnection(profile) && !connectionWaits(profile, ends);');
+    expect(files.get('core/profile-secret-view.ts')).toContain("export function ownerSaveHeldByMemberConnection(profile: ApiProfile, ends: Pick<MandateEnds, 'isLive'> | null): boolean {\n  return isMandateConnection(profile) && !connectionWaits(profile, ends);\n}");
     const found = authorRemovals(files);
     expect(found).toHaveLength(AUTHOR_REMOVALS.length);
     expect(found.filter((r) => !r.checked)).toEqual([]);
