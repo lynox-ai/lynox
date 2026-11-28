@@ -2083,7 +2083,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.collapse_all': { de: 'Alle zuklappen', en: 'Collapse all' },
 
 	// Changeset review
-	'changeset.title': { de: 'Changeset Review', en: 'Changeset Review' },
+	'changeset.title': { de: 'Änderungen prüfen', en: 'Review changes' },
 	'changeset.files_modified': { de: 'geändert', en: 'modified' },
 	'changeset.files_added': { de: 'hinzugefügt', en: 'added' },
 	'changeset.accept_all': { de: 'Alle akzeptieren', en: 'Accept all' },
@@ -2104,6 +2104,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'changeset.review_failed': { de: 'Deine Antwort konnte nicht übernommen werden.', en: 'Your answer could not be applied.' },
 	'changeset.not_restored': { de: 'Nicht zurückgesetzt: {files}. Diese Dateien wurden seit der Prüfung ersetzt oder verknüpft, oder sie liessen sich nicht schreiben. Sieh sie dir selbst an.', en: 'Not restored: {files}. These files were replaced or linked since the review, or could not be written. Look at them yourself.' },
 	'changeset.message_waiting': { de: 'Deine Nachricht geht los, sobald du über diese Änderungen entschieden hast.', en: 'Your message goes out once you have decided on these changes.' },
+	'changeset.messages_waiting': { de: 'Deine Nachrichten gehen los, sobald du über diese Änderungen entschieden hast.', en: 'Your messages go out once you have decided on these changes.' },
 	'changeset.not_restored_unknown': { de: 'Nicht zurückgesetzt: {files}. Warum, kann lynox hier nicht sagen. Sieh dir diese Dateien selbst an; sie können noch die Änderung tragen.', en: 'Not restored: {files}. lynox cannot tell why here. Look at these files yourself; they may still carry the change.' },
 	'changeset.not_restored_more': { de: '{files} und {n} weitere', en: '{files} and {n} more' },
 	'changeset.rollback_aborted': { de: 'Das Zurücksetzen brach mittendrin ab. Noch nicht zurückgesetzt: {files}. Versuch es noch einmal, oder akzeptiere die übrigen Änderungen.', en: 'Rolling back stopped partway. Not yet restored: {files}. Try again, or accept the remaining changes.' },
