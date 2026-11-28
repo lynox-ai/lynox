@@ -70,7 +70,8 @@
 		animation: slideIn 0.2s ease-out;
 	}
 	/* Below `sm` the toasts hang from the top, so they come in from above. */
-	@media (max-width: 639.98px) {
+	/* The exact complement of Tailwind's `sm` (width >= 40rem), so both follow the browser's default font size. */
+	@media (width < 40rem) {
 		.animate-in { animation-name: slideDown; }
 	}
 	@keyframes slideIn {
