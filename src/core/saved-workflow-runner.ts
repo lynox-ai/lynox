@@ -4,15 +4,27 @@ import { randomUUID } from 'node:crypto';
 import type { UntrustedCause } from './untrusted-signals.js';
 
 import type { Engine, RunContext } from './engine.js';
-import { checkPersistentBudget } from './session-budget.js';
+import { checkPersistentBudget, getSessionCostCeiling } from './session-budget.js';
+import { formatUsdAmount } from './utils.js';
+import { fireAdmissionHooks, RunAdmissionRefusedError, type CombinedAdmission } from './run-admission.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/pipeline.js';
 import { decideRunGrant, startedVia, type GrantDecision, type GrantRunOrigin } from './workflow-grant.js';
+import { workflowStampRefusal } from './workflow-stamp.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import type { SubAgentPromptHandles } from '../orchestrator/runtime-adapter.js';
 import type { ApprovalFilingContext } from './approval-filing.js';
 import type { WorkflowQuestionWait } from './workflow-questions.js';
+
+/**
+ * Why a saved workflow was not started when the balance cannot cover the most one workflow
+ * run may spend, while the control plane asks the engine to admit runs only within the
+ * balance — and what the owner can do about it. `capUsd` is the amount the run is admitted on.
+ */
+export function workflowHoldRefusal(capUsd: number): string {
+  return `This workflow was not started: what is left of your AI budget is less than the ${formatUsdAmount(capUsd)} a workflow run may spend at most. Start it again after buying a credit pack or in your next billing period, or once a running task has finished.`;
+}
 
 /** `decideRunGrant` bound to this engine's schedules and keyed hash. */
 function grantDecider(engine: Engine, origin: GrantRunOrigin): (planned: PlannedPipeline) => GrantDecision {
@@ -145,16 +157,36 @@ export async function runGuardedSavedWorkflow(
 
   // 2. onBeforeRun credit gate — a hook throwing means "blocked" (managed
   //    budget exhausted / CP fail-closed). Mirror Session.run: abort the run.
-  for (const hook of engine.getHooks()) {
-    if (hook.onBeforeRun) {
-      try {
-        await hook.onBeforeRun(runContext.runId, runContext);
-      } catch (err: unknown) {
-        const reason = err instanceof Error ? err.message : String(err);
-        return { ok: false, error: `Run blocked: ${reason}` };
-      }
-    }
+  //    A workflow's spend is not bounded per run here, only per step by the session
+  //    ceiling, so it is admitted on that ceiling: a hook that admits only within the
+  //    balance refuses it unless that much is free, and holds it until the run ends.
+  let admission: CombinedAdmission;
+  const capUsd = getSessionCostCeiling();
+  try {
+    admission = await fireAdmissionHooks(engine.getHooks(), runContext.runId, {
+      ...runContext,
+      maxCostCents: capUsd * 100,
+    });
+  } catch (err: unknown) {
+    if (err instanceof RunAdmissionRefusedError) return { ok: false, error: `Run blocked: ${workflowHoldRefusal(capUsd)}` };
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Run blocked: ${reason}` };
   }
+  try {
+    return await runAdmittedWorkflow(engine, workflowId, params, opts, config, runContext);
+  } finally {
+    admission.release();
+  }
+}
+
+async function runAdmittedWorkflow(
+  engine: Engine,
+  workflowId: string,
+  params: Record<string, unknown> | undefined,
+  opts: Parameters<typeof runGuardedSavedWorkflow>[3],
+  config: ReturnType<Engine['getUserConfig']>,
+  runContext: RunContext,
+): Promise<RunSavedWorkflowResult> {
 
   // 3. Run the workflow. Pass the engine's tool set + tool-context + memory so
   //    inline steps can actually execute headless — the runner needs
@@ -199,7 +231,10 @@ export async function runGuardedSavedWorkflow(
     parentPrompt: opts?.parentPrompt,
     questionWait: opts?.questionWait,
     approvalFiling: opts?.approvalFiling,
-    checkWorkflow: opts?.checkWorkflow,
+    // The owner's stamp, asked of the copy the runner reads and runs, after every await of this
+    // path (the credit hook above): an edit while it waited cannot run on the stamp of the steps
+    // before it. Every caller's gate asked earlier; this one is the one that decides.
+    checkWorkflow: (planned: PlannedPipeline) => workflowStampRefusal(engine, planned) ?? opts?.checkWorkflow?.(planned) ?? null,
     // A webhook run's params are a third party's values: its step agents meet them only where a
     // task names them, fenced.
     paramsKeptFromSteps: opts?.origin?.kind === 'webhook',

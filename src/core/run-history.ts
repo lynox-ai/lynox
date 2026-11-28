@@ -9,8 +9,9 @@ import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './str
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type { CallApiCost, CallContract, CallFiled, GrantLift } from './call-connection.js';
-import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
-import type { DeliverySummary } from './notification-router.js';
+import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier, PlannedPipeline } from '../types/index.js';
+import { workflowStampState, type WorkflowStampState } from './workflow-stamp.js';
+import type { DeliveryDetail, DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
@@ -25,6 +26,8 @@ import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
+import { stepIdIssue } from '../orchestrator/step-id.js';
+import { templateRefIssue } from '../orchestrator/template-refs.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -1641,6 +1644,37 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
    ALTER TABLE pipeline_runs ADD COLUMN started_by_run_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started_by ON pipeline_runs(started_by_run_id);`,
+  // v73: who wrote a thread message (`ThreadMessageRecord.author`): a `principalTag` for a turn
+  // the person typed, or a run's own tag (`trigger:<id>`) for a turn a trigger started, which is
+  // never `owner`, not even for the owner's own trigger (`runAuthorTag`). NULL on every older
+  // row and on every row the engine writes itself (assistant turns, tool results, notes), and
+  // NULL means unknown: it is never read as the owner's. No backfill.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (73);
+   ALTER TABLE thread_messages ADD COLUMN author TEXT;`,
+  // v74: two facts about a thread that a check before a send reads.
+  // `thread_typed_text`: the words a person typed into a turn, apart from what the route put
+  // around them in the same message (a loaded mail or run as context, an uploaded file). Keyed
+  // by the message's seq, written in the transaction that writes the message; only a route that
+  // knows where the typed words end writes one. A turn without a row has no typed words anyone
+  // can rely on, and reads as none. `principal` is the author tag of the run that wrote them;
+  // only rows whose principal is the owner are read as the owner's words.
+  // `thread_read_outside`: the thread's conversation has taken in content from outside (the
+  // agent's sticky latch). Only ever inserted, never deleted except with its thread, and
+  // written in the transaction of the message that carries what was read, so a resume after a
+  // compaction that summarized the read away still knows it. Tables, not columns: the
+  // statements can run again on a database that has them.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (74);
+   CREATE TABLE IF NOT EXISTS thread_typed_text (
+     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+     seq INTEGER NOT NULL,
+     text TEXT NOT NULL,
+     principal TEXT,
+     PRIMARY KEY (thread_id, seq)
+   );
+   CREATE TABLE IF NOT EXISTS thread_read_outside (
+     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+     at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -2158,6 +2192,24 @@ export class RunHistory {
    * Ordered by run creation, then `rowid` to disambiguate same-second runs
    * (`runs.created_at` has second granularity), then per-run sequence.
    */
+  /**
+   * The tool_use ids of this session's calls the ledger records as failed: thrown and soft
+   * failures alike (`is_error = 1`). Calls written before `tool_use_id` and `is_error` existed
+   * have neither and are not in it. Workflow steps' replayed calls are left out, as in
+   * `getSessionToolCalls`.
+   */
+  getFailedToolUseIds(sessionId: string): Set<string> {
+    const rows = this.db.prepare(`
+      SELECT tc.tool_use_id AS id FROM run_tool_calls tc
+      JOIN runs r ON r.id = tc.run_id
+      WHERE r.session_id = ?
+        AND r.run_type != 'pipeline_step'
+        AND tc.is_error = 1
+        AND tc.tool_use_id IS NOT NULL
+    `).all(sessionId) as Array<{ id: string }>;
+    return new Set(rows.map((r) => r.id));
+  }
+
   getSessionToolCalls(sessionId: string): ToolCallRecord[] {
     const rows = this.db.prepare(`
       SELECT tc.* FROM run_tool_calls tc
@@ -3431,7 +3483,15 @@ export class RunHistory {
       parameters: (planned as { parameters?: unknown }).parameters,
     }) ?? planned.steps.reduce<ReturnType<typeof findHiddenInName>>(
       (hit, s, i) => hit ?? (typeof s.id === 'string' ? findHiddenInName(s.id, `steps[${i}].id`) : null), null);
-    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
+    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden, { steps: true }));
+    // A step's id has a limited shape (`step-id.ts`): it reaches the model next to lynox's own words.
+    // Every producer saves here, so no new plan carries a free-form id; one stored before the limit
+    // is shown by its position, and `update_workflow_steps` names the rename it needs first.
+    const shapeIssue = stepIdIssue(planned.steps);
+    if (shapeIssue) throw new Error(shapeIssue);
+    // A `{{<id>.result}}` no run could resolve is refused at the save, not met as raw text in a run.
+    const refIssue = templateRefIssue(planned.steps);
+    if (refIssue) throw new Error(refIssue);
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The
@@ -3489,9 +3549,38 @@ export class RunHistory {
     return this._requireWorkflowStore().rename(id, name, author);
   }
 
-  /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */
-  setWorkflowConfirmedAt(id: string, confirmedAt: string): boolean {
-    return this._requireWorkflowStore().setConfirmedAt(id, confirmedAt);
+  /** The owner's stamp on the workflow as it stands (`WorkflowStore.stampCurrent`): exact id,
+   *  with the digest of what runs, and a no-op when its stamp already holds. `expectDigest`:
+   *  only if the definition still has the digest the owner's preview showed. */
+  setWorkflowConfirmedAt(id: string, confirmedAt: string, expectDigest?: string | undefined): boolean {
+    return this._requireWorkflowStore().stampCurrent(id, confirmedAt, expectDigest);
+  }
+
+  /** The once-only boot pass over the stamps from before the digest (`WorkflowStore.stampExistingWorkflows`). */
+  stampExistingWorkflows(): number | null {
+    return this._requireWorkflowStore().stampExistingWorkflows();
+  }
+
+  /** Where `planned` stands for an unattended run (`workflow-stamp.ts`): its stamp against the
+   *  engine's hash, and the workflow's own marks. Without the verb graph nothing holds. */
+  workflowStampState(planned: PlannedPipeline): WorkflowStampState {
+    return this._workflowStore ? this._workflowStore.stampState(planned) : workflowStampState(null, planned, undefined);
+  }
+
+  /** The stored definition of exactly `id`, read from the database, never the pipeline cache. */
+  getWorkflowExact(id: string): PlannedPipeline | undefined {
+    return this._workflowStore?.definitionExact(id);
+  }
+
+  /** Whether a mandate ever set up or changed the workflow, taken over or not. Without the
+   *  verb graph: true, so a caller that gates on it refuses. */
+  workflowMandateShaped(id: string): boolean {
+    return this._workflowStore ? this._workflowStore.mandateShaped(id) : true;
+  }
+
+  /** The digest of `planned` as the owner's stamp would bind it, or null without the verb graph. */
+  workflowStampDigest(planned: PlannedPipeline): string | null {
+    return this._workflowStore ? this._workflowStore.stampDigest(planned) : null;
   }
 
   /**
@@ -3499,8 +3588,8 @@ export class RunHistory {
    * confirm, in one engine.db transaction (`WorkflowStore.acceptReviewedGrant`). `false` when
    * the workflow is gone; nothing is written then.
    */
-  acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string): boolean {
-    return this._requireWorkflowStore().acceptReviewedGrant(row, JSON.stringify(stamp), confirmedAt);
+  acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string, seen: PlannedPipeline): boolean {
+    return this._requireWorkflowStore().acceptReviewedGrant(row, JSON.stringify(stamp), confirmedAt, seen);
   }
 
   /**
@@ -3541,6 +3630,16 @@ export class RunHistory {
    *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */
   markTriggerEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
     return this._requireTriggerStore().markEditedBy(id, editor, clearStamp);
+  }
+
+  /** See `TriggerStore.confirmOwnerCreator`. */
+  confirmTriggerRecipients(id: string, expect: string): import('./recipient-confirm.js').RecipientConfirmOutcome {
+    return this._requireTriggerStore().confirmOwnerCreator(id, expect);
+  }
+
+  /** See `TriggerStore.markEditedByRun`. */
+  markTriggerEditedByRun(id: string, runTag: string): boolean {
+    return this._requireTriggerStore().markEditedByRun(id, runTag);
   }
 
 
@@ -3707,14 +3806,14 @@ export class RunHistory {
 
   /** Mark that an escalation of a trigger started — see {@link TriggerStore.startEscalation}.
    *  False without a trigger store. */
-  startEscalation(id: string, at: string, onlyIfLater = false): boolean {
-    return this._triggerStore?.startEscalation(id, at, onlyIfLater) ?? false;
+  startEscalation(id: string, at: string, onlyIfLater = false, chat?: DeliveryDetail['chat']): boolean {
+    return this._triggerStore?.startEscalation(id, at, onlyIfLater, chat) ?? false;
   }
 
   /** Record whether the escalation that started at `startedAt` reached anyone — see
    *  {@link TriggerStore.recordEscalationOutcome}. False without a trigger store. */
-  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string): boolean {
-    return this._triggerStore?.recordEscalationOutcome(id, outcome, startedAt) ?? false;
+  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string, detail?: DeliveryDetail): boolean {
+    return this._triggerStore?.recordEscalationOutcome(id, outcome, startedAt, detail) ?? false;
   }
 
   /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The
@@ -3799,6 +3898,11 @@ export class RunHistory {
     return this._triggerStore?.getDue() ?? [];
   }
 
+  /** Every plan of a workflow that may still run, switched off ones included (`getPlansOfWorkflow`). */
+  getPlansOfWorkflow(workflowId: string): TriggerRecord[] {
+    return this._triggerStore?.getPlansOfWorkflow(workflowId) ?? [];
+  }
+
   /** Triggers that actively reference a saved workflow (Slice C destructive-edit
    *  guard): enabled + not-completed rows whose `pipeline_id` matches. */
   getTriggersByPipelineId(pipelineId: string): TriggerRecord[] {
@@ -3809,6 +3913,9 @@ export class RunHistory {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
+    /** The cause of a failed run (`RunCause`, as JSON), or null: written on every run end. */
+    lastRunCause: string | null;
+    lastRunMemberNotes?: readonly string[] | undefined;
     // `undefined` leaves next_run_at unchanged; `null` clears it.
     // Clearing is required after a one-shot trigger reaches a terminal
     // state, otherwise getDueTriggers would re-select it forever.

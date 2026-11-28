@@ -140,17 +140,26 @@ export function sanitizeBody(input: string | undefined | null): SanitizeResult {
 }
 
 /**
- * Sanitize a single header-like value (subject, display name). Strips hidden
- * characters and collapses whitespace. Subjects can carry the same bidi /
- * zero-width tricks as bodies.
+ * A header-like value as one clean line, uncut: line breaks become spaces, hidden characters
+ * are removed, runs of whitespace collapse to one space, and the ends are trimmed. The rules
+ * that `sanitizeHeader` applies before its length cut, so a value compared with a stored header
+ * (the inbox rule match) goes through exactly the same steps.
  */
-export function sanitizeHeader(input: string | undefined | null, maxLen = 500): string {
+export function normalizeHeaderText(input: string | undefined | null): string {
   if (!input) return '';
   return input
     .replace(/\r\n?/g, ' ')
     .replace(HIDDEN_CHAR_RE, '')
     .replace(TAG_PLANE_RE, '')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, maxLen);
+    .trim();
+}
+
+/**
+ * Sanitize a single header-like value (subject, display name). Strips hidden
+ * characters and collapses whitespace. Subjects can carry the same bidi /
+ * zero-width tricks as bodies.
+ */
+export function sanitizeHeader(input: string | undefined | null, maxLen = 500): string {
+  return normalizeHeaderText(input).slice(0, maxLen);
 }

@@ -22,6 +22,7 @@ import { UidPool, DEFAULT_POOL_FIRST_UID, DEFAULT_POOL_SIZE } from './pool.js';
 import { buildCallEnv } from './call-env.js';
 import { releaseUid, killUntilEmpty, type ReleaseOps } from './release.js';
 import { linuxReleaseOps, CALLS_DIR } from './linux-ops.js';
+import { assertSignalDebuggerOff } from '../core/signal-debugger.js';
 
 export const DEFAULT_SOCKET_PATH = '/run/lynox-exec/s/exec.sock';
 export const DEFAULT_WORKSPACE = '/workspace';
@@ -308,7 +309,7 @@ export async function main(): Promise<void> {
 }
 
 if (process.argv[1] && /exec-daemon\.js$/.test(process.argv[1])) {
-  main().catch((err: unknown) => {
+  Promise.resolve().then(() => { assertSignalDebuggerOff('exec-daemon'); return main(); }).catch((err: unknown) => {
     process.stderr.write(`[exec-daemon] fatal: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });

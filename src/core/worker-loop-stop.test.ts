@@ -142,10 +142,15 @@ function makeHarness(opts?: {
   taskTimeoutMs?: number | undefined;
   /** Whether the run's container reads as contained (a store pass was minted in it). */
   contained?: boolean | undefined;
+  /** The sends the run refused before it ended (`Session.getOriginRefusals`). */
+  originRefusals?: unknown[] | undefined;
 }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
+  // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+  // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+  vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
   const engineDb = new EngineDb(join(dir, 'engine.db'));
   history.setVerbGraph(engineDb);
   closers.push(() => { try { history.close(); } catch { /* twice is fine */ } });
@@ -239,6 +244,7 @@ function makeHarness(opts?: {
     }),
     getLastRunStop: () => (opts?.lastRunStop === undefined ? null
       : { ...opts.lastRunStop, pendingTools: ['web_research'], text: '' }),
+    getOriginRefusals: () => opts?.originRefusals ?? [],
   };
 
   const engine = {
@@ -375,6 +381,17 @@ describe('stopping a running background task', () => {
     );
     const t = h.history.getTrigger('trg-stop')!;
     expect(t.last_run_status).toBe('stopped');
+  });
+
+  it('a run stopped after a refused send records the refusal before the stop, as stopped', async () => {
+    const h = makeHarness({ originRefusals: [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }] });
+    await h.running;
+    expect(h.loop.stopTask('trg-stop')).toEqual({ kind: 'requested', via: 'session' });
+    await h.tick;
+    await waitUntil('the run to be recorded as finished', () => (h.history.getTrigger('trg-stop')?.last_run_status ?? null) !== null);
+    const t = h.history.getTrigger('trg-stop')!;
+    expect(t.last_run_status).toBe('stopped');
+    expect(t.last_run_result).toMatch(/^The trigger "Long report" did not send to "x@evil\.example": .*\n\n/s);
   });
 
   it('does not falsify the trigger, and does not re-fire it as a retry', async () => {
@@ -737,6 +754,8 @@ function makeClassHarness(opts: {
       updateTrigger: (_id: string, patch: unknown) => { reArms.push(patch); },
       // The owner saved the workflow: no mandate it depends on.
       getWorkflowAuthorship: () => ({ createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-01-01 00:00:00' }),
+      // Stamped when it carries `confirmedAt`, as before the stamp bound its steps (`workflow-stamp.ts`).
+      workflowStampState: (p: { confirmedAt?: string }) => (p.confirmedAt ? 'holds' : 'unconfirmed'),
     }),
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),

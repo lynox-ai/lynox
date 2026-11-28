@@ -8,7 +8,13 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
-	import { confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
+	import MarkedLine from './MarkedLine.svelte';
+	import { tierName } from '../utils/tier-words.js';
+	import { isCustomSchedule } from '../utils/cron-human.js';
+	import WatchAddress from './WatchAddress.svelte';
+	import WholeValue from './WholeValue.svelte';
+	import { setApart, shownWhole } from '../utils/plan-takeover.js';
+	import { confirmable, connectionsParts, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
 		id: string;
@@ -91,7 +97,25 @@
 			return typeof s === 'string' && s !== '' ? markHidden(s) : null;
 		} catch { return null; }
 	});
-	const sentence = $derived(preview ? connectionsSentence(preview) : null);
+	// The address as stored, whenever the parsed one above does not show exactly it: the run writes
+	// the stored text into its prompt (without the characters it strips), while parsing drops line
+	// breaks, tabs, a user part before the host and `..` segments with what they cancel, encodes
+	// hidden and non-ASCII characters, and the display cuts each part at its length. Then the block
+	// shows the stored address in full under the parsed host, hidden characters marked, so the owner
+	// confirms what they read and the note's "marked above" points at a mark.
+	const storedUrl = $derived.by(() => {
+		if (!preview?.subject.watch || !watch) return null;
+		try {
+			const u = (JSON.parse(preview.subject.watch) as { url?: unknown }).url;
+			if (typeof u !== 'string') return null;
+			const p = new URL(u);
+			const path = p.pathname === '/' && !u.slice(p.protocol.length + 2 + p.host.length).startsWith('/') ? '' : p.pathname;
+			const shown = `${p.protocol}//${p.host}${path}${p.search}${p.hash}`;
+			const cut = watch.host.endsWith('\u2026') || watch.rest.endsWith('\u2026');
+			return shown !== u || cut ? markHidden(u) : null;
+		} catch { return null; }
+	});
+	const sentence = $derived(preview ? connectionsParts(preview) : null);
 </script>
 
 <div class="mt-2 space-y-1.5 text-xs text-text-muted" data-stamp-confirm={mode}>
@@ -108,7 +132,8 @@
 		{@const as = shownAs(preview)}
 		{#if as === 'workflow'}
 			<div data-stamp-workflow>
-				<span class="font-medium">{t('stamp.workflow')}:</span> {markHidden(preview.workflow?.name ?? s.pipeline_id ?? '')}
+				<!-- The workflow's name is someone else's value: set apart, marked as `hiddenIn` checks it. -->
+				<span class="font-medium">{t('stamp.workflow')}:</span> <MarkedLine text={setApart(markHidden(preview.workflow?.name ?? s.pipeline_id ?? ''))} />
 				{#if paramsOf(s.pipeline_params).length > 0}
 					<p class="mt-0.5"><span class="font-medium">{t('stamp.params')}:</span> {paramsOf(s.pipeline_params).join(' · ')}</p>
 				{/if}
@@ -116,7 +141,15 @@
 		{:else if as === 'watch' && watch}
 			<div data-stamp-watch>
 				<span class="font-medium">{t('triggers.watch_url')}:</span>
-				<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watch.host}</span>{watch.rest}</p>
+				{#if storedUrl !== null}
+					<div class="mt-0.5 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">
+						<p data-stamp-watch-host><WholeValue value={watch.host} kind="url" class="font-medium text-text" testid="stamp-watch-host" /></p>
+						<p class="mt-0.5 text-warning" data-stamp-watch-stored-hint>{t('stamp.watch_stored')}</p>
+						<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere]" data-stamp-watch-stored>{storedUrl}</p>
+					</div>
+				{:else}
+					<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><WatchAddress host={watch.host} rest={watch.rest} testid="stamp-watch-address" /></p>
+				{/if}
 				{#if watch.intervalMinutes}<p class="mt-0.5">{tf('triggers.watch_every', { minutes: String(watch.intervalMinutes) })}</p>{/if}
 				{#if selector}<p class="mt-0.5"><span class="font-medium">{t('stamp.watch_selector')}:</span> {selector}</p>{/if}
 			</div>
@@ -127,20 +160,27 @@
 			</div>
 		{/if}
 		{#if s.schedule_cron}
-			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {markHidden(cronText(s.schedule_cron))}</p>
+			<!-- A schedule of its own is decided on as it is: the expression, set apart. -->
+			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {#if isCustomSchedule(s.schedule_cron)}<bdi class="font-mono" data-stamp-schedule-expr>{markHidden(s.schedule_cron)}</bdi>{:else}{markHidden(cronText(s.schedule_cron))}{/if}</p>
 		{/if}
 		{#if s.model_tier}
-			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {markHidden(s.model_tier)}</p>
+			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {tierName(s.model_tier) ?? markHidden(s.model_tier)}</p>
+		{/if}
+		{#if preview.asks}
+			<!-- Whom the plan's questions reach besides the owner once stamped, as the run reads it. -->
+			<p class="break-words" data-stamp-asks><MarkedLine text={tf('stamp.asks', { name: shownWhole(preview.asks) })} /></p>
 		{/if}
 		{#if sentence}
-			<p class="text-text" data-stamp-connections>{sentence}</p>
+			<!-- One connection per line: in a run of boxes, where one ends and the next begins is lost. -->
+			<div class="text-text break-words" data-stamp-connections><MarkedLine text={sentence.lead} />{#if sentence.items.length > 0}<ul class="mt-0.5 list-disc pl-4 space-y-0.5">{#each sentence.items as item, i (i)}<li data-stamp-connection><MarkedLine text={item} /></li>{/each}</ul>{/if}</div>
 		{:else if mode === 'check'}
 			<p data-stamp-none>{t('stamp.none')}</p>
 		{/if}
 		{#if hidesText(preview)}
 			<p class="text-warning" data-stamp-hidden-text={hiddenIn(preview)}>{hiddenNote(hiddenIn(preview) === 'workflow', mode === 'check')}</p>
 		{:else if as === 'workflow' && !confirmable(preview)}
-			<p class="text-warning" data-stamp-workflow-unconfirmed>{t('stamp.workflow_unconfirmed')}</p>
+			<!-- Its person's access ended: the way on is the workflow's takeover, which confirms its steps too. -->
+			<p class="text-warning" data-stamp-workflow-unconfirmed>{preview.workflow?.ended === true ? tf('stamp.workflow_unconfirmed_ended', { button: t('workflow_library.takeover.button') }) : t('stamp.workflow_unconfirmed')}</p>
 		{:else if !confirmable(preview)}
 			<!-- A watch whose page cannot be read: nothing to agree to, so no button. -->
 		{:else if mode === 'held' || sentence !== null}

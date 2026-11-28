@@ -6,7 +6,7 @@ sidebar:
 ---
 
 :::note[Multi-Provider BYOK]
-lynox supports multiple LLM providers out of the box, but only two are exercised end-to-end on every release: **Anthropic Claude** (direct API) and **Mistral** (via the OpenAI-compatible adapter pinned to `api.mistral.ai`). Everything else — generic OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, …), the Anthropic-compatible "custom" proxy path, and Google Vertex AI — is **wired but not regularly tested**. Pick those at your own risk and expect rough edges around tool-calling reliability and prompt-cache behaviour.
+lynox supports multiple LLM providers out of the box, but only two are exercised end-to-end on every release: **Anthropic Claude** (direct API) and **Mistral** (via the OpenAI-compatible adapter pinned to `api.eu.mistral.ai`). Everything else — generic OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, …), the Anthropic-compatible "custom" proxy path, and Google Vertex AI — is **wired but not regularly tested**. Pick those at your own risk and expect rough edges around tool-calling reliability and prompt-cache behaviour.
 
 The **installer** lets you choose your provider and enter credentials — stored encrypted in your local vault. You can switch providers anytime in **Settings → Config**.
 :::
@@ -91,14 +91,14 @@ First-class Sonnet replacement, tested on every release. Every Anthropic tier ha
 ```json
 {
   "provider": "openai",
-  "api_base_url": "https://api.mistral.ai/v1",
+  "api_base_url": "https://api.eu.mistral.ai/v1",
   "openai_model_id": "mistral-medium-2604"
 }
 ```
 
 ```bash
 LYNOX_LLM_PROVIDER=openai
-ANTHROPIC_BASE_URL=https://api.mistral.ai/v1
+ANTHROPIC_BASE_URL=https://api.eu.mistral.ai/v1
 MISTRAL_API_KEY=<your-mistral-key>            # primary slot for Mistral
 # OPENAI_API_KEY=<your-mistral-key>           # also accepted as fallback
 OPENAI_MODEL_ID=mistral-medium-2604
@@ -223,7 +223,7 @@ Use named profiles to run different models for different tasks. Claude handles y
   "model_profiles": {
     "mistral-eu": {
       "provider": "openai",
-      "api_base_url": "https://api.mistral.ai/v1",
+      "api_base_url": "https://api.eu.mistral.ai/v1",
       "api_key": "your-mistral-key",
       "model_id": "mistral-medium-2604"
     },

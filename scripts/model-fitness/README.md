@@ -230,7 +230,8 @@ not a question being asked any more. Its history is in the log.
 
 | File | Question it answers | Rung |
 |---|---|---|
-| `replay.ts` | Which model handles a **real captured request** best (escalate-vs-inline)? | 3 — the verdict |
+| `replay.ts` | Which model handles a **real captured request** best (escalate-vs-inline), and what does a turn cost on it, per stage against its Claude 5.5 successor? | 3 — the verdict |
+| `caller-replay.ts` | How often does a model answer the engine's **forced-tool callers** (follow-up, capture, reranker, llm-helper, dag-planner) without the tool call? Through each caller's real code, inputs derived from captured main-agent bodies; starts with a positive control. | 3, wire axis |
 | `prompt-ab.ts` | Does a **prompt edit** change behaviour, measured on the real surface? | 3, prompt axis |
 | `artefact.ts` | Artefact QUALITY (R9) — deterministic structural backbone + anchor-calibrated judge; trusted only when both rank the good anchor above the bad. | 3, quality axis |
 | `setup-probe/` | Does a configured model **carry** a whole set-up flow (inbox / invoices / shop), judged on end state? | 3, end-to-end |

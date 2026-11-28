@@ -42,7 +42,8 @@ function agentWith(store: ApiStore): never {
   return {
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
-    secretStore: { resolve: (): string | null => null, extractSecretNames: (): string[] => [], resolveSecretRefs: (input: unknown): unknown => input },
+    // An empty vault the save can read: a built-in provider's profile is not saved where its slots cannot be seen.
+    secretStore: { resolve: (): string | null => null, listNames: (): string[] => [], extractSecretNames: (): string[] => [], resolveSecretRefs: (input: unknown): unknown => input },
     toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
   } as never;
 }
@@ -136,7 +137,7 @@ describe('the bexio API is reached only through the provider', () => {
   const rest = { endpoints: [{ method: 'POST', path: '/2.0/contact', description: 'create a contact' }], guidelines: ['x'], avoid: ['x'] };
   const save = async (action: 'create' | 'update', profile: ApiProfile, store = new ApiStore()): Promise<{ out: string; store: ApiStore }> => {
     // A person accepts the hosts when asked, so a refusal here is this check's and not that gate's.
-    const agent = Object.assign(agentWith(store) as object, { promptUser: async (): Promise<string> => 'Allow' }) as never;
+    const agent = Object.assign(agentWith(store) as object, { promptUser: async (): Promise<string> => 'allow' }) as never;
     const out = await apiSetupTool.handler({ action, profile: { ...profile, ...rest } }, agent) as string;
     return { out, store };
   };

@@ -14,40 +14,50 @@
  * Profiles are written to ~/.lynox/apis/<id>.json and hot-reloaded into ApiStore.
  */
 
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import { API_SETUP_DIALOG, PRESET_NOTE, presetParamDescribe, SECURITY_CHANGE_WORDS, type DialogLanguage, type SecurityChangeWords } from '../dialog-text.js';
 import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
-import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
+import { currentCallSignal, currentCallTargetOrigin, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
+import { CROSS_HOST_REFUSAL, crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
+import { carriesAddress, hostTargets, UnknownSendTargetError } from '../../core/send-target.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE, OPAQUE_PROFILE_ID_SHAPE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { builtInPresetOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { connectCallText, builtInPresetOf, retiredPresetIdOf, RETIRED_PRESET_IDS, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
-import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
+import { delegatedRenewalWay, fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, ExtractionStoppedError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
 import { recordSessionCost } from '../../core/session-budget.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
-import { pv, singleLine } from '../../core/prompt-value.js';
+import { flattenPrompt, pv, singleLine } from '../../core/prompt-value.js';
+import type { PromptText } from '../../types/agent.js';
+import { toolWordFrame } from '../tool-words.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
-import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
+import { noteMemberRefusal, refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, sendSlots, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle, settingsVersion, bindingOf } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
-import { isRequestShapingHeaderName } from '../../core/outbound-write.js';
+import { effectiveWriteMethod, graphqlUrlWrites, isGraphqlEndpoint, isReadMethod, isRequestShapingHeaderName } from '../../core/outbound-write.js';
 import { ifEmptiedAny, ifOk, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { wrapHandler } from '../wrap-handler.js';
+import { extractionFailureForModel } from '../../core/extraction-failure.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -249,10 +259,14 @@ function validateProfile(profile: ApiProfile): string | null {
   if (!ID_PATTERN.test(profile.id)) {
     return `Invalid id "${profile.id}": must be lowercase alphanumeric with hyphens/underscores, 1-64 chars`;
   }
+  // A string, before it is parsed: `new URL` turns a list into text and parses that, so a list
+  // would be stored as the address and read back as one by every later `new URL`.
+  const baseUrl: unknown = profile.base_url;
+  if (typeof baseUrl !== 'string') return 'Invalid base_url: must be a URL as text, for example "https://api.example.com"';
   try {
-    new URL(profile.base_url);
+    new URL(baseUrl);
   } catch {
-    return `Invalid base_url: "${profile.base_url}" is not a valid URL`;
+    return `Invalid base_url: "${baseUrl}" is not a valid URL`;
   }
   // Checked before the auth fields: whatever they say, a profile on this host that does not
   // name the provider is the wrong one. A stored profile that fails here is refused at every
@@ -336,7 +350,9 @@ function validateProfile(profile: ApiProfile): string | null {
     // `client_secret_key`, the token is attached from a slot derived from the
     // profile id, and `collectVaultKeys` counts the OAuth keys on its own. A list
     // here changes nothing for such a profile, so demanding one only costs a round.
-    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile)) {
+    // So is a provider this engine once shipped: its profiles have that shape, and a save that
+    // keeps the provider must not fail on a list they never had.
+    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile) && retiredPresetIdOf(profile) === undefined) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
     }
     // OAuth2 metadata: required when type='oauth2' AND the agent intends to
@@ -346,8 +362,12 @@ function validateProfile(profile: ApiProfile): string | null {
     if (profile.auth.type === 'oauth2' && profile.auth.oauth) {
       const o = profile.auth.oauth;
       if (o.token_url !== undefined) {
+        // Text only, as for base_url: a list here would pass the parse below and skip the origin
+        // check of the save, which reads only an address given as text (`savedTokenUrl`).
+        const rawTokenUrl: unknown = o.token_url;
+        if (typeof rawTokenUrl !== 'string') return 'Invalid auth.oauth.token_url: must be a URL as text, for example "https://auth.example.com/oauth/token"';
         let tokenUrl: URL;
-        try { tokenUrl = new URL(o.token_url); } catch {
+        try { tokenUrl = new URL(rawTokenUrl); } catch {
           return `Invalid auth.oauth.token_url: "${o.token_url}" is not a valid URL`;
         }
         // The client secret is posted here, and the token it mints is attached to
@@ -647,47 +667,133 @@ const BOOTSTRAP_DRAFT_PREAMBLE =
  * A failed bootstrap fetch, said without the remote's words. The network guard's refusals quote
  * the hostname, and on a redirect that is the hostname the REMOTE server chose (a WHATWG
  * hostname keeps `_ , ; ! "` and more, enough for a sentence). So a refusal is reported by its
- * kind, never its text; any other failure by its error class and code only.
+ * kind, never its text; any other failure by its error class and code only. Each kind is matched
+ * on words with a space between them: a hostname has none, so a host such as
+ * `enforce_https.example` or `network_policy=deny-all.example` in another refusal is not read
+ * as that kind.
  */
 const GUARD_REFUSALS: ReadonlyArray<[RegExp, string]> = [
   [/not in network allow-list/, 'the address or a redirect target is not in the network allow-list'],
   [/not permitted under guarded egress policy/, 'the address or a redirect target is not permitted under the guarded egress policy'],
   [/private IP/, 'the address or a redirect target is a private IP address'],
   [/did not resolve|without an address/, 'the address or a redirect target did not resolve'],
-  [/enforce_https/, 'plain HTTP is not allowed (enforce_https)'],
+  [/HTTP not allowed — enforce_https is enabled/, 'plain HTTP is not allowed (enforce_https)'],
   [/unsupported protocol/, 'the address or a redirect target uses an unsupported protocol'],
-  [/network_policy=deny-all|network access denied/, 'network access is denied for this tool'],
+  [/network access denied/, 'network access is denied for this tool'],
   [/redirect without location header/, 'the server answered with a redirect that names no target'],
   [/too many redirects/, 'the server redirected too many times'],
   [/redirect handling failed/, 'the redirect could not be followed'],
 ];
+
+/**
+ * A discovery read refused before it was requested: its address, or the target of a redirect the
+ * server answered with, carries a method override (`?_method=DELETE` and its kin, read as every
+ * write gate reads them), or its address a GraphQL mutation. A spec or docs page is read, never
+ * written, and a server that runs either would act on the GET as on a write. The text is fixed and
+ * names no part of the address.
+ */
+class DiscoveryOverrideRefused extends Error {
+  constructor(kind: 'address' | 'hop' | 'graphql') {
+    super(kind === 'hop'
+      ? 'blocked: the server answered with a redirect to an address that carries a method override (such as `_method=DELETE`), which a server may run as a write, so the redirect was not followed; the first request was sent and answered; ask the user for the spec as a file or for another address of it'
+      : kind === 'graphql'
+        ? 'blocked: the address is a GraphQL endpoint whose query names a mutation or subscription, which may ask the server to change data, so it was not requested. Pass the plain address of the spec or docs page'
+        : 'blocked: the address carries a method override (such as `_method=DELETE`), which a server may run as a write, so it was not requested. Pass the plain address of the spec or docs page');
+    this.name = 'DiscoveryOverrideRefused';
+  }
+}
+
+/** Whether a request a server receives as `method` may be run as a write (an override it carries included). */
+function sendsWrite(method: string, headers: Record<string, string>, url: string): boolean {
+  return !isReadMethod(effectiveWriteMethod(method, headers, url));
+}
+
+/**
+ * One discovery read (a spec, a docs page, a section of it), the first request and every redirect
+ * hop checked for a method override before it is requested. A delegated session's reader then
+ * records each hop it follows (`delegatedRedirects`).
+ */
+function fetchForDiscovery(url: string, signal: AbortSignal, agent: IAgent): ReturnType<typeof fetchWithValidatedRedirects> {
+  if (sendsWrite('GET', {}, url)) return Promise.reject(new DiscoveryOverrideRefused('address'));
+  // A GraphQL endpoint runs a mutation it finds in the URL's `query` for a GET as well; a hop is
+  // held to that inside `fetchWithValidatedRedirects`, the first request here. Only for an address
+  // that parses: both checks answer yes for one that does not, and that one fails as unparsable.
+  if (URL.canParse(url) && isGraphqlEndpoint(url) && graphqlUrlWrites(url)) return Promise.reject(new DiscoveryOverrideRefused('graphql'));
+  const delegated = delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'));
+  // A read the origin check held follows no redirect to another host (`readHopsGuarded`). That holds
+  // for the page the call named and for each same-host section read after it: the check asked about,
+  // or knew, that one host.
+  return fetchWithValidatedRedirects(url, { signal }, { surface: 'discovery' }, agent.toolContext,
+    undefined, undefined, undefined, crossHostRedirectGuard(url, readHopsGuarded(currentCallTargetOrigin()), (nextUrl, method, headers) => {
+      if (sendsWrite(method, headers ?? {}, nextUrl)) throw new DiscoveryOverrideRefused('hop');
+      delegated?.(nextUrl, method, headers);
+    }));
+}
+
+/**
+ * The address a `bootstrap` reads first: the docs page when one is given, else the spec, as the
+ * handler picks. Its target, whether it carries another address and whether a search listed it are
+ * all read from this one value, so the check and the read cannot name different pages.
+ */
+function bootstrapUrl(input: ApiSetupInput): string | null {
+  if (input.action !== 'bootstrap') return null;
+  const url = input.docs_url || input.openapi_url;
+  return typeof url === 'string' && url !== '' ? url : null;
+}
+
+/**
+ * The token address a `create` or `update` saves: the profile's `auth.oauth.token_url`, to which
+ * `fetch_token` later posts the client ID and client secret from the vault, on every fetch and
+ * refresh. `update` replaces the profile whole, so it sets the address the same way `create` does.
+ * `null` where the save sets none that is used: not oauth2, no `token_url`, or a built-in provider
+ * this engine knows (its tokens go to the provider's own endpoint, and `token_url` is display only,
+ * as in the save's egress list). An address the save refuses anyway (not an https URL) is `null`
+ * too: `validateProfile` refuses it with its own reason, and nothing is saved.
+ * A `token_url` that is set but is no address as text throws, and the check refuses the call as an
+ * unreadable save. The check is on the call, not on `fetch_token`: the call's input is all the
+ * origin check sees.
+ */
+function savedTokenUrl(input: ApiSetupInput): string | null {
+  if (input.action !== 'create' && input.action !== 'update') return null;
+  const profile: unknown = input.profile;
+  if (typeof profile !== 'object' || profile === null) return null;
+  const auth = (profile as ApiProfile).auth;
+  if (typeof auth !== 'object' || auth === null || auth.type !== 'oauth2') return null;
+  const oauth: unknown = auth.oauth;
+  if (typeof oauth !== 'object' || oauth === null) return null;
+  const url: unknown = (oauth as { token_url?: unknown }).token_url;
+  if (url === undefined) return null;
+  if (builtInPresetOf(profile as ApiProfile) !== undefined) return null;
+  // Set, but not an address as text (a list, a number, an empty string): the call is refused as a
+  // save whose address cannot be read (`ToolEntry.credentialAddress`), whether or not the save
+  // would refuse it later. Never `null`: that would let the call past the check unasked.
+  if (typeof url !== 'string' || url === '') throw new UnknownSendTargetError('token address');
+  if (!URL.canParse(url) || new URL(url).protocol !== 'https:') return null;
+  return url;
+}
+
 function fetchFailureForModel(err: unknown): string {
+  // Checked before `delegatedRedirects` on every hop, so a delegated session's write refusal
+  // (`DelegatedHopRefused`) does not reach here: the same reading refuses the hop first.
+  if (err instanceof DiscoveryOverrideRefused) return err.message;
   const message = err instanceof Error ? err.message : '';
+  // A hop to another host after an origin check: the first request was sent, and the text says
+  // what the model may tell the user (`crossHostRedirectGuard`). It names a host only when the
+  // name is plain, so it is passed on as it is.
+  if (message.startsWith(CROSS_HOST_REFUSAL)) return message;
   if (message.startsWith('Blocked:')) {
     for (const [pattern, said] of GUARD_REFUSALS) if (pattern.test(message)) return `blocked: ${said}`;
+    // A hop the redirect handling refused (a GraphQL mutation in its address): the first request
+    // went out and was answered with that redirect.
+    if (message.startsWith('Blocked: redirect to ')) {
+      return 'blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered; ask the user for the spec as a file or for another address of it';
+    }
     return 'the request was refused before it was sent';
   }
   if (err instanceof Error && err.name === 'AbortError') return 'the request timed out';
   const code = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
   const name = err instanceof Error ? err.name : 'error';
   return `the request failed (${/^[A-Za-z]{1,40}$/.test(name) ? name : 'Error'}${typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? ` ${code}` : ''})`;
-}
-
-/**
- * A failed extraction call as the model may read it: the error class and, when there is
- * one, the HTTP status — from the SDK's numeric `status`, or from the fixed prefix the
- * OpenAI-compatible adapter writes. Only the three digits are taken from the message.
- * The adapter's idle timeout is a plain `Error` with a fixed prefix of its own, so it is
- * named by that prefix; an `AbortError` is a cancelled call, which is not the same thing.
- */
-function extractionFailureForModel(err: unknown): string {
-  if (err instanceof Error && err.name === 'AbortError') return 'the extraction call was aborted';
-  if (err instanceof Error && err.message.startsWith('OpenAI-compatible request timed out')) return 'the extraction call timed out';
-  const name = err instanceof Error && /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : 'Error';
-  const raw = err instanceof Error ? (err as Error & { status?: unknown }).status : undefined;
-  const fromPrefix = err instanceof Error ? /^OpenAI-compatible API error (\d{3}):/.exec(err.message)?.[1] : undefined;
-  const status = typeof raw === 'number' && Number.isInteger(raw) && raw >= 100 && raw <= 599 ? String(raw) : fromPrefix;
-  return `the extraction call failed (${name}${status ? ` HTTP ${status}` : ''})`;
 }
 
 /** An OpenAPI version field as it is printed back: digits and dots, an optional pre-release tag. */
@@ -982,9 +1088,9 @@ function requestLimitReached(agent: IAgent): boolean {
  * out; false at the limit, and then nothing is reserved (row 1005). Charged before it sends, as
  * `http_request` is, so a fetch that fails after it went out (a timeout, a redirect loop) stays
  * charged, and a fetch the egress policy refuses is charged too. Checked and charged in one step
- * before the first await, so parallel api_setup fetches cannot all pass the check at 99. That
- * holds among api_setup's fetches only: `http_request` checks and charges with awaits between,
- * so a racing `http_request` can still take one past the limit.
+ * before the first await, so parallel api_setup fetches cannot all pass the check at 99.
+ * `http_request` checks again right before it charges, in the same synchronous step, so a racing
+ * `http_request` cannot take one past the limit either.
  * `api-setup-request-limit.test.ts` holds every fetch here to this.
  */
 function reserveRequest(agent: IAgent): boolean {
@@ -1026,8 +1132,7 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
       // before the read is recorded: a section the budget stops leaves no row.
       if (!reserveRequest(agent)) return null;
       outwardReadRecorder(agent, 'api_setup:read')?.(httpTarget('GET', url));
-      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
-        undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
+      const { response: resp } = await fetchForDiscovery(url, joinCallSignal(ac.signal), agent);
       if (!resp.ok) return '';
       const { text } = await readBodyLimited(resp, remainingBudget);
       return text;
@@ -1180,8 +1285,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
-        undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
+      const { response: resp } = await fetchForDiscovery(docsUrl, joinCallSignal(ac.signal), agent);
       if (!resp.ok) {
         // `resp.statusText` is the HTTP reason phrase — chosen by the REMOTE server,
         // free-form, and was echoed here verbatim. When this was written `api_setup`
@@ -1280,18 +1384,28 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // `MODEL_MAP.balanced` — so a real customer's $0.3848 Sonnet extraction was
     // reported to the control plane as Haiku spend, and every per-tier breakdown
     // understated `balanced` by exactly the helper calls it could not see.
+    // Also charged to this run's cost ceiling, like the agent's own helper calls: the ceiling
+    // counts it, and the run stops at its next check once it is reached.
+    agent.chargeExternalCost?.(costUsd);
     debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, result.tier);
   } catch (err: unknown) {
     // A stopped call has no reply to book: its bound goes to the session cap, never to the
     // tenant debit (`aborted-call.ts`), and the engine reports the stop.
     if (err instanceof ExtractionStoppedError) {
-      if (err.abortedCost !== undefined) recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      if (err.abortedCost !== undefined) {
+        // And to this run's ceiling, as a bound it counts but does not bill.
+        agent.chargeExternalCapOnlyCost?.(err.abortedCost.upperBoundUsd);
+        recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      }
       throw err;
     }
     // A refused extraction still paid for its reply: book it here, once, as the success
     // path above does. Undefined when the call never reached the model.
     const spent = extractionSpendOf(err);
-    if (spent) debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, spent.costUsd, spent.tier);
+    if (spent) {
+      agent.chargeExternalCost?.(spent.costUsd);
+      debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, spent.costUsd, spent.tier);
+    }
     if (err instanceof BudgetError) {
       return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;
     }
@@ -1354,10 +1468,12 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   // BOOTSTRAP_DRAFT_PREAMBLE for why a fence). The engine's own lines (what was done, what was
   // dropped, the next steps) stay outside. The id here is a slug of the docs URL's host, the
   // model's own input.
+  // A locked turn (a mandate's) collects no key: its steps name the key and who stores it (U-185).
+  const locked = turnIsLocked(agent.principal);
   return compose([
     engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}${limitNote}${apiHostCandidates.length > 0 ? `\n${String(apiHostCandidates.length)} other API host(s) seen on the docs page are listed in the block below; verify against an authoritative source before swapping base_url.` : ''}
 
-Review the draft, fill auth.vault_keys via ask_secret, then call action="create":`),
+${locked ? 'Review the draft, name the key(s) in auth.vault_keys, then call action="create":' : 'Review the draft, fill auth.vault_keys via ask_secret, then call action="create":'}`),
     renderFence('api_bootstrap_draft', `${summary}${linkedNote}${hostHintNote}
 
 \`\`\`json
@@ -1365,8 +1481,11 @@ ${draftJson}
 \`\`\``, { preamble: BOOTSTRAP_DRAFT_PREAMBLE, attrs: { from: 'docs page' } }),
     engineText(`Next steps:
 1. Inspect the draft. Add or remove guidelines / avoid / notes based on what you learn from a test call.
-2. Use \`ask_secret\` to collect credentials (a single secret name like ${draft.id.toUpperCase()}_API_KEY usually suffices; OAuth needs a refresh-token slot).
-3. Fire one test \`http_request\` against the most innocent endpoint to confirm the auth scheme.
+${locked
+    ? `2. Name the vault key in auth.vault_keys (a single name like ${draft.id.toUpperCase()}_API_KEY usually suffices; OAuth needs a refresh-token slot). It is not filled in this session: tell the user that the owner of this instance has to store it.
+3. A test \`http_request\` against the most innocent endpoint can only succeed after the owner has stored the key.`
+    : `2. Use \`ask_secret\` to collect credentials (a single secret name like ${draft.id.toUpperCase()}_API_KEY usually suffices; OAuth needs a refresh-token slot).
+3. Fire one test \`http_request\` against the most innocent endpoint to confirm the auth scheme.`}
 4. Call \`api_setup\` action="create" with the finished profile.`),
   ], '\n');
 }
@@ -1523,7 +1642,8 @@ function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: reado
         continue;
       }
       store.deleteSecret(name);
-      if (store.resolve(name) !== null) left.push(name);
+      // Whether a value is still there, asked without reading it out where the store can.
+      if (store.holds !== undefined ? store.holds(name) : store.resolve(name) !== null) left.push(name);
     } catch {
       left.push(name);
     }
@@ -1546,6 +1666,10 @@ function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecre
 function vaultHolds(agent: IAgent, name: string): boolean {
   const store = agent.secretStore;
   if (!store) return false;
+  // Asked without reading the value out, so the check is not recorded as a credential read. A
+  // store that cannot answer that way is asked as before: the answer decides what the user is told.
+  // An infrastructure secret is never resolved into tool input, so it never fills a profile's slot.
+  if (store.holds !== undefined) return !isInfraSecret(name) && store.holds(name);
   const probe = { _: `secret:${name}` };
   const probed = store.resolveSecretRefs(probe) as { _: string };
   return probed._ !== `secret:${name}`;
@@ -1639,6 +1763,25 @@ export function providerBodySummary(text: string, sent: readonly string[]): stri
   ], '\n');
 }
 
+/**
+ * What connect tells the model to do about a value it lacks. No caller reaches these with a locked
+ * turn today (a check before them answers first), but they decide here, not at the call: a locked
+ * turn that does arrive gets the locked step, never the owner's way to `ask_secret` (U-185).
+ */
+export function unnamedValueStep(agent: Pick<IAgent, 'principal'>): string {
+  return turnIsLocked(agent.principal)
+    ? 'then tell the user that the owner of this instance has to store the value'
+    : 'then collect the value with ask_secret';
+}
+
+/** The askable names' step for connect, decided the same way as `unnamedValueStep`. */
+export function askableValueStep(agent: Pick<IAgent, 'principal'>, askable: readonly string[]): string {
+  if (askable.length === 0) return '';
+  return turnIsLocked(agent.principal)
+    ? ` The owner of this instance has to store ${askable.join(' and ')}; tell the user so.`
+    : ` Call ask_secret for ${askable.join(' and ')}.`;
+}
+
 /** Who reads through a profile's view in this agent's run, and what a release is checked against. */
 function readCtxOf(agent: IAgent): ReadCtx {
   return {
@@ -1692,9 +1835,10 @@ async function askBindingGrowth(agent: IAgent, profile: ApiProfile, act: 'saved'
   const grow: Array<{ name: string; endpoints: string[] }> = [];
   for (const { name, bound } of needs) {
     if (agent.runSignal?.aborted) { noteOwnStopSentence(); return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` }; }
-    const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)))}`, ['Allow', 'Deny', '\x00']);
-    if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-      return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.` };
+    const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)), agent.dialogLanguage ?? 'en')}`, consentOptions('guard'), consentMeta('guard'));
+    const outcome = decideConsent('guard', answer);
+    if (outcome !== 'allow') {
+      return { refusal: consentRefusal(outcome, `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.`) };
     }
     grow.push({ name, endpoints: dest });
   }
@@ -1724,22 +1868,64 @@ function adoptionHosts(profile: ApiProfile): string[] {
 
 /**
  * Where a released value goes, as the owner is asked about it: each of {@link credentialEndpoints}
- * by its host, with the port when it is not the default, and for the token endpoint its path and
- * query too. Userinfo and a fragment are not shown. Only https reaches the question (`not-https`).
+ * by its host, with the port when it is not the default. Only the shaped host reaches the
+ * question, because a mandate's turn wrote the profile and the owner confirms this dialog: a path,
+ * query, fragment or userinfo is that turn's free text, so an endpoint that carries one is only counted
+ * (`withDetail`), with the profile's other bound settings. Only https reaches the question
+ * (`not-https`).
  */
-function releaseDestinations(profile: ApiProfile): string[] {
-  const shown = new Set<string>();
+function releaseDestinations(profile: ApiProfile): { hosts: string[]; withDetail: number } {
+  const hosts = new Set<string>();
+  const detailed = new Set<string>();
   for (const e of credentialEndpoints(profile)) {
     const u = new URL(e);
-    const rest = `${u.pathname === '/' ? '' : u.pathname}${u.search}`;
-    shown.add(`${shapedForLog(u.hostname, HOSTNAME_SHAPE, 255)}${u.port ? `:${u.port}` : ''}${rest === '' ? '' : JSON.stringify(boundedForQuestion(singleLine(rest)))}`);
+    hosts.add(`${shapedForLog(u.hostname, HOSTNAME_SHAPE, 255)}${u.port ? `:${u.port}` : ''}`);
+    if (`${u.pathname === '/' ? '' : u.pathname}${u.search}${u.hash}` !== '' || u.username !== '' || u.password !== '') detailed.add(e);
   }
-  return [...shown];
+  return { hosts: [...hosts], withDetail: detailed.size };
 }
 
-/** A value as the release question shows it: at most 200 characters, and a cut is marked. */
-function boundedForQuestion(value: string): string {
-  return value.length > 200 ? `${value.slice(0, 200)}…(${String(value.length - 200)} more)` : value;
+/**
+ * For a profile a mandate wrote: the version of the settings a release binds, as the owner's
+ * release question names it. The owner's view is recorded, so that question can say whether the
+ * profile changed since (`ownerViewOf`); a mandate's view is not, since it is not the owner seeing
+ * it. Empty for the owner's own profiles.
+ */
+function releaseVersionNote(agent: IAgent, apiStore: ApiStore, profile: ApiProfile): string {
+  if (!isMandateAuthored(profile)) return '';
+  // Only an owner's interactive turn counts as a read the question may name: a workflow or worker
+  // run, or an autonomous turn, reads the profile without anyone being shown it. A trigger's,
+  // workflow's or task's run carries its run tag as author under the owner's principal, and a
+  // sub-agent a run origin of its own while it forwards the parent's prompt; neither showed the
+  // owner the profile (the same reading as `ownersCleanBatch`). Nor does the owner's turn in a
+  // thread a helper started (`helperThread`): the model that shows the owner the profile there has
+  // read the helper's content, so its view is no read the question may vouch for. The question
+  // then keeps saying the settings changed, which is the safe side.
+  if (isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL)
+    && agent.sendOrigin === undefined && agent.autonomy !== 'autonomous' && agent.promptUser !== undefined) {
+    apiStore.noteOwnerView(profile.id, bindingOf(profile), new Date());
+  }
+  const trailId = apiStore.trailIdOf(profile.id);
+  return `\n\nRelease settings of API profile ${trailId ?? '(no opaque id)'}: version ${settingsVersion(profile)}.`;
+}
+
+/** `at` as the release question names a time: HH:MM in the person's timezone, else in UTC, said. */
+function releaseClock(at: Date, timeZone: string | undefined): string {
+  if (timeZone) {
+    try {
+      return new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hour12: false }).format(at);
+    } catch { /* an invalid zone falls back to UTC below */ }
+  }
+  return `${at.toISOString().slice(11, 16)} UTC`;
+}
+
+/**
+ * The profile `id` that `raw` names: the profile with that opaque id when `raw` has the shape of
+ * one and such a profile exists, else `raw` itself. The opaque id wins over a slug spelled the
+ * same, so the id a release question names always reaches the profile it asked about.
+ */
+function profileIdFrom(apiStore: ApiStore, raw: string): string {
+  return (OPAQUE_PROFILE_ID_SHAPE.test(raw) ? apiStore.idOfTrailId(raw) : undefined) ?? raw;
 }
 
 /**
@@ -1786,7 +1972,7 @@ export function notConnectedNote(agent: Pick<IAgent, 'secretStore'>, profile: Ap
   // read the token out and log it as a read only to compare it with nothing.
   if (store.holds === undefined) return '';
   if (slots.some((name) => store.holds!(name))) return '';
-  return `\n\nConnection: not connected yet. When the user wants it connected, call api_setup with action "connect" and id "${profile.id}"; that call returns the sign-in link for the user, or says why there is none. A link or a tool call written into your reply connects nothing.`;
+  return `\n\nConnection: not connected yet. When the user wants it connected, ${connectCallText(profile.id)} A link or a tool call written into your reply connects nothing.`;
 }
 
 /**
@@ -1800,6 +1986,191 @@ function consentOf(agent: IAgent, profile: ApiProfile): Pick<OAuthGrantRecord, '
   const p = agent.principal;
   if (p.kind !== 'mandate' || profile.created_by !== principalTag(p)) return { connected_by: 'owner' };
   return p.mandateId === undefined ? { connected_by: principalTag(p) } : { connected_by: principalTag(p), connected_mandate_id: p.mandateId };
+}
+
+// Split as the engine sends it: on whitespace only. A comma is part of a scope, so "read,write" is
+// one scope and "read write" two.
+const scopeTokens = (scope: string | undefined): string[] =>
+  (scope ?? '').split(/\s+/).filter((s) => s !== '');
+
+/**
+ * A profile value as the save question shows it: on one line, so a value cannot draw a list line
+ * of its own, and withheld where it has the shape of a credential. Tool input passes through the
+ * secret resolver before the handler, so a field written as a vault reference holds the value.
+ */
+const shownValue = (value: string, w: SecurityChangeWords = SECURITY_CHANGE_WORDS.en): string => {
+  const line = singleLine(value);
+  return maskSecretPatterns(line, { includeGeneric: true }) === line ? line : w.credentialShaped;
+};
+
+/**
+ * An address as the save question shows it, read the way a request reads it: the host it sends to
+ * is named whenever the written text does not start with it (a user name before an `@`, a host
+ * written in other letters that the URL parser turns into punycode), and the origin stays visible
+ * when the rest is withheld. Text the URL parser does not take is said to be no address, so it
+ * cannot pass for one.
+ */
+const shownUrl = (value: string, w: SecurityChangeWords = SECURITY_CHANGE_WORDS.en): string => {
+  let url: URL;
+  try { url = new URL(value); } catch { return w.notAnAddress(shownValue(value, w)); }
+  const shown = shownValue(value, w);
+  if (shown !== singleLine(value)) return w.originOnly(url.origin);
+  if (url.host === '') return w.sendsToNoHost(shown);
+  // Written as read only when the host is followed by a path, a port and a path, or nothing: a
+  // `\`, `?` or `#` after it would let more host-like text follow that the request never uses.
+  const lead = `${url.protocol}//${url.host}`;
+  const asRead = shown.toLowerCase().startsWith(lead.toLowerCase()) && /^(?::\d+)?(?:\/|$)/.test(shown.slice(lead.length));
+  return asRead ? shown : w.sendsTo(shown, url.host);
+};
+
+/**
+ * Scope tokens as the save question shows them: each is withheld on its own, so one cannot hide
+ * another. The ones shown are listed; the withheld ones are counted after them.
+ */
+const shownScopes = (tokens: readonly string[], w: SecurityChangeWords = SECURITY_CHANGE_WORDS.en): string => {
+  const shown = tokens.map(singleLine).filter((t) => shownValue(t, w) === t);
+  const held = tokens.length - shown.length;
+  if (held === 0) return shown.join(' ');
+  return w.scopesWithheld(shown, held);
+};
+
+export const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
+
+/**
+ * Which secret name each place of a profile reads, by place rather than as a set: a name moved to
+ * another place, or `vault_keys` put in another order, sends another credential. For basic auth the
+ * pair actually sent is a place of its own, because each half falls back to `vault_keys` (http.ts).
+ * Keyed by the label the question shows: `vault_keys` reads as "secret read", counted from the
+ * first when the profile reads several.
+ */
+const secretPlacesOf = (p: ApiProfile, several: boolean, w: SecurityChangeWords = SECURITY_CHANGE_WORDS.en): Map<string, string> => {
+  const places = new Map<string, string>();
+  const put = (label: string, name: string | undefined): void => { if (typeof name === 'string' && name !== '') places.set(label, name); };
+  const a = p.auth;
+  (a?.vault_keys ?? []).forEach((name, i) => { put(several ? w.secretReadNth(i + 1) : w.secretRead, name); });
+  put(w.secretUsername, a?.username_key);
+  put(w.secretPassword, a?.password_key);
+  if (a?.type === 'basic') {
+    put(w.secretBasicUsername, a.username_key ?? a.vault_keys?.[0]);
+    put(w.secretBasicPassword, a.password_key ?? a.vault_keys?.[1]);
+  }
+  put(w.secretClientId, a?.oauth?.client_id_key);
+  put(w.secretClientSecret, a?.oauth?.client_secret_key);
+  put(w.secretRefreshToken, a?.oauth?.refresh_token_key);
+  return places;
+};
+
+/**
+ * What a save changes against the stored profile, in the fields that decide where a credential
+ * goes, how it travels and what it may do. One line each, with the values as values, in the order
+ * of what matters most to someone who reads only the first lines: where the secret goes and which
+ * one is read, then what it may do (grant, audience, scopes, the provider's parameters). Empty for
+ * a new profile or a save that changes none of these.
+ * `widens` is false only for a line that takes something away without anything taking its place:
+ * a scope removed while others remain (with none left, a provider may grant its default), or a
+ * place that no longer reads a secret. That narrows what the profile may do.
+ */
+export interface SecurityChange { readonly text: PromptText; readonly widens: boolean }
+
+export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile, language: DialogLanguage = 'en'): SecurityChange[] {
+  if (prior === undefined) return [];
+  const w = SECURITY_CHANGE_WORDS[language];
+  const out: SecurityChange[] = [];
+  const add = (text: PromptText, widens = true): void => { out.push({ text, widens }); };
+  const field = (label: string, a: string | undefined, b: string | undefined, show: (v: string, w: SecurityChangeWords) => string = shownValue): void => {
+    if ((a ?? '') !== (b ?? '')) add(w.line(label, a === undefined ? w.none : show(a, w), b === undefined ? w.none : show(b, w)));
+  };
+  // Where the secret goes, how it travels, and which one is read.
+  field(w.address, prior.base_url, next.base_url, shownUrl);
+  field(w.tokenAddress, prior.auth?.oauth?.token_url, next.auth?.oauth?.token_url, shownUrl);
+  field(w.authType, prior.auth?.type, next.auth?.type);
+  field(w.headerName, prior.auth?.header_name, next.auth?.header_name);
+  field(w.queryParam, prior.auth?.query_param, next.auth?.query_param);
+  field(w.basicFormat, prior.auth?.basic_format, next.auth?.basic_format);
+  field(w.tokenBody, prior.auth?.oauth?.body_format, next.auth?.oauth?.body_format);
+  const several = Math.max(prior.auth?.vault_keys?.length ?? 0, next.auth?.vault_keys?.length ?? 0) > 1;
+  const [sWas, sNow] = [secretPlacesOf(prior, several, w), secretPlacesOf(next, several, w)];
+  for (const label of [...new Set([...sWas.keys(), ...sNow.keys()])]) {
+    const [a, b] = [sWas.get(label), sNow.get(label)];
+    if (a === b) continue;
+    add(w.line(label, a === undefined ? w.none : shownValue(a, w), b === undefined ? w.none : shownValue(b, w)), b !== undefined);
+  }
+  // What it may do.
+  field(w.grantType, prior.auth?.oauth?.grant_type, next.auth?.oauth?.grant_type);
+  field(w.audience, prior.auth?.oauth?.audience, next.auth?.oauth?.audience);
+  const was = new Set(scopeTokens(prior.auth?.oauth?.scope));
+  const now = new Set(scopeTokens(next.auth?.oauth?.scope));
+  const added = [...now].filter((s) => !was.has(s));
+  const removed = [...was].filter((s) => !now.has(s));
+  if (added.length > 0) add(w.scopesAdded(shownScopes(added, w)));
+  if (removed.length > 0) add(w.scopesRemoved(shownScopes(removed, w), now.size === 0), now.size === 0);
+  const pp = (p: ApiProfile): Record<string, unknown> =>
+    isPlainRecord(p.auth?.oauth?.preset_params) ? p.auth!.oauth!.preset_params as Record<string, unknown> : {};
+  const [ppWas, ppNow] = [pp(prior), pp(next)];
+  for (const key of [...new Set([...Object.keys(ppWas), ...Object.keys(ppNow)])].sort()) {
+    const [a, b] = [ppWas[key], ppNow[key]];
+    if (JSON.stringify(a) !== JSON.stringify(b)) {
+      add(w.providerParameter(shownValue(key, w), a === undefined ? w.none : shownValue(String(a), w), b === undefined ? w.none : shownValue(String(b), w)));
+    }
+  }
+  return out;
+}
+
+/**
+ * A delete in an autonomous run (a trigger, a worker task), refused like the other questions of
+ * this tool: its prompt channel only parks the question for later. A delete also clears the way for
+ * a new profile under the same id, whose grant nothing compares with the one deleted
+ * (`createsOnBoundSecrets` asks about that create).
+ */
+function autonomousDeleteRefusal(id: unknown): string {
+  const shown = typeof id === 'string' && id !== '' ? ` "${shapedForLog(id, ID_PATTERN, 80)}"` : '';
+  return `Blocked: connection${shown} not deleted. Deleting a connection needs the user's acceptance, and a scheduled or background run cannot ask them. Nothing was deleted. Tell the user in one sentence that the connection was not deleted because this needs their acceptance, and that they can delete it by asking lynox for it in a chat. Do not try to delete it in another way.`;
+}
+
+/**
+ * Everything a new profile may do, in the fields and the order of {@link securityChanges}, each
+ * as it is (no arrow from nothing). For a create that has nothing stored to be compared with but
+ * whose secrets may already go to its addresses: there no other question names its grant.
+ */
+export function grantListed(next: ApiProfile, language: DialogLanguage = 'en'): SecurityChange[] {
+  const w = SECURITY_CHANGE_WORDS[language];
+  const out: SecurityChange[] = [];
+  const field = (label: string, b: string | undefined, show: (v: string, w: SecurityChangeWords) => string = shownValue): void => {
+    if (b !== undefined && b !== '') out.push({ text: w.held(label, show(b, w)), widens: true });
+  };
+  field(w.address, next.base_url, shownUrl);
+  field(w.tokenAddress, next.auth?.oauth?.token_url, shownUrl);
+  field(w.authType, next.auth?.type);
+  field(w.headerName, next.auth?.header_name);
+  field(w.queryParam, next.auth?.query_param);
+  field(w.basicFormat, next.auth?.basic_format);
+  field(w.tokenBody, next.auth?.oauth?.body_format);
+  for (const [label, name] of secretPlacesOf(next, (next.auth?.vault_keys?.length ?? 0) > 1, w)) field(label, name);
+  field(w.grantType, next.auth?.oauth?.grant_type);
+  field(w.audience, next.auth?.oauth?.audience);
+  const scopes = [...new Set(scopeTokens(next.auth?.oauth?.scope))];
+  if (scopes.length > 0) out.push({ text: w.scopesHeld(shownScopes(scopes, w)), widens: true });
+  const pp = isPlainRecord(next.auth?.oauth?.preset_params) ? next.auth!.oauth!.preset_params as Record<string, unknown> : {};
+  for (const key of Object.keys(pp).sort()) {
+    if (pp[key] !== undefined) out.push({ text: w.providerParameterHeld(shownValue(key, w), shownValue(String(pp[key]), w)), widens: true });
+  }
+  return out;
+}
+
+/**
+ * A create that reads a secret already bound to some address: the save question has nothing stored
+ * to compare with, and the binding question names only addresses a name does not have yet, never
+ * the grant. It happens when a profile is deleted and saved again (the record of where a name may
+ * go outlives the profile) or when a second profile reads a name the first one bound. Any binding
+ * counts, not only one that covers this profile's addresses: an address spelled a little
+ * differently (a trailing `#` or `?`) would otherwise read as new and keep the list away. Only the
+ * owner's save, as with the binding question: a mandate's sends wait for the owner's release.
+ */
+function createsOnBoundSecrets(agent: IAgent, prior: ApiProfile | undefined, profile: ApiProfile): boolean {
+  if (prior !== undefined || !isOwnerPrincipal(agent.principal)) return false;
+  const bindings = agent.toolContext?.vaultNameBindings ?? null;
+  if (bindings === null) return false;
+  return secretBearingNames(profile).some((name) => bindings.boundOf(name).length > 0);
 }
 
 /**
@@ -1823,18 +2194,35 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   // `bootstrap` reads the page it is given, the docs page before the spec as the handler does.
   // The sub-pages a docs page links to are read later, each recorded as it is read.
   outwardRead: (input) => {
-    if (input.action !== 'bootstrap') return null;
-    const url = input.docs_url || input.openapi_url;
-    return typeof url === 'string' && url !== '' ? httpTarget('GET', url) : null;
+    const url = bootstrapUrl(input);
+    return url === null ? null : httpTarget('GET', url);
   },
+  // After content from outside, the page `bootstrap` reads goes through the origin check as a
+  // read: its address can carry data the model put there. The model chose the address, so it is
+  // checked like `http_request`'s GET. A page a search listed needs no question (`readAddress`).
+  // The token address a `create` or `update` saves goes through the same check, as the save it is
+  // (`credentialAddress`): every later token fetch and refresh posts the client's credentials there.
+  sendTargetsWhenLatched: (input) => {
+    const url = bootstrapUrl(input) ?? savedTokenUrl(input);
+    return url === null ? null : hostTargets(url);
+  },
+  credentialAddress: (input) => savedTokenUrl(input),
+  readCarriesAddress: (input) => {
+    const url = bootstrapUrl(input);
+    return url !== null && carriesAddress(url);
+  },
+  readAddress: (input) => bootstrapUrl(input),
   // `delete` removes a profile and the tokens its sign-in stored. Under `autonomous` the guard
-  // raises `[BLOCKED]`, which no contract lifts: refused without a prompt
-  // channel, a generic question with one. Interactively the handler asks its own question,
-  // which names what is lost, so the guard adds none (`null`).
+  // raises `[BLOCKED]`, which no contract lifts; `refusesUnasked` below refuses such a call before
+  // that question is reached, and the handler refuses it too. Interactively the handler asks its
+  // own question, which names what is lost, so the guard adds none (`null`).
   destructive: {
     mode: 'data',
     check: (input, ctx) => (input.action === 'delete' && ctx?.autonomy === 'autonomous' ? 'delete' : null),
   },
+  // A delete in an autonomous run is refused by the handler (`autonomousDeleteRefusal`), so it is
+  // refused here first, before the guard's question above: a yes to that could not change it.
+  refusesUnasked: (input, _ctx, run) => (input.action === 'delete' && run.autonomy === 'autonomous' ? autonomousDeleteRefusal(input.id ?? input.profile?.id) : null),
   // `create` shares `update`'s save path (an existing id is overwritten, `isNew` false),
   // so no action is a pure create. `fetch_token` may run a refresh grant, which rotates
   // the token at the provider — a vault before-image would restore a dead token. The
@@ -1938,11 +2326,12 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
       if (!apiStore) {
         return 'No API profiles registered.';
       }
-      const profile = apiStore.get(input.id);
+      // The release question names a profile by its opaque id, so `view` takes that id too.
+      const profile = apiStore.get(profileIdFrom(apiStore, input.id));
       if (!profile) {
         return `API profile "${input.id}" not found. Use action "list" to see available profiles.`;
       }
-      return apiStore.formatProfile(profile) + notConnectedNote(agent, profile);
+      return apiStore.formatProfile(profile) + notConnectedNote(agent, profile) + releaseVersionNote(agent, apiStore, profile);
     }
 
     if (input.action === 'bootstrap') {
@@ -1959,8 +2348,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
-            undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'))));
+          ({ response: resp } = await fetchForDiscovery(input.openapi_url, joinCallSignal(ac.signal), agent));
         } finally {
           clearTimeout(timer);
         }
@@ -1984,6 +2372,9 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         // all"... is not valid JSON"), which is remote-authored text: say only that it is
         // not JSON. The fetch's own failures go through `fetchFailureForModel`.
         const msg = err instanceof SyntaxError ? 'the body is not valid JSON' : fetchFailureForModel(err);
+        // A hop the origin check held is not a spec to look for elsewhere: its text says what to
+        // tell the user, and the frame below would send the model looking for another address.
+        if (msg.startsWith(CROSS_HOST_REFUSAL)) return `Error: ${msg}`;
         return `Error: could not parse OpenAPI spec from ${input.openapi_url} — ${msg}. If the docs site serves HTML, find the raw .json spec URL (often at /openapi.json or /swagger.json).`;
       }
 
@@ -2052,6 +2443,8 @@ ${draftJson}
       if (!input.refine) return 'Error: "refine" patch is required for refine action.';
       const apiStore = agent.toolContext?.apiStore;
       if (!apiStore) return 'No API profiles registered.';
+      const engineLess = apiStore.engineLessRefusal('save', 'model');
+      if (engineLess !== null) return `Error: ${engineLess}`;
       const existing = apiStore.get(input.id);
       if (!existing) return `API profile "${input.id}" not found.`;
       const foreignRefine = foreignProfileRefusal(agent, existing, input.id);
@@ -2112,6 +2505,9 @@ ${draftJson}
       if (!input.profile) {
         return 'Error: "profile" object is required for create/update action.';
       }
+      // Without engine.db, before anything is asked, fetched or written (see `engineLessRefusal`).
+      const engineLess = agent.toolContext?.apiStore?.engineLessRefusal('save', 'model') ?? null;
+      if (engineLess !== null) return `Error: ${engineLess}`;
 
       // Shallow-copy the input: the ack-stamping below assigns/strips the
       // top-level `custom_endpoint_ack` field, and mutating the caller's object
@@ -2175,11 +2571,15 @@ ${draftJson}
       const storedForSave = agent.toolContext?.apiStore?.storedProfile(profile.id);
       if (storedForSave && isOwnerPrincipal(agent.principal) && isMandateConnection(storedForSave)
         && !connectionWaits(storedForSave, agent.toolContext?.mandateEnds ?? null)) {
-        const theirs = memberConnectionRefusal(storedForSave, agent.principal, agent.toolContext?.mandateEnds ?? null);
+        const theirs = noteMemberRefusal(storedForSave, agent.principal, agent.toolContext?.mandateEnds ?? null);
         return `Error: API profile "${profile.id}" was not saved. ${theirs ?? 'Its connection was made in a mandate\'s session that is still active.'}`;
       }
       delete profile.created_by;
       const prior = agent.toolContext?.apiStore?.storedProfile(profile.id);
+      // The stored profile the questions below describe. A save in between (another chat, a token
+      // exchange) would be overwritten by this one and the change list would be against a state
+      // that is gone, so the save checks it again right before it writes.
+      const priorState = JSON.stringify(prior ?? null);
       // A save may not take a profile off the built-in provider it was set up with. A model
       // that wanted a write scope the preset refuses saved over a working read connection as
       // its own OAuth app; connect then refused that, and the user had neither. The answer
@@ -2188,22 +2588,63 @@ ${draftJson}
       if (priorPreset && builtInPresetOf(profile)?.id !== priorPreset.id) {
         return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. Connecting here cannot authorize a scope outside that list, so tell the user it is not available rather than offering it. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
       }
+      // The same holds for a provider this engine once shipped and no longer has: the profile
+      // was set up through it, and its grant is a user's. The id is named because it equals one
+      // of ours (`RETIRED_PRESET_IDS`), the rule the unknown-preset note below keeps.
+      const priorRetired = prior && !priorPreset ? retiredPresetIdOf(prior) : undefined;
+      if (priorRetired !== undefined && retiredPresetIdOf(profile) !== priorRetired) {
+        return `Error: profile "${profile.id}" is set up through the built-in "${priorRetired}" provider, which this engine no longer has, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in belongs to the provider, not to the profile. Nothing was saved. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
       const reserved = reservedAppNameRefusal(profile);
       if (reserved) return `Validation error: ${reserved}`;
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
+      // The owner chose this host in their own chat, in a tool batch that began before any
+      // foreign content: a read from it after foreign content is then not asked about
+      // (`ApiStore.readKnownHosts`). The batch's snapshot, not the turn's: the dispatch counts
+      // this tool's own call as foreign content before the handler runs, so the turn would never
+      // be clean here. Only a save in a batch that began before the conversation's first foreign
+      // content records its host, and an earlier `api_setup` call counts as such content.
+      // Outside a batch nothing is recorded, nor in a conversation holding a server tool the
+      // provider ran itself, such as its web search: its results reach the model past every
+      // dispatch. Such a tool also
+      // arms the conversation latch; this check stays as a guard of its own.
+      // Only the owner's interactive run: a trigger's, a workflow's or a task's run carries a run
+      // tag as its author even under the owner's principal, and a sub-agent a run origin of its
+      // own; a workflow made in another conversation could otherwise name a host unattended. The
+      // engine's to write, never the input's, and bound to the host it was saved with.
+      delete profile.owner_clean_host;
+      if (ownersCleanBatch(agent)) {
+        const cleanHost = profileReadHost(profile);
+        if (cleanHost !== null) profile.owner_clean_host = cleanHost;
+      }
       // A mandate's oauth2 profile writes its tokens to the pair its id derives. Where that pair
       // already holds a value, the first exchange would write over it, so the id is refused
       // here. Only when the profile becomes oauth2 under this id: a later save of the same
       // profile, and a retry after a connect whose save failed, go through as before.
       // Not for an id whose slots this instance guards (`protectedDerivedSlot`): the save refuses
       // that id anyway, and the answer must not depend on whether the guarded name holds a value.
-      if (!isOwnerPrincipal(agent.principal) && profile.auth?.type === 'oauth2' && prior?.auth?.type !== 'oauth2' && protectedDerivedSlot(profile) === null) {
+      // The owner too, whenever a profile comes onto a built-in provider (created, or changed from a
+      // static or an OAuth sign-in of its own): its tokens come only from the provider's sign-in, and
+      // a value already under its names (collected before, or written by the earlier sign-in) would be
+      // sent as its token without one. In a session that cannot see every slot this refuses the
+      // owner as well. Not covered: a refresh slot such a profile configures (`refresh_token_key`) —
+      // filled on purpose where it shares another profile's grant, and exchanged only with the
+      // provider's app.
+      const becomesOAuth = profile.auth?.type === 'oauth2' && prior?.auth?.type !== 'oauth2';
+      const becomesPreset = builtInPresetOf(profile) !== undefined && (prior === undefined || builtInPresetOf(prior) === undefined);
+      if ((isOwnerPrincipal(agent.principal) ? becomesPreset : becomesOAuth || becomesPreset) && protectedDerivedSlot(profile) === null) {
+        // A step without a store (a saved workflow's) cannot see the slots either: refused, the owner's too.
         const occupied = agent.secretStore ? occupiedTokenSlots(agent.secretStore, profile.id) : null;
         if (occupied === null) {
           return `Error: the token slots of "${profile.id}" cannot be checked from here, so the OAuth profile was not saved. Nothing was saved. This session does not see the whole store of secrets, as in a sub-agent or a workflow step.`;
         }
         if (occupied.length > 0) {
-          return `Error: ${occupied.map((n) => `"${n}"`).join(' and ')}, where the tokens of "${profile.id}" would go, already ${occupied.length === 1 ? 'holds' : 'hold'} a value. Nothing was saved. Save the profile under a different id, so its tokens get names of their own.`;
+          const where = `${occupied.map((n) => `"${n}"`).join(' and ')}, where the tokens of "${profile.id}" would go, already ${occupied.length === 1 ? 'holds' : 'hold'} a value`;
+          // On a built-in provider another id is no way out: the profile already on its host keeps it.
+          const preset = becomesPreset ? builtInPresetOf(profile) : undefined;
+          return preset !== undefined
+            ? `Error: ${where} that did not come from the sign-in of the built-in "${preset.id}" provider. Nothing was saved. A profile on that provider takes its tokens only from that sign-in. Do not ask the user for a token. Tell the user that the stored value has to go first: they can delete it in Settings → API Keys, and then this profile can be saved and connected.`
+            : `Error: ${where}. Nothing was saved. Save the profile under a different id, so its tokens get names of their own.`;
         }
       }
       // The owner's save of a mandate's profile makes it the owner's, and the answer says what
@@ -2239,8 +2680,9 @@ ${draftJson}
       // unrelated parameter happened to validate — with no trace in either
       // direction. Refusing the save instead was the other candidate and is
       // worse: a provider retired from the register would make every profile
-      // naming it unsaveable, including the update that would remove the field.
-      let presetNote: string | undefined;
+      // naming it unsaveable, even a save that keeps the provider.
+      // The model reads the English; the person is asked in the agent's language.
+      let presetNoteFor: ((language: DialogLanguage) => string) | undefined;
       const redirectUrls: string[] = [];
       // Set only where a human actually answered. An acceptance nobody gave is
       // the one thing this record must never contain.
@@ -2265,18 +2707,16 @@ ${draftJson}
           // a human's prompt. When the id IS known the two arms below do name it
           // — that string equals one of ours, so it discloses nothing.
           const known = presetIds();
-          presetNote = known.length > 0
-            ? `No authorization address could be derived: this profile names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known.join(', ')}.`
-            : 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.';
+          presetNoteFor = (l) => known.length > 0 ? PRESET_NOTE[l].unknownProvider(known.join(', ')) : PRESET_NOTE[l].noProviders;
         } else if (derived.kind === 'bad-preset') {
-          presetNote = `No authorization address could be derived: the built-in provider "${presetId}" is defined wrongly in this engine — ${derived.detail}. Nothing on this profile fixes that; report it.`;
+          presetNoteFor = (l) => PRESET_NOTE[l].badPreset(String(presetId), derived.detail);
         } else if (derived.kind === 'missing-param') {
-          presetNote = `No authorization address could be derived: the provider "${presetId}" needs ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`;
+          presetNoteFor = (l) => PRESET_NOTE[l].missingParam(String(presetId), presetParamDescribe(derived.param.describe, l), derived.param.name);
         } else {
           // Supplied and REFUSED, which is a different sentence: telling someone
           // to set a value they already set is the advice that sends them round
           // a loop. The value itself is not repeated back.
-          presetNote = `No authorization address could be derived: the value this profile supplies for ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}) is not one the provider "${presetId}" accepts. Correct it with api_setup update — the host is disclosed then.`;
+          presetNoteFor = (l) => PRESET_NOTE[l].refusedParam(String(presetId), presetParamDescribe(derived.param.describe, l), derived.param.name);
         }
       }
       // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
@@ -2286,6 +2726,21 @@ ${draftJson}
       // prompted") that could never be followed — the prompt was unreachable and the
       // else-branch below deleted any ack that did exist.
       const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
+      // What this save changes in the fields that decide where a credential goes and what it may
+      // do. Any such change is asked about, on any host and for any kind of profile, and named in
+      // the question: a consent to "save this profile" is not a consent to the scope a text in a
+      // tool result asked the model to add. A refresh sends the stored scope and audience, and a
+      // swap to a name already bound to the same address sends another credential there, so
+      // neither the host check nor the binding question covers them.
+      // Worded in the language the person is asked in; `widens` does not depend on the wording.
+      // A create on secrets that may already go to its addresses lists everything it may do instead,
+      // and is asked like a widening (`createsOnBoundSecrets`): every line of that list widens, and
+      // it always has one, since a profile has a base_url.
+      const listsAll = createsOnBoundSecrets(agent, prior, profile);
+      const changes = listsAll ? grantListed(profile, agent.dialogLanguage ?? 'en') : securityChanges(prior, profile, agent.dialogLanguage ?? 'en');
+      // Only a change that widens or moves something asks on its own; a save that only takes a
+      // scope or a secret away narrows the profile. Every change is still listed when it asks.
+      const widens = changes.some((c) => c.widens);
       // Two questions, one prompt, and the redirect half is asked even when the
       // host IS vetted. That is not thoroughness: it is what keeps the refusal
       // at connect time followable. If this only ran for non-vetted hosts, a
@@ -2293,7 +2748,7 @@ ${draftJson}
       // would refuse for want of an acceptance, and its advice — save again and
       // accept — would point at a prompt that never appears. That dead end is
       // the one this file already carries a scar from.
-      if (nonVetted.length > 0 || redirectUrls.length > 0) {
+      if (nonVetted.length > 0 || redirectUrls.length > 0 || widens) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -2315,17 +2770,24 @@ ${draftJson}
         ));
         // One paragraph per host, not per URL: a store preset puts its base, token and authorize
         // URLs on one host, and the same paragraph three times reads as three destinations.
-        const disclosureParts = [
+        // The hosts as the acceptances name them (describeDisclosure: the URL's hostname, or the URL
+        // when it does not parse), once each.
+        const nonVettedHosts = Array.from(new Set(nonVetted.map((u) => { try { return new URL(u).hostname; } catch { return u; } })));
+        const disclosureIn = (l: DialogLanguage): string => [
           nonVetted.length > 0
-            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n')}`
+            // The acceptance of each host (describeDisclosure) is binding text and stays English.
+            ? API_SETUP_DIALOG[l].outsideSubProcessors(profile.auth?.type === 'oauth2', nonVettedHosts, Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n'))
             : undefined,
-          redirectHostNames.length > 0
-            ? `You will be sent to ${redirectHostNames.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`
-            : undefined,
-          presetNote,
-        ].filter((part): part is string => part !== undefined && part !== '');
-        const disclosure = disclosureParts.join('\n\n');
-        if (!agent.promptUser) {
+          redirectHostNames.length > 0 ? API_SETUP_DIALOG[l].redirect(redirectHostNames) : undefined,
+          presetNoteFor?.(l),
+        ].filter((part): part is string => part !== undefined && part !== '').join('\n\n');
+        const disclosure = disclosureIn('en');
+        // An autonomous run (a trigger, a worker task) has a `promptUser`, but it only parks the
+        // question as a notification for later: nobody is there to weigh a change to where a
+        // credential goes while the run that asked for it waits. So it is treated like a run with
+        // no prompt at all, the same as the binding question (`askBindingGrowth`), `release_secret`
+        // and `adopt_connection`. A delete in such a run is refused as well (`autonomousDeleteRefusal`).
+        if (agent.autonomy === 'autonomous' || !agent.promptUser) {
           // Two halves, two answers, because they fail in opposite directions.
           // The egress half has to refuse the SAVE: a stored profile with a
           // non-vetted host is one a later request attaches a credential to, so
@@ -2339,19 +2801,30 @@ ${draftJson}
           // secret may go grows only when the owner answers a question naming it
           // and its new destinations at an interactive save (`askBindingGrowth`
           // below); with nobody to answer, such a save is refused there. What
-          // still saves without anyone is a profile that names no secret, one
-          // whose secrets are already bound to its destinations, or one a
-          // mandate's session saves (its sends wait for the owner's release).
+          // still saves without anyone is a profile that names no secret, an
+          // update whose secrets are already bound to its destinations and that
+          // widens nothing, or one a mandate's session saves (its sends wait for
+          // the owner's release). A create on a secret bound anywhere is refused
+          // below (`listsAll`).
           if (nonVetted.length > 0) {
             return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
           }
+          // A change to where a credential goes or what it may do, with nobody to accept it: refused.
+          if (listsAll) {
+            return `Blocked: connection "${profile.id}" not saved. It is new, but its secrets may already be sent to its addresses, so saving it needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the connection was not saved because it needs their acceptance, name in a few words what it would have been allowed to do (from the list below), and tell them they can save it by asking lynox for it in a chat, since a scheduled or background run cannot ask them. Do not try to save it in another way.\n\nWhat it would have been allowed to do:\n${grantListed(profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`).join('\n')}`;
+          }
+          if (widens) {
+            return `Blocked: profile "${profile.id}" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, name in a few words what the save would have changed (from the list below), and tell them they can save it by asking lynox for it in a chat, since a scheduled or background run cannot ask them. Do not try to save it in another way.\n\nThis save changes:\n${securityChanges(prior, profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`).join('\n')}`;
+          }
         } else {
           const answer = await agent.promptUser(
-            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
-            ['Allow', 'Deny', '\x00'],
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].save(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), profile.name, changes.map((c) => c.text), disclosureIn(agent.dialogLanguage ?? 'en'), listsAll),
+            consentOptions('guard'),
+            consentMeta('guard'),
           );
-          if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-            return `Blocked: profile "${profile.id}" not saved — user declined.`;
+          const outcome = decideConsent('guard', answer);
+          if (outcome !== 'allow') {
+            return consentRefusal(outcome, `Blocked: profile "${profile.id}" not saved — user declined.`);
           }
           // `true`, not `redirectUrls.length > 0`: the guarded value below is
           // `hostsOf(redirectUrls)`, which is empty when the list is, so the
@@ -2477,6 +2950,17 @@ ${draftJson}
       // kind only.
       const freshTrailId = apiStore.newTrailId();
       return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(savedId) ?? freshTrailId]], main: ['save'] }, (w) => {
+        // No await from here to the save.
+        if (JSON.stringify(apiStore.storedProfile(savedId) ?? null) !== priorState) {
+          return `Error: API profile "${savedId}" changed while the question was open (for example, another chat saved it or its token was renewed), so the answer no longer covers this save. Nothing was saved and no stored token was removed. Read the profile again; if the change is still wanted, save it again; if it still needs their acceptance, the user is asked again.`;
+        }
+        // A secret of this new profile was bound while its questions were open (another save's
+        // answer): none of them listed what this profile may do with it. Two creates on one fresh
+        // secret whose questions overlap meet this too, and the second is saved again with the
+        // list: fail-closed on purpose, at the price of one more question.
+        if (!listsAll && createsOnBoundSecrets(agent, prior, profile)) {
+          return `Error: connection "${savedId}" was not saved: while the user was being asked, another save allowed one of its secrets to be sent to its addresses, so their answer did not cover everything this new connection may do. Nothing was saved. Save it again; the user is then asked with the whole list.`;
+        }
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);
           if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
@@ -2536,6 +3020,7 @@ ${draftJson}
         // was non-vetted. A profile whose base_url is vetted saves with no prompt
         // at all, and that is the case where the missing authorize host would
         // otherwise leave no trace anywhere.
+        const presetNote = presetNoteFor?.('en');
         if (presetNote) parts.push(presetNote);
         if (redirectUrls.length > 0 && !redirectAccepted) {
           // Two sentences, because the two cases are not the same event. On a
@@ -2548,7 +3033,9 @@ ${draftJson}
             ? 'The acceptance for sending the user to the provider was REMOVED: this run could not ask anyone, and the record is rebuilt on every save. api_setup connect will refuse until the profile is saved again while a person is there to answer.'
             : 'Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
         }
-        parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
+        parts.push(turnIsLocked(agent.principal)
+          ? 'Next steps: if the API needs a key, tell the user that the owner of this instance has to store it; a test http_request can only succeed after that.'
+          : 'Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
         return parts.join('\n');
       });
     }
@@ -2558,6 +3045,8 @@ ${draftJson}
       if (!id) return 'Error: "id" is required for connect action.';
       const apiStore = agent.toolContext?.apiStore;
       if (!apiStore) return 'Error: API store unavailable — cannot build a connect link. Restart the engine and retry.';
+      const engineLess = apiStore.engineLessRefusal('connect', 'model');
+      if (engineLess !== null) return `Error: ${engineLess}`;
       const profile = apiStore.get(id);
       if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
       // A session under a mandate connects a profile it set up itself (PRD §3.13): the consent
@@ -2567,6 +3056,14 @@ ${draftJson}
       }
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
+      }
+      // A provider this engine once shipped: there is nothing to connect it to, and the profile
+      // stays held to it, so neither an update to another provider nor fetch_token (both
+      // suggested further down for other profiles) works. Asked before anything else that could
+      // answer with one of those.
+      const retiredId = retiredPresetIdOf(profile);
+      if (retiredId !== undefined) {
+        return `Error: profile "${id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so there is no authorization page to send the user to. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
       }
       // The link is built from the server's own origin, never assembled by the
       // model: a link the model writes is a link the model chooses. Without an
@@ -2585,7 +3082,9 @@ ${draftJson}
         if (originPreset !== undefined) {
           return `Error: profile "${id}" cannot be authorized now: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to after they authorize lynox at ${originPreset.label}. There is no other way to connect ${originPreset.label} here: this engine connects ${originPreset.label} only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. fetch_token cannot do that authorization either; it only renews a profile that was authorized before and still holds its refresh token. Tell the user that this profile cannot be connected until whoever runs this engine sets its public address (ORIGIN).`;
         }
-        return 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
+        return turnIsLocked(agent.principal)
+          ? 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Only the owner of this instance can set it or store the credentials: tell the user so, and use action=fetch_token once the credentials are stored.'
+          : 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
       }
       // Parsed, not merely found. The provider host below is parsed, compared for
       // identity and checked for userinfo; the host the user is sent to FIRST had
@@ -2634,7 +3133,7 @@ ${draftJson}
         const ids = presetIds();
         const known = ids.length > 0 ? `Known providers: ${ids.join(', ')}.` : 'No providers are built in yet, so nothing can be connected this way today.';
         if (endpoints.kind === 'unknown-preset') {
-          return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.`;
+          return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, ${turnIsLocked(agent.principal) ? 'or use a key instead and tell the user that the owner of this instance has to store it' : 'or keep using a credential the user pastes with ask_secret'}.`;
         }
         if (endpoints.kind === 'bad-preset') {
           // A defect in a compiled preset. Neither the model nor the user can
@@ -2690,7 +3189,13 @@ ${draftJson}
             const keys = presetClientKeys(appOfProvider.id);
             return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Save it again with api_setup update: on the built-in "${appOfProvider.id}" provider the names are set to "${keys.id}" and "${keys.secret}", and the owner enters the app in the profile's connection form under Settings → API Profiles.`;
           }
-          return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
+          return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, ${unnamedValueStep(agent)}.`;
+        }
+        // A name this run's secret scope leaves out may well be stored: the run cannot tell, so it
+        // does not send the user to enter it again.
+        const outOfScope = unfilled.filter((k) => agent.secretStore?.explainUnresolved?.(k) === 'out-of-scope');
+        if (outOfScope.length > 0) {
+          return `Error: profile "${id}" cannot authorize in this run: ${outOfScope.join(' and ')} ${outOfScope.length === 1 ? 'is' : 'are'} outside the secrets this run may see, so it cannot tell whether ${outOfScope.length === 1 ? 'it is' : 'they are'} stored. Nothing was sent. Do not ask the user to enter ${outOfScope.length === 1 ? 'it' : 'them'} again; connect from a run that may see ${outOfScope.length === 1 ? 'it' : 'them'}.`;
         }
         const withheld = agent.secretStore ? withheldFrom(agent.secretStore, profile, apiStore, unfilled, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${id}" cannot authorize yet. ${withheldText(withheld)}`;
@@ -2703,8 +3208,10 @@ ${draftJson}
         const askable = unfilled.filter((k) => !isPresetClientSecretName(k) && !isAppIdOf(appOfProvider, k));
         const settled = unfilled.filter((k) => isPresetClientSecretName(k)).map(presetClientSecretGuidance)
           .concat(unfilled.filter((k) => isAppIdOf(appOfProvider, k)).map(presetClientIdGuidance));
-        const ask = askable.length > 0 ? ` Call ask_secret for ${askable.join(' and ')}.` : '';
-        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then connect.`;
+        const ask = askableValueStep(agent, askable);
+        // In a locked turn the end is a condition: "Then" reads as now, and before the owner
+        // stores the values a connect only comes back here (U-185).
+        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}.${ask}${settled.map((g) => ` ${g}`).join('')} ${turnIsLocked(agent.principal) ? 'Once they are stored, connect.' : 'Then connect.'}`;
       }
       // The two refusals the route gives before anything is sent, asked here as well.
       if (clientIdKey && !mayServeAsClientId(apiStore, clientIdKey)) {
@@ -2740,6 +3247,10 @@ ${draftJson}
       if (!apiStore) {
         return 'Error: API store unavailable — cannot delete the profile. Restart the engine and retry.';
       }
+      // Before the profile is read: the refusal is the same whether the id exists.
+      const engineLess = apiStore.engineLessRefusal('remove', 'model');
+      if (engineLess !== null) return `Error: ${engineLess}`;
+      if (agent.autonomy === 'autonomous') return autonomousDeleteRefusal(id);
       // Read before the delete: what the vault holds for this profile is decided
       // by the profile, and afterwards there is no profile to ask. The stored
       // profile, registered or held back by the boot: a held-back profile's
@@ -2761,10 +3272,9 @@ ${draftJson}
       // the tokens its sign-in stored, and the person notices only when the connection is gone;
       // in an owner's own session a text the model read (a mail, a page) can ask for it. The
       // question is the engine's, not the model's: it names the profile, its host and what the
-      // vault loses. With no one to ask, nothing is deleted. Under `autonomous` the permission
-      // guard raises its `[BLOCKED]` signal first (`destructive` on the entry): with no prompt
-      // channel that refuses the call, with one (a worker run) it is a generic question, and
-      // this one follows it.
+      // vault loses. With no one to ask, nothing is deleted, and an autonomous run is refused above
+      // whether or not it carries a prompt channel (`autonomousDeleteRefusal`, also read before
+      // the guard's own question through `refusesUnasked`).
       // An entry the boot could not read is asked about too (the owner's only, above). Not asked:
       // an id with neither a stored profile nor such an entry, where nothing is there. A profile
       // the boot held back is stored: it is asked like a registered one, by its author only,
@@ -2778,12 +3288,14 @@ ${draftJson}
         const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
           ? Promise.resolve(null)
           : promptUser(
-            pv`⚠ api_setup: delete the stored API profile ${id}, which could not be read (${singleLine(unreadableSource)})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
-            ['Allow', 'Deny', '\x00'],
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].deleteUnreadable(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), id, singleLine(unreadableSource)),
+            consentOptions('guard'),
+            consentMeta('guard'),
           ));
         if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`; }
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: API profile entry "${id}" not deleted — user declined.`;
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          return consentRefusal(outcome, `Blocked: API profile entry "${id}" not deleted — user declined.`);
         }
       }
       if (existing) {
@@ -2797,20 +3309,21 @@ ${draftJson}
         let host = '';
         try { host = new URL(existing.base_url).hostname; } catch { /* no host to name */ }
         const tokens = recordedWrites(existing).length;
-        const loses = tokens > 0
-          ? pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again.`
-          : pv` Its settings (endpoints, guidelines, sign-in method) are removed.`;
+        const said = API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'];
+        const loses = tokens > 0 ? said.losesTokens(tokens) : said.losesSettings;
         // A waiter whose run was stopped asks nothing: the question would outlive the run as a
         // pending row and block the session's next prompt (the same rule as `http_request`).
         const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
           ? Promise.resolve(null)
           : promptUser(
-            pv`⚠ api_setup: delete the API profile ${singleLine(String(existing.name))} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
-            ['Allow', 'Deny', '\x00'],
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].deleteProfile(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), singleLine(String(existing.name)), id, host, loses),
+            consentOptions('guard'),
+            consentMeta('guard'),
           ));
         if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile "${id}" not deleted — the run was stopped before the question was asked.`; }
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: API profile "${id}" not deleted — user declined.`;
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          return consentRefusal(outcome, `Blocked: API profile "${id}" not deleted — user declined.`);
         }
       }
       // Delete from the backing store + memory (S4b: engine.db `connections` when
@@ -2869,6 +3382,14 @@ ${draftJson}
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${input.id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
       }
+      // Without engine.db, before anything is read or sent. An exchange writes tokens into the vault
+      // and records them on the profile, and that record would land only in the flat files the next
+      // boot with engine.db does not read: the tokens would stay behind, which a later delete does not
+      // take. The record the files hold for a renewal predates the grant ledger as a rule, so no
+      // renewal is told apart from a first connection; every exchange waits for the restart.
+      // `?.()` on the method: suites hand this branch a partial store double.
+      const engineLessRenew = apiStore.engineLessRefusal?.('renew', 'model') ?? null;
+      if (engineLessRenew !== null) return `Error: ${engineLessRenew}`;
       // A connection someone else made with their own login is theirs to renew; said with who and
       // which, before anything is read, not as a slot this profile "may not write".
       const memberRefusal = refuseMemberConnection(profile, agent.principal, agent.toolContext?.mandateEnds ?? null, 'write');
@@ -2892,6 +3413,14 @@ ${draftJson}
         return `Error: profile "${input.id}" is oauth2, so its tokens would live in a vault slot that belongs to a credential of this instance. Nothing was sent. Choose a different id for this profile.`;
       }
       const oauth = profile.auth.oauth;
+      // A provider this engine once shipped and no longer has: the profile's grant is a user's,
+      // and no endpoint of that provider is left to exchange it at. The profile's own `token_url`
+      // was display only while the provider existed, and it does not become the endpoint now,
+      // or an edit to it would send the user's refresh token to a host the profile names.
+      const retiredId = retiredPresetIdOf(profile);
+      if (retiredId !== undefined) {
+        return `Error: profile "${input.id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so no token is requested for it. Nothing was sent. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
       // A profile that names a preset this engine knows exchanges tokens at the preset's own
       // endpoint — the one the callback used — and its `token_url` is display only. Otherwise a
       // profile the agent wrote could send the provider's refresh token, and the client secret,
@@ -2946,21 +3475,8 @@ ${draftJson}
         const subject = profile.oauth_grant?.origin === 'callback' || tokenPreset === undefined
           ? `was authorized by a user${tokenPreset !== undefined ? ` through the "${tokenPreset.id}" provider` : ''}, and it declares no refresh_token grant to renew that authorization with. Nothing was sent: requesting an app-level token instead would replace the user's authorization with a different one.`
           : `connects through the "${tokenPreset.id}" provider, which issues its tokens only through a user's authorization, and it declares no refresh_token grant. Nothing was sent: fetch_token does not request an app-level token for it.`;
-        // A preset profile that reads its refresh token from a name of its own: a connect stores the
-        // token under the derived name and, since this profile does not read that one, leaves it
-        // without a grant type again (`readersRefreshSlot`, the OAuth callback). Sending it to
-        // connect alone would bring it back here; the field has to go first. Unless the slot is
-        // another profile's grant this one shares through the same provider: that sharing is on
-        // purpose, and what it lacks is the grant type, not a connection of its own.
-        const ownReadSlot = readersRefreshSlot(profile) !== refreshTokenKey(input.id);
-        const next = tokenPreset === undefined
-          ? 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.'
-          : ownReadSlot && apiStore !== undefined && sharesAnotherGrant(apiStore, profile)
-            ? 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.'
-          : ownReadSlot
-            ? 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.'
-            : 'Call api_setup with action "connect" for this profile and show the user the link.';
-        return `Error: profile "${input.id}" ${subject} ${next}`;
+        // The same sentence the 401 reminder of a built-in provider's profile ends with.
+        return `Error: profile "${input.id}" ${subject} ${delegatedRenewalWay(profile, tokenPreset, apiStore)}`;
       }
       // A preset's token endpoint takes the body its provider documents, whatever the profile says.
       const bodyFormat = tokenPreset ? presetTokenBodyFormat(tokenPreset, oauth.body_format) : oauth.body_format ?? 'form';
@@ -3054,11 +3570,28 @@ ${draftJson}
         const withheld = agent.secretStore && apiStore ? withheldFrom(agent.secretStore, profile, apiStore, missing, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${input.id}": ${withheldText(withheld)} Nothing was sent.`;
         const appOfProvider = builtInPresetOf(profile);
-        const askable = missing.filter((n) => !isPresetClientSecretName(n) && !isAppIdOf(appOfProvider, n));
+        // On a built-in provider a token slot is filled by its sign-in, never collected (`ask_secret` refuses it).
+        const presetSlots = appOfProvider === undefined ? new Set<string>() : tokenSlotNames(profile);
+        const askable = missing.filter((n) => !isPresetClientSecretName(n) && !isAppIdOf(appOfProvider, n) && !presetSlots.has(n));
         const settled = missing.filter((n) => isPresetClientSecretName(n)).map(presetClientSecretGuidance)
           .concat(missing.filter((n) => isAppIdOf(appOfProvider, n)).map(presetClientIdGuidance));
-        const ask = askable.length > 0 ? ` Call \`ask_secret\` for ${askable.map((n) => `"${shownSlot(n)}"`).join(', ')} first.` : '';
-        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then retry fetch_token.`;
+        const slotFromSignIn = appOfProvider !== undefined && missing.some((n) => presetSlots.has(n));
+        if (slotFromSignIn) {
+          // A profile that reads the refresh slot of another one it shares the grant with is signed
+          // in through that one: connecting it on its own would end the sharing.
+          const sharing = readersRefreshSlot(profile) !== refreshTokenKey(input.id) && apiStore !== undefined && sharesAnotherGrant(apiStore, profile);
+          // The profile whose own refresh slot this one reads holds the grant; named when it is one.
+          const holderId: unknown = sharing ? sharedGrantOwner(apiStore!, profile)?.id : undefined;
+          settled.push(sharing
+            ? `The tokens of a profile on the built-in "${appOfProvider.id}" provider come only from its sign-in, and this profile shares the connection of another profile through this provider: do not connect this one on its own; ${connectCallText(typeof holderId === 'string' ? holderId : undefined)} Do not ask the user for a token.`
+            : `The tokens of a profile on the built-in "${appOfProvider.id}" provider come only from its sign-in: to connect it, ${connectCallText(input.id)} Do not ask the user for a token.`);
+        }
+        const slots = askable.map((n) => `"${shownSlot(n)}"`).join(', ');
+        const ask = askable.length === 0 ? ''
+          : turnIsLocked(agent.principal) ? ` The owner of this instance has to store ${slots}; tell the user so.`
+            : ` Call \`ask_secret\` for ${slots} first.`;
+        const retry = slotFromSignIn ? '' : turnIsLocked(agent.principal) ? ' Once they are stored, retry fetch_token.' : ' Then retry fetch_token.';
+        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}.${ask}${settled.map((g) => ` ${g}`).join('')}${retry}`;
       }
       // Past this point every slot name has resolved, and `resolveOne` resolves only a
       // name that is, as a whole, an identifier (`SECRET_REF_PATTERN`): a name that
@@ -3096,7 +3629,7 @@ ${draftJson}
       }
       // A built-in provider's app names are written by its connection form and nothing else. A
       // token stored under one would be taken for the app, and a later grant would refuse it.
-      if (OAUTH_PRESETS.ids().some((p) => { const k = presetClientKeys(p); return outputName === k.id || outputName === k.secret; })) {
+      if ([...OAUTH_PRESETS.ids(), ...RETIRED_PRESET_IDS].some((p) => { const k = presetClientKeys(p); return outputName === k.id || outputName === k.secret; })) {
         return `Error: output_secret_name "${outputName}" holds the app of a built-in provider, which only its connection form writes — pick a name for this API's own token.`;
       }
       // A profile a mandate wrote does not write over what it may not read either: a value
@@ -3150,9 +3683,12 @@ ${draftJson}
       // that very name — because there, following "leave it out" walks into the
       // next refusal. (An id whose derived names are protected was refused above.)
       // The answer for that shape, shared with the client-slot refusal below.
-      const refreshOnDerivedAdvice = `Leaving output_secret_name out does not help: this profile reads its refresh token from "${refreshKey}", the name its access token needs. ${grantType === 'refresh_token'
-        ? `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`
-        : `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`}`;
+      const refreshOnDerivedAdvice = `Leaving output_secret_name out does not help: this profile reads its refresh token from "${refreshKey}", the name its access token needs. ${grantType !== 'refresh_token'
+        ? `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`
+        // On a built-in provider the refresh token comes from its sign-in, so no slot is filled by hand.
+        : builtInPresetOf(profile) !== undefined
+          ? `Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, ${connectCallText(input.id)}`
+          : `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and ${turnIsLocked(agent.principal) ? 'tell the user that the owner of this instance has to store the token there' : 'store the token there with ask_secret'}.`}`;
       if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
         const clash = `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it.`;
         const derivedAccess = accessTokenKey(input.id);
@@ -3492,7 +4028,6 @@ ${draftJson}
 
     if (input.action === 'release_secret' || input.action === 'withdraw_release') {
       if (!input.id || !input.secret_name) return `Error: "id" and "secret_name" are required for ${input.action}.`;
-      const id = input.id;
       const name = input.secret_name;
       if (!isOwnerPrincipal(agent.principal)) {
         return `Error: only the owner can ${input.action === 'release_secret' ? 'release a vault name to a profile' : 'take a release back'}. Nothing was changed.`;
@@ -3502,6 +4037,8 @@ ${draftJson}
       if (!releases || !apiStore || !agent.secretStore) {
         return 'Error: releases cannot be recorded on this instance right now. Nothing was changed.';
       }
+      // The release question names the profile by its opaque id, so these take that id too.
+      const id = profileIdFrom(apiStore, input.id);
       const shownName = JSON.stringify(shapedForLog(name, VAULT_NAME_SHAPE, 64));
       if (input.action === 'withdraw_release') {
         // Narrows what a profile reads, so it is not asked.
@@ -3545,21 +4082,42 @@ ${draftJson}
       const author = profile.created_by!;
       // What the person is shown is what is stored: the same binding, read once, before the wait.
       const binding = releaseBinding(profile, name)!;
-      const hosts = releaseDestinations(profile);
+      // The owner confirms this dialog, and a mandate's turn wrote the profile, so the question
+      // carries fixed wording plus only what the engine shapes:
+      // the vault name, the profile's opaque id (the `id` is the mandate's own word), the role and
+      // the hosts. Every other field whose change ends the release is counted, so the person still
+      // learns that there is more, and how to read it first. The scope is counted too: a scope
+      // token may be any printable run without a space, so a listed one is free text as well
+      // (`Owner-note:reviewed-by-lynox-safe-to-Allow.` is one valid token).
+      const trailId = apiStore.trailIdOf(id);
+      if (trailId === undefined) {
+        return `${shownName} cannot be released to this API profile yet: it has no opaque id to name it by in the question. lynox assigns one when it starts; after that, the release can be asked for again. Nothing was changed.`;
+      }
+      const { hosts, withDetail } = releaseDestinations(profile);
+      // The role and its words, read from the same profile as the stored binding.
       const role = sendRole(profile, name)!;
-      // Every field whose change ends the release, so what the person agrees to is all of it.
-      const authority = releaseBoundFields(profile)
-        .map(([field, value]) => `${field} ${typeof value === 'string' ? JSON.stringify(boundedForQuestion(singleLine(value))) : boundedForQuestion(singleLine(JSON.stringify(value)))}`)
-        .join(', ');
+      const slots = sendSlots(profile, name);
+      const more = releaseBoundFields(profile).length + withDetail;
+      // Counted settings are not printed, so a save between the owner's view and this question
+      // could change them under the same words. The engine compares what the owner viewed with what
+      // this question asks about, by the whole digest; the short version is only a reference.
+      const viewed = apiStore.ownerViewOf(id);
+      const version = settingsVersion(profile);
       const held = vaultHolds({ secretStore: agent.secretStore } as IAgent, name);
       const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
         ? Promise.resolve(null)
         : promptUser(
-          pv`⚠ api_setup: release the vault name ${shownName} to API profile ${id}, set up in the session of ${singleLine(author)}? The engine then sends its value, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}${authority ? ` (${authority})` : ''}, for every request and run through this profile, the user's own and bulk runs included, until that mandate ends or the user withdraws it.${role === 'oauth.client_id_key' ? ' A client id also goes into the sign-in link, to the browser of whoever opens it.' : ''} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where it goes ends the release. Release it?`,
-          ['Allow', 'Deny', '\x00'],
+          API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].release(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), {
+            name: shownName, trailId, author: singleLine(author), slots, hosts, more, version,
+            viewed: viewed === undefined ? undefined : { clock: releaseClock(viewed.at, agent.userTimezone), unchanged: viewed.binding === bindingOf(profile) },
+            clientId: role === 'oauth.client_id_key', held,
+          }),
+          consentOptions('guard'),
+          consentMeta('guard'),
         ));
       if (answer === null) { noteOwnStopSentence(); return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`; }
-      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) return `Blocked: ${shownName} was not released to API profile "${id}" — user declined.`;
+      const outcome = decideConsent('guard', answer);
+      if (outcome !== 'allow') return consentRefusal(outcome, `Blocked: ${shownName} was not released to API profile "${id}" — user declined.`);
       // Only what the answer covered: the author and where the value goes. A renewal while the
       // question was open changes neither, and does not void the answer.
       const current = apiStore.get(id);
@@ -3585,6 +4143,8 @@ ${draftJson}
       }
       const apiStore = agent.toolContext?.apiStore;
       if (!apiStore) return 'Error: API store unavailable — cannot adopt the connection. Restart the engine and retry.';
+      const engineLess = apiStore.engineLessRefusal('save', 'model');
+      if (engineLess !== null) return `Error: ${engineLess}`;
       const asked = apiStore.get(id);
       if (!asked) return `Error: API profile "${id}" not found.`;
       if (!isMandateConnection(asked)) {
@@ -3623,16 +4183,17 @@ ${draftJson}
       const names = collectVaultKeys(asked).map((k) => { const one = singleLine(k); return JSON.stringify(one.length > 80 ? `${one.slice(0, 80)}…` : one); });
       const ends = agent.toolContext?.mandateEnds ?? null;
       const known = asked.oauth_grant?.connected_mandate_id !== undefined && ends !== null;
-      const shownNames = names.slice(0, 30).join(', ') + (names.length > 30 ? ` and ${String(names.length - 30)} more` : '');
       const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
         ? Promise.resolve(null)
         : promptUser(
-          pv`⚠ api_setup: adopt the connection of API profile ${singleLine(String(asked.name))} (id ${id})? It was authorized at the provider in the session of ${by}, ${known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the profile is yours. The engine then sends to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}, for your requests and runs, the connection's tokens and the vault names this profile names, read like any of your profiles, values from the environment included: ${shownNames.length > 0 ? shownNames : 'none'}. Adopt it?`,
-          ['Allow', 'Deny', '\x00'],
+          API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].adopt(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), { name: singleLine(String(asked.name)), id, by, known, hosts, names }),
+          consentOptions('guard'),
+          consentMeta('guard'),
         ));
       if (answer === null) { noteOwnStopSentence(); return `Blocked: the connection of API profile "${id}" was not adopted — the run was stopped before the question was asked.`; }
-      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-        return `Blocked: the connection of API profile "${id}" was not adopted — user declined.`;
+      const outcome = decideConsent('guard', answer);
+      if (outcome !== 'allow') {
+        return consentRefusal(outcome, `Blocked: the connection of API profile "${id}" was not adopted — user declined.`);
       }
       // Then where each of the profile's secrets may go: once the profile is the owner's, its sends
       // are checked against the owner's bindings, not against a release. Asked before the state
@@ -3674,12 +4235,44 @@ ${draftJson}
  * mandate authorized is of no use to anyone once that mandate is no longer active, and this is
  * where the owner learns it is there. A mandate's turn is told nothing: the connections are not
  * its to keep.
+ *
+ * An answer that says the action was not done is read by `failureOf` as a failed call: the model
+ * reads the same text as before, and the call is recorded and shown as one that did not succeed
+ * instead of carrying the ✓ of a done action. A decline by the user and a stop of the run are the
+ * person's decision, not a failure of the call, and stay plain answers.
  */
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
-  ...apiSetupEntry,
-  handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> =>
-    `${await apiSetupEntry.handler(input, agent)}${waitingConnectionsNote(agent)}${releaseRequestsNote(agent)}`,
+  ...wrapHandler(apiSetupEntry, async (_input, agent, run): Promise<string> =>
+    `${await run()}${waitingConnectionsNote(agent)}${releaseRequestsNote(agent)}`),
+  failureOf: apiSetupFailure,
 };
+
+/** A refusal that is the user's decline, or a stop of the run before the question was asked. */
+const DECIDED_BY_THE_PERSON = /— user declined\.$|— the owner did not allow |the run was stopped before (?:the question was asked|the owner could be asked)/;
+
+/** How an answer that says the action was not done opens: a label, or one of the handler's own
+ *  openings for a refusal or a failed exchange. */
+const NOT_DONE_OPENING = /^(?:(Error|Refused|Blocked|Validation error)(?::| after )|Token exchange (?:failed|returned HTTP|completed, but)|API profile "[^"\n]*" not found\.|No API profiles registered\.$|Profile is incomplete|Unknown action\.)/;
+/** The sentence a refusal ends on when it opens without a label. */
+const NOTHING_DONE = /\bNothing was (?:changed|released|adopted|sent|saved|deleted)\b/;
+
+/**
+ * The ledger reason when an api_setup answer says the action was not done, else null. Only the
+ * first line is read: the notes added after it, and any fetched content, never stand there. It
+ * says "not done" when it opens with a label (`Error:`, `Refused:`, `Blocked:`, `Validation
+ * error`), with one of the handler's own refusal or exchange-failure openings, or when it says
+ * "Nothing was …" outside a quoted name. An empty `list` ("No API profiles registered. Use …")
+ * is a done list; only the bare sentence, where there is no store, is a refusal. A guard test renders every string return in this file and holds the ones
+ * read as done to a known list, so a new refusal that reads as done is not missed silently. A
+ * person's decline and a stop of the run are not failures of the call (`DECIDED_BY_THE_PERSON`).
+ */
+export function apiSetupFailure(answer: string): string | null {
+  const firstLine = answer.split('\n', 1)[0] ?? answer;
+  // A quoted name is the model's or the user's text, not the handler's: it never says what happened.
+  if (!NOT_DONE_OPENING.test(firstLine) && !NOTHING_DONE.test(firstLine.replace(/"[^"]*"/g, '""'))) return null;
+  if (firstLine.startsWith('Blocked:') && DECIDED_BY_THE_PERSON.test(firstLine)) return null;
+  return firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+}
 
 /** Why a name cannot be released, as the owner and the mandate are told. Content-free: none
  *  of these depends on what the vault holds. */
@@ -3776,6 +4369,14 @@ export function waitingConnectionsNote(agent: IAgent): string {
   const one = ids.length === 1;
   return `\n\nWaiting for the owner: the connection of ${shown}${more} ${one ? 'was' : 'were'} authorized in a mandate's session that is no longer active, so ${one ? 'its tokens are' : 'their tokens are'} not used for anything. Tell the user. To keep one, call api_setup with action "adopt_connection" and its id (the user is asked first); otherwise it can be deleted.`;
 }
+
+/**
+ * The guidance a locked turn (a mandate's) gets: the owner's, with its last sentence, which sends
+ * the model to store the value with `ask_secret`, swapped (U-185).
+ */
+const API_SETUP_OWNER_STORE_SENTENCE = 'Store the value with ask_secret, then just call http_request.';
+const API_SETUP_LOCKED_STORE_SENTENCE = 'The value is stored by the owner of this instance, not in this session; once it is stored, just call http_request.';
+apiSetupTool.lockedGuidance = (apiSetupTool.detailedGuidance ?? '').split(API_SETUP_OWNER_STORE_SENTENCE).join(API_SETUP_LOCKED_STORE_SENTENCE);
 
 /**
  * What the person walks into after clicking the connect link, for the reply the model reads. A

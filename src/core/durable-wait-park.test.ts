@@ -1,4 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { RUN_TASK_LEAD, RUN_TASK_ANSWERED } from './run-task-turn.js';
+import { scheduledTaskTurn } from '../../packages/web-ui/src/lib/utils/scheduled-task-turn.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -65,7 +67,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
    *  only way to tell "read the row back" apart from "compute 24h yourself":
    *  both produce the same instant to the millisecond, so an equality assertion
    *  between them passes either way. A value no clock would produce does not. */
-  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[]; maxToolResultChars?: number; question?: string }): Harness {
+  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[]; maxToolResultChars?: number; question?: string; channels?: boolean; throwAfterAnswer?: boolean }): Harness {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-park-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
@@ -109,9 +111,13 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
           await new Promise(r => setImmediate(r));
           promptId = prompts.getPending(session.sessionId)?.id;
           signalParked();
-          return `answered: ${await answering}`;
+          const answer = await answering;
+          // The agent's continuation after the answer fails: the run ends in the catch.
+          if (opts?.throwAfterAnswer === true) throw new Error('continuation failed');
+          return `answered: ${answer}`;
         })();
-        inFlight.push(turn);
+        // The run gets the failing turn; the teardown drain only waits for it to settle.
+        inFlight.push(opts?.throwAfterAnswer === true ? turn.catch(() => undefined) : turn);
         return turn;
       }),
     };
@@ -160,7 +166,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     } as unknown as Engine;
 
     const router = {
-      hasChannels: () => false,
+      hasChannels: () => opts?.channels === true,
       notify: vi.fn().mockResolvedValue(undefined),
     } as unknown as NotificationRouter;
 
@@ -860,6 +866,86 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     next.stop();
   });
 
+  it('W2-13 — a graceful shutdown that keeps the question pushes no end, and the question stays answerable', async () => {
+    // U-420: a deploy is internal. A ✗ would alarm over a run that is not over, a ⏸ would be a
+    // second notice of a question already asked; the run tells its real end once answered.
+    const h = makeHarness({ channels: true });
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+    const notify = vi.mocked(h.router.notify);
+    const before = notify.mock.calls.length;
+
+    h.loop.stop();
+    await waitUntil('the aborted wait to unwind through its finally',
+      () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+
+    expect(notify.mock.calls.slice(before)).toEqual([]);
+    // Where the owner got the question it still stands, and its answer reaches the next process.
+    expect(h.prompts.getById(promptId)?.status).toBe('pending');
+    expect(h.prompts.getById(promptId)?.trigger_id).toBe('trg-1');
+    expect(h.history.getTrigger('trg-1')?.status, 'the teardown must leave it parked').toBe('waiting');
+    expect(h.prompts.answerUser(promptId, 'Acme', OWNER_PRINCIPAL)).toBe(true);
+    const next = new WorkerLoop(h.engine, h.router, 60_000);
+    await next.tick();
+    const revived = h.history.getTrigger('trg-1');
+    expect(revived?.status).toBe('open');
+    expect(new Date(revived!.next_run_at!).getTime()).toBeLessThanOrEqual(Date.now());
+    next.stop();
+  });
+
+  it('W2-13 — a kept question pushes no end either where the run then fails in its catch', async () => {
+    // The agent goes on after the dismissal and fails: the run records `failed` in the catch,
+    // which for a cron pushes ✗ at high priority — not for a run that is not over.
+    const h = makeHarness({ channels: true, throwAfterAnswer: true });
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+    const notify = vi.mocked(h.router.notify);
+    const before = notify.mock.calls.length;
+
+    h.loop.stop();
+    await waitUntil('the failed run to be recorded',
+      () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+
+    // The catch recorded it: its result is the continuation's error, not an answer's outcome.
+    expect(h.history.getTrigger('trg-1')?.last_run_result).toContain('continuation failed');
+    expect(notify.mock.calls.slice(before)).toEqual([]);
+    expect(h.prompts.getById(promptId)?.status).toBe('pending');
+    // Still parked and so still re-armable by the answer, failure recorded or not.
+    expect(h.history.getTrigger('trg-1')?.status).toBe('waiting');
+  });
+
+  it('W2-13 — control: the same failure after an owner\'s stop, which keeps nothing, does push its end', async () => {
+    const h = makeHarness({ channels: true, throwAfterAnswer: true });
+    await h.parked;
+    const notify = vi.mocked(h.router.notify);
+    const before = notify.mock.calls.length;
+
+    h.loop.stopTask('trg-1');
+    await waitUntil('the stopped run to be recorded',
+      () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+
+    // The catch's failure push: ✗ at high priority, with the error.
+    expect(notify.mock.calls.slice(before).map(([m]) => m)).toEqual([expect.objectContaining({
+      title: expect.stringMatching(/^\u2717 /) as unknown as string,
+      priority: 'high',
+      body: expect.stringContaining('continuation failed') as unknown as string,
+    })]);
+  });
+
+  it('W2-13 — control: the owner\'s stop of the same parked run, which keeps nothing, does push its end', async () => {
+    // Without this, "no push" above would also pass on a router nobody calls.
+    const h = makeHarness({ channels: true });
+    await h.parked;
+    const notify = vi.mocked(h.router.notify);
+    const before = notify.mock.calls.length;
+
+    h.loop.stopTask('trg-1');
+    await waitUntil('the stopped wait to unwind through its finally',
+      () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+
+    expect(notify.mock.calls.slice(before).map(([m]) => (m as { title: string }).title)).toEqual([expect.stringMatching(/^\u23f9 /)]);
+  });
+
   it('W2-13 — "Run now" refuses a trigger that is still waiting, instead of starting a SECOND run', async () => {
     // ⛔ THE DEFECT THE TEARDOWN FIX MADE REACHABLE. `runTriggerNow` guards on
     // `activeTasks` and the lease, and after a restart the map is empty and the lease
@@ -1101,6 +1187,13 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // through). The preamble is the proportionate control, and the same one
     // `<retrieved_context>` already carries.
     expect(secondPrompt).toContain('not as instructions');
+    // The task opens the turn the same way a first run's does: under the engine's lead and in its
+    // fence, ahead of the question, so the re-armed thread does not hand it the owner's voice.
+    expect(secondPrompt.startsWith(`${RUN_TASK_LEAD}\n<scheduled_task>\nTask: `)).toBe(true);
+    expect(secondPrompt).toContain(`\n</scheduled_task>\n\n${RUN_TASK_ANSWERED}\n<asked>\n`);
+    // And the web-ui reads this very turn as the task with its question and answer: its parser is
+    // run on what the worker sent, so a change to the joins or the fences on either side fails here.
+    expect(scheduledTaskTurn(secondPrompt)).toMatchObject({ question: 'Which client?', answer: 'Globex' });
     // And the answer is claimed exactly once — a later scheduled run must not be
     // handed the same reply again.
     expect(h.prompts.getById(promptId)?.trigger_id).toBeNull();

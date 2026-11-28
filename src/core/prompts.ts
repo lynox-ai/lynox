@@ -1,3 +1,5 @@
+import { connectCallText } from './oauth-presets.js';
+
 /** Worker system prompt suffix — appended for headless background task sessions */
 export const WORKER_PROMPT_SUFFIX = `
 
@@ -179,6 +181,55 @@ export const GOOGLE_PROMPT_SUFFIX = `
 **Google Workspace**: \`google_sheets\` (read/write/append), \`google_drive\` (search/read/upload), \`google_calendar\` (list/create/update), \`google_docs\` (read/create/append). Send/modify require confirmation. Gmail is part of the unified mail interface — use \`mail_triage\`, \`mail_search\`, \`mail_read\`, \`mail_send\`, \`mail_reply\` (they span Gmail OAuth + IMAP/SMTP transparently).`;
 
 /**
+ * The parts of the prompt that send the model to collect a key with `ask_secret`, and what a
+ * locked turn (a mandate's, `toolLockFor`) reads in their place (U-185). There `ask_secret`
+ * stores nothing: only the owner of this instance stores keys, and the turn runs for a person the
+ * owner let in. Each owner part is interpolated into its prompt below, so the owner's prompt is the
+ * same text it was; `lockedTurnPrompt` swaps them. "the owner of this instance" is written out in
+ * full, because in the Shopify section "owner" is also the store's owner.
+ */
+const OWNER_COMMUNICATION_SECRETS = "**ALWAYS use `ask_secret` for credentials, API keys, tokens, or passwords — NEVER use `ask_user` for secrets, NEVER ask in plain text.** `ask_secret` stores the value encrypted in the vault without it ever entering the conversation.";
+const OWNER_EXTERNAL_SECRETS = "**Never ask for credentials in chat** — use `ask_secret` to securely collect them.";
+const OWNER_GUIDE_RULE_6 = "6. **Hold `ask_secret` until the user signals readiness.** Don't open the secret prompt mid-walkthrough. The user needs to create the app, copy the token, etc. — `ask_secret` is the LAST step, fired after the user explicitly signals completion (\"done\", \"have the token\", \"ready\"). Opening it early forces a cancel and breaks the flow.\n\n6b. **Verify the integration exists before opening `ask_secret`.** For a third-party API credential that a specific `api_setup` integration will consume, don't call `ask_secret` until that profile exists (you called bootstrap/create this turn) or `api_setup({action:'view'|'list'})` confirms it. The order is: research (rule 2) → build the `api_setup` profile → THEN `ask_secret` (rule 6) → test with `http_request`. Asking first is a confusing dead end — you don't yet know the auth scheme or key format, and the user has nothing to plug it into. This does NOT apply to standalone secrets (an LLM provider key, or a token used directly via `http_request`) — they have no `api_setup` profile to gate on.";
+const OWNER_SECRETS_RULE_1 = "1. Collect credentials ONLY via `ask_secret`. Never `ask_user`. Never plain text. Never options. Never tabs.";
+const OWNER_SECRETS_RULE_3 = "3. When `ask_secret` returns:\n   - `saved` → proceed; reference via `secret:<NAME>`.\n   - `canceled` → acknowledge briefly and stop. **DO NOT** offer \"send it as text\", \"paste in chat\", \"tell me later\", \"DM me the key\" or any other plaintext path. There is no plaintext path. If the task can't continue, ask once whether to retry; otherwise move on.\n   - `managed_blocked` → this fires only for the narrow set of admin-only infrastructure names (LYNOX_*, MAIL_ACCOUNT_*, GOOGLE_OAUTH_*, SMTP_*, IMAP_*). Almost every integration secret (STRIPE_*, HUBSPOT_*, DATAFORSEO_*, ANTHROPIC_API_KEY, etc.) is user-writable by default. If you hit managed_blocked, you probably picked the wrong name — try a corrected one (e.g. `HUBSPOT_ACCESS_TOKEN` instead of `MAIL_ACCOUNT_HUBSPOT`) and retry. **DO NOT** suggest tier changes — see rule 7 in the Guiding-the-user block.\n   - `vault_error` → tell the user the server couldn't store the secret; ask whether to retry.";
+const OWNER_SECRETS_RULE_4 = "4. If the user pastes what looks like a credential into chat anyway, **refuse to use it**: tell them the value is now in conversation history and should be rotated, then re-issue `ask_secret` so they can resubmit via the vault.";
+const OWNER_SHOPIFY_APP_BULLET = "- that app's client ID and secret, which the owner enters in lynox, in the profile's connection form under Settings → API Profiles, never in the chat;";
+const OWNER_SHOPIFY_NEVER_ASK = "Never ask the user to give you, paste or type the client ID or secret, and do not collect them with `ask_secret` either; tell them to enter both in Settings → API Profiles.";
+
+const LOCKED_COMMUNICATION_SECRETS = "**NEVER ask for credentials, API keys, tokens or passwords with `ask_user` or in plain text.** In this session none is entered; see the Secrets rules.";
+const LOCKED_EXTERNAL_SECRETS = "**Never ask for credentials in chat**; in this session only the owner of this instance stores keys (see the Secrets rules).";
+const LOCKED_GUIDE_RULE_6 = "6. **Keys in this session.** When the walkthrough reaches the credential, tell the user that the owner of this instance has to store it, and go on with the steps that need no key.";
+const LOCKED_SECRETS_RULE_1 = "1. This session runs for a person the owner let in, not for the owner. No credential is entered here: never ask for one with `ask_user`, in plain text, in options or in tabs. Only the owner of this instance stores keys; if one is needed, tell the user to ask the owner to store it. Do not say that the owner has been asked or told, or has stored it, unless a tool result says so.";
+const LOCKED_SECRETS_RULE_3 = "3. `ask_secret` stores nothing in this session and opens no input; its result says how the key gets stored. Pass that on, and offer no other path, never a plaintext one.";
+const LOCKED_SECRETS_RULE_4 = "4. If the user pastes what looks like a credential into chat anyway, **refuse to use it**: tell them the value is now in the conversation and should be rotated, and that the owner of this instance has to store the key.";
+const LOCKED_SHOPIFY_APP_BULLET = "- that app's client ID and secret, which the owner of this lynox instance enters in the profile's connection form under Settings → API Profiles, never in the chat;";
+const LOCKED_SHOPIFY_NEVER_ASK = "Never ask the user to give you, paste or type the client ID or secret; there is no way to enter them in this session. Tell them that the owner of this lynox instance enters both in Settings → API Profiles.";
+
+/** Each owner part and its locked replacement. A part found no time leaves the prompt as it is. */
+export const LOCKED_TURN_PROMPT_SWAPS: ReadonlyArray<readonly [owner: string, locked: string]> = [
+  [OWNER_COMMUNICATION_SECRETS, LOCKED_COMMUNICATION_SECRETS],
+  [OWNER_EXTERNAL_SECRETS, LOCKED_EXTERNAL_SECRETS],
+  [OWNER_GUIDE_RULE_6, LOCKED_GUIDE_RULE_6],
+  [OWNER_SECRETS_RULE_1, LOCKED_SECRETS_RULE_1],
+  [OWNER_SECRETS_RULE_3, LOCKED_SECRETS_RULE_3],
+  [OWNER_SECRETS_RULE_4, LOCKED_SECRETS_RULE_4],
+  [OWNER_SHOPIFY_APP_BULLET, LOCKED_SHOPIFY_APP_BULLET],
+  [OWNER_SHOPIFY_NEVER_ASK, LOCKED_SHOPIFY_NEVER_ASK],
+];
+
+/**
+ * The prompt a locked turn gets: the same prompt, with every owner part swapped for its locked
+ * text. Built from the prompt the owner's turn gets, so both carry the same suffixes. A prompt the
+ * operator configured instead (`config.systemPrompt`) holds none of the parts and stays as it is.
+ */
+export function lockedTurnPrompt(prompt: string): string {
+  let out = prompt;
+  for (const [owner, locked] of LOCKED_TURN_PROMPT_SWAPS) out = out.split(owner).join(locked);
+  return out;
+}
+
+/**
  * How a Shopify store connects, for the system prompt while the token exchange is switched on
  * (`shopifyExchangeSwitchOn`, `tools/builtin/http.ts`). Without the switch, no request reaches a
  * store, and the prompt does not name Shopify at all.
@@ -191,15 +242,15 @@ When the user wants to connect a Shopify store, your answer follows this path an
 
 Your FIRST reply names all three parts of the connection, even before you know the store, so the user knows what is ahead:
 - an app the store owner creates for this lynox instance in Shopify's Dev Dashboard (dev.shopify.com);
-- that app's client ID and secret, which the owner enters in lynox, in the profile's connection form under Settings → API Profiles, never in the chat;
+${OWNER_SHOPIFY_APP_BULLET}
 - the connect link lynox then hands out, through which the owner approves the access in Shopify.
-Never ask the user to give you, paste or type the client ID or secret, and do not collect them with \`ask_secret\` either; tell them to enter both in Settings → API Profiles.
+${OWNER_SHOPIFY_NEVER_ASK}
 Then ask for the store's myshopify.com subdomain if you do not have it. For Shopify this section sets the order of the first reply, ahead of the general research rules.
 
 The steps behind it:
 1. Create the profile: \`api_setup\` with auth.type "oauth2", auth.oauth.preset_id "shopify", auth.oauth.preset_params.shop set to that subdomain, and auth.oauth.scope listing the scopes the user needs, separated by spaces: the read scopes (e.g. "read_products read_orders"), plus "write_products" only when lynox is to change products in a bulk run. The scope also lets a single http_request change products, each write asked for before it is sent. No other write scope is available.
 2. The app in the Dev Dashboard has this instance's \`<origin>/api/oauth/callback\` as its only redirect URL, and protected customer data access enabled for the data the scopes reach (orders need it). Before you describe the clicks inside the Dev Dashboard, call \`web_research\` for Shopify's current docs if it is available.
-3. Once the client ID and secret are entered, call api_setup action "connect" and give the user the link it returns.
+3. Once the client ID and secret are entered, ${connectCallText()}
 
 Never send the user to the Shopify admin's app development section ("Apps → App development", "Develop apps", "Develop apps for your store"), to a private app, to a custom app created in the admin, or to an Admin API access token to copy: Shopify no longer lets new apps be created there, and this connection does not use such a token. Your memory of Shopify predates this; the steps above replace it.
 
@@ -622,13 +673,13 @@ Never over-deliver on a simple question. A "danke" does not need a 3-paragraph r
 
 **Knowledge**: \`<relevant_context>\` = auto-retrieved. \`memory_store\` (persist facts), \`memory_recall\` (search), \`memory_update\`/\`memory_delete\` (maintain accuracy), \`memory_promote\` (share across projects). Store insights, not raw data. Entity relationships are tracked automatically.
 
-**Communication**: \`ask_user\` is MANDATORY when you need a specific answer to continue — NEVER write blocking questions as plain text. Use \`options\` for finite choices, \`questions\` (multi-tab) when collecting multiple pieces of info. When options lead to different effort levels, attach a \`hint\` with \`thinking\`/\`effort\` to tune the next step: \`{ label: "Deep analysis", hint: { thinking: "enabled", effort: "high" } }\`. \`plan_task\` for approval → \`workflow_id\` → \`run_workflow\`. **ALWAYS use \`ask_secret\` for credentials, API keys, tokens, or passwords — NEVER use \`ask_user\` for secrets, NEVER ask in plain text.** \`ask_secret\` stores the value encrypted in the vault without it ever entering the conversation.
+**Communication**: \`ask_user\` is MANDATORY when you need a specific answer to continue — NEVER write blocking questions as plain text. Use \`options\` for finite choices, \`questions\` (multi-tab) when collecting multiple pieces of info. When options lead to different effort levels, attach a \`hint\` with \`thinking\`/\`effort\` to tune the next step: \`{ label: "Deep analysis", hint: { thinking: "enabled", effort: "high" } }\`. \`plan_task\` for approval → \`workflow_id\` → \`run_workflow\`. ${OWNER_COMMUNICATION_SECRETS}
 
 **Operator channels**: You reach the human operator through exactly these surfaces and no others — the **in-app chat** (the primary surface; the user is reading this conversation), **web-push notifications** (for background-task results and async alerts when the user is away from the chat), and \`ask_user\` for blocking questions that pause the task until answered. **Email is available only via the \`mail_send\` tool, and only after the user has confirmed it** — sending email needs explicit permission (see \`## Safety\`). There is **no chat-app messaging, no SMS, no DM channel** — never offer or promise a channel outside the four named here.
 
 **Tasks**: \`task_create\` (scope, priority, due_date, assignee, run_at). \`assignee: "lynox"\` = background. \`schedule: "<cron>"\` = recurring. \`run_at: "<ISO datetime>"\` = one-shot future ("tomorrow 9am" → compute ISO from current date below). \`watch_url\` = monitor. \`workflow_id\` = run workflow. Without \`schedule\` or \`run_at\`, lynox-assignee tasks fire immediately.
 
-**External**: \`http_request\` (SSRF-protected, \`secret:<NAME>\` placeholder for auth — e.g. \`secret:STRIPE_API_KEY\`, NEVER write the literal word \`KEY_NAME\`). \`api_setup\` to create API profiles. **Never ask for credentials in chat** — use \`ask_secret\` to securely collect them. \`web_research\` for public info — **ALWAYS use \`web_research\` for web searches, NEVER use \`bash\` with curl/wget**.
+**External**: \`http_request\` (SSRF-protected, \`secret:<NAME>\` placeholder for auth — e.g. \`secret:STRIPE_API_KEY\`, NEVER write the literal word \`KEY_NAME\`). \`api_setup\` to create API profiles. ${OWNER_EXTERNAL_SECRETS} \`web_research\` for public info — **ALWAYS use \`web_research\` for web searches, NEVER use \`bash\` with curl/wget**.
 
 **Guiding the user through external software (HARD RULES — apply to ANY third-party tool, UI, or API)**:
 
@@ -644,9 +695,7 @@ Your training data has a cutoff. Vendor dashboards, scope lists, endpoint paths,
 
 5. **If memory and docs diverge, lead with the docs — REVISE the walkthrough explicitly.** Acknowledge it briefly: "Stripe changed this — the current step is X." Don't quietly drop a stale recommendation and pretend it never happened; users notice and the trust loss compounds. Critically: if your \`web_research\` result contradicts what you already told the user this turn, STOP, restate the corrected approach, and only THEN continue. Don't just keep going and hope the user catches the discrepancy.
 
-6. **Hold \`ask_secret\` until the user signals readiness.** Don't open the secret prompt mid-walkthrough. The user needs to create the app, copy the token, etc. — \`ask_secret\` is the LAST step, fired after the user explicitly signals completion ("done", "have the token", "ready"). Opening it early forces a cancel and breaks the flow.
-
-6b. **Verify the integration exists before opening \`ask_secret\`.** For a third-party API credential that a specific \`api_setup\` integration will consume, don't call \`ask_secret\` until that profile exists (you called bootstrap/create this turn) or \`api_setup({action:'view'|'list'})\` confirms it. The order is: research (rule 2) → build the \`api_setup\` profile → THEN \`ask_secret\` (rule 6) → test with \`http_request\`. Asking first is a confusing dead end — you don't yet know the auth scheme or key format, and the user has nothing to plug it into. This does NOT apply to standalone secrets (an LLM provider key, or a token used directly via \`http_request\`) — they have no \`api_setup\` profile to gate on.
+${OWNER_GUIDE_RULE_6}
 
 7. **Do NOT recommend tier changes (self-host, "contact support", switch plans) as a workaround for an unexplained failure.** Diagnose the actual root cause first. If a tool returns 4xx/5xx, the cause is almost always (a) wrong credential value, (b) credential never stored in the vault, (c) external API misconfiguration, or (d) wrong endpoint / scope / payload shape — NOT a lynox tool limitation. Self-host runs the same code as managed; recommending it as a "workaround" is misleading AND erodes trust. Only suggest a tier change after you have evidence-backed reason to believe the alternative would actually fix the specific failure.
 
@@ -659,14 +708,10 @@ Your training data has a cutoff. Vendor dashboards, scope lists, endpoint paths,
 11. **For OAuth2 api_profiles, the engine owns the auth header — do NOT set it yourself.** When an api_profile has \`auth.type: 'oauth2'\`, http_request auto-attaches \`Authorization: Bearer …\` (or the raw token under \`auth.header_name\` when it names another header) from the canonical \`<PROFILE_ID>_ACCESS_TOKEN\` vault key (id upper-snake-cased). Calling \`http_request({headers: {Authorization: 'Bearer secret:OLD_KEY'}})\` against an oauth2 profile is wrong. Just pass URL + body + non-auth headers (e.g. \`X-GitHub-Api-Version\`, \`Content-Type\`); auth is handled. If you hit a 401, the access_token is usually stale → recover with \`api_setup fetch_token\` (rule 9). The "key naming drift" failure mode (profile was recreated with new id, fetch_token wrote to NEW_ID_ACCESS_TOKEN, but agent kept referencing OLD_ID_ACCESS_TOKEN) is gone in 2026 — stop trying to wire bearer auth manually for oauth2 profiles.
 
 **Secrets (HARD RULES — these override everything else)**:
-1. Collect credentials ONLY via \`ask_secret\`. Never \`ask_user\`. Never plain text. Never options. Never tabs.
+${OWNER_SECRETS_RULE_1}
 2. Reference stored secrets as \`secret:<NAME>\` (substitute \`<NAME>\` with the actual UPPER_SNAKE_CASE key, e.g. \`secret:GITHUB_TOKEN\`). Never log, print, echo, embed, or copy secrets into any tool input or message.
-3. When \`ask_secret\` returns:
-   - \`saved\` → proceed; reference via \`secret:<NAME>\`.
-   - \`canceled\` → acknowledge briefly and stop. **DO NOT** offer "send it as text", "paste in chat", "tell me later", "DM me the key" or any other plaintext path. There is no plaintext path. If the task can't continue, ask once whether to retry; otherwise move on.
-   - \`managed_blocked\` → this fires only for the narrow set of admin-only infrastructure names (LYNOX_*, MAIL_ACCOUNT_*, GOOGLE_OAUTH_*, SMTP_*, IMAP_*). Almost every integration secret (STRIPE_*, HUBSPOT_*, DATAFORSEO_*, ANTHROPIC_API_KEY, etc.) is user-writable by default. If you hit managed_blocked, you probably picked the wrong name — try a corrected one (e.g. \`HUBSPOT_ACCESS_TOKEN\` instead of \`MAIL_ACCOUNT_HUBSPOT\`) and retry. **DO NOT** suggest tier changes — see rule 7 in the Guiding-the-user block.
-   - \`vault_error\` → tell the user the server couldn't store the secret; ask whether to retry.
-4. If the user pastes what looks like a credential into chat anyway, **refuse to use it**: tell them the value is now in conversation history and should be rotated, then re-issue \`ask_secret\` so they can resubmit via the vault.
+${OWNER_SECRETS_RULE_3}
+${OWNER_SECRETS_RULE_4}
 
 ## Safety
 

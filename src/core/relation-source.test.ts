@@ -14,9 +14,11 @@ import { SubjectStore } from './subject-store.js';
 import type { ExtractionResult } from './entity-extractor.js';
 
 /**
- * A relation whose source memory the user deleted is left out of every read, in
- * both relation stores, and only the export still shows it, marked. A replaced
- * memory, a missing one (reaped) and no source at all keep the relation readable.
+ * A relation whose source memory is retired (deleted by the user, or replaced because it
+ * was contradicted) is left out of every read, in both relation stores, and only the
+ * export still shows it, marked. A memory replaced by the same fact hands its relations
+ * to the successor instead (relation-follows-fact.test.ts). A missing source and no
+ * source at all keep the relation readable.
  */
 const mock = vi.hoisted(() => ({ extraction: { entities: [], relations: [] } as ExtractionResult }));
 vi.mock('./entity-extractor.js', async (importOriginal) => {
@@ -80,21 +82,33 @@ describe('legacy relations: the source state decides what is read', () => {
     db.close();
   });
 
-  it('a replaced source keeps the relation', () => {
+  it('a source replaced without handing its relations on (a contradiction) hides the relation', () => {
     const { db, a, b, src } = seed();
     const next = db.createMemory({ text: 'Alice leads Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 0, 1] });
     expect(db.supersedMemory(src, next)).toBe(true);
-    expect(reads(db, a, b)).toEqual(ALL);
+    expect(reads(db, a, b)).toEqual(NONE);
     db.close();
   });
 
-  it('a source the reap already removed keeps the relation (its cause cannot be told)', () => {
+  it('the GC removes the relation of a replaced source before the source itself', () => {
     const { db, a, b, src } = seed();
     const next = db.createMemory({ text: 'Alice leads Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 0, 1] });
     db.supersedMemory(src, next);
     db.gc();
     expect(db.getMemory(src)).toBeNull();
-    expect(reads(db, a, b)).toEqual(ALL);
+    expect(db.getEntityRelationsForExport(a)).toEqual([]);
+    expect(reads(db, a, b)).toEqual(NONE);
+    db.close();
+  });
+
+  it('a relation whose source is no longer present stays readable (its cause cannot be told)', () => {
+    const db = new AgentMemoryDb(join(tmp(), 'mem.db'));
+    const a = db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'g' });
+    const b = db.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+    db.createRelation(a, b, 'works_at', 'CTO', 'a-memory-the-reap-removed');
+    expect(db.getEntityRelations(a)).toHaveLength(1);
+    expect(db.getRelationCount()).toBe(1);
+    expect(db.findPath(a, b)).toHaveLength(1);
     db.close();
   });
 
@@ -166,11 +180,13 @@ describe('engine.db relationships: the source state decides what is read', () =>
     engine.close();
   });
 
-  it('a replaced source keeps the edge', () => {
+  it('a source replaced without handing its edges on (a contradiction) hides the edge, and the GC removes it', () => {
     const { engine, rels, mem } = seed(true);
     mem.upsertStub({ id: 'm3', text: 'Alice leads Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
     mem.markSuperseded('m1', 'm3');
-    expect(reads(rels, mem)).toEqual(ALL);
+    expect(reads(rels, mem)).toEqual(NONE);
+    mem.gcInactiveStubs();
+    expect(rels.getRelationshipsForSubjectForExport('s1', 10)).toEqual([]);
     engine.close();
   });
 

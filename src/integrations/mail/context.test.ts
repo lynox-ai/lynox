@@ -449,10 +449,24 @@ describe('MailContext — listAccounts carries the last polling error', () => {
 });
 
 describe('MailContext — tools()', () => {
-  it('returns the mail tools backed by the context registry (incl. mail_connect)', async () => {
+  // The flags at their defaults ('' reads as unset): inbox rules on, the inbox reader off.
+  beforeEach(() => {
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+    vi.stubEnv('LYNOX_FEATURE_INBOX_READ', '');
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('returns the mail tools backed by the context registry (incl. mail_connect), with the rule proposal by default', async () => {
     await ctx.addAccount(INPUT_GMAIL);
     const tools = ctx.tools();
     const names = tools.map(t => t.definition.name).sort();
+    expect(names).toEqual(['inbox_rule_propose', 'mail_connect', 'mail_read', 'mail_reply', 'mail_search', 'mail_send', 'mail_triage']);
+  });
+
+  it('leaves the rule proposal out with inbox rules turned off', async () => {
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
+    await ctx.addAccount(INPUT_GMAIL);
+    const names = ctx.tools().map(t => t.definition.name).sort();
     expect(names).toEqual(['mail_connect', 'mail_read', 'mail_reply', 'mail_search', 'mail_send', 'mail_triage']);
   });
 });
@@ -1290,7 +1304,7 @@ describe('MailContext — a deferring inbound hook keeps the mail unseen', () =>
     const ctx2 = new MailContext(stateDb, backend, userHandler, { onInboundMail: onInbound });
     const provider = new EmittingProvider();
     try {
-      await ctx2.watcher.attach(provider as unknown as MailProvider, { applyPrefilter: false });
+      await ctx2.watcher.attach(provider as unknown as MailProvider);
       await provider.emit({ type: 'new', envelopes: [mail(1)] });
       expect(stateDb.countForAccount('acct-defer'), 'deferred mail marked seen').toBe(0);
       expect(userHandler).not.toHaveBeenCalled();
@@ -1309,7 +1323,7 @@ describe('MailContext — a deferring inbound hook keeps the mail unseen', () =>
     const ctx2 = new MailContext(stateDb, backend, undefined, { onInboundMail: onInbound });
     const provider = new EmittingProvider();
     try {
-      await ctx2.watcher.attach(provider as unknown as MailProvider, { applyPrefilter: false });
+      await ctx2.watcher.attach(provider as unknown as MailProvider);
       await provider.emit({ type: 'new', envelopes: [mail(2)] });
       expect(onInbound).toHaveBeenCalledTimes(1);
       expect(stateDb.countForAccount('acct-defer')).toBe(1);

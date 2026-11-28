@@ -66,6 +66,7 @@ import { generateInitBriefing, initMemoryInstance, configureBudgetAndRateLimits,
 import { guardedCapableLineRegex, GUARDED_CAPABLE_MARKER } from '../contract/marker.js';
 import { resolveActiveScopes } from './scope-resolver.js';
 import { createToolContext } from './tool-context.js';
+import { checkMailRateLimit, mailSendLimitAdmits, MAIL_RATE_UNCOUNTED, resetMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
 import type { LynoxContext, LynoxConfig, LynoxUserConfig } from '../types/index.js';
 import type { SecretStore } from './secret-store.js';
 
@@ -210,6 +211,41 @@ describe('initMemoryInstance — provider-resolved key', () => {
       expect(args[1]).toBe('sk-ant-legacy-config');
     } finally {
       if (prevA !== undefined) process.env['ANTHROPIC_API_KEY'] = prevA;
+    }
+  });
+});
+
+describe('configureBudgetAndRateLimits — send-rate limits without the history database', () => {
+  const counting = { getToolCallCountSince: () => 0 } as unknown as import('./run-history.js').RunHistory;
+
+  it('sets the HTTP limits on the ToolContext with no provider', () => {
+    const ctx = createToolContext({});
+    configureBudgetAndRateLimits(null, { max_http_requests_per_hour: 10, max_http_requests_per_day: 100 }, ctx);
+    expect(ctx.rateLimitProvider).toBeNull();
+    expect(ctx.hourlyRateLimit).toBe(10);
+    expect(ctx.dailyRateLimit).toBe(100);
+  });
+
+  it('configures the mail limits with no provider: a send and the approval queue are refused', () => {
+    try {
+      configureBudgetAndRateLimits(null, {}, createToolContext({}));
+      expect(checkMailRateLimit('mail_send')).toBe(MAIL_RATE_UNCOUNTED);
+      expect(checkMailRateLimit('mail_reply')).toBe(MAIL_RATE_UNCOUNTED);
+      expect(mailSendLimitAdmits('mail_send', { hour: 0, day: 0 })).toBe(false);
+    } finally {
+      resetMailRateLimits();
+    }
+  });
+
+  it('with the history database, the same defaults count and admit', () => {
+    try {
+      const ctx = createToolContext({});
+      configureBudgetAndRateLimits(counting, { max_http_requests_per_hour: 10 }, ctx);
+      expect(ctx.rateLimitProvider).toBe(counting);
+      expect(checkMailRateLimit('mail_send')).toBeNull();
+      expect(mailSendLimitAdmits('mail_send', { hour: 0, day: 0 })).toBe(true);
+    } finally {
+      resetMailRateLimits();
     }
   });
 });

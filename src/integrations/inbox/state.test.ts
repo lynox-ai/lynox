@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { DEFAULT_TENANT_ID, InboxStateDb } from './state.js';
+import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 import type { MailAccountConfig } from '../mail/provider.js';
 
 let mail: MailStateDb;
@@ -528,6 +529,32 @@ describe('InboxStateDb — rules the agent proposes and the owner confirms', () 
   });
 });
 
+describe('InboxStateDb — description rules are capped per account', () => {
+  const desc = (i: number, accountId = TEST_ACCOUNT.id) => ({ accountId, matcherKind: 'matches_description' as const, matcherValue: `Beschreibung ${String(i)}`, name: `D${String(i)}` });
+
+  it('refuses the proposal past MAX_DESCRIPTION_RULES, counting confirmed and waiting rules alike', () => {
+    for (let i = 0; i < 15; i++) {
+      inbox.insertRule({ ...desc(i), bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    }
+    for (let i = 15; i < MAX_DESCRIPTION_RULES; i++) {
+      expect(inbox.proposeRule(desc(i), 100).ok).toBe(true);
+    }
+    expect(inbox.countRulesOfKind(TEST_ACCOUNT.id, 'matches_description')).toBe(MAX_DESCRIPTION_RULES);
+    expect(inbox.proposeRule(desc(99), 100)).toEqual({ ok: false, reason: 'description_limit', descriptions: MAX_DESCRIPTION_RULES });
+    expect(inbox.countRulesOfKind(TEST_ACCOUNT.id, 'matches_description')).toBe(MAX_DESCRIPTION_RULES);
+  });
+
+  it('the cap is per account and per kind: other kinds and other accounts still propose', () => {
+    mail.upsertAccount({ ...TEST_ACCOUNT, id: 'acct-2', address: 'second@example.com' });
+    for (let i = 0; i < MAX_DESCRIPTION_RULES; i++) {
+      inbox.insertRule({ ...desc(i), bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    }
+    expect(inbox.proposeRule({ accountId: TEST_ACCOUNT.id, matcherKind: 'from', matcherValue: 'k@example.com', name: 'K' }, 100).ok).toBe(true);
+    expect(inbox.proposeRule(desc(0, 'acct-2'), 100).ok).toBe(true);
+    expect(inbox.countRulesOfKind(TEST_ACCOUNT.id, 'from')).toBe(1);
+  });
+});
+
 describe('InboxStateDb — v11 envelope metadata', () => {
   it('round-trips envelope columns on insert', () => {
     const id = inbox.insertItem({
@@ -1018,5 +1045,90 @@ describe('findItemByMessageId (outbound-reply reconcile lookup)', () => {
     insertSampleItem({ messageId: '<dup@x>', threadKey: 't-old', classifiedAt: new Date('2026-05-01T00:00:00Z') });
     const newer = insertSampleItem({ messageId: '<dup@x>', threadKey: 't-new', classifiedAt: new Date('2026-06-01T00:00:00Z') });
     expect(inbox.findItemByMessageId('<dup@x>')?.id).toBe(newer);
+  });
+});
+
+describe('InboxStateDb — the rule withheld on an item (v24)', () => {
+  const withheld = { id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' as const };
+
+  it('stores the withheld rule with the item and reads it back; an item without one reads null', () => {
+    const id = insertSampleItem({ ruleWithheld: withheld });
+    expect(inbox.getItem(id)?.ruleWithheld).toEqual({ id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' });
+    expect(inbox.getItem(id)?.matchedRuleId).toBeUndefined();
+    const plain = insertSampleItem({ threadKey: 'imap:thread-2' });
+    expect(inbox.getItem(plain)?.ruleWithheld).toBeNull();
+    // The list carries it too, as the list route returns it.
+    expect(inbox.listItems().map((i) => i.ruleWithheld ?? null)).toEqual(expect.arrayContaining([null, expect.objectContaining({ id: 'rul_a' })]));
+  });
+
+  it('stores a rule without a name as name null', () => {
+    const id = insertSampleItem({ ruleWithheld: { id: 'rul_a', name: undefined, reason: 'rule_withheld_unchecked' } });
+    expect(inbox.getItem(id)?.ruleWithheld).toEqual({ id: 'rul_a', name: null, reason: 'rule_withheld_unchecked' });
+  });
+
+  it('refuses an item that is filed by a rule and names one as withheld', () => {
+    expect(() => insertSampleItem({ matchedRuleId: 'rul_b', ruleWithheld: withheld })).toThrow(/exclusive/);
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  it('a second insert on the same thread changes nothing on the first item', () => {
+    const id = insertSampleItem({ ruleWithheld: withheld });
+    expect(insertSampleItem({ matchedRuleId: 'rul_b' })).toBe(id);
+    expect(insertSampleItem()).toBe(id);
+    const item = inbox.getItem(id)!;
+    expect(item.ruleWithheld).toEqual({ id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' });
+    expect(item.matchedRuleId).toBeUndefined();
+  });
+
+  it('user actions, snooze, reopen, reminders and the envelope backfill leave it as it is', () => {
+    const id = insertSampleItem({ ruleWithheld: withheld });
+    inbox.updateUserAction(id, 'replied');
+    inbox.reopenReplied(id, DEFAULT_TENANT_ID, new Date());
+    inbox.updateUserAction(id, 'archived');
+    inbox.updateUserAction(id, null);
+    inbox.setSnooze(id, new Date(Date.now() + 60_000), null);
+    inbox.setSnooze(id, null, null);
+    inbox.markReminderNotified(id);
+    inbox.updateItemEnvelopeByThreadKey(TEST_ACCOUNT.id, 'imap:thread-1', {
+      fromAddress: 'a@b.example', fromName: undefined, subject: 's', mailDate: undefined, snippet: undefined, messageId: undefined, inReplyTo: undefined,
+    });
+    expect(inbox.getItem(id)?.ruleWithheld).toEqual({ id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' });
+  });
+
+  it('deleting the rule clears its id and keeps its name and the reason, on its items only', () => {
+    const ruleId = inbox.insertRule({ accountId: TEST_ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@b', bucket: 'auto_handled', action: 'archive', source: 'on_demand', name: 'Alt' });
+    const otherId = inbox.insertRule({ accountId: TEST_ACCOUNT.id, matcherKind: 'from', matcherValue: 'c@d', bucket: 'auto_handled', action: 'archive', source: 'on_demand', name: 'Andere' });
+    const mine = insertSampleItem({ ruleWithheld: { id: ruleId, name: 'Alt', reason: 'rule_withheld_sensitive' } });
+    const other = insertSampleItem({ threadKey: 'imap:thread-2', ruleWithheld: { id: otherId, name: 'Andere', reason: 'rule_withheld_sensitive' } });
+    const filed = insertSampleItem({ threadKey: 'imap:thread-3', matchedRuleId: ruleId });
+    expect(inbox.deleteRule(ruleId)).toBe(true);
+    expect(inbox.getItem(mine)?.ruleWithheld).toEqual({ id: null, name: 'Alt', reason: 'rule_withheld_sensitive' });
+    expect(inbox.getItem(other)?.ruleWithheld).toEqual({ id: otherId, name: 'Andere', reason: 'rule_withheld_sensitive' });
+    expect(inbox.getItem(filed)?.matchedRuleId).toBeUndefined();
+    expect(inbox.getItem(filed)?.ruleWithheld).toBeNull();
+  });
+
+  it('deleting a rule in another tenant leaves the withheld id alone', () => {
+    const ruleId = inbox.insertRule({ accountId: TEST_ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@b', bucket: 'auto_handled', action: 'archive', source: 'on_demand', tenantId: 'other' });
+    const mine = insertSampleItem({ ruleWithheld: { id: ruleId, name: 'Alt', reason: 'rule_withheld_sensitive' } });
+    expect(inbox.deleteRule(ruleId, 'other')).toBe(true);
+    expect(inbox.getItem(mine)?.ruleWithheld?.id).toBe(ruleId);
+  });
+});
+
+describe('InboxStateDb — countPendingRules', () => {
+  it('counts unconfirmed rules over all accounts of the tenant, not confirmed ones nor other tenants', () => {
+    mail.upsertAccount({ ...TEST_ACCOUNT, id: 'acct-2', address: 'two@acme.example', isDefault: false });
+    expect(inbox.countPendingRules()).toBe(0);
+    const a = inbox.proposeRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'a@x', name: 'A' }, 10);
+    inbox.proposeRule({ accountId: 'acct-2', matcherKind: 'from', matcherValue: 'b@x', name: 'B' }, 10);
+    inbox.proposeRule({ accountId: 'acct-2', matcherKind: 'subject_contains', matcherValue: 'Rechnung', name: 'C' }, 10);
+    inbox.proposeRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'z@x', name: 'Z', tenantId: 'other' }, 10);
+    inbox.insertRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'own@x', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    expect(inbox.countPendingRules()).toBe(3);
+    expect(inbox.countPendingRules('other')).toBe(1);
+    if (!a.ok) throw new Error('propose failed');
+    expect(inbox.confirmRule(a.id)).toBe(true);
+    expect(inbox.countPendingRules()).toBe(2);
   });
 });
