@@ -2355,13 +2355,18 @@ describe('the sentence for an answer the rule refused', () => {
 describe('every bulk sentence names the judging step with one word', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const Q = String.raw`'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"`;
-	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.[^']+)': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
-	const KEY = /^\s*'(bulk\.[^']+)': \{/;
-	const sentences: Record<string, { de: string; en: string }> = {};
-	for (const l of source.split('\n')) {
-		const m = ENTRY.exec(l);
-		if (m) sentences[m[1]!] = { de: (m[2] ?? m[3])!, en: (m[4] ?? m[5])! };
-	}
+	// Some keys are aligned with more than one space before their brace.
+	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.[^']+)':\s+\{ de: (?:${Q}), en: (?:${Q}) \},$`);
+	const KEY = /^\s*'(bulk\.[^']+)':\s+\{/;
+	const read = (lines: readonly string[]): Record<string, { de: string; en: string }> => {
+		const out: Record<string, { de: string; en: string }> = {};
+		for (const l of lines) {
+			const m = ENTRY.exec(l);
+			if (m) out[m[1]!] = { de: (m[2] ?? m[3])!, en: (m[4] ?? m[5])! };
+		}
+		return out;
+	};
+	const sentences = read(source.split('\n'));
 	// „urteilt“ only as a word of its own, so „beurteilt“ passes; „bewertet“ in any case.
 	const banned = (s: { de: string; en: string }): string[] => [
 		...(/(?<!\p{L})urteilt/u.test(s.de) ? ['urteilt'] : []),
@@ -2369,10 +2374,25 @@ describe('every bulk sentence names the judging step with one word', () => {
 		...(/the judging/.test(s.en) ? ['the judging'] : []),
 	];
 
-	it('reads every bulk sentence of the table, one line each', () => {
-		const keys = source.split('\n').flatMap((l) => KEY.exec(l)?.[1] ?? []);
+	it('reads every bulk sentence of the table, one line each, as many as a plain count of the keys finds', () => {
+		const lines = source.split('\n');
+		const keys = lines.flatMap((l) => KEY.exec(l)?.[1] ?? []);
+		// A count that knows nothing of the format: every line that starts with a bulk key.
+		const counted = lines.filter((l) => /^\s*'bulk\./.test(l)).length;
 		expect(keys.length).toBeGreaterThan(500);
+		expect(keys.length).toBe(counted);
+		expect(Object.keys(sentences).length).toBe(counted);
 		expect(Object.keys(sentences).sort()).toEqual([...new Set(keys)].sort());
+	});
+
+	it('reads an aligned line and one in double quotes with an escape', () => {
+		expect(read([
+			"\t'bulk.x.aligned':        { de: 'ausgerichtet', en: 'aligned' },",
+			`\t'bulk.x.quoted': { de: "Er sagt \\"nein\\" und es\\'s", en: "it\\'s" },`,
+		])).toEqual({
+			'bulk.x.aligned': { de: 'ausgerichtet', en: 'aligned' },
+			'bulk.x.quoted': { de: 'Er sagt \\"nein\\" und es\\\'s', en: "it\\'s" },
+		});
 	});
 
 	it('says neither „urteilt“ nor „bewertet“ in German, nor "the judging" in English, in any bulk sentence', () => {
