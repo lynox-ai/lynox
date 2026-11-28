@@ -301,11 +301,16 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     const started = performance.now();
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(10_000_000), [], 'D'))).toContain(`saving “${'x'.repeat(63)}…” needs`);
     expect(performance.now() - started).toBeLessThan(2000);
-    // Nor does a long run of marks that composing would have to reorder. A leading space (any run
-    // of them is one by then) is dropped before the head is taken.
+    // Nor does a long run of marks: past four on one letter they are cut before the head is
+    // taken, so the letter shows with four. A leading space (any run of them is one by then) is
+    // dropped before the head is taken.
     const marks = performance.now();
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301'.repeat(100_000)}${'\u0316'.repeat(100_000)}`, [], 'D'))).toContain('saving “…” needs');
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301'.repeat(100_000)}${'\u0316'.repeat(100_000)}`, [], 'D'))).toContain(`saving “${'a\u0301\u0301\u0301\u0301'.normalize('NFC')}” needs`);
     expect(performance.now() - marks).toBeLessThan(2000);
+    // A spacing mark that composing reorders is not cut: only the raw head is composed.
+    const spacing = performance.now();
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301\u{1D16D}'.repeat(100_000)}`, [], 'D'))).toContain('saving “…” needs');
+    expect(performance.now() - spacing).toBeLessThan(2000);
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', ' Wetter', [], 'D'))).toContain('saving “Wetter” needs');
     const huge = flattenPrompt(API_SETUP_DIALOG.en.save('API', `क${'ा'.repeat(200_000)}`, [], 'D'));
     expect(huge.length).toBeLessThan(400);
