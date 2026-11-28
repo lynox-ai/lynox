@@ -97,6 +97,11 @@ export const OAUTH_RESULT_TEXTS = {
     en: 'In this session you can connect only an API profile you set up yourself. Nothing was sent to the provider.',
     de: 'In dieser Sitzung kannst du nur ein API-Profil verbinden, das du selbst eingerichtet hast. An den Anbieter wurde nichts gesendet.',
   },
+  // The owner on a profile a person with access set up (`ownerConnectionCarries`).
+  setUpByMember: {
+    en: 'A person with access set up this connection, so lynox would not use a connection you make here. Tell lynox in the chat that you are taking it over, then connect it. Nothing was sent to the provider.',
+    de: 'Diese Verbindung hat eine Person mit Zugang eingerichtet, darum würde lynox eine Verbindung, die du hier machst, nicht nutzen. Sag lynox im Chat, dass du sie übernimmst, und verbinde sie dann. An den Anbieter wurde nichts gesendet.',
+  },
   tokenSlotNotOwn: {
     en: 'This connection would store its token under a name that is not this session\'s to fill. Nothing was sent to the provider.',
     de: 'Diese Verbindung würde ihr Token unter einem Namen speichern, den diese Sitzung nicht füllen darf. An den Anbieter wurde nichts gesendet.',

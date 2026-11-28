@@ -19,6 +19,7 @@ export interface OAuthGrantView {
 	account?: { label?: unknown } | undefined;
 	account_withheld?: unknown;
 	connected_by_reader?: unknown;
+	unused?: unknown;
 }
 
 export type ConnectedBy = { kind: 'you' } | { kind: 'owner' } | { kind: 'helper'; address: string } | { kind: 'other'; tag: string };
@@ -34,10 +35,11 @@ export interface ConnectionLine {
 /**
  * The line for a profile's connection, or null when it was never connected (no consent on
  * record). A grant from before `connected_by` was recorded reads as the owner's, as it does in
- * the engine.
+ * the engine. Also null for one the engine says no request uses (`unused`): an owner's connection on
+ * a profile a person with access set up is not shown as a connection.
  */
 export function connectionLine(grant: OAuthGrantView | undefined): ConnectionLine | null {
-	if (grant === undefined || grant === null) return null;
+	if (grant === undefined || grant === null || grant.unused === true) return null;
 	const tag = grant.connected_by;
 	const label = grant.account?.label;
 	const withheld = grant.account_withheld === true;

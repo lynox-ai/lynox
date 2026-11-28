@@ -7284,9 +7284,56 @@ describe('LynoxHTTPApi', () => {
       };
       try {
         expect(await mayConnect(true)).toEqual({ own: true, owners: false, others: false });
-        expect(await mayConnect(false)).toEqual({ own: true, owners: true, others: true });
+        // The owner starts on its own profile only: a connection on one a person with access set up would carry nothing.
+        expect(await mayConnect(false)).toEqual({ own: false, owners: true, others: false });
       } finally {
         eng['getMandateEnds'] = priorEnds;
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
+    // Whether the client pair is still withheld from the person who set an oauth2 profile up, so
+    // the page offers that person the first connect only once the owner released it. Nobody else
+    // gets the field: not another mandate, not the owner.
+    it.each([[true, false], [false, true]])('tells only the profile\'s author whether its client pair is withheld (released: %s)', async (released, withheld) => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const { releaseBinding } = await import('../core/profile-secret-view.js');
+      const store = new ApiStore();
+      const oauth = (id: string, author: string | undefined) => ({
+        id, name: id, base_url: 'https://api.bexio.com/3.0', description: 'd',
+        auth: { type: 'oauth2' as const, vault_keys: [`${id.toUpperCase()}_CLIENT_ID`, `${id.toUpperCase()}_CLIENT_SECRET`], oauth: { token_url: 'https://auth.bexio.com/token', client_id_key: `${id.toUpperCase()}_CLIENT_ID`, client_secret_key: `${id.toUpperCase()}_CLIENT_SECRET` } },
+        ...(author === undefined ? {} : { created_by: author }),
+      });
+      store.register(oauth('own', TAG));
+      store.register(oauth('owners', undefined));
+      store.register(oauth('others', 'mandate:someone-else@example.invalid'));
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((n: string) => (n.endsWith('_CLIENT_ID') || n.endsWith('_CLIENT_SECRET') ? 'stored' : null));
+      const eng = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const priorEnds = eng['getMandateEnds'];
+      const priorReleases = eng['getSecretReleases'];
+      eng['getMandateEnds'] = () => ({ isLive: (mid: string) => mid === 'TEST-MANDATE-1' });
+      eng['getSecretReleases'] = () => ({
+        releaseOf: (pid: string, author: string, name: string) => {
+          const p = store.get(pid);
+          if (!released || !p || p.created_by !== author) return undefined;
+          const binding = releaseBinding(p, name);
+          return binding === null || binding === undefined ? undefined : { binding, mandateId: 'TEST-MANDATE-1' };
+        },
+      });
+      const fields = async (asMandate: boolean): Promise<Record<string, unknown>> => {
+        const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
+        const res = await fetch(`${baseUrl}/api/api-profiles`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        const list = await res.json() as { profiles: Record<string, unknown>[] };
+        return Object.fromEntries(list.profiles.map((p) => [p['id'] as string, 'reader_client_withheld' in p ? p['reader_client_withheld'] : 'absent']));
+      };
+      try {
+        expect(await fields(true)).toEqual({ own: withheld, owners: 'absent', others: 'absent' });
+        expect(await fields(false)).toEqual({ own: 'absent', owners: 'absent', others: 'absent' });
+      } finally {
+        eng['getMandateEnds'] = priorEnds;
+        eng['getSecretReleases'] = priorReleases;
         mockGetApiStore.mockReturnValue(null);
       }
     });
@@ -7424,9 +7471,19 @@ describe('LynoxHTTPApi', () => {
       expect(r.state).toBeNull();
     });
 
-    it('control: the owner\'s session starts on a mandate\'s profile, signed as the owner', async () => {
-      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+    it('the owner\'s session does not start on a mandate\'s profile, and is told the way', async () => {
       const r = await connect(TAG, false, 'books', { lang: 'de-CH' });
+      // A connection the owner made here would carry nothing (`ownerConnectionCarries`): refused
+      // before anything goes to the provider, with the way to take the profile over.
+      expect(r.status).toBe(403);
+      expect(r.location ?? '').toBe('');
+      expect(r.state).toBeNull();
+      expect(r.text).toContain('A person with access set up this connection');
+    });
+
+    it('control: the owner\'s session starts on the owner\'s own profile, signed as the owner', async () => {
+      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const r = await connect(undefined, false, 'books', { lang: 'de-CH' });
       // Straight to the provider: the owner's session never gets the note page.
       expect(r.status).toBe(302);
       expect(r.text).not.toContain('data-connect-note');
@@ -7494,7 +7551,8 @@ describe('LynoxHTTPApi', () => {
         });
         const location = res.headers.get('location') ?? '';
         expect(location.includes('client-id-from-env')).toBe(sent);
-        expect(res.status).toBe(sent ? 302 : 409);
+        // The owner's session is refused on a profile a mandate wrote before the client id is read at all.
+        expect(res.status).toBe(sent ? 302 : 403);
       } finally {
         mockSecretIsEnvironment.mockReset();
         mockSecretIsEnvironment.mockReturnValue(false);
@@ -23284,6 +23342,35 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       const grant = store.get(PROFILE)?.oauth_grant;
       expect(grant?.connected_by).toBe('owner');
       expect(grant?.connected_mandate_id).toBeUndefined();
+    });
+
+    // A connection the owner made on a profile a person with access set up would carry nothing
+    // (`ownerConnectionCarries`): the callback stores none, asked before the exchange and again
+    // just before the tokens are written.
+    it('stores no owner\'s consent on a profile a mandate set up, and spends no code', async () => {
+      const { cookie, store } = await arrange();
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      mockExchangeToken.mockClear();
+      const res = await complete(cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('A person with access set up this connection');
+      expect(mockExchangeToken).not.toHaveBeenCalled();
+      expect(mockSecretSet).not.toHaveBeenCalled();
+      expect(store.get(PROFILE)?.oauth_grant?.connected_by).toBeUndefined();
+    });
+
+    it('stores no owner\'s consent on a profile a mandate set up while the provider\'s page was open', async () => {
+      const { cookie, store } = await arrange();
+      const exchange = mockExchangeToken.getMockImplementation();
+      mockExchangeToken.mockImplementationOnce(async (...args: unknown[]) => {
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        return (exchange as (...a: unknown[]) => unknown)(...args);
+      });
+      const res = await complete(cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('A person with access set up this connection');
+      expect(mockSecretSet).not.toHaveBeenCalled();
+      expect(store.get(PROFILE)?.oauth_grant?.connected_by).toBeUndefined();
     });
 
     it.each([

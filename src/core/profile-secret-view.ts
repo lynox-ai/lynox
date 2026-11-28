@@ -1195,7 +1195,7 @@ export function memberConnectionReader(
 
 /** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` and `connected_by_reader` exist only there, never in the store. */
 export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
-  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined; connected_by_reader: boolean }) | undefined;
+  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined; connected_by_reader: boolean; unused?: true | undefined }) | undefined;
 };
 
 /**
@@ -1213,6 +1213,11 @@ export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
  * cannot tell who reads it, and a tag alone does not say whether it is the reader's. The owner's
  * is the owner tag or none (a grant from before the tag was recorded); a mandate's, the same
  * test that shows it the account.
+ *
+ * A grant the profile's view hides from every reader says so (`unused`): one whose consent is not
+ * the author's on a profile a person with access set up, such as an owner's connection made there
+ * before the owner's connect was refused ({@link hiddenFromProfile}). No request uses its tokens, so
+ * it is not shown as a connection; once the owner has taken the profile over it carries again.
  */
 export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ProfileForReader {
   const shown = withoutFingerprints(profile);
@@ -1228,9 +1233,10 @@ export function profileForReader(profile: ApiProfile, reader: RequestPrincipal):
     case 'cp-admin': yours = false; break;
     default: return unhandledPrincipal(reader);
   }
-  if (grant.account === undefined || reader.kind === 'owner' || yours) return { ...shown, oauth_grant: { ...grant, connected_by_reader: yours } };
+  const unused = isMandateAuthored(profile) && grant.connected_by !== profile.created_by ? { unused: true as const } : {};
+  if (grant.account === undefined || reader.kind === 'owner' || yours) return { ...shown, oauth_grant: { ...grant, connected_by_reader: yours, ...unused } };
   const { account: _account, ...rest } = grant;
-  return { ...shown, oauth_grant: { ...rest, connected_by_reader: yours, account_withheld: true } };
+  return { ...shown, oauth_grant: { ...rest, connected_by_reader: yours, account_withheld: true, ...unused } };
 }
 
 /**

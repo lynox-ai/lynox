@@ -670,6 +670,18 @@ export function isMandateAuthored(profile: ApiProfile): boolean {
 }
 
 /**
+ * Whether a connection made outside a mandate's session (the owner's) would carry on this
+ * profile. Not on one a person with access set up: its view hides a token whose `connected_by` is
+ * not the profile's author from every reader, the owner included (`hiddenFromProfile`), so the
+ * connection would show as connected and carry nothing. The owner takes such a profile over by
+ * saving it as their own (`api_setup` create or update drops `created_by`); from then on it carries.
+ * The one condition the connect start, the OAuth callback and the `connect` tool ask.
+ */
+export function ownerConnectionCarries(profile: ApiProfile): boolean {
+  return !isMandateAuthored(profile);
+}
+
+/**
  * The vault names that hold a profile's tokens: the derived pair of an oauth2 profile and what
  * its exchanges wrote. Its client pair and other configured credentials are not among them.
  */

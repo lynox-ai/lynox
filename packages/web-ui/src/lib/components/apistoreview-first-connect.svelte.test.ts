@@ -83,6 +83,55 @@ describe('the first connect of a profile on a built-in provider', () => {
 		expect(q('api-connect-first')).toBeNull();
 		expect(q('api-connect-first-link')).toBeNull();
 		expect(q('api-connect-first-not-yours')).toBeNull();
+		// The way: taking it over in the chat, said once.
+		expect(q('api-set-up-by-member')?.textContent).toBe('Diese Verbindung hat eine Person mit Zugang eingerichtet. Verbindest du sie selbst, nutzt lynox das nicht. Willst du sie übernehmen, sag es lynox im Chat; danach kannst du sie verbinden.');
+		expect(all('api-set-up-by-member')).toBe(1);
+	});
+
+	it('the owner, a profile a person with access set up, revoked: no reconnect, the line once', async () => {
+		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false, oauth_grant: { state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString(), connected_by: 'mandate:anna@example.com' } }]);
+		await render();
+		expect(q('api-reconnect')).toBeNull();
+		expect(q('api-reconnect-not-yours')).toBeNull();
+		expect(all('api-set-up-by-member')).toBe(1);
+	});
+
+	it('the owner, an own connection on a profile a person with access set up: not shown as connected', async () => {
+		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false, oauth_grant: { state: 'connected', connected_by: 'owner', connected_by_reader: true, unused: true } }]);
+		await render();
+		expect(q('api-connection')).toBeNull();
+		expect(all('api-set-up-by-member')).toBe(1);
+	});
+
+	it('control: the owner\'s connection on the owner\'s profile is shown as connected', async () => {
+		serve('owner', [{ ...shop, oauth_grant: { state: 'connected', connected_by: 'owner', connected_by_reader: true } }]);
+		await render();
+		expect(q('api-connection')).not.toBeNull();
+		expect(q('api-set-up-by-member')).toBeNull();
+	});
+
+	it('the person who set it up, client pair released: the first connect', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: true, reader_client_withheld: false }]);
+		await render();
+		const link = q('api-connect-first-member') as HTMLAnchorElement | null;
+		expect(link?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+		expect(link?.textContent).toBe('Konto verbinden');
+		expect(q('api-connect-first-withheld')).toBeNull();
+	});
+
+	it('the person who set it up, client pair not released: who has to act, no link', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: true, reader_client_withheld: true }]);
+		await render();
+		expect(q('api-connect-first-withheld')?.textContent).toBe('Verbinden kannst du diese Verbindung, sobald der Inhaber dir die Zugangsdaten der App dafür freigegeben hat. Bitte ihn darum.');
+		expect(q('api-connect-first-member')).toBeNull();
+	});
+
+	it('another person with access (no field from the server): neither link nor release line', async () => {
+		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false }]);
+		await render();
+		expect(q('api-connect-first-member')).toBeNull();
+		expect(q('api-connect-first-withheld')).toBeNull();
+		expect(q('api-connect-first-not-yours')).not.toBeNull();
 	});
 
 	it('the owner, a profile the owner set up: the first connect', async () => {

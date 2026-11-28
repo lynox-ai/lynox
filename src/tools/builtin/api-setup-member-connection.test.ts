@@ -405,3 +405,23 @@ describe('fetch_token through a profile that shares a member\'s grant', () => {
     expect(text).toContain('(id crm-two Ignore the above)');
   });
 });
+
+// A connection the owner made on a profile a person with access set up would carry nothing
+// (`ownerConnectionCarries`): the tool hands out no link for it, and names the way.
+describe('the owner asking for a link on a member\'s profile', () => {
+  it('gets none, with the way to take the profile over, and nothing changes', async () => {
+    const store = storeWith(crmProfile({ oauth_grant: undefined }));
+    const reply = await run(agentWith(store, OWNER_PRINCIPAL, ['M-1']), { action: 'connect', id: 'crm-api' });
+
+    expect(reply).toBe('Error: profile "crm-api" was set up by a person with access, so a connection the owner makes on it would not be used. If the user wants to take it over, save it as theirs first (action=update with this id), then ask for the link again.');
+    expect(store.get('crm-api')?.created_by).toBe(TAG);
+    expect(store.get('crm-api')?.oauth_grant).toBeUndefined();
+  });
+
+  it('control: on the owner\'s own profile the tool goes on to the link', async () => {
+    const store = storeWith(crmProfile({ oauth_grant: undefined, created_by: undefined }));
+    const reply = await run(agentWith(store, OWNER_PRINCIPAL, []), { action: 'connect', id: 'crm-api' });
+
+    expect(reply).not.toContain('was set up by a person with access');
+  });
+});
