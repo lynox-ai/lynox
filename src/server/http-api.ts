@@ -4379,9 +4379,34 @@ export class LynoxHTTPApi {
     };
   }
 
+  /** How long shutdown waits for the chat runs it ended to unwind, before the engine closes. */
+  private static readonly SHUTDOWN_RUN_DRAIN_MS = 3_000;
+
+  /**
+   * End every chat run still going, a run whose client is gone among them, as a restart ends it,
+   * and wait until their slots are free: the engine closes its stores next, and a run still going
+   * then would write into closed ones. Each keeps its row in the registry of live runs (the
+   * route's `finally` leaves the row of a run ended for this reason), so the boot after marks it
+   * interrupted, as a crash leaves it. A run that does not unwind within the bound is left to the process's exit.
+   */
+  private async _endRunsForShutdown(): Promise<void> {
+    if (this.runningSessions.size === 0) return;
+    for (const slot of [...this.runningSessions.values()]) {
+      try { slot.takeover('process_restarted'); } catch { /* the others are still ended */ }
+    }
+    const started = Date.now();
+    while (this.runningSessions.size > 0 && Date.now() - started < LynoxHTTPApi.SHUTDOWN_RUN_DRAIN_MS) {
+      // run-group-starter: a one-shot wait during shutdown, outside any run; it reports no spend.
+      await new Promise<void>((r) => setTimeout(r, 25));
+    }
+  }
+
   /** @param options.inboxBacklog passed to `Engine.shutdown`; a signal handler passes `'bounded'`. */
   async shutdown(options: { inboxBacklog?: 'classify' | 'bounded' | undefined } = {}): Promise<void> {
     this._stopping = true;
+    // The engine's limits for a process about to be killed count from here, so ending the chat
+    // runs below comes out of the same budget.
+    const shutdownBegan = Date.now();
     if (this.rateGcTimer) clearInterval(this.rateGcTimer);
     this.sessionStore.stopEviction();
     // Expire pending prompts in SQLite on shutdown — except a trigger's parked
@@ -4390,13 +4415,14 @@ export class LynoxHTTPApi {
     // exception would be pointless.
     this.engine?.getPromptStore()?.expireUnparked();
     this.server?.close();
+    await this._endRunsForShutdown();
     // Release the client-error lookup. Module state is last-writer-wins, so a
     // second instance in the same process (tests do this) would otherwise leave
     // the reference pointing into a shut-down instance. Not a live leak today —
     // production constructs exactly one — but the reason it is safe is an
     // accident of arity, and that is a poor thing to rely on.
     releaseClientErrorSecretStore(this.clientErrorResolver);
-    await this.engine?.shutdown(options);
+    await this.engine?.shutdown({ ...options, deadlineFrom: shutdownBegan });
   }
 
   // ── Request handling ─────────────────────────────────────────────────────
@@ -5774,6 +5800,12 @@ export class LynoxHTTPApi {
         errorResponse(res, 409, ERASURE_IN_PROGRESS);
         return;
       }
+      // Refused once shutdown began, for the same reason: shutdown ends the runs that hold a
+      // slot, and a run that took one later would go on while the stores close under it.
+      if (this._stopping) {
+        errorResponse(res, 503, 'The instance is restarting, so the message was not run. Send it again in a moment.');
+        return;
+      }
       if (erasedSinceEntry()) {
         // The Session captured above was dropped by that erasure and still holds
         // the erased conversation in memory; running it would send it to the model.
@@ -5895,6 +5927,12 @@ export class LynoxHTTPApi {
       const sessionAbortController = new AbortController();
       // Why this run's open question closes if the run ends while it waits: a stop, unless whoever takes the run over says otherwise.
       let endedBy: PromptClosedReason = 'run_stopped';
+      // Whether something already ended this run: its first reason stands (a stop the user made
+      // is not turned into a restart by the shutdown that follows).
+      let endRequested = false;
+      // Whether the run ended aborted. A run told to end may still answer (its last step does
+      // not stop on the abort), and an answered run is not one to run again.
+      let endedAborted = false;
       let hasActivePendingPrompt = false;
 
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
@@ -6260,7 +6298,8 @@ export class LynoxHTTPApi {
         // alone, so aborting first means a throw from the prompt store (closed
         // db, SQLITE_BUSY) can no longer leave the run parked — which is the
         // exact failure this handle exists to prevent.
-        endedBy = reason;
+        if (!endRequested) endedBy = reason;
+        endRequested = true;
         sessionAbortController.abort();
         session.abort();
         // Only the run's own question lapses with it. The thread holds one open question, so
@@ -6268,7 +6307,7 @@ export class LynoxHTTPApi {
         // scheduled run's, which waits on for its own answer.
         if (!hasActivePendingPrompt) return;
         const pending = promptStore?.getPending(sessionId);
-        if (pending) promptStore?.expirePrompt(pending.id, reason);
+        if (pending) promptStore?.expirePrompt(pending.id, endedBy);
       };
       this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt, streamGone: () => aborted, toolWorking: () => toolClock.holds() });
       // A client that left while this request was still being set up (a file being read, a
@@ -6310,6 +6349,7 @@ export class LynoxHTTPApi {
         // WITHOUT a scary `error` event, matching the prior no-error behavior.
         // (The backstop/disconnect paths already set `aborted` and tore down res.)
         if (err instanceof RunAbortedError) {
+          endedAborted = true;
           if (!res.writableEnded && !res.destroyed) res.end();
         } else if (isInputRequired(err) && !aborted) {
           // The run stopped on purpose: it asked a question and nobody can be reached (this
@@ -6356,7 +6396,13 @@ export class LynoxHTTPApi {
         // Run reached a terminal state (done/error/abort-completion) — drop it
         // from the registry. The transcript persists in thread_messages. A
         // process crash never reaches here, leaving the row for the boot-sweep.
-        runRegistry?.remove(runId);
+        // Nor does a run that shutdown ended: its row stays for the same sweep,
+        // so after the restart the chat says the run was interrupted and offers
+        // to run it again. Only a run that shutdown ended first and that ended
+        // aborted: one that answered all the same, or that the user had stopped,
+        // is dropped as usual. (`takeover` sets `endedBy`, so it is read as its
+        // declared type, not as the value set above.)
+        if (!((endedBy as PromptClosedReason) === 'process_restarted' && endedAborted)) runRegistry?.remove(runId);
         // End + drop the resumable buffer: notifies any live `/stream`
         // subscribers to close, then frees the ring (the durable transcript
         // persists regardless).
