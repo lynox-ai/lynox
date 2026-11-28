@@ -232,8 +232,9 @@ export function persistCompactionMarker(
 
 /**
  * Keep a message that never reached the model, and the sentence saying why, in the thread as
- * display-only rows: the content check refused it (`content_refused`), or the daily/monthly budget
- * or a run hook blocked the run (`run_blocked`). The run ends before the model is called and before
+ * display-only rows: the content check refused it (`content_refused`), the daily/monthly budget
+ * or a run hook blocked the run (`run_blocked`), or nothing of the AI budget was free for it
+ * (`hold_exhausted`, the note the live chat shows for that). The run ends before the model is called and before
  * the user's turn is stored, so without these rows a reload shows neither what the person wrote nor
  * why nothing came. display_only keeps both out of the model's context: the next turn does not read
  * the refused request, nor the refusal as something it said.
@@ -250,7 +251,7 @@ export function persistRefusedTurn(
   sessionId: string,
   task: string | unknown[],
   sentence: string,
-  code: EngineNoticeCode = CONTENT_REFUSED_NOTE,
+  code: RefusedTurnNoteCode = CONTENT_REFUSED_NOTE,
 ): boolean {
   if (!threadStore) return false;
   try {
@@ -277,6 +278,11 @@ export const CONTENT_REFUSED_NOTE = 'content_refused';
  *  check refused the request, or the budget or a run hook blocked it before the model. Sent as
  *  `done.notice`; the chat shows the sentence as a lynox note, not as the AI model's words. */
 export type EngineNoticeCode = typeof CONTENT_REFUSED_NOTE | 'run_blocked';
+
+/** The note a kept refused turn carries. Wider than `EngineNoticeCode`: a run refused because
+ *  nothing of the AI budget is free is a `run_blocked` notice, but the live chat shows it as a
+ *  `hold_exhausted` note, so that is the note a reload shows too. */
+export type RefusedTurnNoteCode = EngineNoticeCode | 'hold_exhausted';
 
 /** What `Agent.getLastStop()` reports, narrowed to what the note decision needs. */
 export interface CapStopLike {

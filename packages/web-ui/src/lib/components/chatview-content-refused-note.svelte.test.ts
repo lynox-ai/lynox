@@ -105,6 +105,20 @@ describe('a refused message after a reload', () => {
 		expect(note!.textContent).not.toContain(t('chat.note.generic'));
 	});
 
+	it('a stored hold_exhausted note reads as the live one: its own words, the engine sentence hidden', async () => {
+		// Kills: the stored code falling back to the generic note, or to the block note's text.
+		const engineSentence = 'Nothing is left of the AI budget for this run right now.';
+		await render({ code: 'hold_exhausted', detail: engineSentence });
+		const note = noteEl();
+		expect(note!.textContent).toContain(t('chat.note.hold_exhausted.title'));
+		expect(note!.textContent).toContain(t('chat.note.hold_exhausted'));
+		expect(note!.textContent).not.toContain(engineSentence);
+		expect(note!.querySelector('.font-mono')).toBeNull();
+		expect(note!.textContent).not.toContain(t('chat.note.generic'));
+		expect(note!.textContent).not.toContain(t('chat.note.title'));
+		expect(note!.className).not.toContain('border-danger');
+	});
+
 	it('another note keeps its detail as the small line (control)', async () => {
 		await render({ code: 'provider_error', detail: 'upstream 529' });
 		const note = noteEl();

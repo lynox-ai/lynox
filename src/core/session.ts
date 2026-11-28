@@ -1164,7 +1164,9 @@ export class Session {
         type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox',
         ...(holdExhausted ? { reason: RUN_BLOCKED_HOLD_EXHAUSTED } : {}),
       });
-      if (runOptions?.triggerOrigin === undefined) persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked');
+      // Kept under the note the live chat shows for it: a run with nothing of the budget free is
+      // a hold_exhausted note there, so a reload shows that note, not the plain block note.
+      if (runOptions?.triggerOrigin === undefined) persistRefusedTurn(threadStore, this.sessionId, task, reason, holdExhausted ? RUN_BLOCKED_HOLD_EXHAUSTED : 'run_blocked');
       this._lastRunNotice = 'run_blocked';
       return `Run blocked: ${reason}`;
     }

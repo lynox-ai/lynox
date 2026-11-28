@@ -305,6 +305,32 @@ describe('a message the budget or a run hook blocked is kept for the person, not
     expect(mockProcess).not.toHaveBeenCalled();
   });
 
+  it('nothing of the AI budget free: kept as the hold_exhausted note the live chat shows, not as a block note', async () => {
+    // Kills: the code fixed to run_blocked for this refusal (a reload would show another note
+    // than the live chat did).
+    const engine = await boot();
+    const session = engine.createSession();
+    session.registerHooks({ onBeforeRun: async () => ({ maxCostCents: 0 }) });
+    const result = await session.run('draft the offer');
+    expect(result.startsWith('Run blocked: ')).toBe(true);
+    const sentence = result.slice('Run blocked: '.length);
+    const rows = shown(engine, session);
+    expect(rows.map((r) => r.content === 'draft the offer' ? 'message' : r.note?.code)).toEqual(['message', 'hold_exhausted']);
+    expect(rows[1]!.note!.detail).toBe(sentence);
+    // The live notice stays what it was: the chat takes `run_blocked`, never the note code.
+    expect(session.getLastRunNotice()).toBe('run_blocked');
+    expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true })).toEqual([]);
+    expect(mockProcess).not.toHaveBeenCalled();
+  });
+
+  it('nothing of the AI budget free in a scheduled run: nothing is kept', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.registerHooks({ onBeforeRun: async () => ({ maxCostCents: 0 }) });
+    await session.run('draft the offer', { triggerOrigin: 'cron' });
+    expect(engine.getThreadStore()!.getMessages(session.sessionId)).toEqual([]);
+  });
+
   it('a hook\'s text is kept as the note\'s detail only, cut and without control characters', async () => {
     const engine = await boot();
     const session = engine.createSession();
