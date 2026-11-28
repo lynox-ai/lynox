@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { setLocale, getLocale } from '../i18n.svelte.js';
+import { setLocale, getLocale, t } from '../i18n.svelte.js';
 
 // The owner's view says what a person with delegated access read in words, with the route once
 // and muted next to it as the proof (U-306 B1); the same read made again is one line with a
@@ -115,6 +115,14 @@ describe('a read in words, the route once (U-306 B1)', () => {
 		expect(text(c)).toContain('Versuch, den Tresorschlüssel anzuzeigen (verweigert)');
 	});
 
+	it('keeps a refused reveal by HEAD the attempted reveal it was, not the status word', async () => {
+		await render([read('HEAD /api/vault/key', '/api/vault/key?reveal=true', 1, 'refused'), read('HEAD /api/auth/token', '/api/auth/token?reveal=true', 2, 'refused')]);
+		const [vault, token] = items();
+		expect(text(vault)).toContain('Versuch, den Tresorschlüssel anzuzeigen (verweigert)');
+		expect(text(vault)).not.toContain('Ob ein Tresorschlüssel eingerichtet ist');
+		expect(text(token)).toContain(t('access_trail.refused_reveal_token'));
+	});
+
 	it('in English too', async () => {
 		setLocale('en');
 		await render([read('GET /api/inbox/items/:id/full', '/api/inbox/items/i-1/full'), read('GET /api/backups', '/api/backups', 2)]);
@@ -144,19 +152,19 @@ describe('the words added at the design gate (U-306 N1)', () => {
 		]);
 		const [contact, run, plan] = items();
 		expect(text(contact?.querySelector('[data-word]'))).toBe('Kontakt zu einer Adresse, mit letzter Interaktion');
-		expect(text(run?.querySelector('[data-word]'))).toBe('Ein Lauf mit Auftrag und Antwort');
-		expect(text(plan)).toContain('Versuch: Vorschau der Freigabe eines Plans (verweigert)');
+		expect(text(run?.querySelector('[data-word]'))).toBe('Ein Lauf mit Auftrag, Antwort und Kosten');
+		expect(text(plan)).toContain('Versuch: Vorschau der Freigabe eines Plans, mit Auftrag (verweigert)');
 	});
 
 	it('says the contents a list or a result carries: task and answer, instruction and result, outputs, before and after', async () => {
 		const cases: Array<[string, string, string]> = [
-			['GET /api/history/runs', '/api/history/runs', 'Liste der Läufe mit Auftrag und Antwort'],
+			['GET /api/history/runs', '/api/history/runs', 'Liste der Läufe mit Auftrag, Antwort und Kosten'],
 			['GET /api/triggers', '/api/triggers', 'Liste der Pläne mit Auftrag und letztem Ergebnis'],
 			['GET /api/workflows/:id/steps', '/api/workflows/w-1/steps', 'Ergebnisse der Schritte eines Workflow-Laufs'],
 			['GET /api/history/runs/:id/tool-calls', '/api/history/runs/r-1/tool-calls', 'Werkzeugaufrufe eines Laufs mit Ein- und Ausgaben'],
 			['GET /api/bulk/runs/:id/targets', '/api/bulk/runs/b-1/targets', 'Ziele eines Massenlaufs mit Werten vorher und nachher'],
 			['GET /api/subjects/:id/footprint', '/api/subjects/s-1/footprint', 'Alles zu einem Eintrag: Tabellenzeilen, Chats, Gedächtnis, Aufgaben'],
-			['GET /api/inbox/items/:id/context', '/api/inbox/items/i-1/context', 'Weitere Mails von und an den Absender einer Mail'],
+			['GET /api/inbox/items/:id/context', '/api/inbox/items/i-1/context', 'Weitere Mails vom und an den Absender einer Mail'],
 		];
 		await render(cases.map(([action, path], i) => read(action, path, i + 1)));
 		expect(items().map((li) => text(li.querySelector('[data-word]')))).toEqual(cases.map((c) => c[2]));
@@ -233,7 +241,7 @@ describe('the same read again, one line (U-306 C)', () => {
 		const list = items();
 		expect(list.map((li) => li.dataset['entryKind'])).toEqual(['repeat', 'event']);
 		const summary = text(list[0]?.querySelector('[data-repeat-summary]'));
-		expect(summary).toMatch(/^Lesezugriff Stand eines Massenlaufs \(3×, .+–.+\) GET \/api\/bulk\/runs\/b-1$/);
+		expect(summary).toMatch(/^Lesezugriff Stand eines Massenlaufs mit Kosten \(3×, .+–.+\) GET \/api\/bulk\/runs\/b-1$/);
 		// Opening it shows each read.
 		expect(list[0]?.querySelectorAll('details [data-entry-kind="event"]')).toHaveLength(3);
 	});

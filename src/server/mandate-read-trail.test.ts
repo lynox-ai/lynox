@@ -428,26 +428,41 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
     });
   });
 
-  // The owner's view says a read of the run list as what it returns (U-306 N1): every run's task
-  // and answer, in their words. Measured on the real route, held against the declaration and the
-  // word the view shows for it, so neither can drift back to "a list of runs".
-  it('the run list a mandate reads carries task and answer, and its word in the owner\'s view says so', async () => {
-    const history = (api as unknown as { engine: { getRunHistory: () => { insertRun: (p: { sessionId: string; taskText: string; modelTier: string; modelId: string }) => string; updateRun: (id: string, p: { responseText: string; status: 'completed' }) => void } } }).engine.getRunHistory();
+  // The owner's view says a read of the run list as what it returns (U-306 N1). Measured on the real
+  // route: the kinds of content the answer carries are read off the run it returns, and the route's
+  // declaration and its word must name each, so a new field the route starts to return is noticed
+  // here, and a declaration that grows with it does not break the test.
+  it('the run list a mandate reads names in its word every kind of content the route returns', async () => {
+    const history = (api as unknown as { engine: { getRunHistory: () => { insertRun: (p: { sessionId: string; taskText: string; modelTier: string; modelId: string }) => string; updateRun: (id: string, p: { responseText: string; costUsd: number; status: 'completed' }) => void } } }).engine.getRunHistory();
     // A run names its chat: one that names none is left out of a mandate's list (fail-closed).
     const id = history.insertRun({ sessionId: 't-runs-word', taskText: 'Offerte an Brunner vorbereiten', modelTier: 'sonnet', modelId: 'test-model' });
-    history.updateRun(id, { responseText: 'Entwurf mit Preisen erstellt', status: 'completed' });
+    history.updateRun(id, { responseText: 'Entwurf mit Preisen erstellt', costUsd: 0.0123, status: 'completed' });
     const res = await ask('GET', '/api/history/runs?limit=500', mandateCookie);
     expect(res.status).toBe(200);
-    const { runs } = await res.json() as { runs: Array<{ id: string; task_text: string; response_text: string }> };
-    expect(runs.find((r) => r.id === id)).toMatchObject({ task_text: 'Offerte an Brunner vorbereiten', response_text: 'Entwurf mit Preisen erstellt' });
+    const { runs } = await res.json() as { runs: Array<Record<string, unknown>> };
+    const run = runs.find((r) => r['id'] === id);
+    expect(run).toMatchObject({ task_text: 'Offerte an Brunner vorbereiten', response_text: 'Entwurf mit Preisen erstellt' });
     expect(newReadRows().map((r) => r.action)).toContain('GET /api/history/runs');
 
+    // The kinds this answer carries, by the fields that hold them, with the term each needs.
+    const KINDS: Array<{ kind: string; field: string; de: RegExp; en: RegExp }> = [
+      { kind: 'task', field: 'task_text', de: /Auftrag/, en: /task/i },
+      { kind: 'answer', field: 'response_text', de: /Antwort/, en: /answer/i },
+      { kind: 'cost', field: 'cost_usd', de: /Kosten/, en: /cost/i },
+    ];
+    const carried = KINDS.filter((k) => run![k.field] !== undefined && run![k.field] !== null && run![k.field] !== '');
+    expect(carried.map((k) => k.kind)).toEqual(['task', 'answer', 'cost']);
+
     const words = readFileSync(new URL('../../packages/web-ui/src/lib/access-trail-words.ts', import.meta.url), 'utf8');
-    expect(words).toContain("'GET /api/history/runs': ['task', 'answer'],");
-    expect(words).toContain("'GET /api/history/runs': 'history_runs',");
+    const declared = /'GET \/api\/history\/runs': \[([^\]]*)\],/.exec(words)?.[1]?.match(/'([a-z_]+)'/g)?.map((q) => q.slice(1, -1)) ?? [];
+    for (const k of carried) expect(declared, k.kind).toContain(k.kind);
     const i18n = readFileSync(new URL('../../packages/web-ui/src/lib/i18n.svelte.ts', import.meta.url), 'utf8');
     const line = i18n.split('\n').find((l) => l.includes("'access_trail.read.history_runs':")) ?? '';
-    expect(line).toMatch(/de: '[^']*Auftrag[^']*Antwort[^']*'/);
-    expect(line).toMatch(/en: '[^']*task[^']*answer[^']*'/);
+    const de = /de: '([^']*)'/.exec(line)?.[1] ?? '';
+    const en = /en: '([^']*)'/.exec(line)?.[1] ?? '';
+    for (const k of carried) {
+      expect(de, `${k.kind} (de)`).toMatch(k.de);
+      expect(en, `${k.kind} (en)`).toMatch(k.en);
+    }
   });
 });

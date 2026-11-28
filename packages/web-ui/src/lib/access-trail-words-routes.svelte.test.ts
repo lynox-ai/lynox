@@ -101,6 +101,7 @@ describe('the word names what the read returns (U-306 N1)', () => {
 		const old = { de: 'Liste der Läufe', en: 'List of runs' };
 		expect(unnamed('GET /api/history/runs', CARRIES['GET /api/history/runs']!, (l) => old[l])).toEqual([
 			'GET /api/history/runs: task (de)', 'GET /api/history/runs: task (en)', 'GET /api/history/runs: answer (de)', 'GET /api/history/runs: answer (en)',
+			'GET /api/history/runs: cost (de)', 'GET /api/history/runs: cost (en)',
 		]);
 	});
 

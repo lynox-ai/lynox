@@ -151,7 +151,8 @@
 		return 'key' in word ? t(word.key) : tf('access_trail.read.settings', { page: t(word.settings) });
 	}
 	function refusedText(e: Event): string {
-		const reveal = REFUSED_REVEALS[e.action];
+		// A HEAD is the GET route without the body: a refused reveal stays the attempted reveal it was.
+		const reveal = REFUSED_REVEALS[e.action.startsWith('HEAD ') ? `GET ${e.action.slice('HEAD '.length)}` : e.action];
 		if (reveal !== undefined && e.target?.endsWith('?reveal=true') === true) return t(reveal);
 		const word = wordText(e.action);
 		return word === null ? t('access_trail.refused') : tf('access_trail.refused_word', { word });
