@@ -724,10 +724,30 @@ function freshRateWindow(): void {
   for (const e of (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts.values()) e.count = 0;
 }
 
+type RateWindow = Map<string, { count: number }>;
+type RateSnapshot = Map<string, { entry: { count: number }; count: number }>;
+
+function snapshotRateWindow(window: RateWindow): RateSnapshot {
+  return new Map([...window].map(([k, v]) => [k, { entry: v, count: v.count }]));
+}
+
+/**
+ * Gives back what was spent since `before`. A window still open since then gets its count back.
+ * A window opened after it (a client new since then, or a window that ran out and was opened again)
+ * holds only what was spent since, so it goes back to 0: writing the earlier count into it would
+ * carry a spent window into a fresh one.
+ */
+function restoreRateWindow(window: RateWindow, before: RateSnapshot): void {
+  for (const [k, e] of window) {
+    const was = before.get(k);
+    e.count = was !== undefined && was.entry === e ? was.count : 0;
+  }
+}
+
 function repayRateWindow(): void {
-  const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
-  const before = new Map([...window].map(([k, v]) => [k, v.count]));
-  onTestFinished(() => { for (const [k, e] of window) e.count = before.get(k) ?? 0; });
+  const window = (api as unknown as { rateCounts: RateWindow }).rateCounts;
+  const before = snapshotRateWindow(window);
+  onTestFinished(() => { restoreRateWindow(window, before); });
 }
 
 /**
@@ -810,6 +830,13 @@ beforeAll(async () => {
   vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
   vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
   api = new LynoxHTTPApi();
+  // The whole file shares this instance's rate windows, and its tests pay back what they spend.
+  // Its clock stands still, so a window never runs out during the file: not halfway through a
+  // test, which a file that runs past a minute otherwise does at a point that moves with the
+  // machine's load, and not between tests either. On this instance each loopback client's window
+  // is 600 requests for the whole run (a request with X-Forwarded-For counts for the address it
+  // names), and what the tests do not pay back adds up over all of them.
+  (api as unknown as { rateNow: () => number }).rateNow = () => 0;
   await api.init();
   await api.start(0);
   baseUrl = `http://127.0.0.1:${portOf(api)}`;
@@ -869,9 +896,9 @@ describe('LynoxHTTPApi', () => {
     // This file shares ONE per-IP rate window; a request this test adds is paid back, so a test
     // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
     const payBack = async <T>(body: () => Promise<T>): Promise<T> => {
-      const counts = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
-      const before = new Map([...counts].map(([k, v]) => [k, v.count]));
-      try { return await body(); } finally { for (const [k, e] of counts) e.count = before.get(k) ?? 0; }
+      const counts = (api as unknown as { rateCounts: RateWindow }).rateCounts;
+      const before = snapshotRateWindow(counts);
+      try { return await body(); } finally { restoreRateWindow(counts, before); }
     };
   describe('health', () => {
     // The stub engine answers `getEngineDb()` with null (see its constructor), which the health body
@@ -12441,8 +12468,9 @@ describe('LynoxHTTPApi', () => {
     }
 
     // ⚠ AND IT PAYS ITS OWN WAY. The per-IP window is 600 requests / 60 s
-    // (`RATE_MAX_LOOPBACK`), every request in this file comes from 127.0.0.1, so the
-    // whole file shares ONE bucket — and at ~590 requests it already sat just under the
+    // (`RATE_MAX_LOOPBACK`; on this file's shared instance, whose clock stands still, 600 for
+    // the whole run, see the file's beforeAll). Every request here without X-Forwarded-For counts
+    // for 127.0.0.1, so they all share ONE bucket — and at ~590 requests it already sat just under the
     // ceiling. Measured, not feared: with these cases added and no reset, seven
     // `GET /api/oauth/callback` tests several thousand lines below failed with 429,
     // while the same file at the base commit passed all 565. A comment further down
@@ -18921,9 +18949,8 @@ describe('LynoxHTTPApi', () => {
   describe('rate limiting', () => {
     it('loopback gets higher rate limit (spoofed X-Forwarded-For ignored for limit tier)', async () => {
       // Security: rate limiter uses socket IP (not X-Forwarded-For) for loopback detection.
-      // Loopback gets RATE_MAX_LOOPBACK (600), so 127 requests should all succeed. The whole
-      // file shares one per-IP window; this count pays back the three requests the
-      // prompt-withdraw tests above add (it was 130).
+      // Loopback gets RATE_MAX_LOOPBACK (600), so 127 requests should all succeed. With the
+      // proxy trusted they count in the window of the address they name, not in 127.0.0.1's.
       const fakeIp = '203.0.113.42';
       const promises = Array.from({ length: 127 }, () =>
         fetch(`${baseUrl}/api/secrets`, {
@@ -18934,6 +18961,120 @@ describe('LynoxHTTPApi', () => {
       // All should pass — loopback socket gets the higher 600-request limit
       expect(statuses).not.toContain(429);
       expect(statuses.every(s => s === 200)).toBe(true);
+    });
+
+    describe('the window clock', () => {
+      // Own instances: the shared one runs on a stopped clock (see the file's beforeAll).
+      type Windows = Map<string, { count: number; resetAt: number }>;
+      const windowsOf = (instance: LynoxHTTPApi): Windows => (instance as unknown as { rateCounts: Windows }).rateCounts;
+      const ask = (instance: LynoxHTTPApi): Promise<number> =>
+        fetch(`http://127.0.0.1:${portOf(instance)}/api/secrets`, { headers: authHeaders() }).then(async (r) => { await r.text(); return r.status; });
+      async function withOwn(body: (own: LynoxHTTPApi) => Promise<void>): Promise<void> {
+        const own = new LynoxHTTPApi();
+        try { await own.init(); await own.start(0); await body(own); } finally { await own.shutdown(); }
+      }
+
+      it('a step of the wall clock ahead opens no window early', async () => {
+        await withOwn(async (own) => {
+          expect(await ask(own)).toBe(200);
+          const [key, opened] = [...windowsOf(own)][0]!;
+          const resetAt = opened.resetAt;
+          const realNow = Date.now.bind(Date);
+          // 170 s ahead, past the window's minute on the wall clock.
+          const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 170_000);
+          try {
+            expect(await ask(own)).toBe(200);
+          } finally {
+            spy.mockRestore();
+          }
+          const after = windowsOf(own).get(key)!;
+          expect(after, 'the same window is still open').toBe(opened);
+          expect(after.count).toBe(2);
+          expect(after.resetAt, 'and it ends when it did').toBe(resetAt);
+        });
+      });
+
+      it('a window opened while the wall clock stands ahead lasts one minute of elapsed time', async () => {
+        await withOwn(async (own) => {
+          const realNow = Date.now.bind(Date);
+          // On the wall clock this window would end 170 s + 60 s from now.
+          const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 170_000);
+          let before: number;
+          let after: number;
+          try {
+            before = performance.now();
+            expect(await ask(own)).toBe(200);
+            after = performance.now();
+          } finally {
+            spy.mockRestore();
+          }
+          const [, opened] = [...windowsOf(own)][0]!;
+          // The window opened somewhere between `before` and `after` on the elapsed clock.
+          expect(opened.resetAt, 'it ends a minute after it opened').toBeGreaterThanOrEqual(before + 60_000);
+          expect(opened.resetAt, 'and not later: the step of the wall clock stretches nothing').toBeLessThanOrEqual(after + 60_000);
+        });
+      });
+
+      it('opens a new window once a minute has passed on its own clock', async () => {
+        await withOwn(async (own) => {
+          let now = 1_000;
+          (own as unknown as { rateNow: () => number }).rateNow = () => now;
+          expect(await ask(own)).toBe(200);
+          expect(await ask(own)).toBe(200);
+          const [key, first] = [...windowsOf(own)][0]!;
+          expect(first.count).toBe(2);
+          now += 60_000;
+          expect(await ask(own), 'the minute is not over yet').toBe(200);
+          expect(windowsOf(own).get(key)).toBe(first);
+          now += 1;
+          expect(await ask(own)).toBe(200);
+          const second = windowsOf(own).get(key)!;
+          expect(second).not.toBe(first);
+          expect(second.count).toBe(1);
+        });
+      });
+
+      it('a test that gives back its spend does not carry it into a window that opened meanwhile', async () => {
+        await withOwn(async (own) => {
+          let now = 1_000;
+          (own as unknown as { rateNow: () => number }).rateNow = () => now;
+          for (let i = 0; i < 5; i++) expect(await ask(own)).toBe(200);
+          const windows = windowsOf(own);
+          const [key, first] = [...windows][0]!;
+          const before = snapshotRateWindow(windows);
+          expect(before.get(key)!.count, 'positive control: there is a spend to carry').toBe(5);
+          expect(await ask(own)).toBe(200);
+          // The window runs out between the snapshot and the give-back, and the test spends on.
+          now += 60_001;
+          expect(await ask(own)).toBe(200);
+          expect(await ask(own)).toBe(200);
+          const second = windows.get(key)!;
+          expect(second, 'the case: a new window opened after the snapshot').not.toBe(first);
+          // And a client the snapshot did not know yet. Its own window needs the proxy trusted,
+          // which the file keeps stubbed (beforeAll, and again after each test that clears it).
+          const other = await fetch(`http://127.0.0.1:${portOf(own)}/api/secrets`, { headers: { ...authHeaders(), 'X-Forwarded-For': '203.0.113.77' } });
+          await other.text();
+          const newcomer = windows.get('203.0.113.77');
+          expect(newcomer?.count, 'positive control: the newcomer spent in its own window').toBe(1);
+          restoreRateWindow(windows, before);
+          expect(second.count, 'what the test spent in it is given back, and nothing is carried in').toBe(0);
+          expect(newcomer!.count, 'a window new since the snapshot is given back in full').toBe(0);
+        });
+      });
+
+      it('a test that gives back its spend in a window still open restores that window\'s count', async () => {
+        await withOwn(async (own) => {
+          (own as unknown as { rateNow: () => number }).rateNow = () => 1_000;
+          for (let i = 0; i < 3; i++) expect(await ask(own)).toBe(200);
+          const windows = windowsOf(own);
+          const before = snapshotRateWindow(windows);
+          for (let i = 0; i < 4; i++) expect(await ask(own)).toBe(200);
+          const [, open] = [...windows][0]!;
+          expect(open.count).toBe(7);
+          restoreRateWindow(windows, before);
+          expect(open.count).toBe(3);
+        });
+      });
     });
   });
 
