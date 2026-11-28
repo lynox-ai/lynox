@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
   OAUTH_BACK_PATHS, OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_PAGE_CSS, OAUTH_PAGE_STYLE_HASH, OAUTH_RESULT_TEXTS,
-  ENGINE_LESS_PAGE_CLOSE, engineLessPageText, connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack,
+  ENGINE_LESS_PAGE_CLOSE, engineLessPageText, exchangeRefusedText, connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack,
 } from './oauth-pages.js';
 
 describe('the OAuth page frame', () => {
@@ -203,3 +203,25 @@ describe('the pages of an engine without engine.db', () => {
 function escapeForTest(s: string): string {
   return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
+
+describe('the page for an exchange a store got no pass for', () => {
+  // The German text of each cause, word for word: only the one lynox could not confirm says to try
+  // again, and none says to start the connection again, which is the plain failure's advice.
+  it.each([
+    ['switched_off', 'Shopify-Verbindungen sind auf dieser Instanz ausgeschaltet. Es wurde nichts gespeichert. Ein neuer Versuch ändert daran nichts; einschalten kann sie nur lynox.'],
+    ['self_hosted', 'Shopify-Shops erreicht lynox nur auf einer Instanz, die lynox betreibt. Diese Instanz betreibst du selbst. Es wurde nichts gespeichert.'],
+    ['not_set_up', 'Shopify ist auf dieser Instanz nicht eingerichtet. Es wurde nichts gespeichert. Das behebt lynox, nicht du; bis dahin ändert ein neuer Versuch nichts.'],
+    ['unconfirmed', 'lynox konnte gerade nicht bestätigen, dass diese Instanz Shopify erreichen darf. Es wurde nichts gespeichert. Versuch es in ein paar Minuten noch einmal.'],
+    ['not_cleared', 'Shopify ist für diese Instanz zurzeit nicht freigegeben. Es wurde nichts gespeichert. Ein neuer Versuch ändert daran nichts; freigeben kann nur lynox.'],
+  ] as const)('%s reads in German as written, and does not say to start again', (cause, de) => {
+    const text = exchangeRefusedText(cause);
+    expect(text.de).toBe(de);
+    expect(text.de).not.toContain('neu starten');
+    expect(text.en).not.toContain('start the connection again');
+  });
+
+  it('a callback that is not this store keeps the plain failure, which says to start again', () => {
+    expect(exchangeRefusedText('not_this_store')).toBe(OAUTH_RESULT_TEXTS.exchangeFailed);
+    expect(exchangeRefusedText('not_this_store').de).toContain('neu starten');
+  });
+});

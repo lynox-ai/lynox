@@ -45,7 +45,7 @@ function item(over: Partial<Parameters<InboxRuntime['state']['insertItem']>[0]> 
     fromAddress: 'kunde@example.com', fromName: 'Max Kunde', snippet: 'Hallo, passt Ihnen Dienstag?',
     mailDate: new Date('2026-11-01T10:00:00Z'),
     ...over,
-  });
+  }).id;
 }
 
 async function call(input: Record<string, unknown>, agent: IAgent = watched): Promise<string> {
@@ -137,7 +137,7 @@ describe('inbox_read — sensitive content is withheld', () => {
   });
 
   it('in the stored body of the item it opens, also when a rule filed it', async () => {
-    const id = item({ messageId: '<m1@x>', reasonDe: 'Regel: from = kunde@example.com', subject: 'Login', snippet: 'Hallo' });
+    const id = item({ messageId: '<m1@x>', reasonDe: 'Regel: Absender = kunde@example.com', subject: 'Login', snippet: 'Hallo' });
     const stored = runtime.state.getItem(id)!;
     runtime.state.insertThreadMessage({
       accountId: 'acct-1', threadKey: stored.threadKey, messageId: '<m1@x>', fromAddress: 'kunde@example.com',
@@ -256,7 +256,7 @@ describe('inbox_read — what the inbox found at intake counts (B1)', () => {
   });
 
   it('withholds a rule-filed item from before the audit recorded the check, by the stored body the list does not show', async () => {
-    const id = item({ bucket: 'auto_handled', reasonDe: 'Regel: from = noreply@app.example.com', classifierVersion: 'rule:r1', messageId: '<old-rule@x>', subject: 'Ihr Zugang', snippet: `Hier: ${LINK}` });
+    const id = item({ bucket: 'auto_handled', reasonDe: 'Regel: Absender = noreply@app.example.com', classifierVersion: 'rule:r1', messageId: '<old-rule@x>', subject: 'Ihr Zugang', snippet: `Hier: ${LINK}` });
     runtime.state.insertThreadMessage({
       accountId: 'acct-1', threadKey: runtime.state.getItem(id)!.threadKey, messageId: '<old-rule@x>', fromAddress: 'noreply@app.example.com',
       subject: 'Ihr Zugang', bodyMd: snippet, inboxItemId: id,
@@ -272,7 +272,7 @@ describe('inbox_read — what the inbox found at intake counts (B1)', () => {
         reasonDe: 'Bestätigung des Zugangs', classifiedAt: new Date(), classifierVersion: 'v1',
         subject: 'Ihr Zugang', snippet: `Hier: ${LINK}`, fromAddress: 'noreply@app.example.com' },
       { action: 'classified', actor: 'classifier', payloadJson: JSON.stringify({ bucket: 'draft_ready', sensitive_categories: ['password_reset'], sensitive_masked: true }) },
-    );
+    ).id;
     const out = await call({ action: 'item', id });
     expect(out).not.toContain(LINK);
     expect(out).toContain('(withheld: sensitive content — password_reset)');
@@ -287,7 +287,7 @@ describe('inbox_read — the intake finding reaches the stored copy of the same 
         reasonDe: 'Sensible Inhalte — manuell prüfen.', classifiedAt: new Date(), classifierVersion: 'sensitive-prefilter',
         subject: 'Ihr Zugang', messageId: '<new@x>', fromAddress: 'noreply@app.example.com' },
       { action: 'classified', actor: 'rule_engine', payloadJson: JSON.stringify({ sensitive_categories: ['password_reset'], sensitive_mode: 'skip' }) },
-    );
+    ).id;
     runtime.state.insertThreadMessage({
       accountId: 'acct-1', threadKey: 't-bf', messageId: '<old@x>', fromAddress: 'noreply@app.example.com',
       subject: 'Ihr Zugang', snippet: `Hier: ${LINK}`, inboxItemId: id,

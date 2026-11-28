@@ -364,6 +364,15 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       })
     : undefined;
 
+  const accounts: AccountResolver = {
+    resolve: (id) => {
+      const acct = opts.mailStateDb.getAccount(id);
+      return acct ? { address: acct.address, displayName: acct.displayName, authType: acct.authType } : null;
+    },
+    // Read per message, not cached: an account connected later counts from its first mail on.
+    isOwnAddress: (address) => opts.mailStateDb.listAccounts().some((a) => a.address.toLowerCase() === address),
+  };
+
   const queue = buildInboxRunner({
     state,
     llm,
@@ -373,14 +382,13 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     ...(notifier ? { notifier } : {}),
     // Behind the flag, as the rest of the user rules: with it off no description rule is checked.
     ...(isFeatureEnabled('inbox-user-rules') ? { ruleCheck: { rules, llm: ruleLlm } } : {}),
-  });
-
-  const accounts: AccountResolver = {
-    resolve: (id) => {
-      const acct = opts.mailStateDb.getAccount(id);
-      return acct ? { address: acct.address, displayName: acct.displayName, authType: acct.authType } : null;
+    // A mail filed into its thread's item reads the same account, mode and check as the hook.
+    followUps: {
+      accounts,
+      sensitiveMode: opts.sensitiveMode,
+      ...(opts.confirmAutoReply !== undefined ? { confirmAutoReply: opts.confirmAutoReply } : {}),
     },
-  };
+  });
 
   const hookOpts: Parameters<typeof createInboxClassifierHook>[0] = {
     state,

@@ -5,6 +5,15 @@ name: Canary Image
 # with two tags — one branch-stable, one immutable per commit:
 #   ghcr.io/lynox-ai/lynox:branch-<slug>
 #   ghcr.io/lynox-ai/lynox:sha-<short>
+# and, when a published release is reachable from the commit, a third, a semver:
+#   ghcr.io/lynox-ai/lynox:<x.y.z+1>-canary.<sha8>
+# The control plane orders images by semver against its floors, and a branch or sha
+# tag has no order, so it never passes a floor. The semver comes from the release
+# tags in the commit's history (scripts/canary-version.sh), never from package.json,
+# and the image reports it as its version: a branch cut before a floor release gets a
+# version below that floor. This runs from the pushed branch, so it guards against a
+# mistake, not against whoever pushes. Which instances accept a `-canary.` tag is the
+# control plane's decision.
 # Promotion to a managed instance is a separate manual step via the admin API
 # (`POST /admin/updates/instance/<id>` with `{targetVersion:"branch-<slug>"}`).
 # This workflow never touches a running instance.
@@ -41,6 +50,10 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The canary version is read from the release tags reachable from HEAD, so
+          # the history and the tags have to be here.
+          fetch-depth: 0
 
       # The daemon pulls the BuildKit image itself when setup-buildx boots the
       # builder, so it needs the mirror too.
@@ -63,6 +76,8 @@ jobs:
         env:
           REF_NAME: ${{ github.ref_name }}
           GITHUB_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # Tag must match VALID_VERSION_RE in pro (update-manager.ts):
@@ -77,10 +92,33 @@ jobs:
           BRANCH_TAG="${BRANCH_TAG%[._-]}"
           SHORT_SHA="${GITHUB_SHA:0:7}"
           SHA_TAG="sha-${SHORT_SHA}"
+          # Only a published release counts, not a bare tag (scripts/canary-version.sh).
+          # If the list cannot be read, the build gets no semver tag. Its branch and sha
+          # tags are not semver, and the control plane's floor check (`isVersionAtLeast`)
+          # never passes a tag that is not, so the failure falls the safe way.
+          RELEASED="${RUNNER_TEMP}/released-tags"
+          CANARY_NOTE="no published release is reachable from this commit"
+          if ! gh api "repos/${REPO}/releases" --paginate \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' > "$RELEASED"; then
+            echo "::warning::could not list the published releases; this build gets no semver canary tag"
+            CANARY_NOTE="the list of published releases could not be read"
+            : > "$RELEASED"
+          fi
+          # The same way down when the script itself fails: no semver tag, the build goes on.
+          if ! CANARY_VERSION=$(bash scripts/canary-version.sh "$RELEASED"); then
+            echo "::warning::scripts/canary-version.sh failed; this build gets no semver canary tag"
+            CANARY_NOTE="the canary version could not be computed"
+            CANARY_VERSION=""
+          fi
+          CANARY_REF=""
+          if [ -n "$CANARY_VERSION" ]; then CANARY_REF="ghcr.io/lynox-ai/lynox:${CANARY_VERSION}"; fi
           echo "branch_tag=${BRANCH_TAG}" >> "$GITHUB_OUTPUT"
           echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo "canary_version=${CANARY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "canary_ref=${CANARY_REF}" >> "$GITHUB_OUTPUT"
+          echo "canary_note=${CANARY_NOTE}" >> "$GITHUB_OUTPUT"
           echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-          echo "Built tags: ${BRANCH_TAG}, ${SHA_TAG}"
+          echo "Built tags: ${BRANCH_TAG}, ${SHA_TAG}${CANARY_VERSION:+, ${CANARY_VERSION}}"
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         id: build
@@ -92,6 +130,7 @@ jobs:
           # layers we ship and the gha cache is shared.
           build-args: |
             BUILD_SHA=${{ github.sha }}
+            CANARY_VERSION=${{ steps.meta.outputs.canary_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -111,6 +150,7 @@ jobs:
           tags: |
             ghcr.io/lynox-ai/lynox:${{ steps.meta.outputs.branch_tag }}
             ghcr.io/lynox-ai/lynox:${{ steps.meta.outputs.sha_tag }}
+            ${{ steps.meta.outputs.canary_ref }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ steps.meta.outputs.created }}
@@ -118,6 +158,7 @@ jobs:
             lynox.canary.branch=${{ github.ref_name }}
           build-args: |
             BUILD_SHA=${{ github.sha }}
+            CANARY_VERSION=${{ steps.meta.outputs.canary_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -125,6 +166,8 @@ jobs:
         env:
           BRANCH_TAG: ${{ steps.meta.outputs.branch_tag }}
           SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
+          CANARY_VERSION: ${{ steps.meta.outputs.canary_version }}
+          CANARY_NOTE: ${{ steps.meta.outputs.canary_note }}
         run: |
           {
             echo "## Canary image pushed"
@@ -133,6 +176,11 @@ jobs:
             echo "|-----|---------|"
             echo "| \`ghcr.io/lynox-ai/lynox:${BRANCH_TAG}\` | branch-stable, follows future pushes |"
             echo "| \`ghcr.io/lynox-ai/lynox:${SHA_TAG}\` | immutable, pinned to this commit |"
+            if [ -n "$CANARY_VERSION" ]; then
+              echo "| \`ghcr.io/lynox-ai/lynox:${CANARY_VERSION}\` | semver for this commit, ordered against the control plane's floors |"
+            else
+              echo "| (no semver tag) | ${CANARY_NOTE} |"
+            fi
             echo ""
             echo "To deploy this canary image, run the \`/canary-deploy\` skill locally (operator-only)."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -5,6 +5,7 @@ import type { Manifest } from '../types/orchestration.js';
 import type { InlinePipelineStep, PipelineMode, PlannedPipeline } from '../types/index.js';
 import { findAutonomousViolations } from './human-in-the-loop.js';
 import { INLINE_CORE_TOOLS, INLINE_NAMED_ONLY_TOOLS } from './runtime-adapter.js';
+import { templateRefIssue } from './template-refs.js';
 
 /**
  * Default policy ceiling on workflow steps. The run-path enforcement points in
@@ -185,6 +186,11 @@ export function validateManifest(raw: unknown): Manifest {
     validateGraph(manifest.agents);
   }
 
+  // A `{{<id>.result}}` no run resolves would stay as raw text in the step's task: refused before the
+  // run, against the context this run brings (`template-refs.ts`).
+  const refIssue = templateRefIssue(manifest.agents, manifest.context);
+  if (refIssue) throw new Error(`Invalid manifest: ${refIssue}`);
+
   return manifest;
 }
 
@@ -220,10 +226,27 @@ export class AutonomousPipelineViolation extends Error {
  * `isSchedulableWorkflow` (human-in-the-loop.ts), asked by every planning
  * surface and again by the worker when the schedule fires.
  */
-export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: PipelineMode): void {
+export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: PipelineMode, locked = false): void {
   if (mode === 'interactive') return;
-  const issues = findAutonomousViolations(steps);
+  const issues = findAutonomousViolations(steps, locked);
   if (issues.length > 0) throw new AutonomousPipelineViolation(issues);
+}
+
+/**
+ * A tool name as a save refusal may quote it: a name of ASCII letters, digits, `_` and `-` (at most
+ * 64, as a provider takes it). Any other is counted, never quoted: a stored step's declared tools
+ * are text, and one written before this check may hold a sentence a prior turn brought in.
+ */
+const TOOL_NAME_SHAPE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function unknownToolsInWords(unknown: readonly string[]): string {
+  const shown = unknown.filter((n) => TOOL_NAME_SHAPE.test(n));
+  const hidden = unknown.length - shown.length;
+  if (hidden === 0) return `unknown tool(s): ${shown.join(', ')}`;
+  if (shown.length === 0) {
+    return hidden === 1 ? '1 unknown tool (lynox does not show its name)' : `${String(hidden)} unknown tools (lynox does not show their names)`;
+  }
+  return `${String(unknown.length)} unknown tools: ${shown.join(', ')}, and ${String(hidden)} whose name${hidden === 1 ? '' : 's'} lynox does not show`;
 }
 
 /**
@@ -249,11 +272,15 @@ function declaredToolIssue(step: { id: string; tools?: string[] | undefined; too
   if (!step.tools) return undefined;
   const unknown = step.tools.filter(name => !INLINE_CORE_TOOLS.has(name) && !INLINE_NAMED_ONLY_TOOLS.has(name));
   if (unknown.length > 0) {
-    return `Step "${step.id}" declares unknown tool(s): ${unknown.join(', ')}. ` +
+    return `Step "${step.id}" declares ${unknownToolsInWords(unknown)}. ` +
       `Declarable tools: ${[...INLINE_CORE_TOOLS, ...INLINE_NAMED_ONLY_TOOLS].join(', ')}.`;
   }
   if (step.tool !== undefined && !step.tools.includes(step.tool)) {
-    return `Step "${step.id}" replays tool "${step.tool}" but its declared tools (${step.tools.join(', ') || 'none'}) exclude it.`;
+    // The declared tools are all known names here; the replayed one is the step's own text.
+    const declared = step.tools.join(', ') || 'none';
+    return TOOL_NAME_SHAPE.test(step.tool)
+      ? `Step "${step.id}" replays tool "${step.tool}" but its declared tools (${declared}) exclude it.`
+      : `Step "${step.id}" replays a tool (lynox does not show its name) that its declared tools (${declared}) do not include.`;
   }
   return undefined;
 }
@@ -265,8 +292,11 @@ export function assertDeclaredToolsAreValid(steps: InlinePipelineStep[]): void {
   }
 }
 
-/** Convenience overload that takes a stored PlannedPipeline. */
-export function assertPlannedPipelineIsValid(planned: PlannedPipeline): void {
-  assertPipelineModeIsValid(planned.steps, planned.mode);
+/**
+ * Convenience overload that takes a stored PlannedPipeline. `locked`: the save runs in a locked
+ * turn (`turnIsLocked`), which reads its own text for a step on `ask_secret`.
+ */
+export function assertPlannedPipelineIsValid(planned: PlannedPipeline, locked = false): void {
+  assertPipelineModeIsValid(planned.steps, planned.mode, locked);
   assertDeclaredToolsAreValid(planned.steps);
 }

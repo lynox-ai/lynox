@@ -15,6 +15,7 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { ChannelOutcome, NotificationRouter, NotificationMessage } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
+import { noteMemberConnection } from './member-connection-notes.js';
 
 /**
  * The plan pause through the real worker loop (`worker-loop.ts`): the gate, its fresh read, Run
@@ -61,7 +62,7 @@ interface Proc {
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
 
-function boot(dir = mkdtempSync(join(tmpdir(), 'lynox-pause-w-')), opts: { hold?: boolean; language?: string } = {}): Proc {
+function boot(dir = mkdtempSync(join(tmpdir(), 'lynox-pause-w-')), opts: { hold?: boolean; language?: string; note?: string } = {}): Proc {
   if (!dirs.includes(dir)) dirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
   const engineDb = new EngineDb(join(dir, 'engine.db'));
@@ -76,6 +77,8 @@ function boot(dir = mkdtempSync(join(tmpdir(), 'lynox-pause-w-')), opts: { hold?
   const turnStarted = new Promise<void>((r) => { started = r; });
   let rejectTurn: ((e: Error) => void) | undefined;
   const run = vi.fn(async () => {
+    // A request of the run that met a member's own-login connection (`member-connection-notes.ts`).
+    if (opts.note !== undefined) noteMemberConnection(opts.note);
     if (opts.hold !== true) return 'done';
     const turn = new Promise<string>((_resolve, reject) => { rejectTurn = reject; });
     setImmediate(() => started());
@@ -409,6 +412,24 @@ describe('a run stopped part-way', () => {
     expect(r.next_run_at).toBe(DUE);
     // Not "on your instruction", and not pushed: the tick tells the owner.
     expect(p.sent.filter((m) => m.body.includes('Stopped on your instruction'))).toEqual([]);
+  });
+
+  it('a run stopped for its plan\'s pause after it met a member\'s connection records the pause, not the lines', async () => {
+    const line = 'Connection not used: jo@kanzlei.example set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login.';
+    const p = boot(undefined, { hold: true, note: line });
+    plan(p);
+    login(p, 'h@x.ch', nowS() + H, nowS() - H);
+    await tick(p);
+    await p.turnStarted;
+    p.db.prepare('UPDATE triggers SET paused_at = ? WHERE id = ?').run(nowS(), 'p');
+    expect(p.loop.stopEndedStarters((id) => p.ends.isLive(id))).toEqual(['p']);
+    await settle();
+    const r = p.db.prepare('SELECT last_run_status, last_run_result, last_run_member_notes FROM triggers WHERE id = ?').get('p') as { last_run_status: string; last_run_result: string; last_run_member_notes: string | null };
+    expect(r.last_run_status).toBe('stopped');
+    expect(r.last_run_result).toContain('paused until the owner takes it over');
+    // The access's end stands in for the run, lines included: a mandate reads it, not the sentence for an end with lines.
+    expect(r.last_run_member_notes).toBeNull();
+    expect(r.last_run_result).not.toContain('jo@kanzlei.example');
   });
 
   it('a run whose member provably ends part-way pauses its plan', async () => {

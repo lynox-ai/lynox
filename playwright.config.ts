@@ -12,6 +12,11 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 5_000 },
   fullyParallel: false,
+  // One worker: the engine counts API requests per client address in a fixed 60-second window,
+  // and every spec reaches the stack from the same address. Files running side by side share that
+  // window, so a file that loads many pages could get the next one refused (429). Run one after
+  // the other, a file that spends the window waits it out at its end (csp-artifact-frame.spec.ts).
+  workers: 1,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
   reporter: process.env.CI ? 'github' : 'list',

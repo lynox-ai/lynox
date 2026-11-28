@@ -142,6 +142,8 @@ function makeHarness(opts?: {
   taskTimeoutMs?: number | undefined;
   /** Whether the run's container reads as contained (a store pass was minted in it). */
   contained?: boolean | undefined;
+  /** The sends the run refused before it ended (`Session.getOriginRefusals`). */
+  originRefusals?: unknown[] | undefined;
 }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
@@ -242,6 +244,7 @@ function makeHarness(opts?: {
     }),
     getLastRunStop: () => (opts?.lastRunStop === undefined ? null
       : { ...opts.lastRunStop, pendingTools: ['web_research'], text: '' }),
+    getOriginRefusals: () => opts?.originRefusals ?? [],
   };
 
   const engine = {
@@ -378,6 +381,17 @@ describe('stopping a running background task', () => {
     );
     const t = h.history.getTrigger('trg-stop')!;
     expect(t.last_run_status).toBe('stopped');
+  });
+
+  it('a run stopped after a refused send records the refusal before the stop, as stopped', async () => {
+    const h = makeHarness({ originRefusals: [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }] });
+    await h.running;
+    expect(h.loop.stopTask('trg-stop')).toEqual({ kind: 'requested', via: 'session' });
+    await h.tick;
+    await waitUntil('the run to be recorded as finished', () => (h.history.getTrigger('trg-stop')?.last_run_status ?? null) !== null);
+    const t = h.history.getTrigger('trg-stop')!;
+    expect(t.last_run_status).toBe('stopped');
+    expect(t.last_run_result).toMatch(/^The trigger "Long report" did not send to "x@evil\.example": .*\n\n/s);
   });
 
   it('does not falsify the trigger, and does not re-fire it as a retry', async () => {

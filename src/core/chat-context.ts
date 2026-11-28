@@ -7,8 +7,9 @@ import { stripUntrustedSeparators } from './sanitize.js';
 import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
 import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
 import { stripHidden, stripHiddenInName } from './hidden-text.js';
-import { isStepIdShape, shownStepId, storedStepOrder } from '../orchestrator/step-id.js';
+import { isStepIdShape, shownRunStepId, shownStepId, stepRunNames, storedSteps } from '../orchestrator/step-id.js';
 import { detectSensitiveContent } from '../integrations/inbox/sensitive-content.js';
+import { followUpsOf } from '../integrations/inbox/follow-ups.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
@@ -184,25 +185,9 @@ export interface ChatThreadMessage {
  * mail, as before.
  */
 export function followUpToAnswer(reader: ChatInboxReader, item: InboxItem): ChatThreadMessage | null {
-  const messages = reader.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit: 50 });
-  const own = item.messageId !== undefined ? messages.find((m) => m.messageId === item.messageId) : undefined;
-  const since = own?.mailDate?.getTime();
-  const reopenedBy = new Set<string>();
-  for (const a of reader.listAuditForItem(item.id, item.tenantId)) {
-    if (a.action !== 'reopened_on_reply' && a.action !== 'raised_on_sensitive_follow_up') continue;
-    try {
-      const id = (JSON.parse(a.payloadJson) as { message_id?: unknown }).message_id;
-      if (typeof id === 'string') reopenedBy.add(id);
-    } catch {
-      // An unreadable payload names no message.
-    }
-  }
-  return messages.find((m) =>
-    m.messageId !== item.messageId
-    && m.direction === 'inbound'
-    && (m.autoReply === false || (m.autoReply === undefined && reopenedBy.has(m.messageId)))
-    && !(since !== undefined && m.mailDate !== undefined && m.mailDate.getTime() < since),
-  ) ?? null;
+  // The rule the inbox list and reading pane start from (`follow-ups.ts`); they also leave out
+  // mail the owner dealt with since, which the chat needs not: it answers the newest one.
+  return followUpsOf(reader, item)[0] ?? null;
 }
 
 /**
@@ -341,9 +326,9 @@ function storedName(s: string, max: number): string {
 }
 
 /** A stored step id in the preamble: itself in the allowed shape, otherwise its position in the
- *  workflow (`step-id.ts`), or the note alone where no position is known (`index` absent or -1). */
-function storedStepId(id: string, index: number | undefined): string {
-  return isStepIdShape(id) ? storedName(id, MAX_STEP_ID_CHARS) : shownStepId(id, index === -1 ? undefined : index);
+ *  workflow (`step-id.ts`) with the name its runs use, or the note alone where no position is known. */
+function storedStepId(id: string, index: number | undefined, runName?: string): string {
+  return isStepIdShape(id) ? storedName(id, MAX_STEP_ID_CHARS) : shownStepId(id, index === -1 ? undefined : index, runName);
 }
 
 /**
@@ -569,15 +554,27 @@ export function resolveChatContext(
     for (const id of ref.ids.slice(0, MAX_BATCH_ITEMS)) {
       const item = inboxState.getItem(id);
       if (!item) continue;
-      const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
-      const from = item.fromName
-        ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
+      // As in the single 'mail' kind: a follow-up in the thread is what a reply answers, so its
+      // sender, subject, text and Message-ID take the place of the first mail's. It was not judged
+      // by the check the item's own mail passed, so it is checked here, on the snippet shown and on
+      // the body, which a writer may store masked differently.
+      const followUp = followUpToAnswer(inboxState, item);
+      const mail = followUp ?? item;
+      const followUpBody = followUp?.bodyMd ?? '';
+      const text = followUp ? (followUp.snippet || followUpBody) : (item.snippet ?? '');
+      const withheld = followUp
+        ? detectSensitiveContent({ subject: '', body: [followUp.subject, followUp.fromName ?? '', followUpBody, text].join('\n') }).categories
+        : [];
+      const hidden = withheld.length > 0;
+      const fromAddr = oneLine(mail.fromAddress, MAX_NAME_CHARS);
+      const from = mail.fromName && !hidden
+        ? `${oneLine(mail.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
         : fromAddr;
       const acct = oneLine(item.accountId, MAX_NAME_CHARS);
-      const uidRow = item.messageId
-        ? inboxState.getUidByMessageId(item.accountId, item.messageId)
+      const uidRow = mail.messageId
+        ? inboxState.getUidByMessageId(item.accountId, mail.messageId)
         : null;
-      const msgId = item.messageId ? oneLine(item.messageId, MAX_NAME_CHARS) : '';
+      const msgId = mail.messageId ? oneLine(mail.messageId, MAX_NAME_CHARS) : '';
       // Operational header — engine-generated, NOT sender-controlled, so it stays
       // in the trusted framing above the wrapped block. Same split as
       // `envelope.ts:83`, which calls it "Operational header — agent framing, NOT
@@ -587,12 +584,18 @@ export function resolveChatContext(
           `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}`
         : `account "${acct}" — locate via mail_search` +
           `${msgId ? ` (by the Message-ID below)` : ''}`;
-      const subject = oneLine(item.subject, MAX_NAME_CHARS);
-      const snippet = oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS);
+      const subject = hidden ? '' : oneLine(mail.subject, MAX_NAME_CHARS);
+      const snippet = hidden ? '' : oneLine(text, MAX_MAIL_SNIPPET_CHARS);
+      const which = followUp ? ' — a follow-up to the mail the inbox took in' : '';
+      const absent = hidden
+        ? ` — sender name, subject and snippet withheld: sensitive content (${[...new Set(withheld)].join(', ')})`
+        : followUp && text.length === 0
+          ? `${missingFieldNote({ from, subject })} — the inbox stored no text of it`
+          : missingFieldNote({ from, subject, snippet });
       lines.push(
         // Absence rides on the locator line — engine framing, same reason as the
         // single 'mail' kind: a placeholder inside the block is forgeable.
-        `${lines.length + 1}. ${locator}${missingFieldNote({ from, subject, snippet })}\n` +
+        `${lines.length + 1}. ${locator}${which}${absent}\n` +
         wrapChannelMessage({
           source: `mail:${acct}:inbox:${item.id}`,
           fields: {
@@ -629,8 +632,9 @@ export function resolveChatContext(
       return null;
     }
     if (wf.template !== true) return null; // only saved workflows are editable
+    const runNames = stepRunNames(wf.steps ?? []);
     const steps = (wf.steps ?? [])
-      .map((s, i) => `  ${i + 1}. [${storedStepId(s.id, i)}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
+      .map((s, i) => `  ${i + 1}. [${storedStepId(s.id, i, runNames.get(s.id))}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
       .join('\n');
     return (
       `[Loaded saved workflow for editing — id: ${wf.id}]\n` +
@@ -658,9 +662,10 @@ export function resolveChatContext(
     }
   }
   const stepResults = runHistory.getPipelineStepResults(run.id);
-  const order = storedStepOrder(run.workflow_id ? runHistory.getPlannedPipeline(run.workflow_id) : undefined);
+  // A run names a step stored outside the shape by its run name: shown with its position and the bridge.
+  const stored = storedSteps(run.workflow_id ? runHistory.getPlannedPipeline(run.workflow_id) : undefined);
   const trace = stepResults
-    .map(s => `  [${s.status}] ${storedStepId(s.step_id, order?.indexOf(s.step_id))}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
+    .map(s => `  [${s.status}] ${isStepIdShape(s.step_id) && !stored?.length ? storedName(s.step_id, MAX_STEP_ID_CHARS) : shownRunStepId(s.step_id, stored)}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
     .join('\n');
   const hasFailure = run.status === 'failed' || stepResults.some(s => s.status === 'failed' || s.error);
   // Only point at the editable workflow if it still exists — a run can outlive a

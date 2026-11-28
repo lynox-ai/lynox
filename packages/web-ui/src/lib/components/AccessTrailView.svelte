@@ -17,7 +17,7 @@
 	interface Targets { written: number; failed: number; atLeast: boolean }
 	interface Step { kind: 'step'; id: string; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
 	/** `auto`: a read on a route the person's web UI polls by itself, marked by the engine (row 1034). */
-	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true }
+	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true; count?: number; until?: string }
 	interface PlanRun { kind: 'plan'; run?: 'plan' | 'workflow'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
 	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; store?: 'files' | 'data_store' | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
 	type Entry = PlanRun | BulkRun | Step | Event;
@@ -128,8 +128,26 @@
 	function statusText(s: Status | null): string {
 		return t(`access_trail.status.${s ?? 'unknown'}`);
 	}
+	/** The engine's action of the row a revoked grant leaves (`MANDATE_REVOKED_ACTION`, audit-log.ts). */
+	const REVOKED_ACTION = 'mandate:revoke';
+	/** A refused reveal of a secret whose route answers a mandate a plain status: said as such. */
+	const REFUSED_REVEALS: Readonly<Record<string, string>> = {
+		'GET /api/vault/key': 'access_trail.refused_reveal_vault_key',
+		'GET /api/auth/token': 'access_trail.refused_reveal_token',
+	};
+	function isRevoke(e: Step | Event): boolean {
+		return e.kind === 'event' && e.action === REVOKED_ACTION;
+	}
+	function refusedText(e: Event): string {
+		const reveal = REFUSED_REVEALS[e.action];
+		return t(reveal !== undefined && e.target?.endsWith('?reveal=true') === true ? reveal : 'access_trail.refused');
+	}
 	function kindText(e: Entry): string {
-		if (e.kind === 'event') return t(e.phase === 'read' ? 'access_trail.kind_read' : 'access_trail.kind_event');
+		if (e.kind === 'event') {
+			if (e.action === REVOKED_ACTION) return t('access_trail.revoked');
+			if (e.phase === 'refused') return refusedText(e);
+			return t(e.phase === 'read' ? 'access_trail.kind_read' : 'access_trail.kind_event');
+		}
 		// A workflow run started in a chat (660b) is a run like a plan's, without a trigger.
 		if (e.kind === 'plan' && e.run === 'workflow') return t('access_trail.kind_workflow');
 		return t(`access_trail.kind_${e.kind}`);
@@ -157,7 +175,8 @@
 	<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-entry-kind={e.kind}>
 		<span class="text-xs text-text-subtle tabular-nums">{when(e.at)}</span>
 		<span class="text-text-muted">{kindText(e)}</span>
-		<span class="font-mono text-xs break-all">{e.action}{#if e.target} · {e.target}{/if}</span>
+		{#if !isRevoke(e)}<span class="font-mono text-xs break-all">{e.action}{#if e.target} · {e.target}{/if}</span>{/if}
+		{#if e.kind === 'event' && e.count !== undefined}<span class="text-xs text-text-muted" data-poll-day>{e.count === 1 ? tf('access_trail.poll_day_one', { time: when(e.at) }) : tf('access_trail.poll_day', { n: String(e.count), time: when(e.until ?? e.at) })}</span>{/if}
 		{#if e.kind === 'step'}
 			<span class="text-xs" data-status>{statusText(e.status)}</span>
 			{#if e.note !== undefined}<span class="text-xs text-text-muted" data-note>{noteText(e)}</span>{/if}
@@ -221,9 +240,9 @@
 							{#if item.entries[0]!.person.email && item.entries[0]!.person.display}<span class="text-xs text-text-subtle">{item.entries[0]!.person.email}</span>{/if}
 						</div>
 						<details>
-							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{item.entries.length === 1
+							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{item.reads === 1
 								? tf('access_trail.polls_one', { time: when(item.to) })
-								: tf('access_trail.polls_many', { n: String(item.entries.length), span: span(item.from, item.to) })}</summary>
+								: tf('access_trail.polls_many', { n: String(item.reads), span: span(item.from, item.to) })}</summary>
 							<div class="space-y-1 pt-1 pl-4">
 								{#each item.entries as p (p.id)}{@render line(p)}{/each}
 							</div>

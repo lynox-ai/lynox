@@ -213,6 +213,51 @@ describe('each kind of entry', () => {
 	});
 });
 
+describe('a refused attempt and a revoke', () => {
+	it('a refused attempt is named an attempt, refused, with the route behind it; a refused reveal by what it tried', async () => {
+		await render([
+			{ kind: 'event', action: 'GET /api/secrets', target: '/api/secrets', phase: 'refused', at: NOW, person: IDA },
+			{ kind: 'event', action: 'GET /api/vault/key', target: '/api/vault/key?reveal=true', phase: 'refused', at: NOW, person: IDA },
+			{ kind: 'event', action: 'GET /api/auth/token', target: '/api/auth/token?reveal=true', phase: 'refused', at: NOW, person: IDA },
+			{ kind: 'event', action: 'GET /api/vault/key', target: '/api/vault/key', phase: 'read', at: NOW, person: IDA },
+		]);
+		const [plain, vault, token, status] = items();
+		expect(text(plain)).toContain('Versuch (verweigert)');
+		expect(text(plain)).toContain('GET /api/secrets');
+		expect(text(vault)).toContain('Versuch, den Tresorschlüssel anzuzeigen (verweigert)');
+		expect(text(token)).toContain('Versuch, das Zugangstoken anzuzeigen (verweigert)');
+		// The plain status read of the same route stays a read access: only the refused reveal says reveal.
+		expect(text(status)).toContain('Lesezugriff');
+		expect(text(status)).not.toContain('verweigert');
+	});
+
+	it('the refused words in EN', async () => {
+		const before = getLocale();
+		setLocale('en');
+		try {
+			await render([
+				{ kind: 'event', action: 'GET /api/secrets', target: '/api/secrets', phase: 'refused', at: NOW, person: IDA },
+				{ kind: 'event', action: 'GET /api/vault/key', target: '/api/vault/key?reveal=true', phase: 'refused', at: NOW, person: IDA },
+				{ kind: 'event', action: 'mandate:revoke', target: null, phase: 'done', at: NOW, person: IDA },
+			]);
+			const [plain, vault, revoke] = items();
+			expect(text(plain)).toContain('Attempt (refused)');
+			expect(text(vault)).toContain('Attempt to reveal the vault key (refused)');
+			expect(text(revoke)).toContain('Access revoked');
+		} finally {
+			setLocale(before);
+		}
+	});
+
+	it('a revoke is named, and its engine action does not show', async () => {
+		await render([{ kind: 'event', action: 'mandate:revoke', target: null, phase: 'done', at: NOW, person: IDA }]);
+		const [revoke] = items();
+		expect(text(revoke)).toContain('Zugang widerrufen');
+		expect(text(revoke)).not.toContain('mandate:revoke');
+		expect(text(revoke)).not.toContain('Ereignis');
+	});
+});
+
 describe('statuses and notes come from the engine and are named', () => {
 	const WORDS: Record<string, string> = {
 		running: 'Läuft', done: 'Abgeschlossen', halted: 'Angehalten', ended: 'Beendet',
@@ -281,7 +326,7 @@ describe('the states around the list', () => {
 
 	it('no entries: the empty line', async () => {
 		await render([]);
-		expect(text(target.querySelector('[data-state="empty"]'))).toBe('Noch keine Einträge.');
+		expect(text(target.querySelector('[data-state="empty"]'))).toBe('Noch keine Einträge. Hier erscheinen Läufe, Schritte und Ereignisse von Personen, denen du Zugang gegeben hast.');
 	});
 });
 

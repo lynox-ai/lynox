@@ -16,9 +16,9 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import { MARKUP_MAX_DEPTH } from './html-tree.js';
 
 // The read-back after a write and the undo of a description (PRD shopify-preset §21.2 items 2, 6
-// and 7). Until descriptions are written on Shopify (item 1), the ledger's side runs here on a
-// WooCommerce list run, whose `description` is an HTML field of its list form too; the writer's
-// side runs on a stub host.
+// and 7). The ledger's side runs here on a WooCommerce list run, whose `description` is an HTML
+// field of its list form too, written before Shopify's was (item 1); the writer's side runs on a
+// stub host. A Shopify description's own undo is tested in bulk-shopify.test.ts.
 
 const HOST = 'shop.example.com';
 const LIST = `https://${HOST}/wp-json/wc/v3/products`;
@@ -138,7 +138,7 @@ describe('markupAddedByHost: what the host kept against what was sent', () => {
   });
 
   it('does not refuse a hidden character the host added: that is no markup', () => {
-    expect(added('<p>Neu</p>', '<p>Ne​u</p>')).toBe(false);
+    expect(added('<p>Neu</p>', '<p>Ne\u200Bu</p>')).toBe(false);
   });
 });
 
@@ -209,6 +209,25 @@ describe('a write the host kept with markup it was not sent (§21.2 item 6)', ()
     expect(ledger.getPreview(id)[0]).toMatchObject({ shopAddedMarkup: true });
   });
 
+  // The mark and the record in one transaction (§21.7, #13): a failure injected at the mark's write
+  // takes the record with it, so no target is left recorded as applied and unmarked.
+  it('records the applied target and its mark together or not at all when the mark\'s write fails', async () => {
+    const id = approvedRun({ description: '<p>Neu</p>' }, [{ description: '<p>Alt</p>' }]);
+    const store = new Map([[`${LIST}/1`, { description: '<p>Alt</p>' } as Record<string, unknown>]]);
+    const w = stubWriter(store, (v) => ({ ...v, description: `${String(v['description'])}${SCRIPT}` }));
+    const db = engineDb.getDb();
+    db.exec(`CREATE TRIGGER fail_mark BEFORE UPDATE OF shop_added_markup ON bulk_targets
+      WHEN NEW.shop_added_markup = 1 BEGIN SELECT RAISE(ABORT, 'injected mark failure'); END`);
+    await expect(run(id, w)).rejects.toThrow(/injected mark failure/);
+    db.exec('DROP TRIGGER fail_mark');
+    // The host received the write, and its read-back was to be marked.
+    expect(w.sent).toEqual([`${LIST}/1`]);
+    // Sent and so shown as written, but not recorded as applied: a resume reads it again.
+    expect(db.prepare('SELECT applied_at, shop_added_markup FROM bulk_targets WHERE run_id = ?').all(id))
+      .toEqual([{ applied_at: null, shop_added_markup: 0 }]);
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 0 });
+  });
+
   it('does not halt on a read-back with only a paragraph added, or only reformatted', async () => {
     const id = approvedRun({ description: 'Neu' }, [{ description: '<p>Alt</p>' }, { description: '<p>Alt 2</p>' }]);
     const store = new Map<string, Record<string, unknown>>([[`${LIST}/1`, { description: '<p>Alt</p>' }], [`${LIST}/2`, { description: '<p>Alt 2</p>' }]]);
@@ -262,6 +281,26 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     const redo = planned(undo);
     expect(byKey(redo, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
     expect(byKey(redo, `${LIST}/2`).change).toBe('update');
+  });
+
+  it('plans an undo of that undo with every target invalid where the store marked every write, and the ledger refuses to approve it as nothing to apply', async () => {
+    const id = approvedRun({ description: '<p>Neu</p>' }, [{ description: '<p>Alt</p>' }, { description: '<p>Alt 2</p>' }]);
+    const store = new Map<string, Record<string, unknown>>([[`${LIST}/1`, { description: '<p>Alt</p>' }], [`${LIST}/2`, { description: '<p>Alt 2</p>' }]]);
+    // The store adds the script to every write: each halts the run once, and the owner writes on.
+    const w = stubWriter(store, (v) => ({ ...v, description: `${String(v['description'])}${SCRIPT}` }));
+    await run(id, w);
+    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)! })).toMatchObject({ ok: true });
+    await run(id, w);
+    expect(ledger.getPreview(id).map((x) => x.shopAddedMarkup)).toEqual([true, true]);
+    const undo = planned(id);
+    approve(undo);
+    await run(undo, stubWriter(store), 'bulk_undo');
+    const redo = planned(undo);
+    const preview = ledger.getPreview(redo);
+    expect(preview).toHaveLength(2);
+    for (const t of preview) expect(t).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+    expect(ledger.getStatus(redo)!.changes).toMatchObject({ update: 0, create: 0, delete: 0, invalid: 2 });
+    expect(ledger.approve(redo, { checksum: ledger.computeChecksum(redo)!, unmeasuredConfirmed: true })).toEqual({ ok: false, reason: 'nothing_to_apply' });
   });
 
   it('reads the mark down the whole chain, not only on the run it undoes', async () => {
@@ -348,6 +387,17 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     expect(byKey(planned(u1), `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
   });
 
+  it('counts down the chain a value laid out with a line break the store kept otherwise as marked', async () => {
+    const { id, store } = await markedRun();
+    const u1 = planned(id);
+    approve(u1);
+    await run(u1, stubWriter(store), 'bulk_undo');
+    const relaid = `<p>Neu</p>\n${SCRIPT}`;
+    expect(htmlEqual(relaid, `<p>Neu</p>${SCRIPT}`)).toBe(false);
+    swap(u1, 'before', relaid);
+    expect(byKey(planned(u1), `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+  });
+
   it('CONTROL: does not count a value within the bounds that differs from the one the store kept', async () => {
     const { id, store } = await markedRun();
     const u1 = planned(id);
@@ -368,6 +418,7 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
       added: [{ kind: 'element', namespace: 'html', element: 'script', attributes: [], text: 'steal()', inTemplate: false }],
       removed: [],
       addsOutsideAllowlist: true,
+      addsOnlyPassive: false,
     }]);
     expect(ledger.htmlFieldsOf(undo)).toEqual(['description', 'short_description']);
   });
@@ -376,7 +427,8 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
   it('leaves a product out of a new run whose before-image is the marked value, reformatted too; plans the others', async () => {
     const { id } = await markedRun();
     const marked = `<p>Neu</p>${SCRIPT}`;
-    for (const before of [marked, `<P>Neu</P>${SCRIPT.replace('<script>', '<SCRIPT >')}`]) {
+    // The last: laid out with a line break htmlEqual keeps, as a store's save may (M6b).
+    for (const before of [marked, `<P>Neu</P>${SCRIPT.replace('<script>', '<SCRIPT >')}`, `<p>Neu</p>\n${SCRIPT}`]) {
       const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: before }, { description: '<p>Alt 2</p>' }]);
       expect(next).not.toBe(id);
       expect(byKey(next, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });

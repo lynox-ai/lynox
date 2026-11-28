@@ -32,13 +32,15 @@ const runner = vi.hoisted(() => ({
   // The stamp was taken over other steps than the ones the workflow has now.
   staleStamp: { value: false },
 }));
-const budget = vi.hoisted(() => ({ refuse: false, released: 0 }));
+const budget = vi.hoisted(() => ({ refuse: false, released: 0, releasedUSD: 0 }));
 vi.mock('./session-budget.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('./session-budget.js')>();
   return {
     ...real,
     reservePersistentBudget: (usd: number) => budget.refuse ? { allowed: false, reason: 'monthly cap reached', reservedUSD: 0 } : real.reservePersistentBudget(usd),
     releasePersistentBudget: (usd: number) => { budget.released++; real.releasePersistentBudget(usd); },
+    // The worker gives an admission's reservation back by the object it was issued as.
+    releaseReservation: (r: Parameters<typeof real.releaseReservation>[0]) => { budget.released++; budget.releasedUSD += r.reservedUSD; real.releaseReservation(r); },
   };
 });
 vi.mock('./saved-workflow-runner.js', () => ({ runGuardedSavedWorkflow: (...args: unknown[]) => runner.run(...args) }));
@@ -79,6 +81,7 @@ describe('the webhook drain', () => {
     runner.staleStamp.value = false;
     budget.refuse = false;
     budget.released = 0;
+    budget.releasedUSD = 0;
     dir = mkdtempSync(join(tmpdir(), 'lynox-webhook-drain-'));
     history = new RunHistory(join(dir, 'history.db'));
     engineDb = new EngineDb(join(dir, 'engine.db'));
@@ -132,9 +135,13 @@ describe('the webhook drain', () => {
     return tm.createWebhookTrigger({ title: 'Orders', pipelineId: 'wf-orders', verifier: 'shopify-hmac', connectionId: 'shop-a', confirmedAt: '2026-10-01T00:00:00.000Z' }).trigger.id;
   }
   let seq = 0;
+  // Events arrive an hour before the test runs, a second apart: inside the retention window, which
+  // the loop measures from the clock, on whatever day the suite runs.
+  const arrivedFrom = Date.now() - 60 * 60 * 1000;
+  const arrivedAt = (n: number): string => new Date(arrivedFrom + n * 1000).toISOString();
   function deliver(triggerId: string, values: Record<string, string | number | boolean> = { email: 'kim@example.com' }, headers: Record<string, string> = {}): string {
     seq++;
-    ledger.record({ triggerId, dedupKey: `k-${String(seq)}`, headers, state: 'received', values: { values, unread: {} }, now: `2026-10-22T12:00:${String(seq).padStart(2, '0')}.000Z` });
+    ledger.record({ triggerId, dedupKey: `k-${String(seq)}`, headers, state: 'received', values: { values, unread: {} }, now: arrivedAt(seq) });
     return ledger.listByTrigger(triggerId).at(-1)!.id;
   }
   const eventOf = (triggerId: string, id: string) => ledger.listByTrigger(triggerId).find((e) => e.id === id)!;
@@ -164,6 +171,23 @@ describe('the webhook drain', () => {
     expect([after.status, after.next_run_at, after.enabled]).toEqual([before.status, before.next_run_at, before.enabled]);
     expect(after.last_run_status).toBe('success');
     expect(eventOf(t, id).runId).toBe('run-1');
+  });
+
+  it('gives the budget reservation back once the event\'s run settled', async () => {
+    const { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } = await import('./session-budget.js');
+    configurePersistentBudget({ costProvider: { getCostByDay: () => [] }, dailyCapUSD: 100, monthlyCapUSD: 1000 });
+    try {
+      let heldWhileRunning = 0;
+      runner.run.mockImplementationOnce(() => { heldWhileRunning = getReservedInFlight(); return Promise.resolve({ ok: true, status: 'completed', runId: 'run-1' }); });
+      const t = sharedTrigger();
+      const id = deliver(t);
+      await loop.tick();
+      await settled(t, id, 'done');
+      expect(heldWhileRunning, 'positive control: the run was held').toBeGreaterThan(0);
+      await vi.waitFor(() => { expect(getReservedInFlight(), 'the hold is back').toBe(0); });
+    } finally {
+      resetPersistentBudget();
+    }
   });
 
   // The run is held as an event's start, so a workflow its steps start never says it was
@@ -313,6 +337,21 @@ describe('the webhook drain', () => {
     expect(runner.run.mock.calls.map((c) => c[2])).toEqual([{ n: 1 }, { n: 2 }]);
   });
 
+  it('records a failed run that met a member\'s connection with its reason, the lines apart on the trigger and not in the event', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const line = 'Connection not used: jo@kanzlei.example set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login.';
+    runner.run.mockImplementation(async () => { noteMemberConnection(line); return { ok: false, error: 'the shop said no' }; });
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'failed');
+    const ev = eventOf(t, id);
+    expect(ev.reason).toContain('the shop said no');
+    expect(ev.reason).not.toContain('jo@kanzlei.example');
+    // Control: the run did collect the line; it went to the trigger, for the owner to read.
+    expect(tm.getTrigger(t)!.last_run_member_notes).toEqual([line]);
+  });
+
   it('records a failed run failed, with its reason, and keeps the values for a run again', async () => {
     runner.run.mockResolvedValue({ ok: false, error: 'the shop said no' });
     const t = sharedTrigger();
@@ -432,6 +471,45 @@ describe('the webhook drain', () => {
     await loop.tick();
     await settled(t, id, 'failed');
     expect(eventOf(t, id).reason).toContain('uses the event value "note"');
+  });
+
+  // A step id stored before ids had a shape runs under its run name, and its references move with
+  // it: a reference the stored text shows as an unmapped param is a step's output in the run.
+  it('refuses a run in which a reference reads as a param only before the run renames its step', async () => {
+    runner.steps.value = [
+      { id: 'params ', task: 'Summarize the order' },
+      { id: 'call', task: 'Call it', tool: 'http_request', input_from: ['params '], input_template: { method: 'GET', url: '{{params .result}}' } },
+    ];
+    runner.run.mockImplementation(async (...args: unknown[]) => {
+      const opts = args[3] as { checkWorkflow?: (p: { steps: unknown[] }) => string | null };
+      const refused = opts.checkWorkflow?.({ steps: runner.steps.value }) ?? null;
+      return refused === null ? { ok: true, status: 'completed', runId: 'run-1' } : { ok: false, error: refused };
+    });
+    const t = sharedTrigger({ note: '/note' });
+    const id = deliver(t, { note: 'hello' });
+    await loop.tick();
+    await settled(t, id, 'failed');
+    expect(eventOf(t, id).reason).toContain('Step "call" uses "{{step-1.result}}" outside its task text');
+  });
+
+  // An id outside the shape that holds braces is renamed in the run; the reference the run executes
+  // is the one in the input template, and that is the one refused, by the step's run name.
+  it('refuses the reference the run executes, by the run name of a step stored with braces in its id', async () => {
+    runner.steps.value = [
+      { id: 's1', task: 'Summarize the order' },
+      { tool: '{{params.foo', id: '}}{{s1.x}}', task: 'Call it', input_from: ['s1'], input_template: { url: '{{s1.result}}' } },
+    ];
+    runner.run.mockImplementation(async (...args: unknown[]) => {
+      const opts = args[3] as { checkWorkflow?: (p: { steps: unknown[] }) => string | null };
+      const refused = opts.checkWorkflow?.({ steps: runner.steps.value }) ?? null;
+      return refused === null ? { ok: true, status: 'completed', runId: 'run-1' } : { ok: false, error: refused };
+    });
+    const t = sharedTrigger({ note: '/note' });
+    const id = deliver(t, { note: 'hello' });
+    await loop.tick();
+    await settled(t, id, 'failed');
+    expect(eventOf(t, id).reason).toContain('Step "step-2" uses "{{s1.result}}" outside its task text');
+    expect(eventOf(t, id).reason).not.toContain('{{s1.x}}');
   });
 
   it('CONTROL: a mapped value used only in task text runs', async () => {
@@ -606,9 +684,18 @@ describe('the webhook drain', () => {
     const t = sharedTrigger();
     const id = deliver(t);
     const spy = vi.spyOn(WorkerLoop.prototype as unknown as { takeLease: (id: string) => string }, 'takeLease').mockImplementationOnce(() => { throw new Error('database is locked'); });
-    await loop.tick();
-    expect(spy).toHaveBeenCalled();
-    expect(budget.released).toBe(1);
+    // A real hold, so the release is measured in money and not only counted as a call.
+    const { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } = await import('./session-budget.js');
+    configurePersistentBudget({ costProvider: { getCostByDay: () => [] }, dailyCapUSD: 100, monthlyCapUSD: 1000 });
+    try {
+      await loop.tick();
+      expect(spy).toHaveBeenCalled();
+      expect(budget.released).toBe(1);
+      expect(budget.releasedUSD, 'positive control: a real hold was taken').toBeGreaterThan(0);
+      expect(getReservedInFlight(), 'the hold is back').toBe(0);
+    } finally {
+      resetPersistentBudget();
+    }
     expect(eventOf(t, id).state).toBe('received');
   });
 
@@ -899,8 +986,9 @@ describe('the webhook drain', () => {
     const id = deliver(t);
     expect(ledger.begin(id, 'a1')).toBe(true);
     expect(ledger.finish(id, 'a1', { state: 'failed', reason: 'x' })).toBe(true);
-    expect(ledger.sweepValues('2026-10-22T12:00:00.000Z')).toBe(0);
-    expect(ledger.sweepValues('2026-11-30T00:00:00.000Z')).toBe(1);
+    // Not before its own arrival: the window clears what arrived strictly before it.
+    expect(ledger.sweepValues(arrivedAt(seq))).toBe(0);
+    expect(ledger.sweepValues(new Date(arrivedFrom + 39 * 24 * 60 * 60 * 1000).toISOString())).toBe(1);
     expect(eventOf(t, id).valuesJson).toBeNull();
   });
 });
@@ -988,7 +1076,7 @@ describe('the ledger\'s moves', () => {
   it('gets the index on a database that ran the drain columns before it existed', () => {
     const db = engineDb.getDb();
     // Every later version goes too: the migrations run from the highest one recorded.
-    db.exec('ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62;');
+    db.exec('ALTER TABLE bulk_runs DROP COLUMN planner_grants; ALTER TABLE bulk_targets DROP COLUMN before_grants; ALTER TABLE bulk_targets DROP COLUMN write_grants; ALTER TABLE triggers DROP COLUMN last_run_member_notes; ALTER TABLE bulk_runs DROP COLUMN phase_before_undo; DROP INDEX IF EXISTS idx_bulk_runs_superseded; ALTER TABLE bulk_runs DROP COLUMN superseded_by; ALTER TABLE triggers DROP COLUMN last_escalation_chat_kind; ALTER TABLE triggers DROP COLUMN last_escalation_thread_id; ALTER TABLE triggers DROP COLUMN last_escalation_case; ALTER TABLE bulk_targets DROP COLUMN refusal_detail; ALTER TABLE bulk_targets DROP COLUMN target_title; DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause; ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62; DROP INDEX IF EXISTS idx_audit_log_poll_fold; DROP INDEX IF EXISTS idx_audit_log_ts; ALTER TABLE audit_log DROP COLUMN poll_last; ALTER TABLE audit_log DROP COLUMN poll_count;');
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'));
     expect(engineDb.getDb().prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbound_events_state_received'`).get()).toBeDefined();

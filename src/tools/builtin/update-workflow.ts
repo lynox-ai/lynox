@@ -1,6 +1,6 @@
 import type { ToolEntry, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { applyModifications, quotedId, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { isStepIdShape, OUTSIDE_SHAPE, STEP_ID_MAX } from '../../orchestrator/step-id.js';
+import { isReservedStepId, isStepIdShape, OUTSIDE_SHAPE, reservedStepIdsInWords, runStepIds, STEP_ID_MAX } from '../../orchestrator/step-id.js';
 import { getPipeline, forgetPipeline, buildManifest } from './pipeline.js';
 import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
@@ -51,10 +51,10 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
           items: {
             type: 'object',
             properties: {
-              action: { type: 'string', enum: ['remove', 'update_task', 'add_step', 'rename_step'] },
+              action: { type: 'string', enum: ['remove', 'update_task', 'add_step', 'rename_step', 'set_input_from'] },
               step_id: { type: 'string', description: 'Target step id or "#2" (position); new id for add_step.' },
               value: { type: 'string', description: 'New task text, or new id for rename_step.' },
-              input_from: { type: 'array', items: { type: 'string' }, description: 'add_step: dependency step ids.' },
+              input_from: { type: 'array', items: { type: 'string' }, description: 'Step ids it reads (add_step; set_input_from replaces the list).' },
               after: { type: 'string', description: 'add_step: insert after this step id (default: append).' },
             },
             required: ['action', 'step_id'],
@@ -140,13 +140,17 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const fixes: string[] = [];
     const named = new Set<number>();
     let outsideShape = false;
+    let reservedId = false;
     const shapeFix = new Map<number, string>();
     let hiddenText = false;
     steps.forEach((s, i) => {
       // An id with a character that does not show is outside the shape too: named by its position alone.
-      if (findHiddenInName(s.id, 'id') !== null) { named.add(i); hiddenText = true; fixes.push(`rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id in that form, for example fetch_orders; the steps that read it follow`); }
+      if (findHiddenInName(s.id, 'id') !== null) { named.add(i); hiddenText = true; fixes.push(`rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id of 1 to ${STEP_ID_MAX} characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow`); }
       // An id stored before step ids had a shape (`step-id.ts`): named by its position, never its text.
-      else if (!isStepIdShape(s.id)) { named.add(i); outsideShape = true; shapeFix.set(i, `rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id in that form, for example fetch_orders; the steps that read it follow`); fixes.push(shapeFix.get(i)!); }
+      else if (!isStepIdShape(s.id)) { named.add(i); outsideShape = true; shapeFix.set(i, `rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id of 1 to ${STEP_ID_MAX} characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow`); fixes.push(shapeFix.get(i)!); }
+      // An id a run already uses for something else (`RESERVED_STEP_IDS`), stored before a save refused it:
+      // no run starts while it is there (`runManifest`), so the rename is the way out.
+      else if (isReservedStepId(s.id)) { named.add(i); reservedId = true; shapeFix.set(i, `rename_step for step #${i + 1} (a reserved id): step_id "#${i + 1}", value a new id of 1 to ${STEP_ID_MAX} characters (a-z, 0-9, _ or -), other than ${reservedStepIdsInWords()}, for example fetch_orders; the steps that read it follow`); fixes.push(shapeFix.get(i)!); }
       if (findHiddenChar(s.task) !== null) { named.add(i); hiddenText = true; fixes.push(`update_task for step #${i + 1}: step_id "#${i + 1}", value its task typed again in your own words`); }
     });
     // A step stored with the id `#<n>` is what `#<n>` names (`stepIndex`): each one that takes a
@@ -165,6 +169,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       const why = [
         ...(hiddenText ? ['text saved with a character that does not show'] : []),
         ...(outsideShape ? [`a step id saved before step ids were limited to 1 to ${String(STEP_ID_MAX)} characters (lowercase a-z, digits 0-9, _ or -)`] : []),
+        ...(reservedId ? ['a step id a run already uses for something else ("params", "__proto__" or "constructor")'] : []),
       ].join(', and ');
       return `Error: This workflow holds ${why}, which a save now refuses. Nothing was saved. Call again with this call's modifications and, after them:\n${fixes.map(f => `- ${f}`).join('\n')}`;
     }
@@ -182,8 +187,10 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     // BEFORE persisting, so a structurally broken edit is rejected here at save
     // rather than deferred to a failed cron run. The run-volatile path validates
     // the same way (executePipelineById → buildManifest → validateManifest).
+    // Every id is in the shape here, but a stored `input_from` entry outside it that names no step
+    // is not: the check sees it as `unknown-step-<j>`, so its refusal does not quote it.
     try {
-      validateManifest(buildManifest(planned.name, steps, planned.on_failure ?? 'stop'));
+      validateManifest(buildManifest(planned.name, runStepIds(steps), planned.on_failure ?? 'stop'));
     } catch (err: unknown) {
       return `Error: The edit produces an invalid workflow: ${getErrorMessage(err)}`;
     }

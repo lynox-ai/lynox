@@ -1,8 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { setLocale, getLocale } from '../i18n.svelte.js';
+import { setLocale, getLocale, t } from '../i18n.svelte.js';
 import { startPausedPlansNav } from '../stores/paused-plans.svelte.js';
+import { noteSettingsViewer, resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
+
+// A margin or a padding class of any side or axis, also behind variants (`sm:`, `hover:`) and `!`:
+// `m`/`p` with one of `lrxytbse`, `bs` or `be`, or none. Not `max-w-`, `min-w-`, `place-`, `pointer-`.
+const MARGIN_CLASS = /^(?:[^:\s]+:)*!?-?m(?:[lrxytbse]|bs|be)?-/;
+const PADDING_CLASS = /^(?:[^:\s]+:)*!?-?p(?:[lrxytbse]|bs|be)?-/;
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -36,16 +42,36 @@ let countReads = 0;
 const posts: unknown[] = [];
 const before = getLocale();
 
+// A plan the owner alone set up and changed.
+const OWN = { created_by: 'owner', edited_by: 'owner', mandate_editor: undefined } as const;
 const PAUSED = {
 	id: 'p1', title: 'Wochenreport', status: 'open', effect: 'run_agent', source: 'cron', confirmed_at: '2026-10-01T00:00:00.000Z',
-	paused: true, paused_who: ['ida@treuhand-mueller-partner.ch'],
-	paused_ended: [{ email: 'ida@treuhand-mueller-partner.ch', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: false }],
+	created_by: 'mandate:ida@example.invalid',
+	paused: true, paused_who: ['ida@example.invalid'],
+	paused_ended: [{ email: 'ida@example.invalid', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: false }],
 };
 const PREVIEW = {
 	expect: 'digest-1', refusal: null,
-	members: [{ name: 'ida@treuhand-mueller-partner.ch', roles: ['created'], ended: true, reason: 'expired' }],
+	members: [{ name: 'ida@example.invalid', roles: ['created'], ended: true, reason: 'expired' }],
 	runsAs: 'owner', workflow: null, memberChanges: [], alsoReleased: [], connections: [], schedule: 'kept', dueAt: null,
 };
+
+
+/**
+ * Every text of `root` that names one of the `FX-` values: [the value, whether it sits inside a set-apart value].
+ * The values are the fixture's own, so a value anywhere else in a sentence shows here as `false`.
+ */
+function foreignPlaces(root: Element): Array<[string, boolean]> {
+	const out: Array<[string, boolean]> = [];
+	const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	for (let n = walk.nextNode(); n !== null; n = walk.nextNode()) {
+		const box = n.parentElement?.closest('bdi[data-foreign-value]') ?? null;
+		for (const m of (n.textContent ?? '').matchAll(/FX-[a-z0-9]+/g)) {
+			out.push([m[0], box !== null && /\bfont-mono\b|\bbg-bg-muted\b/.test(box.className)]);
+		}
+	}
+	return out;
+}
 
 const json = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -141,14 +167,58 @@ describe('a completed plan that keeps its pause', () => {
 	});
 });
 
-describe('Run now at a paused plan (ux U-179)', () => {
-	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
-	it('is not offered at a completed plan that keeps its pause', async () => {
+describe('a completed plan that keeps its pause (U-275)', () => {
+	const mark = (): Element | null => target.querySelector('[data-trigger-paused-done]');
+	const hint = (): Element | null => target.querySelector('[data-trigger-paused-done-hint]');
+	it('is marked completed and paused, and its line names the way there is: a new plan, after the workflow\'s takeover where it needs one', async () => {
 		rows = [{ ...PAUSED, status: 'completed' }];
 		await render();
-		// The row is there, so the button is missing at it, not with an empty list.
+		expect(mark()?.textContent).toBe('Abgeschlossen · pausiert');
+		expect(hint()?.textContent).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an. Läuft er auf einem Workflow, den die Person mit dem beendeten Zugang angelegt oder zuletzt geändert hat, übernimm vorher den Workflow unter „Workflows“ mit „Workflow übernehmen“.');
+		expect(target.querySelector('[data-trigger-paused]')).toBeNull();
+	});
+	it('tells a helper that the workflow\'s takeover is the owner\'s, as its button is (U-275)', async () => {
+		viewer = 'mandate';
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		expect(mark()?.textContent).toBe('Abgeschlossen · pausiert');
+		expect(hint()?.textContent).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an. Läuft er auf einem Workflow, den die Person mit dem beendeten Zugang angelegt oder zuletzt geändert hat, muss der Inhaber vorher den Workflow übernehmen.');
+	});
+	it('tells the owner the list does not name the way to the workflow\'s takeover, once the session says owner (U-275)', async () => {
+		viewer = 'none';
+		noteSettingsViewer({ viewer: 'owner' });
+		try {
+			rows = [{ ...PAUSED, status: 'completed' }];
+			await render();
+			expect(hint()?.textContent).toContain('übernimm vorher den Workflow unter „Workflows“ mit „Workflow übernehmen“.');
+		} finally {
+			resetSettingsViewer();
+		}
+	});
+	it('an open paused plan keeps the takeover mark, and neither the completed mark nor its line', async () => {
+		await render();
+		expect(target.querySelector('[data-trigger-paused]')).not.toBeNull();
+		expect(mark()).toBeNull();
+		expect(hint()).toBeNull();
+	});
+	it('a completed plan without a pause has neither', async () => {
+		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await render();
+		expect(target.textContent).toContain('Wochenreport');
+		expect(mark()).toBeNull();
+		expect(hint()).toBeNull();
+	});
+});
+
+describe('Run now at a paused plan (ux U-179)', () => {
+	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
+	it('is not offered at a completed plan that keeps its pause, nor is its switch (U-275)', async () => {
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		// The row is there, so the buttons are missing at it, not with an empty list.
 		expect(target.textContent).toContain('Wochenreport');
 		expect(runNow()).toBeNull();
+		expect(target.querySelector('[data-trigger-toggle]')).toBeNull();
 	});
 	it('is not offered to a helper there either, who is told the pause without the names', async () => {
 		viewer = 'mandate';
@@ -157,17 +227,59 @@ describe('Run now at a paused plan (ux U-179)', () => {
 		await render();
 		expect(target.textContent).toContain('Wochenreport');
 		expect(runNow()).toBeNull();
-		// The same row, open: the helper has the button, so its absence above is the pause's.
+		// The same row, not paused: the helper has the button, so its absence above is the pause's.
 		unmount(component!);
 		component = undefined;
-		rows = [{ ...row, status: 'open' }];
+		rows = [{ ...row, status: 'open', paused: false }];
 		await render();
 		expect(runNow()).not.toBeNull();
 	});
-	it('stays at an open paused plan, where the refusal names the takeover the row offers', async () => {
+});
+
+describe('a plan that waits for its takeover (U-410)', () => {
+	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
+	const toggle = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-toggle]');
+	const ownerLine = (): HTMLElement | null => target.querySelector<HTMLElement>('[data-trigger-paused-owner]');
+	it('offers the owner the takeover and neither Run now nor Pause, and no line for a helper', async () => {
 		await render();
-		expect(runNow()?.textContent).toContain('Jetzt ausführen');
-		expect(button()).not.toBeNull();
+		expect(button()?.textContent?.trim()).toBe('Übernehmen');
+		expect([runNow(), toggle(), ownerLine()]).toEqual([null, null, null]);
+	});
+	it('hides Resume too where the owner had paused the plan before', async () => {
+		rows = [{ ...PAUSED, enabled: 0 }];
+		await render();
+		expect(target.textContent).toContain('Wochenreport');
+		expect([runNow(), toggle()]).toEqual([null, null]);
+	});
+	it('tells a helper, visibly under the badge, who lets it run again, with neither button, in DE and EN', async () => {
+		viewer = 'mandate';
+		await render();
+		expect([button(), runNow(), toggle()]).toEqual([null, null, null]);
+		expect(ownerLine()?.textContent).toBe('Pausiert, bis der Inhaber den Plan übernimmt.');
+		expect(ownerLine()?.previousElementSibling?.querySelector('[data-trigger-paused]')).not.toBeNull();
+		unmount(component!);
+		component = undefined;
+		setLocale('en');
+		await render();
+		expect(ownerLine()?.textContent).toBe('Paused until the owner takes the plan over.');
+		// Not at a bulk run, which no takeover lets run again (the engine never pauses one).
+		unmount(component!);
+		component = undefined;
+		rows = [{ ...PAUSED, effect: 'bulk_apply' }];
+		await render();
+		// The row is there with its badge, so the line is missing at it, not with an empty list.
+		expect(target.querySelector('[data-trigger-paused]')).not.toBeNull();
+		expect(ownerLine()).toBeNull();
+	});
+	it('gives back both buttons, and no line, once the plan is not paused', async () => {
+		for (const v of ['owner', 'mandate']) {
+			viewer = v;
+			rows = [{ ...PAUSED, paused: false, paused_who: undefined, paused_ended: undefined }];
+			await render();
+			expect([runNow() !== null, toggle()?.textContent?.trim(), ownerLine()]).toEqual([true, 'Pausieren', null]);
+			unmount(component!);
+			component = undefined;
+		}
 	});
 	it('stays at a completed plan that is not paused', async () => {
 		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
@@ -176,11 +288,80 @@ describe('Run now at a paused plan (ux U-179)', () => {
 	});
 });
 
+describe('Delete and the switch at a paused plan, which the route refuses to a helper', () => {
+	const del = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-delete]');
+	const toggle = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-toggle]');
+	// What a helper's list carries for a paused plan: the pause, not whose access ended (owner only).
+	const HELPER_PAUSED = { ...PAUSED, paused_who: undefined, paused_ended: undefined };
+	const remount = async (): Promise<void> => {
+		unmount(component!);
+		component = undefined;
+		await render();
+	};
+	afterEach(() => { resetSettingsViewer(); });
+	it('offers a helper neither at a paused plan, open or completed', async () => {
+		viewer = 'mandate';
+		rows = [HELPER_PAUSED];
+		await render();
+		// The row is there with its badge, so the buttons are missing at it, not with an empty list.
+		expect(target.querySelector('[data-trigger-paused]')).not.toBeNull();
+		expect([del(), toggle()]).toEqual([null, null]);
+		rows = [{ ...HELPER_PAUSED, status: 'completed' }];
+		await remount();
+		expect(target.textContent).toContain('Wochenreport');
+		expect([del(), toggle()]).toEqual([null, null]);
+	});
+	it('keeps Delete for the owner at a paused plan, open or completed, and offers no switch there', async () => {
+		await render();
+		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
+		// Completed, the plan never runs again, as its line says (U-275): a switch would say otherwise.
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await remount();
+		expect(target.querySelector('[data-trigger-paused-done-hint]')).not.toBeNull();
+		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
+		// Nor a Resume where the owner had also switched it off before: it still never runs again.
+		rows = [{ ...PAUSED, status: 'completed', enabled: 0 }];
+		await remount();
+		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
+		// Nor at a plan completed without a pause: it never runs again either (U-275 N6).
+		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await remount();
+		expect([del()?.textContent?.trim(), toggle()]).toEqual(['Löschen', null]);
+		// CONTROL: the same plan open, without a pause, keeps its switch.
+		rows = [{ ...PAUSED, status: 'open', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await remount();
+		expect(toggle()?.textContent?.trim()).toBe('Pausieren');
+	});
+	it('keeps the switch at an open plan the owner paused, which no ended access paused, and not at a completed one', async () => {
+		// `enabled: 0` is the owner's own pause; `paused` is the one an ended access set.
+		rows = [{ ...PAUSED, status: 'open', enabled: 0, paused: false, paused_who: undefined, paused_ended: undefined }];
+		await render();
+		expect(toggle()?.textContent?.trim()).toBe('Fortsetzen');
+		rows = [{ ...PAUSED, status: 'completed', enabled: 0, paused: false, paused_who: undefined, paused_ended: undefined }];
+		await remount();
+		expect(target.textContent).toContain('Wochenreport');
+		expect(toggle()).toBeNull();
+	});
+	it('keeps Delete for the owner the list does not name, once the session says owner', async () => {
+		viewer = 'none';
+		noteSettingsViewer({ viewer: 'owner' });
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		expect(del()?.textContent?.trim()).toBe('Löschen');
+	});
+	it('gives a helper both at a plan that is not paused', async () => {
+		viewer = 'mandate';
+		rows = [{ ...HELPER_PAUSED, paused: false }];
+		await render();
+		expect([del()?.textContent?.trim(), toggle()?.textContent?.trim()]).toEqual(['Löschen', 'Pausieren']);
+	});
+});
+
 describe('the notice of an ended access', () => {
 	it('says the full address, which the push shortens, and that there was no advance notice', async () => {
 		await render();
 		const notice = target.querySelector('[data-paused-notice]')?.textContent ?? '';
-		expect(notice).toContain('Für ida@treuhand-mueller-partner.ch war ein Zugang bis zum 31.10.2026 eingetragen.');
+		expect(notice).toContain('Für ida@example.invalid war ein Zugang bis zum 31.10.2026 eingetragen.');
 		expect(notice.endsWith('Eine Vorwarnung gab es nicht.')).toBe(true);
 	});
 	it('is not shown to a helper, even if an answer carried the data', async () => {
@@ -204,6 +385,125 @@ describe('the notice of an ended access', () => {
 });
 
 describe('the confirmation', () => {
+	it('sets the title apart on a plan with a takeover to give or one a person with access wrote, and on no plan of the owner\'s alone', async () => {
+		const live = { paused: false, paused_who: undefined, paused_ended: undefined };
+		rows = [
+			PAUSED,
+			{ ...PAUSED, ...live, id: 'p2', title: 'Monatsabschluss', created_by: 'mandate:ida@example.invalid' },
+			{ ...PAUSED, ...live, id: 'p3', title: 'Eigener Plan', created_by: 'owner', edited_by: 'owner', mandate_editor: undefined },
+		];
+		await render();
+		const titleBox = (title: string): Element | null | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === title)?.querySelector('bdi[data-foreign-value]');
+		expect(titleBox('Wochenreport')?.textContent).toBe('Wochenreport');
+		expect(titleBox('Monatsabschluss')?.textContent).toBe('Monatsabschluss');
+		expect(titleBox('Eigener Plan')).toBeNull();
+	});
+
+	it('sets every paused title apart, and puts lynox\'s words before it only where the list says it is the workflow\'s name', async () => {
+		const ida = 'mandate:ida@example.invalid';
+		rows = [
+			// The owner's plan may run a workflow someone else named, and carry that name: boxed too.
+			{ ...PAUSED, created_by: 'owner', id: 'o1', title: 'Owner plan' },
+			// Titled with its workflow's name by the engine, now (the name alone) and before (prefixed).
+			{ ...PAUSED, id: 'w1', title: 'Wochenbericht', title_workflow: 'Wochenbericht', edited_by: ida },
+			{ ...PAUSED, created_by: 'owner', id: 'w2', title: 'Scheduled: Monatsbericht', title_workflow: 'Monatsbericht' },
+			// A title that starts with the prefix is whole in its box, the owner's own plan's too:
+			// only the list says a title is the workflow's name, never the title's text.
+			{ ...PAUSED, created_by: 'owner', id: 'f1', title: 'Scheduled: Forged' },
+			{ ...PAUSED, id: 'f2', title: 'Scheduled: Mandate made', created_by: ida },
+		];
+		await render();
+		const title = (t: string): Element | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === t);
+		const boxed: Array<[string, string]> = [
+			['Owner plan', 'Owner plan'],
+			['Geplant: Wochenbericht', 'Wochenbericht'],
+			['Geplant: Monatsbericht', 'Monatsbericht'],
+			['Scheduled: Forged', 'Scheduled: Forged'],
+			['Scheduled: Mandate made', 'Scheduled: Mandate made'],
+		];
+		for (const [line, value] of boxed) {
+			const box = title(line)?.querySelector('bdi[data-foreign-value]');
+			expect(box?.textContent, line).toBe(value);
+			// One box per line: lynox's words stand outside it.
+			expect(title(line)!.querySelectorAll('bdi[data-foreign-value]').length, line).toBe(1);
+			// A grey box in the list's font: the title keeps its width.
+			expect(box!.classList.contains('bg-bg-muted'), line).toBe(true);
+			expect(box!.classList.contains('font-mono'), line).toBe(false);
+			// No space of its own outside; 4 px inside, on each line of a wrapped title.
+			expect([...box!.classList].filter((c) => MARGIN_CLASS.test(c)), line).toEqual([]);
+			expect([...box!.classList].filter((c) => PADDING_CLASS.test(c)), line).toEqual(['px-1']);
+			expect(box!.classList.contains('box-decoration-clone'), line).toBe(true);
+			// Its 1 px edge, the part of the box that shows on the measured grounds.
+			expect(box!.classList.contains('border'), line).toBe(true);
+			expect(box!.classList.contains('border-text-subtle'), line).toBe(true);
+		}
+	});
+
+	it('says lynox\'s words before a workflow\'s name in the reader\'s language, on a paused plan and in the list', async () => {
+		const plans = [
+			{ ...PAUSED, id: 'w1', title: 'Wochenbericht', title_workflow: 'Wochenbericht' },
+			{ ...PAUSED, ...OWN, id: 'w2', title: 'Monatsbericht', title_workflow: 'Monatsbericht', paused: false, paused_who: undefined, paused_ended: undefined },
+			{ ...PAUSED, ...OWN, id: 'f1', title: 'Scheduled: Forged', paused: false, paused_who: undefined, paused_ended: undefined },
+			// Not paused, but a person with access set it up: the owner's list sets its title apart too.
+			{ ...PAUSED, id: 'm1', title: 'Quartal', title_workflow: 'Quartal', paused: false, paused_who: undefined, paused_ended: undefined },
+			{ ...PAUSED, id: 'm2', title: 'Scheduled: Forged too', paused: false, paused_who: undefined, paused_ended: undefined },
+		];
+		const lines = (): string[] => [...target.querySelectorAll('p[data-trigger-title]')].map((e) => (e.textContent ?? '').trim());
+		rows = plans;
+		await render();
+		expect(lines()).toEqual(['Geplant: Wochenbericht', 'Geplant: Monatsbericht', 'Scheduled: Forged', 'Geplant: Quartal', 'Scheduled: Forged too']);
+		unmount(component!);
+		target.replaceChildren();
+		setLocale('en');
+		await render();
+		expect(lines()).toEqual(['Scheduled: Wochenbericht', 'Scheduled: Monatsbericht', 'Scheduled: Forged', 'Scheduled: Quartal', 'Scheduled: Forged too']);
+		// In English as in German: on the paused plan and on a plan a person with access set up, the
+		// workflow's name is boxed and lynox's words stand outside; a title that only starts with
+		// them is boxed whole. The owner's own plans in the list show no box.
+		const boxes = [...target.querySelectorAll('p[data-trigger-title]')].map((e) => [...e.querySelectorAll('bdi[data-foreign-value]')].map((b) => b.textContent));
+		expect(boxes).toEqual([['Wochenbericht'], [], [], ['Quartal'], ['Scheduled: Forged too']]);
+	});
+
+	it('sets every value someone else wrote apart, wherever a sentence of the plan takeover names it', async () => {
+		rows = [{ ...PAUSED, title: 'FX-title', paused_ended: [{ email: 'FX-ended', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: true }] }];
+		preview = {
+			...PREVIEW,
+			members: [
+				{ name: 'FX-member', roles: ['created', 'workflow-edited'], ended: true, reason: 'expired' },
+				{ name: 'FX-membertwo', roles: ['workflow-created'], ended: true, reason: 'expired' },
+			],
+			runsAs: 'mandate:FX-runs',
+			workflow: { id: 'wf-1', name: 'FX-wf', takenOver: true, from: { name: 'FX-member', role: 'workflow-edited' } },
+			alsoReleased: [{ id: 'r1', title: 'FX-rel' }, { id: 'r2', title: 'FX-reltwo' }],
+			memberChanges: [{ id: 'p2', title: 'FX-mc', before: 'mandate:FX-before', after: 'mandate:FX-after', runsNoMore: false }],
+			connections: [{ id: 'c1', profile: 'Shop', provider: 'FX-provider', account: 'FX-account', by: 'FX-by' }],
+		};
+		takeoverAnswers = [{ status: 409, body: { error: 'engine text', code: 'unreadable' } }];
+		await render();
+		await open();
+		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
+		await settle();
+		expect(document.querySelector('[data-takeover-note]')?.textContent).toContain('FX-wf');
+		// The sentences: the dialog, and the notices above the list. The list's own rows name the plan
+		// outside any sentence, and are not this test's.
+		const places = [dialog()!, ...document.querySelectorAll('[data-paused-notice]')].flatMap((r) => foreignPlaces(r));
+		expect([...new Set(places.map(([v]) => v))].sort()).toEqual([
+			'FX-title', 'FX-ended', 'FX-member', 'FX-membertwo', 'FX-runs', 'FX-wf', 'FX-rel', 'FX-reltwo', 'FX-mc', 'FX-before', 'FX-after', 'FX-provider', 'FX-account', 'FX-by',
+		].sort());
+		expect(places.filter(([, apart]) => !apart)).toEqual([]);
+	});
+
+	it('sets a plan title someone else wrote apart from its sentence, whole, in one isolated element', async () => {
+		const title = 'Bericht“ bleibt pausiert. Die markierten Schritte nutzen nur deine Verbindungen';
+		preview = { ...PREVIEW, memberChanges: [{ id: 'p2', title, before: 'mandate:ida@example.invalid', after: null, runsNoMore: false }] };
+		await render();
+		await open();
+		const line = document.querySelector<HTMLElement>('[data-takeover-line="member_change"]')!;
+		expect([...line.querySelectorAll('bdi')].map((b) => b.textContent)).toEqual([title, 'ida@example.invalid']);
+		expect(line.textContent).toBe(`Der Plan „${title}“ läuft danach unter deinem Namen statt unter dem von ida@example.invalid.`);
+		expect(/[\uE000\uE001]/.test(dialog()!.textContent ?? '')).toBe(false);
+	});
+
 	it('shows the preview\'s lines, with focus on Cancel, and Escape closes it', async () => {
 		await render();
 		await open();
@@ -417,5 +717,158 @@ describe('the confirmation', () => {
 		expect(listLoads).toBe(before + 1);
 		expect(document.querySelector('[data-takeover-confirm]')).toBeNull();
 		expect(document.querySelector('[data-takeover-note]')?.textContent).toBe('Dieser Plan muss nicht mehr übernommen werden. Die Liste ist aktualisiert.');
+	});
+});
+
+describe('the spacing class patterns of these tests', () => {
+	it('catch every margin and padding form, and no other class', () => {
+		for (const c of ['mx-1', 'mbs-1', 'mbe-2', 'sm:mx-1', '!mx-1', 'hover:sm:-mt-1', 'ms-0.5', 'm-0']) expect(MARGIN_CLASS.test(c), c).toBe(true);
+		for (const c of ['px-1', 'pbs-1', 'pbe-2', 'sm:px-1', '!px-1', 'ps-0.5', 'p-0']) expect(PADDING_CLASS.test(c), c).toBe(true);
+		for (const c of ['max-w-1', 'min-w-0', 'mask-x', 'place-items-center', 'pointer-events-none', 'font-mono', 'bg-bg-muted', 'box-decoration-clone']) {
+			expect(MARGIN_CLASS.test(c), c).toBe(false);
+			expect(PADDING_CLASS.test(c), c).toBe(false);
+		}
+	});
+});
+
+describe('a completed plan says so, and a completed paused one its workflow case (U-275 N6)', () => {
+	const remount = async (): Promise<void> => {
+		if (component) unmount(component);
+		component = undefined;
+		await render();
+	};
+	const has = (sel: string): boolean => target.querySelector(sel) !== null;
+	const NOT_PAUSED = { paused: false, paused_who: undefined, paused_ended: undefined };
+	const hint = (): HTMLElement | null => target.querySelector<HTMLElement>('[data-trigger-paused-done-hint]');
+	const text = (): string => (hint()?.textContent ?? '').replace(/\s+/g, ' ').trim();
+	const DONE_WF = { ...PAUSED, status: 'completed', effect: 'run_workflow', pipeline_id: 'wf-1' };
+
+	it('marks a completed plan "Completed", and a completed paused one with its own mark only', async () => {
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'completed' }];
+		await render();
+		expect(target.querySelector('[data-trigger-completed]')?.textContent?.trim()).toBe('Abgeschlossen');
+		expect([has('[data-trigger-paused-done]'), has('[data-trigger-switched-off]')]).toEqual([false, false]);
+		// CONTROL: an open plan has no such mark.
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'open' }];
+		await remount();
+		expect(target.textContent).toContain('Wochenreport');
+		expect(has('[data-trigger-completed]')).toBe(false);
+		// Completed and paused, also switched off by the owner: one mark, "Completed · paused".
+		rows = [{ ...PAUSED, status: 'completed', enabled: 0 }];
+		await remount();
+		expect(target.querySelector('[data-trigger-paused-done]')?.textContent?.trim()).toBe('Abgeschlossen · pausiert');
+		expect([has('[data-trigger-switched-off]'), has('[data-trigger-completed]')]).toEqual([false, false]);
+		// Completed and switched off by the owner, without a pause: "Completed" alone, no "Paused".
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'completed', enabled: 0 }];
+		await remount();
+		expect(target.querySelector('[data-trigger-completed]')?.textContent?.trim()).toBe('Abgeschlossen');
+		expect(has('[data-trigger-switched-off]')).toBe(false);
+		// CONTROL: an open plan the owner switched off keeps "Paused".
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'open', enabled: 0 }];
+		await remount();
+		expect(target.querySelector('[data-trigger-switched-off]')?.textContent?.trim()).toBe('Pausiert');
+		setLocale('en');
+		rows = [{ ...PAUSED, ...NOT_PAUSED, status: 'completed' }];
+		await remount();
+		expect(target.querySelector('[data-trigger-completed]')?.textContent?.trim()).toBe('Completed');
+	});
+
+	it('tells the owner which workflow to take over first, by name, or that a new plan is all, or the condition when unknown', async () => {
+		const tab = t('hub.automation.workflows');
+		const btn = t('workflow_library.takeover.button');
+		rows = [{ ...DONE_WF, paused_done_workflow: { name: 'FX-monat' } }];
+		await render();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('workflow');
+		expect(text()).toBe(`Ein Zugang endete. Soll der Plan wieder laufen, übernimm zuerst den Workflow FX-monat unter „${tab}“ mit „${btn}“ und leg dann einen neuen Plan an.`);
+		// The name is someone else's value: set apart, and nowhere else in the line.
+		expect(foreignPlaces(hint()!)).toEqual([['FX-monat', true]]);
+		rows = [{ ...DONE_WF, paused_done_workflow: { name: null } }];
+		await remount();
+		expect(text()).toBe(`Ein Zugang endete. Soll der Plan wieder laufen, übernimm zuerst seinen Workflow unter „${tab}“ mit „${btn}“ und leg dann einen neuen Plan an.`);
+		rows = [{ ...DONE_WF, paused_done_workflow: null }];
+		await remount();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('none');
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.');
+		// An engine that could not read the case, or an older one: the condition, as before.
+		rows = [{ ...DONE_WF }];
+		await remount();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('unknown');
+		expect(text()).toContain('Läuft er auf einem Workflow, den die Person mit dem beendeten Zugang angelegt oder zuletzt geändert hat');
+		setLocale('en');
+		rows = [{ ...DONE_WF, paused_done_workflow: { name: 'FX-monat' } }];
+		await remount();
+		expect(text()).toBe(`An access ended. If the plan should run again, first take over the workflow FX-monat under “${t('hub.automation.workflows')}” with “${t('workflow_library.takeover.button')}”, then create a new plan.`);
+		rows = [{ ...DONE_WF, paused_done_workflow: null }];
+		await remount();
+		expect(text()).toBe('An access ended. If the plan should run again, create a new one.');
+	});
+
+	it('tells a person with access that the owner takes the workflow over first, and what they can do then', async () => {
+		viewer = 'mandate';
+		const HELPER = { ...DONE_WF, paused_who: undefined, paused_ended: undefined };
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat' } }];
+		await render();
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, muss der Inhaber zuerst den Workflow FX-monat übernehmen; bitte ihn darum. Danach kannst du einen neuen Plan anlegen.');
+		expect(foreignPlaces(hint()!)).toEqual([['FX-monat', true]]);
+		rows = [{ ...HELPER, paused_done_workflow: { name: null } }];
+		await remount();
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, muss der Inhaber zuerst seinen Workflow übernehmen; bitte ihn darum. Danach kannst du einen neuen Plan anlegen.');
+		rows = [{ ...HELPER, paused_done_workflow: null }];
+		await remount();
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.');
+		rows = [{ ...HELPER }];
+		await remount();
+		expect(text()).toContain('muss der Inhaber vorher den Workflow übernehmen');
+		setLocale('en');
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat' } }];
+		await remount();
+		expect(text()).toBe('An access ended. If the plan should run again, the owner must first take over the workflow FX-monat; ask them to. After that, you can create a new plan.');
+	});
+
+	it('tells a person with access that a new plan on another live person\'s workflow is the owner\'s, or that lynox writes one of their own (U-489)', async () => {
+		viewer = 'mandate';
+		const HELPER = { ...DONE_WF, paused_who: undefined, paused_ended: undefined };
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat', refused: 'foreign' } }];
+		await render();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('foreign');
+		expect(text()).toBe('Ein Zugang endete. Den Workflow FX-monat hat eine andere Person mit Zugang angelegt oder zuletzt geändert, darum kannst du keinen neuen Plan darauf anlegen. Soll der Plan wieder laufen, bitte den Inhaber, einen neuen anzulegen, oder lass lynox im Chat einen eigenen Workflow für diese Aufgabe schreiben.');
+		expect(foreignPlaces(hint()!)).toEqual([['FX-monat', true]]);
+		rows = [{ ...HELPER, paused_done_workflow: { name: null, refused: 'foreign' } }];
+		await remount();
+		expect(text()).toBe('Ein Zugang endete. Seinen Workflow hat eine andere Person mit Zugang angelegt oder zuletzt geändert, darum kannst du keinen neuen Plan darauf anlegen. Soll der Plan wieder laufen, bitte den Inhaber, einen neuen anzulegen, oder lass lynox im Chat einen eigenen Workflow für diese Aufgabe schreiben.');
+		setLocale('en');
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat', refused: 'foreign' } }];
+		await remount();
+		expect(text()).toBe('An access ended. The workflow FX-monat was set up or last changed by another person with access, so you cannot create a new plan on it. If the plan should run again, ask the owner to create a new one, or have lynox write a workflow of your own for this task in chat.');
+		rows = [{ ...HELPER, paused_done_workflow: { name: null, refused: 'foreign' } }];
+		await remount();
+		expect(text()).toBe('An access ended. Its workflow was set up or last changed by another person with access, so you cannot create a new plan on it. If the plan should run again, ask the owner to create a new one, or have lynox write a workflow of your own for this task in chat.');
+	});
+
+	it('tells a person with access that only the owner may plan on a workflow whose setup lynox cannot read (U-489)', async () => {
+		viewer = 'mandate';
+		const HELPER = { ...DONE_WF, paused_who: undefined, paused_ended: undefined };
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat', refused: 'unreadable' } }];
+		await render();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('unreadable');
+		expect(text()).toBe('Ein Zugang endete. Beim Workflow FX-monat kann lynox nicht lesen, wer ihn angelegt hat, darum darf nur der Inhaber einen neuen Plan darauf anlegen. Soll der Plan wieder laufen, bitte ihn darum, oder lass lynox im Chat einen eigenen Workflow für diese Aufgabe schreiben.');
+		expect(foreignPlaces(hint()!)).toEqual([['FX-monat', true]]);
+		rows = [{ ...HELPER, paused_done_workflow: { name: null, refused: 'unreadable' } }];
+		await remount();
+		expect(text()).toBe('Ein Zugang endete. Bei seinem Workflow kann lynox nicht lesen, wer ihn angelegt hat, darum darf nur der Inhaber einen neuen Plan darauf anlegen. Soll der Plan wieder laufen, bitte ihn darum, oder lass lynox im Chat einen eigenen Workflow für diese Aufgabe schreiben.');
+		setLocale('en');
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat', refused: 'unreadable' } }];
+		await remount();
+		expect(text()).toBe('An access ended. lynox cannot read who set up the workflow FX-monat, so only the owner may create a new plan on it. If the plan should run again, ask them to, or have lynox write a workflow of your own for this task in chat.');
+		rows = [{ ...HELPER, paused_done_workflow: { name: null, refused: 'unreadable' } }];
+		await remount();
+		expect(text()).toBe('An access ended. lynox cannot read who set up its workflow, so only the owner may create a new plan on it. If the plan should run again, ask them to, or have lynox write a workflow of your own for this task in chat.');
+	});
+
+	it('CONTROL: the owner reads "create a new one" where the engine marks a refusal, which is never the owner\'s', async () => {
+		rows = [{ ...DONE_WF, paused_done_workflow: { name: 'FX-monat', refused: 'foreign' } }];
+		await render();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('none');
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.');
 	});
 });
