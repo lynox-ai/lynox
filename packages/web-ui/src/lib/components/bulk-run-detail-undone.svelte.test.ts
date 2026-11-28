@@ -228,6 +228,18 @@ describe('an undone run’s page', () => {
 		}
 	});
 
+	it('points the incomplete rollback\'s sentence at the mark „not taken back“ by its name, beside a target marked taken back', async () => {
+		const before = getLocale();
+		setLocale('de');
+		onTestFinished(() => setLocale(before));
+		run = makeRun({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete', atomic: true, undoneBy: null, haltReason: 'atomicRollbackIncomplete' });
+		targets = [written(1, false), written(2, true)];
+		await render();
+		expect(target.textContent).toContain('Bei den Zielen mit der Marke ‚nicht zurückgenommen‘ hat lynox die Änderung nicht zurückgenommen.');
+		expect(target.textContent).not.toContain('Bei den markierten Zielen');
+		expect(takenBackMarks()).toEqual([undefined, 'zurückgenommen']);
+	});
+
 	it('one target reads in the singular', async () => {
 		const before = getLocale();
 		setLocale('de');
