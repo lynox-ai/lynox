@@ -2233,6 +2233,20 @@ describe('data-store runs', () => {
       const cells = engineDb.getDb().prepare('SELECT before_grants AS b, write_grants AS w FROM bulk_targets WHERE run_id = ?').get(undo.id);
       expect(cells).toEqual({ b: '["gA"]', w: '["gB","unknown"]' });
     });
+
+    it('the undo writes its source\'s title and both stamps each into its own column', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      const runId = await planFromCollection([{ target: 'S1', price: 99 }], ['gA'], agentWith(['gA']));
+      // Three different values, so a value written into a neighbouring column shows: all three are TEXT.
+      engineDb.getDb().prepare("UPDATE bulk_targets SET target_title = 'title-of-S1' WHERE run_id = ?").run(runId);
+      const source = engineDb.getDb().prepare('SELECT target_title AS t, before_grants AS b, write_grants AS w FROM bulk_targets WHERE run_id = ?').get(runId);
+      expect(source).toEqual({ t: 'title-of-S1', b: '["gB","unknown"]', w: null });
+      const undo = await undoOf(runId);
+      expect(undo.status).toBe('done');
+      const cells = engineDb.getDb().prepare('SELECT target_title AS t, before_grants AS b, write_grants AS w FROM bulk_targets WHERE run_id = ?').get(undo.id);
+      expect(cells).toEqual({ t: 'title-of-S1', b: '["gA"]', w: '["gB","unknown"]' });
+    });
   });
 
   it('a data-store run whose collection is gone halts as unavailable', async () => {
