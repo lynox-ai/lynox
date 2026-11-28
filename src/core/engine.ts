@@ -3658,11 +3658,14 @@ export class Engine {
    *   throw. `'bounded'` is for a process about to be killed: the backlog is classified for
    *   `SHUTDOWN_INBOX_CLASSIFY_MS` and the rest surfaced unclassified, and no inbox job outlasts
    *   `SHUTDOWN_INBOX_CUTOFF_MS`. Every other shutdown classifies the backlog, as before.
+   * @param options.deadlineFrom when the process's shutdown began, if it began before this call:
+   *   the `'bounded'` limits count from there, so what ran before (the chat runs ended first)
+   *   comes out of the same budget. A limit already past makes the inbox stop at once.
    */
-  async shutdown(options: { inboxBacklog?: 'classify' | 'dead-letter' | 'bounded' | undefined } = {}): Promise<void> {
+  async shutdown(options: { inboxBacklog?: 'classify' | 'dead-letter' | 'bounded' | undefined; deadlineFrom?: number | undefined } = {}): Promise<void> {
     const forRestore = options.inboxBacklog === 'dead-letter';
     this._inboxShutdownBegun = true;
-    const startedAt = Date.now();
+    const startedAt = options.deadlineFrom ?? Date.now();
     const within = options.inboxBacklog === 'bounded'
       ? { classifyUntil: startedAt + SHUTDOWN_INBOX_CLASSIFY_MS, cutOffAt: startedAt + SHUTDOWN_INBOX_CUTOFF_MS }
       : undefined;

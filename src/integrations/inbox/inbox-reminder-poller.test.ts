@@ -35,7 +35,7 @@ function insertReminderItem(subject: string, snoozeUntil: Date, opts: { reasonDe
     classifiedAt: new Date('2026-05-01'),
     classifierVersion: 'v',
     subject,
-  });
+  }).id;
   state.setSnooze(id, snoozeUntil, null, true, opts.notify ?? true);
   return id;
 }

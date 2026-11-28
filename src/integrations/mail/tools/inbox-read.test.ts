@@ -45,7 +45,7 @@ function item(over: Partial<Parameters<InboxRuntime['state']['insertItem']>[0]> 
     fromAddress: 'kunde@example.com', fromName: 'Max Kunde', snippet: 'Hallo, passt Ihnen Dienstag?',
     mailDate: new Date('2026-11-01T10:00:00Z'),
     ...over,
-  });
+  }).id;
 }
 
 async function call(input: Record<string, unknown>, agent: IAgent = watched): Promise<string> {
@@ -272,7 +272,7 @@ describe('inbox_read — what the inbox found at intake counts (B1)', () => {
         reasonDe: 'Bestätigung des Zugangs', classifiedAt: new Date(), classifierVersion: 'v1',
         subject: 'Ihr Zugang', snippet: `Hier: ${LINK}`, fromAddress: 'noreply@app.example.com' },
       { action: 'classified', actor: 'classifier', payloadJson: JSON.stringify({ bucket: 'draft_ready', sensitive_categories: ['password_reset'], sensitive_masked: true }) },
-    );
+    ).id;
     const out = await call({ action: 'item', id });
     expect(out).not.toContain(LINK);
     expect(out).toContain('(withheld: sensitive content — password_reset)');
@@ -287,7 +287,7 @@ describe('inbox_read — the intake finding reaches the stored copy of the same 
         reasonDe: 'Sensible Inhalte — manuell prüfen.', classifiedAt: new Date(), classifierVersion: 'sensitive-prefilter',
         subject: 'Ihr Zugang', messageId: '<new@x>', fromAddress: 'noreply@app.example.com' },
       { action: 'classified', actor: 'rule_engine', payloadJson: JSON.stringify({ sensitive_categories: ['password_reset'], sensitive_mode: 'skip' }) },
-    );
+    ).id;
     runtime.state.insertThreadMessage({
       accountId: 'acct-1', threadKey: 't-bf', messageId: '<old@x>', fromAddress: 'noreply@app.example.com',
       subject: 'Ihr Zugang', snippet: `Hier: ${LINK}`, inboxItemId: id,

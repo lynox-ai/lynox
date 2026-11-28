@@ -325,6 +325,16 @@ describe('ImapSmtpProvider — list: reply headers', () => {
     expect(e).toMatchObject({ threadKey: 'T-42', references: [] });
   });
 
+  it('sets the arrival from INTERNALDATE, not from the Date header the sender wrote', async () => {
+    probe.search.mockResolvedValue([3]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([makeFetchMessage({
+      uid: 3, envelope: { ...env(3), date: new Date('2020-01-01T00:00:00Z') }, internalDate: new Date('2026-11-24T08:05:00Z'),
+    })]));
+    const [e] = await new ImapSmtpProvider(ACCOUNT, credResolver).list({ folder: 'INBOX', limit: 10 });
+    expect(e?.date.toISOString(), 'date stays the header').toBe('2020-01-01T00:00:00.000Z');
+    expect(e?.arrivedAt?.toISOString()).toBe('2026-11-24T08:05:00.000Z');
+  });
+
   it('asks for References when it searches too', async () => {
     probe.search.mockResolvedValue([1]);
     probe.fetch.mockImplementation(() => asyncIterFrom([makeFetchMessage({ uid: 1 })]));

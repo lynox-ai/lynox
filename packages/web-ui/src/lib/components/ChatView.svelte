@@ -2916,10 +2916,13 @@
 					     API context (filtered at resume hydration). -->
 					{@const approvalLines = approvalNoteLines(msg.note.code, msg.note.approval, getApprovalsViewer())}
 					{@const noteKey = approvalLines?.bodyKey ?? `chat.note.${msg.note.code}`}
-					{@const noteBody = t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey)}
+					<!-- A message the content check did not send: its note carries the engine's sentence,
+					     the words the chat showed live, so that sentence is the body, not a debug line. -->
+					{@const refusedSentence = msg.note.code === 'content_refused' && msg.note.detail ? msg.note.detail : undefined}
+					{@const noteBody = refusedSentence ?? (t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey))}
 					{@const titleKey = `chat.note.${msg.note.code}.title`}
 					{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
-					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'thinking_loop' || msg.note.code === 'tool_call_imitation' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget' || msg.note.code === 'input_required' || msg.note.code === 'approval_sent' || msg.note.code === 'hold_exhausted'}
+					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'thinking_loop' || msg.note.code === 'tool_call_imitation' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget' || msg.note.code === 'input_required' || msg.note.code === 'approval_sent' || msg.note.code === 'hold_exhausted' || msg.note.code === 'content_refused'}
 					<div class="flex items-start gap-2 text-[13px] md:text-[12px] border-l-2 {isInfoNote ? 'border-border' : 'border-danger/40'} pl-3 py-1 my-1" role="status">
 						{#if isInfoNote}
 							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-text-subtle mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
@@ -2945,7 +2948,7 @@
 								</div>
 							{/if}
 							<!-- A hold_exhausted note's code carries the whole sentence; its detail is the engine's English copy of it. -->
-							{#if msg.note.detail && msg.note.code !== 'hold_exhausted'}
+							{#if msg.note.detail && msg.note.code !== 'hold_exhausted' && refusedSentence === undefined}
 								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>
 							{/if}
 						</div>
@@ -3486,7 +3489,7 @@
 					<ChangesetReview
 						files={pendingChangeset}
 						onReview={(action, rolledBackFiles) => submitChangesetReview(action, rolledBackFiles)}
-						messageWaiting={queueLength > 0}
+						messagesWaiting={queueLength}
 						{rollbackStopped}
 					/>
 				{/if}
