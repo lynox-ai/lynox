@@ -2850,6 +2850,153 @@ describe('data-store runs', () => {
     });
   });
 
+  describe('the outside-content mark of a run\'s writes (_written_untrusted)', () => {
+    const writerFor = (run: Parameters<typeof bulkWriterFor>[0]) => bulkWriterFor(run, store);
+    /** An agent whose turn had read outside content (`untrusted`) or not. */
+    const agentRead = (untrusted: boolean): IAgent => ({ ...agent(), sawExternalContentTool: untrusted } as unknown as IAgent);
+    const markOf = (sku: string): boolean | undefined => store.sourceOfRow('products', 'sku', sku)?.untrusted;
+    /** Add rows to the collection `staged` (made on first use), written with `untrusted`. */
+    const stage = (rows: { target: string; price: number }[], untrusted: boolean): void => {
+      if (!store.getCollectionInfo('staged')) {
+        store.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }, { name: 'price', type: 'number' }] });
+      }
+      store.insertRecords({ collection: 'staged', records: rows, stamp: { grants: ['gS'], runId: null, writtenBy: null, untrusted } });
+    };
+    const apply = async (out: string): Promise<string> => {
+      const runId = runIdOf(out);
+      approve(runId);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
+      return runId;
+    };
+    const planStaged = async (planner: IAgent): Promise<string> => apply(await bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'products', source_collection: 'staged' }, planner));
+    const undoOf = async (runId: string): Promise<string> => {
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      approve(undo.status.id);
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
+      return undo.status.id;
+    };
+
+    it('a row a run creates by copying a marked source row is marked, planned in a clean turn', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], false);
+      stage([{ target: 'NEW2', price: 2 }], true);
+      await planStaged(agentRead(false));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect([markOf('NEW1'), markOf('NEW2')]).toEqual([true, true]);
+    });
+
+    it('CONTROL: a run copying only unmarked rows, planned in a clean turn, leaves its rows unmarked', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], false);
+      await planStaged(agentRead(false));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(markOf('NEW1')).toBe(false);
+    });
+
+    it('a run planned in a turn that read outside content marks the rows it updates, from an unmarked source', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      expect(markOf('S1')).toBe(false);
+      stage([{ target: 'S1', price: 99 }], false);
+      await planStaged(agentRead(true));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'S1' } }).rows[0]).toMatchObject({ price: 99 });
+      expect(markOf('S1')).toBe(true);
+    });
+
+    it('a run planned from a file marks its rows, planned in a clean turn', async () => {
+      seedStore();
+      writeFileSync(join(ws, 'p.json'), JSON.stringify([{ target: 'NEW1', price: 1 }]));
+      await apply(await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, agentRead(false)));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(markOf('NEW1')).toBe(true);
+    });
+
+    it('a marked source row past the first read chunk still marks the run', async () => {
+      seedStore();
+      // 500 unmarked rows (one chunk of `BULK_QUERY_PAGE`), and the 501st marked.
+      stage(Array.from({ length: 500 }, (_, i) => ({ target: `N${String(i)}`, price: i })), false);
+      stage([{ target: 'N500', price: 500 }], true);
+      await planStaged(agentRead(false));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'N0' } }).rows).toHaveLength(1);
+      expect(markOf('N0')).toBe(true);
+    });
+
+    it('the undo of an undo re-creates a marked row marked, and an undo of a clean run stays clean', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], true);
+      const runId = await planStaged(agentRead(false));
+      expect(markOf('NEW1')).toBe(true);
+      const undo = await undoOf(runId);
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')).toBeNull();
+      expect(ledger.getRunForApply(undo)!.plannerUntrusted).toBe(true);
+      await undoOf(undo);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
+      expect(markOf('NEW1')).toBe(true);
+
+      store.dropCollection('products');
+      store.dropCollection('staged');
+      seedStore();
+      stage([{ target: 'NEW2', price: 2 }], false);
+      const clean = await planStaged(agentRead(false));
+      expect(ledger.getRunForApply(await undoOf(clean))!.plannerUntrusted).toBe(false);
+    });
+
+    it('a row a clean undo re-creates is marked, so a mark it held before its undo deleted it is not lost', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], false);
+      const runId = await planStaged(agentRead(false));
+      expect(markOf('NEW1')).toBe(false);
+      // A turn that read outside content writes the row again with the same values: it is marked,
+      // and the undo still finds the values it expects.
+      store.putRowVerbatim('products', { sku: 'NEW1', price: 1, owner: null }, { grants: ['gO'], runId: null, writtenBy: null, untrusted: true });
+      expect(markOf('NEW1')).toBe(true);
+      const undo = await undoOf(runId);
+      expect(ledger.getRunForApply(undo)!.plannerUntrusted).toBe(false);
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')).toBeNull();
+      await undoOf(undo);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
+      expect(markOf('NEW1')).toBe(true);
+
+      // The undo cannot tell which rows were marked when it deleted them (the before-image does
+      // not carry the mark), so it marks every row it re-creates — a clean one as well.
+      stage([{ target: 'NEW2', price: 2 }], false);
+      const clean = await planStaged(agentRead(false));
+      expect(markOf('NEW2')).toBe(false);
+      await undoOf(await undoOf(clean));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW2' } }).rows[0]).toMatchObject({ sku: 'NEW2', price: 2 });
+      expect(markOf('NEW2')).toBe(true);
+    });
+
+    it('CONTROL: a clean undo of an update leaves an unmarked row unmarked', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      stage([{ target: 'S1', price: 99 }], false);
+      const runId = await planStaged(agentRead(false));
+      await undoOf(runId);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'S1' } }).rows[0]).toMatchObject({ price: 1 });
+      expect(markOf('S1')).toBe(false);
+    });
+
+    it('a run that does not record the mark, as one planned before the record, counts as marked', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], false);
+      const out = await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_collection: 'staged' }, agentRead(false));
+      const runId = runIdOf(out);
+      expect(ledger.getRunForApply(runId)!.plannerUntrusted).toBe(false);
+      engineDb.getDb().prepare('UPDATE bulk_runs SET planner_untrusted = NULL WHERE id = ?').run(runId);
+      expect(ledger.getRunForApply(runId)!.plannerUntrusted).toBe(true);
+      approve(runId);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
+      expect(markOf('NEW1')).toBe(true);
+      // And a run recorded without saying is recorded as marked.
+      expect(ledger.getRunForApply(recordMemoryRun(1).runId)!.plannerUntrusted).toBe(true);
+    });
+  });
+
   it('a data-store run whose collection is gone halts as unavailable', async () => {
     seedStore();
     writeFileSync(join(ws, 'p.json'), JSON.stringify([{ target: 'S1', price: 5 }]));

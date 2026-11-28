@@ -844,7 +844,7 @@ interface RunRow {
   list_last_id: number;
   cost_usd: number; cost_cap_usd: number | null;
   judge_rule: string | null; judge_rule_hash: string | null; judge_started_at: string | null;
-  start_domains: string | null; planner_grants: string | null;
+  start_domains: string | null; planner_grants: string | null; planner_untrusted: number | null;
 }
 
 /** Where the read of a run's list stands: `pending` while it is read, `done` once its targets
@@ -1106,6 +1106,12 @@ export interface BulkRunForApply {
    *  the source rows' own stamps, or `unknown` for a file (`bulk_plan`). Null is unknown, and so
    *  is every undo's — the owner plans it with no conversation; its targets carry their own. */
   plannerGrants: string[] | null;
+  /** Whether the run's data-store writes are marked as written from outside content
+   *  (`_written_untrusted`), since the worker holds no turn: the planning turn had read outside
+   *  content, or the source carries the mark (a file always does). A run that does not record it,
+   *  as one planned before the record existed, counts as marked. An undo keeps its source's, and
+   *  marks each row it re-creates. */
+  plannerUntrusted: boolean;
 }
 
 /** One target as the effect loop writes it: the state it must find, the state it writes. */
@@ -1321,6 +1327,9 @@ export class BulkLedger {
      *  (`ConversationGrants.members()`) together with its source's — the source rows' own stamps,
      *  or `unknown` for a file. The caller forms the union. Null or absent: unknown. */
     plannerGrants?: readonly string[] | null | undefined;
+    /** Whether the run's data-store writes carry the outside-content mark: the planning turn's
+     *  (`deriveTurnUntrusted`) or its source's, which the caller ORs. Absent: marked. */
+    plannerUntrusted?: boolean | undefined;
   }): BulkRunStatus {
     if (params.judge !== undefined && params.targetSystem !== 'data_store') {
       // A workspace target is text, not fields: a verdict over F has nothing to replace in it.
@@ -1342,8 +1351,8 @@ export class BulkLedger {
     const judged = params.judge !== undefined;
     const insertRun = db.prepare(
       `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, target_collection,
-         principal, mandate_id, halt_reason, judge_rule, judge_rule_hash, planner_grants)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         principal, mandate_id, halt_reason, judge_rule, judge_rule_hash, planner_grants, planner_untrusted)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertTarget = db.prepare(
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error, before_grants)
@@ -1365,6 +1374,7 @@ export class BulkLedger {
         judged ? BULK_HALT_REASONS.awaitingStart : null,
         ...this.judgeColumns(params.judge),
         grantsCell(params.plannerGrants),
+        params.plannerUntrusted === false ? 0 : 1,
       );
       params.targets.forEach((t, seq) => {
         const key = this.engineDb.enc(t.key);
@@ -3108,11 +3118,14 @@ export class BulkLedger {
       // The undo writes the same host and paths as its source, under the same contract.
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, kind,
-           source_run_id, target_collection, contract_json, principal, mandate_id)
-         VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, 'undo', ?, ?, ?, ?, ?)`,
+           source_run_id, target_collection, contract_json, principal, mandate_id, planner_untrusted)
+         VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, 'undo', ?, ?, ?, ?, ?, ?)`,
       ).run(id, params.createdBy ?? null, this.engineDb.keyedHash(hashParts()), src.target_system, runUndo,
         // Only the owner's route plans an undo (§3.13 E6), so the undo is the owner's.
-        planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json, ...planner(OWNER_PRINCIPAL));
+        planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json, ...planner(OWNER_PRINCIPAL),
+        // It writes back what its source found, into rows that keep any mark they hold: it keeps
+        // the source's mark. A row it re-creates is marked by the writer (`dataStoreWriter`).
+        src.planner_untrusted === 0 ? 0 : 1);
       planned.forEach((t, seq) => {
         if (t.tainted) {
           insertInvalid.run(id, seq, this.engineDb.enc(t.key), t.sourceSeq, 'shop_added_markup' satisfies BulkInvalidReason, t.title);
@@ -3902,6 +3915,7 @@ export class BulkLedger {
       expiresAt: r.expires_at, applied: r.targets_applied, failed: r.targets_failed, haltReason: r.halt_reason,
       sourceRunId: r.source_run_id, contractJson: r.contract_json, delegatedPlanner: delegatedPlannerOf(r),
       plannerGrants: grantsOfCell(r.planner_grants),
+      plannerUntrusted: r.planner_untrusted !== 0,
     };
   }
 
