@@ -14,6 +14,7 @@
 import type {
   InboxBucket,
   InboxItem,
+  InboxItemShown,
   InboxRuleAction,
   InboxRuleMatcherKind,
   InboxRuleSource,
@@ -23,7 +24,7 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
-import { flaggedAtIntake, followUpIsSensitive, itemFollowUps } from './follow-ups.js';
+import { flaggedAtIntake, followUpIsSensitive, followUpsOf, itemFollowUps } from './follow-ups.js';
 import { charCount, cutChars, descriptionProblem, fixedValueProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
 import { isFeatureEnabled } from '../../core/features.js';
 
@@ -167,10 +168,44 @@ export function handleGetItem(deps: InboxApiDeps, id: string): ApiResponse {
   return item ? { status: 200, body: { item: withFollowUps(deps, item) } } : notFound('item');
 }
 
-/** The item as the inbox shows it: with the mail that came into its thread after its own mail. */
+/** The item as the inbox shows it: with the mail that came into its thread after its own mail,
+ *  and, for an item a delivery failure notice created, the mail its list row shows instead. */
 function withFollowUps(deps: InboxApiDeps, item: InboxItem): InboxItem {
   const followUps = itemFollowUps(deps.state, item);
-  return followUps === undefined ? item : { ...item, followUps };
+  const shown = shownMail(deps, item);
+  return {
+    ...item,
+    ...(followUps !== undefined ? { followUps } : {}),
+    ...(shown !== undefined ? { shown } : {}),
+  };
+}
+
+/**
+ * The mail the list row of an item created by a delivery failure notice shows: the newest of the
+ * item's follow-ups, the mail "Reply in chat" answers. Every value is taken from that one stored
+ * message. Read from `followUpsOf`, not `itemFollowUps`: the latter ends when the owner acts on the
+ * item, and the row would then name the notice again. Undefined for any other item, and when no
+ * such mail came. The item's own fields are never changed: its Message-ID anchors the follow-ups.
+ *
+ * A mail that reads as sensitive, or that the intake check flagged (its stored text may be dropped
+ * or masked), shows no name and no subject: under `skip` its subject is stored as it came.
+ */
+function shownMail(deps: InboxApiDeps, item: InboxItem): InboxItemShown | undefined {
+  if (item.prefilterRule !== 'bounce') return undefined;
+  const latest = followUpsOf(deps.state, item)[0];
+  if (latest === undefined) return undefined;
+  const sensitive = followUpIsSensitive(latest)
+    || flaggedAtIntake(deps.state.listAuditForItem(item.id, item.tenantId)).has(latest.messageId);
+  const at = latest.mailDate ?? latest.fetchedAt;
+  const name = latest.fromName?.trim();
+  return {
+    fromAddress: latest.fromAddress,
+    ...(!sensitive && name !== undefined && name.length > 0 ? { fromName: latest.fromName } : {}),
+    ...(!sensitive && latest.subject.trim().length > 0 ? { subject: latest.subject } : {}),
+    messageId: latest.messageId,
+    ...(at !== undefined ? { mailDate: at.toISOString() } : {}),
+    sensitive,
+  };
 }
 
 /**
@@ -386,30 +421,35 @@ export function handleListItemAudit(deps: InboxApiDeps, id: string): ApiResponse
 export function handleGetItemContext(deps: InboxApiDeps, id: string): ApiResponse {
   const item = deps.state.getItem(id);
   if (!item) return notFound('item');
+  // An item a delivery failure notice created names the sender of the mail its list row shows
+  // (`shownMail`), so the row and the sender context name the same sender.
+  const shown = shownMail(deps, item);
+  const fromAddress = shown?.fromAddress ?? item.fromAddress;
+  const fromName = shown !== undefined ? shown.fromName : item.fromName;
   // RFC 5321 §4.5.3 caps the local + domain at 320 chars; anything longer
   // is either malformed envelope data or a crafted DoS amplifier feeding
   // the LIKE-over-JSON path. Reject the lookup but still return the
   // (capped) sender so the UI renders something rather than 500.
-  const fromValid = item.fromAddress.length > 0 && item.fromAddress.length <= 320;
+  const fromValid = fromAddress.length > 0 && fromAddress.length <= 320;
   const recentThreads = fromValid
-    ? deps.state.listRecentByFromAddress(item.fromAddress, {
+    ? deps.state.listRecentByFromAddress(fromAddress, {
         excludeItemId: id,
         tenantId: item.tenantId,
         limit: 5,
       })
     : [];
   const reminders = fromValid
-    ? deps.state.listActiveRemindersByFromAddress(item.fromAddress, {
+    ? deps.state.listActiveRemindersByFromAddress(fromAddress, {
         excludeItemId: id,
         tenantId: item.tenantId,
         limit: 5,
       })
     : [];
   const openFollowups = fromValid && deps.mailContext
-    ? deps.mailContext.stateDb.listOpenFollowupsForRecipient(item.fromAddress, 5)
+    ? deps.mailContext.stateDb.listOpenFollowupsForRecipient(fromAddress, 5)
     : [];
   const outboundHistory = fromValid && deps.mailContext
-    ? deps.mailContext.stateDb.listOutboundForAddress(item.fromAddress, {
+    ? deps.mailContext.stateDb.listOutboundForAddress(fromAddress, {
         tenantId: item.tenantId,
         limit: 5,
       })
@@ -417,7 +457,7 @@ export function handleGetItemContext(deps: InboxApiDeps, id: string): ApiRespons
   return {
     status: 200,
     body: {
-      sender: { address: item.fromAddress, name: item.fromName ?? null },
+      sender: { address: fromAddress, name: fromName ?? null },
       recentThreads,
       openFollowups,
       outboundHistory,

@@ -62,6 +62,22 @@ export interface InboxItem {
 	ruleWithheld?: InboxRuleWithheld | null | undefined;
 	/** Mail that came into the thread after this item's own mail while it is open; absent when none. */
 	followUps?: InboxItemFollowUps | undefined;
+	/** The prefilter rule the item's own mail met; `'bounce'` for a delivery failure notice. */
+	prefilterRule?: string | undefined;
+	/** For an item a delivery failure notice created: the newest mail of its thread after it,
+	 *  which the list row shows in place of the notice. Absent when there is none. */
+	shown?: InboxItemShown | undefined;
+}
+
+/** The mail the list row shows for an item a delivery failure notice created. Every field comes
+ *  from that one mail; name and subject are absent when it reads as sensitive. */
+export interface InboxItemShown {
+	fromAddress: string;
+	fromName?: string | undefined;
+	subject?: string | undefined;
+	messageId: string;
+	mailDate?: string | undefined; // ISO
+	sensitive: boolean;
 }
 
 /** How many mails came into an open item's thread after its own mail, and the newest one's

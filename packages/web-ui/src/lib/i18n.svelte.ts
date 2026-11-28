@@ -3906,6 +3906,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.compose_new': { de: 'Neue Mail', en: 'New mail' },
 	'inbox.reply_in_chat': { de: 'Im Chat beantworten', en: 'Reply in chat' },
 	'inbox.reply_in_chat_prompt': { de: 'Ich möchte auf diese Mail antworten:', en: "I'd like to reply to this email:" },
+	'inbox.reply_in_chat_prompt_newest': { de: 'Ich möchte auf die neueste Nachricht in diesem Verlauf antworten.', en: "I'd like to reply to the newest message in this thread." },
 	'inbox.compose_in_chat_prompt': { de: 'Ich möchte eine neue Mail schreiben.', en: "I'd like to compose a new email." },
 	'inbox.compose_title': { de: 'Neue Mail schreiben', en: 'Compose new mail' },
 	'inbox.compose_account': { de: 'Absender-Konto', en: 'From account' },
