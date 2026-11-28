@@ -716,7 +716,9 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         plannerGrants: plannerGrantsOf(agent.conversationGrants?.members() ?? null, fromArtifact === null ? sourceGrants : [...sourceGrants, UNKNOWN_GRANT]),
         // Likewise its outside-content mark: a copy of a marked row, or a row written on the word
         // of a turn that read outside content, is marked as the store marks such a write itself.
-        plannerUntrusted: deriveTurnUntrusted(agent) || sourceUntrusted,
+        // A rule read from a saved artifact is read here, not by the turn, and the artifact keeps
+        // no mark of where its text came from: the run counts as marked.
+        plannerUntrusted: deriveTurnUntrusted(agent) || sourceUntrusted || fromArtifact !== null,
       });
       return [
         'Dry run recorded — nothing was written to any target.',

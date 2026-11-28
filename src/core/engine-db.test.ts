@@ -671,10 +671,11 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     });
     const e = new EngineDb(dbPath, '');
     const first = shape(e.getDb());
-    // Every value the rows held stays as it was; the new columns are empty (unknown stamp).
+    // Every value the rows held stays as it was; the new columns are empty (unknown stamp), and
+    // so is v82's mark, which the start runs as well.
     expect(first).toEqual({
       columns: [{ name: 'before_grants', type: 'TEXT' }, { name: 'planner_grants', type: 'TEXT' }, { name: 'write_grants', type: 'TEXT' }],
-      run: { ...(rowsBefore.run as object), planner_grants: null },
+      run: { ...(rowsBefore.run as object), planner_grants: null, planner_untrusted: null },
       target: { ...(rowsBefore.target as object), before_grants: null, write_grants: null },
       version: 82,
       versions: 1,
@@ -682,6 +683,52 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     e.close();
 
     // A second start over a v81 database runs no migration again: same shape, one v81 row.
+    const again = new EngineDb(dbPath, '');
+    expect(shape(again.getDb())).toEqual(first);
+    again.close();
+  });
+
+  it('v82 migration adds an empty outside-content mark to the runs a v81 database holds, keeps every value they held, and a second start changes nothing', () => {
+    // A v81 database: the current schema with v82's column and version taken back out.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mig82-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'engine.db');
+    new EngineDb(dbPath, '').close();
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DELETE FROM schema_version WHERE version >= 82;
+      ALTER TABLE bulk_runs DROP COLUMN planner_untrusted;
+      INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, planner_grants) VALUES ('old', 't', 'h', 'data_store', 'restorable', 'done', '["g1"]');
+      INSERT INTO bulk_targets (run_id, seq, target_key, change, before, after_planned, before_grants, write_grants) VALUES ('old', 0, 'k', 'update', 'b', 'a', '["g0"]', NULL);
+    `);
+    expect(raw.prepare(`SELECT name FROM pragma_table_info('bulk_runs') WHERE name = 'planner_untrusted'`).all()).toEqual([]);
+    expect((raw.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(81);
+    const rowsBefore = {
+      run: raw.prepare(`SELECT * FROM bulk_runs WHERE id = 'old'`).get(),
+      target: raw.prepare(`SELECT * FROM bulk_targets WHERE run_id = 'old'`).get(),
+    };
+    raw.close();
+
+    const shape = (db: Database.Database): unknown => ({
+      columns: db.prepare(`SELECT name, type FROM pragma_table_info('bulk_runs') WHERE name = 'planner_untrusted'`).all(),
+      run: db.prepare(`SELECT * FROM bulk_runs WHERE id = 'old'`).get(),
+      target: db.prepare(`SELECT * FROM bulk_targets WHERE run_id = 'old'`).get(),
+      version: (db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v,
+      versions: (db.prepare('SELECT COUNT(*) as n FROM schema_version WHERE version = 82').get() as { n: number }).n,
+    });
+    const e = new EngineDb(dbPath, '');
+    const first = shape(e.getDb());
+    // Every value the rows held stays as it was; the new column is empty, which a run reads as marked.
+    expect(first).toEqual({
+      columns: [{ name: 'planner_untrusted', type: 'INTEGER' }],
+      run: { ...(rowsBefore.run as object), planner_untrusted: null },
+      target: rowsBefore.target,
+      version: 82,
+      versions: 1,
+    });
+    e.close();
+
+    // A second start over a v82 database runs no migration again: same shape, one v82 row.
     const again = new EngineDb(dbPath, '');
     expect(shape(again.getDb())).toEqual(first);
     again.close();
