@@ -136,6 +136,18 @@ describe('the words added at the design gate (U-306 N1)', () => {
 		expect(text(items()[1])).toContain('Attempt: Instance log (refused)');
 	});
 
+	it('names what the route returns, not less: a contact with its last interaction, a run with task and answer, a plan', async () => {
+		await render([
+			read('GET /api/inbox/contacts/:email', '/api/inbox/contacts/a%40example.invalid'),
+			read('GET /api/history/runs/:id', '/api/history/runs/r-1', 2),
+			read('GET /api/tasks/:id/stamp-preview', '/api/tasks/t-1/stamp-preview', 3, 'refused'),
+		]);
+		const [contact, run, plan] = items();
+		expect(text(contact?.querySelector('[data-word]'))).toBe('Kontakt zu einer Adresse, mit letzter Interaktion');
+		expect(text(run?.querySelector('[data-word]'))).toBe('Ein Lauf mit Auftrag und Antwort');
+		expect(text(plan)).toContain('Versuch: Vorschau der Freigabe eines Plans (verweigert)');
+	});
+
 	it('says the inbox as the app does', async () => {
 		await render([read('GET /api/inbox/cold-start', '/api/inbox/cold-start'), read('GET /api/inbox/rules', '/api/inbox/rules', 2)]);
 		expect(items().map((li) => text(li.querySelector('[data-word]')))).toEqual(['Stand des Nachladens des Posteingangs', 'Regeln des Posteingangs']);
