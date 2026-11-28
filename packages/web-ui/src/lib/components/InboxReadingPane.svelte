@@ -19,6 +19,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { inboxHeadline } from '../utils/inbox-headline.js';
+	import { shownReplyFraming } from '../utils/inbox-shown.js';
 	import { senderRulePrefill, subjectRulePrefill } from '../inbox-rule-prefill.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import WholeValue from './WholeValue.svelte';
@@ -49,7 +50,9 @@
 		// otherwise inject a pseudo-directive on its own line into the framing the
 		// agent reads. Mirrors the other chat-over-bespoke consumers, which all
 		// wrap their external fields in sanitizeFramingField.
-		const framing = `${t('inbox.reply_in_chat_prompt')} „${sanitizeFramingField(item.subject)}".`;
+		// An item whose list row shows another mail than its own names none of that mail's values
+		// here: the server's context for the item carries them (see shownReplyFraming).
+		const framing = shownReplyFraming(item, t) ?? `${t('inbox.reply_in_chat_prompt')} „${sanitizeFramingField(item.subject)}".`;
 		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
 		void goto('/app');
 	}
