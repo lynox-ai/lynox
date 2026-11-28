@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
-  BULK_CLAIM_HEARTBEAT_MS, BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, sameValue,
+  BULK_CLAIM_HEARTBEAT_MS, BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, recreatedGrants, sameValue,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -66,8 +66,10 @@ export interface TargetWriter {
   /** `hostAddedMarkup`: the read-back holds markup the write never sent (PRD shopify-preset
    *  §21.2 item 6). The target is written all the same — the value is in the store — and is
    *  recorded with its mark; the run then halts. `hostRewrote`: the host stored the value otherwise
-   *  than sent, within what the run may write — counted on the target, not halted. */
-  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true; hostRewrote?: true }>;
+   *  than sent, within what the run may write — counted on the target, not halted.
+   *  `grants`: the stamp a data-store row is written with (`_source_grants`); null or absent is
+   *  unknown. A writer with no such stamp ignores it. */
+  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void, grants?: readonly string[] | null): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true; hostRewrote?: true }>;
 }
 
 /**
@@ -583,7 +585,8 @@ async function applyRunEffect(
       };
       const refused = (): void => { ledger.markRefused(runId, t.seq); };
       if (w.reportsSend !== true) { sent(); localSent = true; }
-      const out = await w.write(t.key, t.after, sent, refused);
+      // The run's stamp, or the one an undo target writes back (`ApplyTarget.writeGrants`).
+      const out = await w.write(t.key, t.after, sent, refused, t.writeGrants !== undefined ? t.writeGrants : run!.plannerGrants);
       if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
       return {
         kind: 'applied', result: out.result, actual: out.actual,
@@ -633,7 +636,10 @@ async function rollBack(
       }
       // Left as it is, and unmarked: the owner's view marks it as one to check by hand.
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
-      await writer.write(t.key, t.expected);
+      // Taken back with the stamp the row held before the run wrote it. A row the run deleted is
+      // re-created, and its recorded stamp may be older than the row it removed: `unknown` beside
+      // it (`recreatedGrants`).
+      await writer.write(t.key, t.expected, undefined, undefined, t.change === 'delete' ? recreatedGrants(t.beforeGrants) : t.beforeGrants);
       if (recorded) ledger.recordRolledBack(run, t.seq, now());
       else ledger.recordUnrecordedSettled(run.id, t.seq, now());
     } catch {
@@ -849,16 +855,20 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
     async read(key) {
       return readRow(key);
     },
-    async write(key, after) {
+    async write(key, after, _onSend, _onRefused, grants) {
       if (after.absent) {
         store.deleteRecords({ collection, filter: { [keyCol]: coercePlainColumnValue(key, keyDef) } });
         return 'deleted';
       }
       const row = after.value;
       if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error('not a row');
-      // Bulk apply runs in the worker, outside any conversation, so it holds no grant set:
-      // the row reads as unknown, and an update keeps what the row already held beside it.
-      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null, writtenBy: null, untrusted: false });
+      // Bulk apply runs in the worker, outside any conversation, so the stamp comes with the
+      // write: the run's (`BulkRunForApply.plannerGrants`, the planning conversation's set with
+      // its source's), or for an undo the one the row held before its source wrote it — with
+      // `unknown` beside it where a row is re-created (`recreatedGrants`). A created row holds
+      // exactly the stamp passed; an update keeps what the row already held beside it. Null
+      // reads as unknown.
+      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: grants ?? null, runId: null, writtenBy: null, untrusted: false });
     },
   };
 }

@@ -1171,6 +1171,15 @@ describe('MailStateDb — deferred mails kept across a restart (v20)', () => {
     expect(db.deferredMail('gm-b')).toEqual([]);
   });
 
+  it('gives back the server arrival time as a date, so a kept mail keeps its place by arrival', () => {
+    const arrivedAt = new Date('2026-11-06T07:59:58Z');
+    db.holdDeferredMail('gm-a', [{ ...env(7, '<a@x>'), arrivedAt }, env(8, '<b@x>')], 500);
+    const back = db.deferredMail('gm-a');
+    expect(back[0]?.arrivedAt).toBeInstanceOf(Date);
+    expect(back[0]?.arrivedAt?.getTime()).toBe(arrivedAt.getTime());
+    expect(back[1] && 'arrivedAt' in back[1], 'a mail kept without one has none').toBe(false);
+  });
+
   it('keeps a mail once, and none without a Message-ID or of an account without a row', () => {
     db.holdDeferredMail('gm-a', [env(1, '<a@x>'), env(2, undefined)], 500);
     db.holdDeferredMail('gm-a', [env(3, '<a@x>')], 500);

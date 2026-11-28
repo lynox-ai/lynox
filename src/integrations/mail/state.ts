@@ -1329,8 +1329,16 @@ export class MailStateDb {
     const drop = this.db.prepare('DELETE FROM mail_deferred WHERE account_id = ? AND message_id = ?');
     for (const row of rows) {
       try {
-        const env = JSON.parse(row.envelope) as MailEnvelope & { date: string };
-        out.push({ ...env, uid: stableUid ? env.uid : 0, date: new Date(env.date) });
+        const env = JSON.parse(row.envelope) as Omit<MailEnvelope, 'date' | 'arrivedAt'> & { date: string; arrivedAt?: string | undefined };
+        const { arrivedAt, ...rest } = env;
+        const arrived = typeof arrivedAt === 'string' ? new Date(arrivedAt) : undefined;
+        out.push({
+          ...rest,
+          uid: stableUid ? env.uid : 0,
+          date: new Date(env.date),
+          // Kept as text; one that no longer reads as a date leaves the mail without an arrival.
+          ...(arrived !== undefined && Number.isFinite(arrived.getTime()) ? { arrivedAt: arrived } : {}),
+        });
       } catch {
         drop.run(accountId, row.message_id);
       }

@@ -780,6 +780,7 @@ export class OAuthGmailProvider implements MailProvider {
       replyTo: parseAddressList(header(headers, 'Reply-To')),
       subject: header(headers, 'Subject') ?? '',
       date,
+      arrivedAt: Number.isFinite(internalMs) ? new Date(internalMs) : undefined,
       flags: flagsFromLabels(msg.labelIds),
       snippet: snippetFrom(msg.snippet ?? text, SNIPPET_CHARS),
       hasAttachments: attachments.length > 0,

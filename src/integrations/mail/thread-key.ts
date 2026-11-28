@@ -68,3 +68,34 @@ export function parentMessageIds(env: MailEnvelope): string[] {
   for (let i = refs.length - 1; i >= 0; i--) add(refs[i]);
   return out;
 }
+
+/** When the server took the mail in, in epoch milliseconds, or undefined when it is not known. */
+function arrivalMs(env: MailEnvelope): number | undefined {
+  const t = env.arrivedAt?.getTime();
+  return t !== undefined && Number.isFinite(t) ? t : undefined;
+}
+
+/**
+ * A copy of `envelopes` with the mails the server dated in the order they arrived, oldest first:
+ * by `arrivedAt`, then by uid (a mail held from an earlier poll may come back with uid 0, and was
+ * listed before any mail listed now). A mail without an arrival keeps its place in the list, and
+ * the dated mails are sorted among the other places. The sender's Date header plays no part, so a
+ * sender cannot move a mail ahead of one that arrived before it. The input is not changed.
+ */
+export function inArrivalOrder(envelopes: ReadonlyArray<MailEnvelope>): MailEnvelope[] {
+  const out = [...envelopes];
+  const slots: number[] = [];
+  const dated: Array<{ env: MailEnvelope; at: number }> = [];
+  out.forEach((env, i) => {
+    const at = arrivalMs(env);
+    if (at === undefined) return;
+    slots.push(i);
+    dated.push({ env, at });
+  });
+  dated.sort((a, b) => a.at - b.at || a.env.uid - b.env.uid);
+  slots.forEach((slot, k) => {
+    const next = dated[k];
+    if (next !== undefined) out[slot] = next.env;
+  });
+  return out;
+}

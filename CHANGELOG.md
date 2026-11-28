@@ -4,6 +4,11 @@
 
 ### Upgrade notes
 
+- With durable memory switched off, turning a chat private now removes the
+  durable knowledge entries that chat seeded while durable memory was on, and
+  deleting a chat marks their source as a deleted chat. Switching durable memory
+  off never deleted those entries, and until now both actions left them as they
+  were.
 - Managed instances now sign the Google connect start token in the
   provider-bound v2 format. A control plane that does not accept v2 yet answers
   every Connect with `bad_signature`, so the control plane has to be updated
@@ -143,6 +148,13 @@
   out a count of zero, and says "no entries and no memories" when both are zero.
   On a narrow screen the subject panel is now opaque, so the page behind it no
   longer shows through.
+- Once a person erasure has finished, its panel says so: the heading reads
+  "Erasure finished" and the button "Close" instead of offering to erase and to
+  cancel, and the panel is no longer drawn in the warning colour. After a
+  partial erasure all of it stays as it was. The subject list and panel show a
+  subject's kind as a word in the page's language instead of the stored value
+  in a code font, and the kind "other" is tinted like the rest. A kind the web
+  UI does not know shows as "other", never as the stored value.
 
 ## 2.18.0 — 2026-11-17
 
