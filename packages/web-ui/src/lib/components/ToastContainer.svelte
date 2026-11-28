@@ -13,7 +13,7 @@
 	content changes; mounting region + text together is the classic
 	unreliably-announced case). Error toasts additionally carry role="alert" for
 	an assertive interrupt. The empty container must not eat clicks across the
-	bottom of the screen, so it is pointer-events-none and each toast re-enables
+	screen edge it sits on, so it is pointer-events-none and each toast re-enables
 	pointer-events on itself.
 
 	Placement: below `sm` a toast sits at the top, under the app's 3rem header and the safe area,
@@ -69,8 +69,16 @@
 	.animate-in {
 		animation: slideIn 0.2s ease-out;
 	}
+	/* Below `sm` the toasts hang from the top, so they come in from above. */
+	@media (max-width: 639.98px) {
+		.animate-in { animation-name: slideDown; }
+	}
 	@keyframes slideIn {
 		from { opacity: 0; transform: translateY(8px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+	@keyframes slideDown {
+		from { opacity: 0; transform: translateY(-8px); }
 		to { opacity: 1; transform: translateY(0); }
 	}
 </style>

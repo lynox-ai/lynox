@@ -41,7 +41,8 @@ async function render(messages: string[]): Promise<HTMLElement> {
 const classes = (el: HTMLElement): string[] => el.className.split(/\s+/);
 
 describe('where a toast stands', () => {
-	it('below sm: at the top, under the header and the safe area, not at the bottom', async () => {
+	// 3.5rem is the app header's h-12 (3rem, AppShell) plus a 0.5rem gap, below the safe area.
+	it('below sm: its class puts it at the top, at safe area + 3.5rem, not at the bottom', async () => {
 		const c = classes(await render(['a']));
 		expect(c).toContain('top-[calc(env(safe-area-inset-top,0px)+3.5rem)]');
 		expect(c, 'no bottom anchor below sm').not.toContain('bottom-4');
