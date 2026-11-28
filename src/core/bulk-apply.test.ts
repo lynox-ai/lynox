@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
-import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HALT_REASONS, BULK_PHASE_NOT_KEPT, bulkFailureLimit } from './bulk-ledger.js';
+import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HALT_REASONS, BULK_PHASE_NOT_KEPT, BULK_REQUEST_TIMEOUT_MS, bulkFailureLimit } from './bulk-ledger.js';
 import type { PlannedTarget } from './bulk-ledger.js';
-import { BulkSecretError, bulkWriterFor, runBulkEffect, workspaceWriter, type BulkRunTrail, type TargetWriter } from './bulk-apply.js';
+import { BulkSecretError, BulkWriterHalt, bulkWriterFor, runBulkEffect, workspaceWriter, type BulkRunTrail, type TargetWriter } from './bulk-apply.js';
 import { TriggerStore } from './trigger-store.js';
 import { BULK_NOTICES } from './bulk-notices.js';
 import { deriveSourceEffect } from './task-manager.js';
@@ -721,6 +721,556 @@ describe('stop at ~80 % and resume (§7 c)', () => {
   });
 });
 
+describe('a target taken over by a second loop while the first still runs', () => {
+  // Loop A reads its target, then stops running past the claim bound (its heartbeat does not beat
+  // at the default interval within a test); loop B, on a later clock, takes the target over.
+  // A then sends no further write to that target and records nothing on it.
+  const T0 = Date.UTC(2026, 10, 20, 12);
+  const PAST = T0 + BULK_CLAIM_STALE_MS + 1_000;
+  /** A clock that reads `at` until moved. */
+  const clock = (at: number) => { const c = { at, now: () => c.at }; return c; };
+  const row = (runId: string, seq = 0) => engineDb.getDb()
+    .prepare('SELECT error, applied_at IS NOT NULL AS applied, claimed_at, failed_once FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as
+    { error: string | null; applied: number; claimed_at: string | null; failed_once: number | null };
+  const gate = () => { let open!: () => void; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+  /** A writer over `state` that counts its own writes, and runs `stall` once, after its first read. */
+  function loopWriter(state: Map<string, string>, stall?: () => Promise<void>, afterWrite?: () => Promise<void>) {
+    const w = { writes: 0, writer: undefined as unknown as TargetWriter };
+    let stalled = false;
+    w.writer = {
+      async read(key) {
+        const got = state.has(key) ? { absent: false as const, value: state.get(key)! } : { absent: true as const };
+        if (stall && !stalled) { stalled = true; await stall(); }
+        return got;
+      },
+      async write(key, after) {
+        w.writes++;
+        if (after.absent) {
+          // As the workspace writer: deleting a file that is gone fails (ENOENT).
+          if (!state.has(key)) throw new Error('ENOENT');
+          state.delete(key);
+        } else state.set(key, after.value as string);
+        await afterWrite?.();
+        return 'ok';
+      },
+    };
+    return w;
+  }
+
+  it('update: the first loop sends nothing to a target the second took over and wrote, and finds the run done', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const b = loopWriter(state);
+    const aw = loopWriter(state, async () => {
+      a.at = PAST;
+      expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(b.writer, () => PAST))).status).toBe('done');
+    });
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aw.writer, a.now))).status).toBe('done');
+    expect([aw.writes, b.writes]).toEqual([0, 1]);
+    expect(state.get('k000')).toBe('w0');
+    expect(row(runId)).toMatchObject({ error: null, applied: 1 });
+  });
+
+  it('owner change: a change made after the second loop wrote is not overwritten by the first', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const b = loopWriter(state);
+    const aw = loopWriter(state, async () => {
+      a.at = PAST;
+      await runBulkEffect(runId, 'bulk_apply', effectDeps(b.writer, () => PAST));
+      state.set('k000', 'owner');
+    });
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(aw.writer, a.now));
+    expect(aw.writes).toBe(0);
+    expect(state.get('k000')).toBe('owner');
+  });
+
+  it('delete: the first loop neither deletes again nor records a failure while the second has deleted and not yet recorded', async () => {
+    const s0 = ledger.recordDryRun({
+      createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
+      targets: [{ key: 'k000', before: { absent: true }, after: 'w0' }],
+    });
+    approve(s0.id);
+    const state = new Map<string, string>();
+    expect((await runBulkEffect(s0.id, 'bulk_apply', effectDeps(loopWriter(state).writer))).status).toBe('done');
+    const undo = ledger.planUndo(s0.id);
+    if (!undo.ok) throw new Error(undo.reason);
+    const runId = undo.status.id;
+    approve(runId, { now: T0 });
+    const a = clock(T0);
+    const bDeleted = gate();
+    const bRecords = gate();
+    const b = loopWriter(state, undefined, async () => { bDeleted.open(); await bRecords.p; });
+    let bRun!: Promise<unknown>;
+    const aw = loopWriter(state, async () => {
+      a.at = PAST;
+      bRun = runBulkEffect(runId, 'bulk_undo', effectDeps(b.writer, () => PAST));
+      await bDeleted.p;
+    });
+    // A resumes with the file gone and B's write not yet recorded: the order in which a second
+    // delete would record a false failure first.
+    expect((await runBulkEffect(runId, 'bulk_undo', effectDeps(aw.writer, a.now))).status).toBe('pending');
+    expect(aw.writes).toBe(0);
+    expect(row(runId)).toMatchObject({ error: null, applied: 0 });
+    bRecords.open();
+    await bRun;
+    expect(state.has('k000')).toBe(false);
+    expect(row(runId)).toMatchObject({ error: null, applied: 1 });
+    expect(ledger.getRunForApply(runId)!.failed).toBe(0);
+  });
+
+  it('a loop that stops longer than two request deadlines but within the bound keeps its target', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const b = loopWriter(state);
+    const within = T0 + 2 * BULK_REQUEST_TIMEOUT_MS;
+    const aw = loopWriter(state, async () => {
+      a.at = within;
+      await runBulkEffect(runId, 'bulk_apply', effectDeps(b.writer, () => within));
+    });
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(aw.writer, a.now));
+    expect([aw.writes, b.writes]).toEqual([1, 0]);
+    expect(row(runId)).toMatchObject({ error: null, applied: 1 });
+  });
+
+  it('a send retried after a refusal renews the claim each time and still goes out', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    // A clock that moves a second per reading, so each renewal stamps a new time.
+    let t = T0;
+    const ticking = () => (t += 1_000);
+    let sends = 0;
+    const writer: TargetWriter = {
+      reportsSend: true,
+      async read(key) { claimed = row(runId).claimed_at; return { absent: false, value: state.get(key)! }; },
+      async write(key, after, onSend, onRefused) {
+        onSend?.(); sends++; stamps.push(row(runId).claimed_at); onRefused?.(); // a 429, retried
+        onSend?.(); sends++; stamps.push(row(runId).claimed_at);
+        state.set(key, after.absent ? '' : after.value as string);
+        return 'written';
+      },
+    };
+    const stamps: (string | null)[] = [];
+    let claimed: string | null = null;
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer, ticking))).status).toBe('done');
+    expect(sends).toBe(2);
+    // Each send moved the claim on: the first past the time it was claimed at, the second past the first.
+    expect(stamps).toHaveLength(2);
+    expect(stamps[0]! > claimed!).toBe(true);
+    expect(stamps[1]! > stamps[0]!).toBe(true);
+    expect(state.get('k000')).toBe('w0');
+    expect(row(runId)).toMatchObject({ error: null, applied: 1, claimed_at: null });
+  });
+
+  it('a loop that loses its target while waiting to retry a refused send does not send the retry', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    let aSends = 0;
+    let bSends = 0;
+    const b: TargetWriter = {
+      reportsSend: true,
+      async read(key) { return { absent: false, value: state.get(key)! }; },
+      async write(key, after, onSend) { onSend?.(); bSends++; state.set(key, after.absent ? '' : after.value as string); return 'written'; },
+    };
+    const aw: TargetWriter = {
+      reportsSend: true,
+      async read(key) { return { absent: false, value: state.get(key)! }; },
+      async write(key, after, onSend, onRefused) {
+        onSend?.(); aSends++; onRefused?.(); // a 429: the writer waits out its Retry-After …
+        a.at = PAST;
+        await runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => PAST)); // … and B takes over
+        onSend?.(); aSends++; // the retry
+        state.set(key, 'late');
+        return 'written';
+      },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now))).status).toBe('done');
+    expect([aSends, bSends]).toEqual([1, 1]);
+    expect(state.get('k000')).toBe('w0');
+    expect(row(runId)).toMatchObject({ error: null, applied: 1 });
+  });
+
+  it('a loop that takes over a target already sent to sends nothing, and the first loop\'s late answer is not recorded over it', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    let bSends = 0;
+    const b: TargetWriter = {
+      reportsSend: true,
+      async read(key) { return { absent: false, value: state.get(key)! }; },
+      async write() { bSends++; return 'written'; },
+    };
+    const a = clock(T0);
+    const aWriter: TargetWriter = {
+      reportsSend: true,
+      async read(key) { return { absent: false, value: state.get(key)! }; },
+      async write(key, after, onSend) {
+        onSend?.();
+        // Out, and not yet visible: the loop stops past the bound while B takes over.
+        a.at = PAST;
+        await runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => PAST));
+        state.set(key, after.absent ? '' : after.value as string);
+        return 'written';
+      },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aWriter, a.now))).status).toBe('done');
+    expect(bSends).toBe(0);
+    // B left it unclear, as for a send of a loop that died; A, no longer its holder, records nothing.
+    expect(row(runId)).toMatchObject({ error: 'sent_unknown', applied: 0 });
+  });
+
+  it('a loop that lost its target finds an atomic run the other loop finished, and leaves it written', async () => {
+    const { runId, initial } = recordMemoryRun(3, { atomic: true });
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const b = loopWriter(state);
+    let reads = 0;
+    const aw: TargetWriter = {
+      async read(key) {
+        const got = { absent: false as const, value: state.get(key)! };
+        if (++reads === 2) {
+          // On its second target A stops past the bound and its deadline; B takes over the rest.
+          a.at = PAST;
+          expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(b.writer, () => PAST))).status).toBe('done');
+        }
+        return got;
+      },
+      async write(key, after) { state.set(key, after.absent ? '' : after.value as string); return 'ok'; },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now))).status).toBe('done');
+    expect([state.get('k000'), state.get('k001'), state.get('k002')]).toEqual(['w0', 'w1', 'w2']);
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', haltReason: null, applied: 3 });
+  });
+
+  it('a loop that lost its target records no conflict over the other loop\'s claim', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const bHolds = gate();
+    const bInRead = gate();
+    const b: TargetWriter = {
+      async read(key) { bInRead.open(); await bHolds.p; return { absent: false, value: state.get(key)! }; },
+      async write(key, after) { state.set(key, after.absent ? '' : after.value as string); return 'ok'; },
+    };
+    let bRun!: Promise<unknown>;
+    const aw: TargetWriter = {
+      async read() {
+        a.at = PAST;
+        bRun = runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => PAST));
+        await bInRead.p;
+        return { absent: false, value: 'changed meanwhile' }; // what A read is a conflict
+      },
+      async write() { throw new Error('A must not write'); },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now))).status).toBe('pending');
+    expect(row(runId)).toMatchObject({ error: null, applied: 0, claimed_at: new Date(PAST).toISOString() });
+    bHolds.open();
+    await bRun;
+    expect(row(runId)).toMatchObject({ error: null, applied: 1 });
+  });
+
+  it('a loop that lost its target does not give back the other loop\'s claim on its writer\'s halt', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const bHolds = gate();
+    const bInRead = gate();
+    const b: TargetWriter = {
+      async read(key) { bInRead.open(); await bHolds.p; return { absent: false, value: state.get(key)! }; },
+      async write(key, after) { state.set(key, after.absent ? '' : after.value as string); return 'ok'; },
+    };
+    let bRun!: Promise<unknown>;
+    const aw: TargetWriter = {
+      async read() {
+        a.at = PAST;
+        bRun = runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => PAST));
+        await bInRead.p;
+        throw new BulkWriterHalt(BULK_HALT_REASONS.credential);
+      },
+      async write() { throw new Error('A must not write'); },
+    };
+    // The writer's halt still halts the run (the run still writes, unhalted); the claim stays the other loop's.
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now))).status).toBe('halted');
+    expect(row(runId).claimed_at).toBe(new Date(PAST).toISOString());
+    bHolds.open();
+    await bRun;
+    expect(row(runId)).toMatchObject({ error: null, applied: 1 });
+  });
+
+  it('the owner\'s stop reaching a loop that lost its target: no further target is written, and the run stops', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const stop = new AbortController();
+    const bHolds = gate();
+    const bInRead = gate();
+    let bFirst = true;
+    const b: TargetWriter = {
+      async read(key) { if (bFirst) { bFirst = false; bInRead.open(); await bHolds.p; } return { absent: false, value: state.get(key)! }; },
+      async write(key, after) { state.set(key, after.absent ? '' : after.value as string); return 'ok'; },
+    };
+    let bRun!: Promise<{ status: string }>;
+    let aWrites = 0;
+    const aw: TargetWriter = {
+      async read(key) {
+        const got = { absent: false as const, value: state.get(key)! };
+        if (key === 'k000') {
+          a.at = PAST;
+          bRun = runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => PAST));
+          await bInRead.p;
+          stop.abort(); // the owner stops the run while B holds the first target
+        }
+        return got;
+      },
+      async write(key, after) { aWrites++; state.set(key, after.absent ? '' : after.value as string); return 'ok'; },
+    };
+    const out = await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(aw, a.now), signal: stop.signal, ownerStopped: () => true });
+    expect(out.status).toBe('stopped');
+    expect(aWrites).toBe(0);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.stoppedByOwner);
+    bHolds.open();
+    expect((await bRun).status).toBe('halted');
+    // B recorded the target it held and wrote no further one.
+    expect([state.get('k000'), state.get('k001'), state.get('k002')]).toEqual(['w0', 'v1', 'v2']);
+    expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.stoppedByOwner });
+  });
+
+  // A halt loop A meets after B took its target over still halts the run, and B, holding that
+  // target, records it and writes no further one.
+  it.each([
+    ['markup the host added', BULK_HALT_REASONS.markupAddedByShop],
+    ['a writer halt (contract)', BULK_HALT_REASONS.contract],
+    ['a writer halt (credential)', BULK_HALT_REASONS.credential],
+  ] as const)('a loop that lost its target still halts the run on %s', async (_what, reason) => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const bHolds = gate();
+    const bInRead = gate();
+    let bFirst = true;
+    let bWrites = 0;
+    const b: TargetWriter = {
+      async read(key) { if (bFirst) { bFirst = false; bInRead.open(); await bHolds.p; } return { absent: false, value: state.get(key)! }; },
+      async write(key, after) { bWrites++; state.set(key, after.absent ? '' : after.value as string); return 'ok'; },
+    };
+    let bRun!: Promise<{ status: string }>;
+    const takeOver = async () => {
+      a.at = PAST;
+      bRun = runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => PAST));
+      await bInRead.p;
+    };
+    const markup = reason === BULK_HALT_REASONS.markupAddedByShop;
+    const aw: TargetWriter = {
+      async read(key) {
+        if (!markup) { await takeOver(); throw new BulkWriterHalt(reason); }
+        return { absent: false, value: state.get(key)! };
+      },
+      async write(key, after) {
+        state.set(key, `${String(after.absent ? '' : after.value)}<p></p>`);
+        await takeOver(); // the read-back stalls past the bound
+        return { result: 'written', actual: { value: state.get(key), estimated: false }, hostAddedMarkup: true };
+      },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now))).status).toBe('halted');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(reason);
+    bHolds.open();
+    expect((await bRun).status).toBe('halted');
+    expect([state.get('k001'), state.get('k002')]).toEqual(['v1', 'v2']);
+    expect(bWrites).toBeLessThanOrEqual(1);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(reason);
+    // B recorded the target it held: A's writer halt left it unwritten, so B wrote it; on markup
+    // A's write landed with the host's addition, so B found it changed and left it, a conflict.
+    const seq0 = engineDb.getDb().prepare('SELECT applied_at IS NOT NULL AS applied, error, claimed_at FROM bulk_targets WHERE run_id = ? AND seq = 0').get(runId) as { applied: number; error: string | null; claimed_at: string | null };
+    expect(seq0.claimed_at).toBeNull();
+    if (markup) expect([seq0.applied, seq0.error]).toEqual([0, 'conflict']);
+    else expect([seq0.applied, seq0.error]).toEqual([1, null]);
+  });
+
+  it('a loop that lost its target does not overwrite the end the other loop gave the run', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const b = loopWriter(state);
+    const aw: TargetWriter = {
+      async read(key) { return { absent: false, value: state.get(key)! }; },
+      async write(key, after) {
+        state.set(key, after.absent ? '' : after.value as string);
+        a.at = PAST;
+        expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(b.writer, () => PAST))).status).toBe('done');
+        return { result: 'written', actual: null, hostAddedMarkup: true };
+      },
+    };
+    const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now));
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', haltReason: null });
+    // A reports the other loop's end, not a halt of its own.
+    expect(out.summary).not.toContain(BULK_HALT_REASONS.markupAddedByShop);
+    expect(out.summary).toContain('stopped by another loop');
+  });
+
+  it('the first loop records nothing on a target the second holds and has not finished', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const bHolds = gate();
+    const bInRead = gate();
+    const b: TargetWriter = {
+      async read(key) { bInRead.open(); await bHolds.p; return { absent: false, value: state.get(key)! }; },
+      async write(key, after) { state.set(key, after.absent ? '' : after.value as string); return 'ok'; },
+    };
+    let aWrites = 0;
+    let bRun!: Promise<unknown>;
+    const aw: TargetWriter = {
+      async read(key) {
+        const got = { absent: false as const, value: state.get(key)! };
+        a.at = PAST;
+        bRun = runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => PAST));
+        await bInRead.p;
+        return got;
+      },
+      async write() { aWrites++; return 'ok'; },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now))).status).toBe('pending');
+    // A has returned while B still holds the target: A left no trace on it.
+    expect(aWrites).toBe(0);
+    expect(row(runId)).toMatchObject({ error: null, applied: 0, failed_once: 0 });
+    expect(row(runId).claimed_at).toBe(new Date(PAST).toISOString());
+    bHolds.open();
+    await bRun;
+    expect(row(runId)).toMatchObject({ error: null, applied: 1 });
+  });
+});
+
+describe('the claim heartbeat while a target is written', () => {
+  const T0 = Date.UTC(2026, 10, 20, 12);
+  const LATE = T0 + 2 * BULK_CLAIM_STALE_MS;
+  const beatDeps = (writer: TargetWriter, now: () => number) => ({ ...effectDeps(writer, now), claimHeartbeatMs: 5 });
+
+  it('keeps a live loop\'s target through a request that runs longer than the bound', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const { writer: inner, state } = memory(initial);
+    let at = T0;
+    let bWrites = 0;
+    const b: TargetWriter = { read: (k) => inner.read(k), async write(k, a) { bWrites++; return inner.write(k, a); } };
+    let aWrites = 0;
+    const aw: TargetWriter = {
+      async read(key) {
+        const got = await inner.read(key);
+        // The request runs on past twice the bound; the heartbeat beats meanwhile.
+        at = LATE;
+        await sleep(40);
+        expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => LATE + 1_000))).status).toBe('pending');
+        return got;
+      },
+      async write(k, a) { aWrites++; return inner.write(k, a); },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', beatDeps(aw, () => at))).status).toBe('done');
+    expect([aWrites, bWrites]).toEqual([1, 0]);
+    expect(state.get('k000')).toBe('w0');
+  });
+
+  it('a loop whose target was taken while it read leaves the other loop\'s halt standing', async () => {
+    const { runId } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const b: TargetWriter = {
+      async read() { throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized); },
+      async write() { throw new Error('B must not write'); },
+    };
+    const aw: TargetWriter = {
+      reportsSend: true,
+      async read(key) {
+        // A's own clock stays: its claim goes stale for B, which takes the target, halts the run
+        // on its own writer's halt and gives the target back; A's next beat finds it gone.
+        expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => T0 + BULK_CLAIM_STALE_MS + 1_000))).status).toBe('halted');
+        await sleep(40);
+        throw new BulkWriterHalt(BULK_HALT_REASONS.credential);
+      },
+      async write() { throw new Error('A must not write'); },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', beatDeps(aw, () => T0))).status).toBe('halted');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unauthorized);
+  });
+
+  it('a beat that fails (the store busy) is caught and does not lose the target', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const { writer: inner, state } = memory(initial);
+    let at = T0;
+    const renew = ledger.renewClaim.bind(ledger);
+    let thrown = 0;
+    const spy = vi.spyOn(ledger, 'renewClaim').mockImplementation((...args) => {
+      if (thrown === 0) { thrown++; throw new Error('SQLITE_BUSY'); }
+      return renew(...args);
+    });
+    try {
+      const aw: TargetWriter = {
+        async read(key) { const got = await inner.read(key); at = T0 + 1_000; await sleep(40); return got; },
+        write: (k, a) => inner.write(k, a),
+      };
+      expect((await runBulkEffect(runId, 'bulk_apply', beatDeps(aw, () => at))).status).toBe('done');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(thrown).toBe(1);
+    expect(state.get('k000')).toBe('w0');
+  });
+
+  it('leaves no heartbeat running after the target, also when its write throws', async () => {
+    // Only the heartbeat's own interval is counted (its period here is 5 ms).
+    const realSet = globalThis.setInterval.bind(globalThis);
+    const realClear = globalThis.clearInterval.bind(globalThis);
+    const live = new Set<ReturnType<typeof setInterval>>();
+    let started = 0;
+    const set = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+      const h = realSet(fn, ms);
+      if (ms === 5) { live.add(h); started++; }
+      return h;
+    }) as typeof setInterval);
+    const clear = vi.spyOn(globalThis, 'clearInterval').mockImplementation(((h: ReturnType<typeof setInterval>) => {
+      live.delete(h);
+      realClear(h);
+    }) as typeof clearInterval);
+    try {
+      const { runId, initial } = recordMemoryRun(2);
+      approve(runId);
+      const { writer } = memory(initial);
+      expect((await runBulkEffect(runId, 'bulk_apply', beatDeps(writer, Date.now))).status).toBe('done');
+      expect([started, live.size]).toEqual([2, 0]);
+
+      const second = recordMemoryRun(1);
+      approve(second.runId);
+      // The local write fails, and booking that answer then throws out of the target's write.
+      const throwing = vi.spyOn(ledger, 'markRefused').mockImplementation(() => { throw new Error('store gone'); });
+      try {
+        const failing = memory(second.initial, new Set(['k000'])).writer;
+        await expect(runBulkEffect(second.runId, 'bulk_apply', beatDeps(failing, Date.now))).rejects.toThrow('store gone');
+      } finally {
+        throwing.mockRestore();
+      }
+      expect([started, live.size]).toEqual([3, 0]);
+    } finally {
+      set.mockRestore();
+      clear.mockRestore();
+    }
+  });
+});
+
 describe('the owner view', () => {
   it('serves at most 500 targets per page', () => {
     const { runId } = recordMemoryRun(501);
@@ -749,6 +1299,29 @@ describe('the owner view', () => {
     expect(ledger.getPreview(id, { changed: true }).map((t) => [t.key, t.written])).toEqual([['k7', true], ['k5', false]]);
     expect(ledger.getPreview(id).map((t) => t.key).slice(5)).toEqual(['k5', 'k6', 'k7']);
   });
+
+  it('serves the targets with an error from the run right after the written ones, a read that failed among them, not a reason the plan left one out for', () => {
+    // Eight changed targets: the page opens on a first page of six, so a failed target late in the
+    // plan has to come before the open ones to be seen there.
+    const targets: PlannedTarget[] = Array.from({ length: 8 }, (_, i) => ({ key: `k${String(i)}`, before: { absent: false, value: 'v' }, after: `w${String(i)}` }));
+    const { id } = ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem', targets });
+    approve(id);
+    // k6 written, k7 failed, k5 a conflict; k3 left out at planning on a failed read, k4 for another reason.
+    expect(ledger.claimTarget(id, 6)).toBe(true);
+    ledger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 6, 'ok');
+    expect(ledger.claimTarget(id, 7)).toBe(true);
+    ledger.recordFailed(id, 7, 'write_failed');
+    expect(ledger.claimTarget(id, 5)).toBe(true);
+    ledger.recordFailed(id, 5, 'conflict');
+    const db = engineDb.getDb();
+    db.prepare("UPDATE bulk_targets SET change = 'invalid', error = 'read_failed' WHERE run_id = ? AND seq = 3").run(id);
+    db.prepare("UPDATE bulk_targets SET change = 'invalid', error = 'not_found' WHERE run_id = ? AND seq = 4").run(id);
+    expect(ledger.getPreview(id, { changed: true }).map((t) => t.key)).toEqual(['k6', 'k3', 'k5', 'k7', 'k0', 'k1', 'k2', 'k4']);
+    // The first page of six holds the written one and every one with an error from the run.
+    expect(ledger.getPreview(id, { changed: true, limit: 6 }).map((t) => t.key)).toEqual(['k6', 'k3', 'k5', 'k7', 'k0', 'k1']);
+    // Control: without it, plan order.
+    expect(ledger.getPreview(id).map((t) => t.key)).toEqual(['k0', 'k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7']);
+  });
 });
 
 describe('the claim predicate (BulkLedger.claimTarget)', () => {
@@ -769,6 +1342,34 @@ describe('the claim predicate (BulkLedger.claimTarget)', () => {
     expect(ledger.claimTarget(runId, 1, t0)).toBe(true);
     ledger.recordFailed(runId, 1, 'write_failed');
     expect(ledger.claimTarget(runId, 1, t0 + 10 * BULK_CLAIM_STALE_MS)).toBe(false);
+  });
+
+  it('records nothing for an undo target another loop took over, and leaves the run it takes back as it was', async () => {
+    const { runId, initial } = recordMemoryRun(2);
+    approve(runId);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial).writer))).status).toBe('done');
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    const forUndo = { id: undo.status.id, kind: 'undo' as const, sourceRunId: runId };
+    const undoneAt = (): (string | null)[] => (engineDb.getDb()
+      .prepare('SELECT undone_at FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runId) as { undone_at: string | null }[]).map((r) => r.undone_at);
+    const appliedAt = (): string | null => (engineDb.getDb()
+      .prepare('SELECT applied_at FROM bulk_targets WHERE run_id = ? AND seq = 0').get(undo.status.id) as { applied_at: string | null }).applied_at;
+
+    const a = Date.now();
+    const b = a + BULK_CLAIM_STALE_MS + 1_000;
+    expect(ledger.claimTarget(undo.status.id, 0, a)).toBe(true);
+    expect(ledger.claimTarget(undo.status.id, 0, b)).toBe(true); // a second loop takes it over
+    // The first loop's record lands nowhere: not on the undo target, not on the run it takes back.
+    expect(ledger.recordApplied(forUndo, 0, 'ok', b + 1, null, null, false, false, a)).toBe(false);
+    expect(appliedAt()).toBeNull();
+    expect(undoneAt()).toEqual([null, null]);
+    expect(ledger.getStatus(undo.status.id)!.applied).toBe(0);
+    // The loop that holds the claim records, and takes the source target back.
+    expect(ledger.recordApplied(forUndo, 0, 'ok', b + 2, null, null, false, false, b)).toBe(true);
+    expect(appliedAt()).not.toBeNull();
+    expect(undoneAt().filter((x) => x !== null)).toHaveLength(1);
   });
 });
 
@@ -2088,6 +2689,314 @@ describe('data-store runs', () => {
     expect(store.getCollectionInfo('products')!.recordCount).toBe(150);
   });
 
+  describe('the stamp of a run\'s writes (_source_grants)', () => {
+    const writerFor = (run: Parameters<typeof bulkWriterFor>[0]) => bulkWriterFor(run, store);
+    /** An agent whose conversation holds `grants`; null: one that holds no grant set. */
+    const agentWith = (grants: string[] | null): IAgent => ({
+      ...agent(), ...(grants === null ? {} : { conversationGrants: { members: () => [...grants] } }),
+    } as unknown as IAgent);
+    const applyPlanned = async (out: string, deps: { writerFor: typeof writerFor } = { writerFor }): Promise<string> => {
+      const runId = runIdOf(out);
+      approve(runId);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, ...deps })).status).toBe('done');
+      return runId;
+    };
+    /** Plan from a workspace file: a file carries no stamp, so the run's stamp holds unknown. */
+    const planAndApply = async (rows: { target: string; price: number }[], planner: IAgent): Promise<string> => {
+      writeFileSync(join(ws, 'p.json'), JSON.stringify(rows));
+      return applyPlanned(await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, planner));
+    };
+    /** Add rows to the collection `staged` (made on first use), stamped by a write with `stamp`. */
+    const stage = (rows: { target: string; price: number }[], stamp: string[]): void => {
+      if (!store.getCollectionInfo('staged')) {
+        store.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }, { name: 'price', type: 'number' }] });
+      }
+      store.insertRecords({ collection: 'staged', records: rows, stamp: { grants: stamp, runId: null, writtenBy: null, untrusted: false } });
+    };
+    const planStaged = async (planner: IAgent, atomic = false): Promise<string> => applyPlanned(await bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'products', source_collection: 'staged', atomic }, planner));
+    /** Plan from the collection `staged`, whose rows a write stamped with `stamp`. */
+    const planFromCollection = async (rows: { target: string; price: number }[], stamp: string[], planner: IAgent, atomic = false): Promise<string> => {
+      stage(rows, stamp);
+      return planStaged(planner, atomic);
+    };
+    const undoOf = async (runId: string, w: typeof writerFor = writerFor): Promise<{ id: string; status: string }> => {
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      approve(undo.status.id);
+      return { id: undo.status.id, status: (await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: w })).status };
+    };
+    const grantsOf = (sku: string): readonly string[] | undefined => store.sourceOfRow('products', 'sku', sku)?.grants;
+
+    it('a row a run creates from a collection holds the planning conversation\'s grants and the source rows\', not unknown', async () => {
+      seedStore();
+      await planFromCollection([{ target: 'NEW1', price: 1 }], ['gX'], agentWith(['gA']));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(grantsOf('NEW1')).toEqual(['gA', 'gX']);
+    });
+
+    it('a source row without a stamp (NULL, as from before the columns) puts unknown beside the conversation\'s grants', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], ['gX']);
+      store['db'].prepare('UPDATE ds_staged SET _source_grants = NULL').run();
+      await planStaged(agentWith(['gA']));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(grantsOf('NEW1')).toEqual(['gA', 'unknown']);
+    });
+
+    it('the stamp of a source row past the first read chunk reaches the rows the run creates', async () => {
+      seedStore();
+      // 500 rows (one chunk of `BULK_QUERY_PAGE`) under gY, and the 501st alone under gZ.
+      stage(Array.from({ length: 500 }, (_, i) => ({ target: `N${String(i)}`, price: i })), ['gY']);
+      stage([{ target: 'N500', price: 500 }], ['gZ']);
+      await planStaged(agentWith(['gA']));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'N500' } }).rows).toHaveLength(1);
+      expect(grantsOf('N0')).toEqual(['gA', 'gY', 'gZ']);
+      expect(grantsOf('N500')).toEqual(['gA', 'gY', 'gZ']);
+    });
+
+    it('a row a run creates from a file holds unknown beside the planning conversation\'s grants', async () => {
+      seedStore();
+      await planAndApply([{ target: 'NEW1', price: 1 }], agentWith(['gA']));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(grantsOf('NEW1')).toEqual(['gA', 'unknown']);
+    });
+
+    it('CONTROL: a row a run creates, planned with no grant set, holds unknown — beside the source rows\' grants', async () => {
+      seedStore();
+      await planAndApply([{ target: 'NEW1', price: 1 }], agentWith(null));
+      expect(grantsOf('NEW1')).toEqual(['unknown']);
+      store.dropCollection('products');
+      seedStore();
+      await planFromCollection([{ target: 'NEW2', price: 2 }], ['gX'], agentWith(null));
+      expect(grantsOf('NEW2')).toEqual(['gX', 'unknown']);
+    });
+
+    it('a row an undo deletes comes back with the stamp it held and unknown beside it, when that undo is undone', async () => {
+      seedStore();
+      // The row a run under gB creates; its undo deletes it, and the undo of that undo — planned
+      // by the owner with no conversation — re-creates it.
+      const runId = await planFromCollection([{ target: 'NEW1', price: 1 }], ['gB'], agentWith(['gB']));
+      expect(grantsOf('NEW1')).toEqual(['gB']);
+      const undo = await undoOf(runId);
+      expect(undo.status).toBe('done');
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')).toBeNull();
+      expect((await undoOf(undo.id)).status).toBe('done');
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
+      expect(grantsOf('NEW1')).toEqual(['gB', 'unknown']);
+    });
+
+    it('the atomic rollback re-creates a row its undo deleted with the stamp it held and unknown beside it', async () => {
+      seedStore();
+      const runId = await planFromCollection([{ target: 'NEW0', price: 0 }, { target: 'NEW1', price: 1 }], ['gB'], agentWith(['gB']), true);
+      expect([grantsOf('NEW0'), grantsOf('NEW1')]).toEqual([['gB'], ['gB']]);
+      // The undo deletes NEW1 first (reverse order), then fails on NEW0 and rolls back.
+      const failing = (run: Parameters<typeof bulkWriterFor>[0]): TargetWriter | null => {
+        const inner = bulkWriterFor(run, store);
+        if (!inner) return null;
+        return {
+          read: (k, f) => inner.read(k, f),
+          write: async (k, a, onSend, onRefused, grants) => {
+            if (k === 'NEW0' && a.absent) throw new Error('boom');
+            return inner.write(k, a, onSend, onRefused, grants);
+          },
+        };
+      };
+      expect((await undoOf(runId, failing)).status).toBe('aborted');
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
+      expect(grantsOf('NEW1')).toEqual(['gB', 'unknown']);
+      expect(grantsOf('NEW0')).toEqual(['gB']);
+    });
+
+    it('a judged data-store plan records the stamp each existing row held', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      writeFileSync(join(ws, 'j.csv'), 'target\nS1\nS2');
+      const out = await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_file: 'j.csv', judge: { rule: 'Set a price.', schema: { price: { type: 'number' } } } }, agentWith(['gA']));
+      const cells = engineDb.getDb().prepare('SELECT seq, before_grants AS b FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runIdOf(out));
+      // S1's stamp is gB with the seed's unknown; S2 holds the seed's empty set, read as unknown.
+      expect(cells).toEqual([{ seq: 0, b: '["gB","unknown"]' }, { seq: 1, b: null }]);
+    });
+
+    it('the undo of an update records the row\'s earlier stamp and the run\'s per target, and the store keeps their union', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      expect(grantsOf('S1')).toEqual(['gB', 'unknown']);
+      const runId = await planFromCollection([{ target: 'S1', price: 99 }], ['gA'], agentWith(['gA']));
+      expect(grantsOf('S1')).toEqual(['gA', 'gB', 'unknown']);
+      const undo = await undoOf(runId);
+      expect(undo.status).toBe('done');
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'S1' } }).rows[0]).toMatchObject({ price: 1 });
+      // The store's union keeps the run's grant beside the restored one (accepted over-attribution).
+      expect(grantsOf('S1')).toEqual(['gA', 'gB', 'unknown']);
+      const cells = engineDb.getDb().prepare('SELECT before_grants AS b, write_grants AS w FROM bulk_targets WHERE run_id = ?').get(undo.id);
+      expect(cells).toEqual({ b: '["gA"]', w: '["gB","unknown"]' });
+    });
+
+    it('the undo writes its source\'s title and both stamps each into its own column', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      const runId = await planFromCollection([{ target: 'S1', price: 99 }], ['gA'], agentWith(['gA']));
+      // Three different values, so a value written into a neighbouring column shows: all three are TEXT.
+      engineDb.getDb().prepare("UPDATE bulk_targets SET target_title = 'title-of-S1' WHERE run_id = ?").run(runId);
+      const source = engineDb.getDb().prepare('SELECT target_title AS t, before_grants AS b, write_grants AS w FROM bulk_targets WHERE run_id = ?').get(runId);
+      expect(source).toEqual({ t: 'title-of-S1', b: '["gB","unknown"]', w: null });
+      const undo = await undoOf(runId);
+      expect(undo.status).toBe('done');
+      const cells = engineDb.getDb().prepare('SELECT target_title AS t, before_grants AS b, write_grants AS w FROM bulk_targets WHERE run_id = ?').get(undo.id);
+      expect(cells).toEqual({ t: 'title-of-S1', b: '["gA"]', w: '["gB","unknown"]' });
+    });
+  });
+
+  describe('the outside-content mark of a run\'s writes (_written_untrusted)', () => {
+    const writerFor = (run: Parameters<typeof bulkWriterFor>[0]) => bulkWriterFor(run, store);
+    /** An agent whose turn had read outside content (`untrusted`) or not. */
+    const agentRead = (untrusted: boolean): IAgent => ({ ...agent(), sawExternalContentTool: untrusted } as unknown as IAgent);
+    const markOf = (sku: string): boolean | undefined => store.sourceOfRow('products', 'sku', sku)?.untrusted;
+    /** Add rows to the collection `staged` (made on first use), written with `untrusted`. */
+    const stage = (rows: { target: string; price: number }[], untrusted: boolean): void => {
+      if (!store.getCollectionInfo('staged')) {
+        store.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }, { name: 'price', type: 'number' }] });
+      }
+      store.insertRecords({ collection: 'staged', records: rows, stamp: { grants: ['gS'], runId: null, writtenBy: null, untrusted } });
+    };
+    const apply = async (out: string): Promise<string> => {
+      const runId = runIdOf(out);
+      approve(runId);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
+      return runId;
+    };
+    const planStaged = async (planner: IAgent): Promise<string> => apply(await bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'products', source_collection: 'staged' }, planner));
+    const undoOf = async (runId: string): Promise<string> => {
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      approve(undo.status.id);
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
+      return undo.status.id;
+    };
+
+    it('a row a run creates by copying a marked source row is marked, planned in a clean turn', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], false);
+      stage([{ target: 'NEW2', price: 2 }], true);
+      await planStaged(agentRead(false));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect([markOf('NEW1'), markOf('NEW2')]).toEqual([true, true]);
+    });
+
+    it('CONTROL: a run copying only unmarked rows, planned in a clean turn, leaves its rows unmarked', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], false);
+      await planStaged(agentRead(false));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(markOf('NEW1')).toBe(false);
+    });
+
+    it('a run planned in a turn that read outside content marks the rows it updates, from an unmarked source', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      expect(markOf('S1')).toBe(false);
+      stage([{ target: 'S1', price: 99 }], false);
+      await planStaged(agentRead(true));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'S1' } }).rows[0]).toMatchObject({ price: 99 });
+      expect(markOf('S1')).toBe(true);
+    });
+
+    it('a run planned from a file marks its rows, planned in a clean turn', async () => {
+      seedStore();
+      writeFileSync(join(ws, 'p.json'), JSON.stringify([{ target: 'NEW1', price: 1 }]));
+      await apply(await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, agentRead(false)));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(markOf('NEW1')).toBe(true);
+    });
+
+    it('a marked source row past the first read chunk still marks the run', async () => {
+      seedStore();
+      // 500 unmarked rows (one chunk of `BULK_QUERY_PAGE`), and the 501st marked.
+      stage(Array.from({ length: 500 }, (_, i) => ({ target: `N${String(i)}`, price: i })), false);
+      stage([{ target: 'N500', price: 500 }], true);
+      await planStaged(agentRead(false));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'N0' } }).rows).toHaveLength(1);
+      expect(markOf('N0')).toBe(true);
+    });
+
+    it('the undo of an undo re-creates a marked row marked, and an undo of a clean run stays clean', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], true);
+      const runId = await planStaged(agentRead(false));
+      expect(markOf('NEW1')).toBe(true);
+      const undo = await undoOf(runId);
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')).toBeNull();
+      expect(ledger.getRunForApply(undo)!.plannerUntrusted).toBe(true);
+      await undoOf(undo);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
+      expect(markOf('NEW1')).toBe(true);
+
+      store.dropCollection('products');
+      store.dropCollection('staged');
+      seedStore();
+      stage([{ target: 'NEW2', price: 2 }], false);
+      const clean = await planStaged(agentRead(false));
+      expect(ledger.getRunForApply(await undoOf(clean))!.plannerUntrusted).toBe(false);
+    });
+
+    it('a row a clean undo re-creates is marked, so a mark it held before its undo deleted it is not lost', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], false);
+      const runId = await planStaged(agentRead(false));
+      expect(markOf('NEW1')).toBe(false);
+      // A turn that read outside content writes the row again with the same values: it is marked,
+      // and the undo still finds the values it expects.
+      store.putRowVerbatim('products', { sku: 'NEW1', price: 1, owner: null }, { grants: ['gO'], runId: null, writtenBy: null, untrusted: true });
+      expect(markOf('NEW1')).toBe(true);
+      const undo = await undoOf(runId);
+      expect(ledger.getRunForApply(undo)!.plannerUntrusted).toBe(false);
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')).toBeNull();
+      await undoOf(undo);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
+      expect(markOf('NEW1')).toBe(true);
+
+      // The undo cannot tell which rows were marked when it deleted them (the before-image does
+      // not carry the mark), so it marks every row it re-creates — a clean one as well.
+      stage([{ target: 'NEW2', price: 2 }], false);
+      const clean = await planStaged(agentRead(false));
+      expect(markOf('NEW2')).toBe(false);
+      await undoOf(await undoOf(clean));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW2' } }).rows[0]).toMatchObject({ sku: 'NEW2', price: 2 });
+      expect(markOf('NEW2')).toBe(true);
+    });
+
+    it('CONTROL: a clean undo of an update leaves an unmarked row unmarked', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      stage([{ target: 'S1', price: 99 }], false);
+      const runId = await planStaged(agentRead(false));
+      await undoOf(runId);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'S1' } }).rows[0]).toMatchObject({ price: 1 });
+      expect(markOf('S1')).toBe(false);
+    });
+
+    it('a run that does not record the mark, as one planned before the record, counts as marked', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], false);
+      const out = await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_collection: 'staged' }, agentRead(false));
+      const runId = runIdOf(out);
+      expect(ledger.getRunForApply(runId)!.plannerUntrusted).toBe(false);
+      engineDb.getDb().prepare('UPDATE bulk_runs SET planner_untrusted = NULL WHERE id = ?').run(runId);
+      expect(ledger.getRunForApply(runId)!.plannerUntrusted).toBe(true);
+      approve(runId);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
+      expect(markOf('NEW1')).toBe(true);
+      // And a run recorded without saying is recorded as marked.
+      expect(ledger.getRunForApply(recordMemoryRun(1).runId)!.plannerUntrusted).toBe(true);
+    });
+  });
+
   it('a data-store run whose collection is gone halts as unavailable', async () => {
     seedStore();
     writeFileSync(join(ws, 'p.json'), JSON.stringify([{ target: 'S1', price: 5 }]));
@@ -2200,6 +3109,7 @@ describe('§7(i) before-images reach no model context', () => {
     const listAgent = {
       toolContext: { taskManager: { list: () => [], listTriggers: () => bulkTriggers } },
       activeScopes: [],
+      principal: OWNER_PRINCIPAL,
     } as unknown as IAgent;
     const listed = await taskListTool.handler({}, listAgent);
     expect(listed).toContain(`Bulk run ${runId2}`);

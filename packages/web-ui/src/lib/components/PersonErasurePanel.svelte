@@ -29,6 +29,10 @@
 	let busy = $state(false);
 	let notice = $state<PersonErasureOutcome['kind'] | null>(null);
 	let result = $state<PersonErasureResult | null>(null);
+	// Once the erasure has answered in full there is nothing left to do or cancel: the panel
+	// says it is finished, offers to close and drops the warning colour, which belongs to an
+	// erasure still to come. A partial answer is not done and keeps all three.
+	const done = $derived(notice === 'erased');
 
 	const bound = $derived(preview ? [
 		...preview.entries.filter(e => e.matchedBy === 'subject'),
@@ -85,10 +89,10 @@
 	$effect(() => { untrack(() => { void loadManagedStatus(); }); });
 </script>
 
-<div class="mt-3 rounded-[var(--radius-md)] border border-danger/30 bg-danger/10 p-3 text-sm" role="region" aria-label={t('erasure.title')}>
+<div class="mt-3 rounded-[var(--radius-md)] border p-3 text-sm {done ? 'border-border bg-bg-subtle' : 'border-danger/30 bg-danger/10'}" role="region" aria-label={t(done ? 'erasure.done_title' : 'erasure.title')}>
 	<div class="flex items-start justify-between gap-2">
-		<h3 class="font-medium text-danger">{t('erasure.title')}</h3>
-		<button onclick={onclose} class="shrink-0 text-xs text-text-subtle hover:text-text">{t('erasure.cancel')}</button>
+		<h3 class="font-medium {done ? 'text-text' : 'text-danger'}">{t(done ? 'erasure.done_title' : 'erasure.title')}</h3>
+		<button onclick={onclose} class="shrink-0 text-xs text-text-subtle hover:text-text">{t(done ? 'erasure.close' : 'erasure.cancel')}</button>
 	</div>
 
 	{#if notice === 'erased' && result}

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
+import { CONTENT_FLAG_DIALOG, contentFlagFound, contentFlagRefusal } from '../tools/dialog-text.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -76,7 +77,7 @@ import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
 import { ReadOutsideUnrecordedError } from './thread-store.js';
-import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, persistRefusedTurn, capStopNote, CONTENT_REFUSED_NOTE, type EngineNoticeCode } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
 import { buildCompactionSummaryPrompt } from './compaction-prompt.js';
@@ -90,7 +91,6 @@ import type { SecretStore } from './secret-store.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { DataStore } from './data-store.js';
-import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 import { MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, principalTag, runAuthorTag } from './request-principal.js';
@@ -659,6 +659,9 @@ export class Session {
   /** Token/cost totals of the most recently completed run; null until the
    *  first run finishes. Echoed in the `done` SSE event — see getLastRunUsage(). */
   private _lastRunUsage: RunUsageSummary | null = null;
+  /** Set when the last run ended with a sentence of lynox's own instead of a model reply; see
+   *  getLastRunNotice(). */
+  private _lastRunNotice: EngineNoticeCode | undefined;
   private _systemPrompt: string | undefined;
 
   readonly usage: AccumulatedUsage = {
@@ -1006,6 +1009,9 @@ export class Session {
       this._originRefusals.length = 0;
     }
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
+    // Cleared for every run the person started, before any of its returns: only the returns
+    // below that end the run with lynox's own sentence set it again.
+    if (runOptions?.internal !== true) this._lastRunNotice = undefined;
     // Before anything that could rebuild the agent below, like the principal: every rebuild
     // of this run marks its agent by what this run's client said, never by an earlier run.
     if (runOptions?.internal !== true) this._runShowsReview = runOptions?.showsChangesetReview === true;
@@ -1101,6 +1107,7 @@ export class Session {
       // An internal (compaction) run must NOT return the block string — it would
       // be injected as the thread's authoritative summary. Throw instead.
       if (runOptions?.internal === true) throw new InternalRunBlockedError(reason);
+      this._lastRunNotice = 'run_blocked';
       return reason;
     }
 
@@ -1150,6 +1157,7 @@ export class Session {
         type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox',
         ...(holdExhausted ? { reason: RUN_BLOCKED_HOLD_EXHAUSTED } : {}),
       });
+      this._lastRunNotice = 'run_blocked';
       return `Run blocked: ${reason}`;
     }
 
@@ -1161,13 +1169,16 @@ export class Session {
       if (inputCheck.action === 'block') {
         const msg = `⚠ Request blocked by content policy: ${inputCheck.reason ?? 'prohibited content'}. This request was not sent to the AI model.`;
         if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+        persistRefusedTurn(threadStore, this.sessionId, task, msg);
+        this._lastRunNotice = CONTENT_REFUSED_NOTE;
         return msg;
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
+        const language = noticeLanguage(this.engine.config.language);
         let answer: string;
         try {
           answer = await this.agent.promptUser(
-            pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
+            CONTENT_FLAG_DIALOG[language].question(contentFlagFound(language, inputCheck.reason)),
             consentOptions('guard'),
             consentMeta('guard'),
           );
@@ -1179,14 +1190,20 @@ export class Session {
           if (!isInputRequired(err)) throw err;
           const msg = `⚠ Request flagged by content policy: ${inputCheck.reason ?? 'suspicious content'}. There is no one to allow it, so it was not sent to the AI model.`;
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+          persistRefusedTurn(threadStore, this.sessionId, task, msg);
+          this._lastRunNotice = CONTENT_REFUSED_NOTE;
           return msg;
         }
         const outcome = decideConsent('guard', answer);
         if (outcome !== 'allow') {
-          // The run's result, read by the person, not by the model: no sentence for the model here
-          // (the reply route already tells the person an unrecognised answer allowed nothing).
-          const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
+          // The run's result, read by the person in the instance's language: the run ends here,
+          // before the model is called. The message and this sentence are kept as display-only
+          // rows, so a reload shows both and the model never reads either.
+          const why = outcome === 'unrecognised' ? 'unrecognised' : outcome === 'dismissed' ? 'unanswered' : 'declined';
+          const msg = contentFlagRefusal(language, why, inputCheck.reason);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+          persistRefusedTurn(threadStore, this.sessionId, task, msg);
+          this._lastRunNotice = CONTENT_REFUSED_NOTE;
           return msg;
         }
       }
@@ -1299,6 +1316,10 @@ export class Session {
     // (without this, eager checkpoints during the run inflate existingCount
     // and the first-run title generation never fires).
     const startMessageCount = this.engine.getThreadStore()?.getMessageCount(this.sessionId) ?? 0;
+    // "First run" for the title counts only the rows the model reads. A refused message or a
+    // failed turn leaves display-only rows behind; counted, they made the next accepted turn
+    // look like a later one, and the thread kept no title.
+    const startApiMessageCount = this.engine.getThreadStore()?.getApiMessageCount(this.sessionId) ?? 0;
 
     // Compute prompt hash from the system prompt the agent uses
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
@@ -1663,7 +1684,7 @@ export class Session {
       // still ALWAYS write the cost / token rollup (eager-persist doesn't
       // know token counts; those are only computed here at run-end) plus
       // the first-run title — both gated on the START count, not the now
-      // (`startMessageCount === 0` = "thread was empty when this run began").
+      // (`startApiMessageCount === 0` = "the model had read nothing in this thread when this run began").
       if (threadStore && this.agent) {
         try {
           const agent = this.agent;
@@ -1709,7 +1730,11 @@ export class Session {
           }
           // An internal run (a summary in a session of its own) has no user words to title, and
           // its prompt is another thread's history: it would go to a second model call.
-          if (startMessageCount === 0 && !agent.isInternalRun) {
+          // After a refused or failed first turn the thread is already listed, and the person may
+          // have named it; that name stays. A thread with no rows before this run is titled as before.
+          const namedAfterDisplayRows = startMessageCount > startApiMessageCount
+            && (threadStore.getThread(this.sessionId)?.title ?? '') !== '';
+          if (startApiMessageCount === 0 && !agent.isInternalRun && !namedAfterDisplayRows) {
             // Derive the title from the user's OWN words, not the engine framing:
             // a context-opened chat (💬 mail-reply / fix / workflow-edit) carries a
             // `[Loaded …]\n[/loaded-context]\n\n` preamble on its first message that
@@ -2656,6 +2681,14 @@ export class Session {
    *  live per-message footer survives a lost `turn_end` frame. */
   getLastRunUsage(): RunUsageSummary | null {
     return this._lastRunUsage;
+  }
+
+  /** Whether the last run the person started ended with a sentence of lynox's own — a request
+   *  the content check refused, or one the budget or a run hook blocked — rather than with a model reply, and
+   *  which. Set only by the engine at those returns; the HTTP API echoes it in the `done` event
+   *  so the chat does not mark that sentence as written by the AI model. */
+  getLastRunNotice(): EngineNoticeCode | undefined {
+    return this._lastRunNotice;
   }
 
   setEffort(level: EffortLevel): void {

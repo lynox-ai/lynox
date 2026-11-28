@@ -12,13 +12,12 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
-	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import BulkRunDetail from './BulkRunDetail.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkHost from './BulkHost.svelte';
-	import { bulkHaltSuffixKey, bulkHostOf, bulkLabelParts, bulkListUnread, bulkLoadErrorKey, bulkReadsList, bulkPhaseHasSuffix, bulkPhaseKey, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
+	import { bulkHaltSuffixKey, bulkHostOf, bulkLabelParts, bulkListUnread, bulkLoadErrorKey, bulkReadsList, bulkPhaseHasSuffix, bulkPhaseKey, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkUsd, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
 	let merges = $state<BulkMerge[]>([]);
@@ -173,7 +172,8 @@
 										{/if}
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{bulkReadsList(run) ? t('bulk.head.counts_pending') : bulkListUnread(run) !== null ? '' : `${run.applied}/${run.total}`}</td>
-									<td class="py-2 hidden sm:table-cell font-mono text-xs">{formatCost(run.costUsd)}</td>
+									<!-- Amounts read as on the run's own page, „0.25 USD“; nothing spent reads as a dash (U-339). -->
+									<td class="py-2 hidden sm:table-cell font-mono text-xs whitespace-nowrap" data-testid="bulk-run-cost">{run.costUsd > 0 ? `${bulkUsd(run.costUsd)}\u00a0USD` : '–'}</td>
 								</tr>
 							{/each}
 						</tbody>

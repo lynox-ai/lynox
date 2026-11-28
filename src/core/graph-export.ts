@@ -83,6 +83,44 @@ export async function collectGraphForExport(source: GraphExportSource): Promise<
   return { entities, relationships: [...relationSet.values()], truncated, relationCapHit };
 }
 
+/**
+ * The graph block's free text through the export's mask: an entity's name, type, aliases and
+ * description, a relation's type and description. These are what the graph was told, as the
+ * remembered texts beside them are, so they go through the same mask. Ids, counts and times are
+ * left as they are.
+ */
+export function maskGraphForExport(
+  graph: { entities: EntityRecord[]; relationships: ExportRelation[] },
+  mask: (text: string) => string,
+): { entities: EntityRecord[]; relationships: ExportRelation[] } {
+  // A field is masked where it holds text, as `readMemoryTextsForExport` masks its rows: a record
+  // read from an older or partial row passes through with what it has. Types, empty descriptions
+  // and relation kinds repeat across a graph, and the mask costs the same for each, so each
+  // distinct text is masked once per call.
+  const seen = new Map<string, string>();
+  const once = (v: string): string => {
+    let out = seen.get(v);
+    if (out === undefined) { out = mask(v); seen.set(v, out); }
+    return out;
+  };
+  const text = <T>(v: T): T => (typeof v === 'string' ? once(v) as T : v);
+  return {
+    entities: graph.entities.map(e => ({
+      ...e,
+      canonicalName: text(e.canonicalName),
+      // An older row's type is a free text column, so it is masked too.
+      entityType: text(e.entityType),
+      aliases: Array.isArray(e.aliases) ? e.aliases.map(text) : text(e.aliases),
+      description: text(e.description),
+    })),
+    relationships: graph.relationships.map(r => ({
+      ...r,
+      relationType: text(r.relationType),
+      description: text(r.description),
+    })),
+  };
+}
+
 /** Walks every entity by key, page by page; `null` when the source cannot, or stops part way. */
 async function walkByKey(
   next: (after: string | null, limit: number) => Promise<EntityRecord[] | null> | EntityRecord[] | null,
@@ -225,6 +263,8 @@ export interface HeldMemoryTexts {
   'agent-memory.db': {
     memories: ExportRow[]; mentions: ExportRow[]; supersedes: ExportRow[]; cooccurrences: ExportRow[]; metrics: ExportRow[];
     entities: ExportRow[]; relations: ExportRow[];
+    /** Which remembered lines came from a source that was not checked: fingerprints, no text. */
+    untrusted_lines: ExportRow[];
   };
   /** The subject-graph store: each remembered text, which subject it is about, every relation
    * between subjects (those of a kind the graph block does not list included), which text
@@ -243,8 +283,9 @@ export interface HeldMemoryTexts {
  * Every remembered text both stores hold, and what links it to the graph, for the data export.
  * Active or not: a text that was replaced or retired is still stored, and Art. 15 asks what is
  * held. Each row carries its stored columns except the embedding (numbers, no content of their
- * own), which is not even read. Every text, and a relationship's free-text description and
- * notes, and the reason one text replaced another, goes through `mask`, as the other blocks do;
+ * own), which is not even read. Every text, an entity's free-text columns, a relationship's kind,
+ * description, dates and notes, and the reason one text replaced another, go through `mask`, as
+ * the other blocks do;
  * engine.db texts are decrypted first, and
  * one that cannot be, or is not stored as text at all, is written as
  * {@link UNREADABLE_MEMORY_TEXT}, never as what is stored.
@@ -298,7 +339,7 @@ export function readMemoryTextsForExport(opts: {
     return { ...row, text: UNREADABLE_MEMORY_TEXT };
   };
 
-  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [] };
+  const legacyHalf: HeldMemoryTexts['agent-memory.db'] = { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [], untrusted_lines: [] };
   let legacy: Database.Database | null = null;
   try {
     if (existsSync(opts.agentMemoryFile)) {
@@ -313,9 +354,15 @@ export function readMemoryTextsForExport(opts: {
           .map(row => maskField(row, 'reason'));
         legacyHalf.cooccurrences = read(legacy, 'cooccurrences', '', 't.last_seen_at, t.entity_a_id, t.entity_b_id', 'agent-memory.db cooccurrences');
         legacyHalf.metrics = read(legacy, 'metrics', '', 't.computed_at, t.id', 'agent-memory.db metrics');
+        // A file older than this build that has no such table yet (one the engine has not
+        // migrated) holds no marked lines, so nothing is missing. A current file without it is
+        // read anyway, and fails as unreadable.
+        const older = agentMemoryVersionOn(legacy) < AGENT_MEMORY_SCHEMA_VERSION;
+        const hasMarks = legacy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'untrusted_lines' COLLATE NOCASE").get() !== undefined;
+        legacyHalf.untrusted_lines = older && !hasMarks ? [] : read(legacy, 'untrusted_lines', '', 't.created_at, t.namespace, t.key', 'agent-memory.db untrusted_lines');
         if (opts.subjectGraph === true) {
           legacyHalf.entities = read(legacy, 'entities', '', 't.first_seen_at, t.id', 'agent-memory.db entities')
-            .map(row => ['canonical_name', 'aliases', 'description', 'metadata'].reduce(maskField, row));
+            .map(row => ['canonical_name', 'entity_type', 'aliases', 'description', 'metadata'].reduce(maskField, row));
           legacyHalf.relations = read(legacy, 'relations', '', 't.created_at, t.id', 'agent-memory.db relations')
             .map(row => maskField(maskField(row, 'relation_type'), 'description'));
         }
@@ -345,7 +392,7 @@ export function readMemoryTextsForExport(opts: {
       });
     engineHalf.memory_subjects = read(db, 'memory_subjects', '', 't.created_at, t.memory_id, t.subject_id', 'engine.db memory_subjects');
     engineHalf.relationships = read(db, 'relationships', `, CASE WHEN ${sourceDeletedSql('t')} THEN 1 ELSE 0 END AS source_deleted`, 't.created_at, t.id', 'engine.db relationships')
-      .map(row => maskField(maskField(row, 'description'), 'notes'));
+      .map(row => ['kind', 'description', 'since', 'until', 'notes'].reduce(maskField, row));
     engineHalf.supersedes = read(db, 'supersedes', '', 't.created_at, t.new_memory_id, t.old_memory_id', 'engine.db supersedes')
       .map(row => maskField(row, 'reason'));
     engineHalf.subject_cooccurrences = read(db, 'subject_cooccurrences', '', 't.last_seen_at, t.subject_a_id, t.subject_b_id', 'engine.db subject_cooccurrences');

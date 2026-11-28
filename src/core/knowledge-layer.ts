@@ -1754,6 +1754,38 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Whether the active memories matching `pattern` were written untrusted (or at the
+   * `external_unverified` tier): `null` when none match, so the caller cannot tell and
+   * treats the text as untrusted. Read before a move or a replacement, so the new row keeps
+   * the mark of the row it comes from.
+   */
+  sourceUntrustedOf(pattern: string, namespace: MemoryNamespace, scope?: MemoryScopeRef | undefined): boolean | null {
+    const r = this.db.sourceOfPattern(pattern, namespace, scope);
+    return r.found ? r.untrusted : null;
+  }
+
+  /** The texts of the active memories in `namespace` written untrusted (or at the
+   *  `external_unverified` tier), for a read path that marks the lines found in them. */
+  untrustedTextsIn(namespace: MemoryNamespace): string[] {
+    return this.db.untrustedTexts(namespace);
+  }
+
+  /** Record the keys of flat lines of `namespace` that carry the untrusted mark (`untrustedLineKey`). */
+  markUntrustedLines(namespace: MemoryNamespace, keys: readonly string[]): void {
+    this.db.addUntrustedLineKeys(namespace, keys);
+  }
+
+  /** The keys of the flat lines of `namespace` that carry the untrusted mark. */
+  untrustedLineKeysIn(namespace: MemoryNamespace): ReadonlySet<string> {
+    return this.db.untrustedLineKeys(namespace);
+  }
+
+  /** Drop the marks of erased lines; without `namespace`, in every namespace. */
+  forgetUntrustedLines(namespace: MemoryNamespace | undefined, keys: readonly string[]): number {
+    return this.db.removeUntrustedLineKeys(namespace, keys);
+  }
+
+  /**
    * Retire the original of a move (`memory_promote`): the memories matching `pattern`
    * in `scope` are deactivated now, like {@link deactivateByPattern}, and their ids
    * returned so {@link markMoved} can name the copy as their successor once it is

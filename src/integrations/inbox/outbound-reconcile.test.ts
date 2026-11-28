@@ -28,7 +28,7 @@ function seedItem(messageId: string | undefined): string {
     bucket: 'requires_user', confidence: 0.9, reasonDe: 'needs you',
     classifiedAt: new Date('2026-06-24T10:00:00Z'), classifierVersion: 'v1',
     ...(messageId !== undefined ? { messageId } : {}),
-  });
+  }).id;
 }
 
 function outCtx(overrides: Partial<OutboundContext> = {}): OutboundContext {

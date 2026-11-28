@@ -8,6 +8,8 @@
 // Single-user instances use the literal 'default' tenant_id. Team-inbox lands
 // in Phase 5+ without a schema change.
 
+import type { PrefilterRule } from '../integrations/mail/triage/rules.js';
+
 export type InboxChannel = 'email';
 
 /**
@@ -38,6 +40,9 @@ export type InboxAuditAction =
   | 'raised_on_sensitive_follow_up'
   /** A flagged follow-up on an item already open in "requires you": nothing raised, the flag noted. */
   | 'sensitive_follow_up_kept_open'
+  /** A mail filed into its thread's item after that item was created by another mail of the
+   *  thread: its own verdict, and whether that verdict raised the item to "requires you". */
+  | 'joined_thread'
   | 'rule_applied'
   | 'generation_requested';
 
@@ -118,6 +123,36 @@ export interface InboxItem {
    * the item's reason and subject still describe its own mail.
    */
   followUps?: InboxItemFollowUps | undefined;
+  /**
+   * The prefilter rule the item's own mail met, absent when none did. `'bounce'`: the item was
+   * created by a delivery failure notice. A raise leaves it as it is (it rewrites the classifier
+   * version), so it tells such an item at any time.
+   */
+  prefilterRule?: PrefilterRule | undefined;
+  /**
+   * For an item created by a delivery failure notice: the newest mail of its thread that came
+   * after the notice (`followUpsOf`), which the list row shows in place of the notice. Set by the
+   * inbox API on the items it returns, absent when there is none. Display only: every other field
+   * still describes the item's own mail, the notice.
+   */
+  shown?: InboxItemShown | undefined;
+}
+
+/**
+ * See {@link InboxItem.shown}. All fields come from the same stored thread message. When that mail
+ * reads as sensitive, or the intake check flagged it, the name and subject are left out.
+ */
+export interface InboxItemShown {
+  /** The stored thread message's row id, as {@link InboxItemFollowUps.latestMessageId} names one. */
+  id: string;
+  fromAddress: string;
+  fromName?: string | undefined;
+  subject?: string | undefined;
+  /** RFC 5322 Message-ID of the shown mail. */
+  messageId: string;
+  /** ISO date of the shown mail, absent when not known. */
+  mailDate?: string | undefined;
+  sensitive: boolean;
 }
 
 /** See {@link InboxItem.followUps}. */

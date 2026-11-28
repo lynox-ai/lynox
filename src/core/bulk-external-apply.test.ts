@@ -943,6 +943,49 @@ describe('applying an external run', () => {
     });
   });
 
+  it('serves beside a failed target whether it was applied and whether a send to it has no clear answer', async () => {
+    // Each its own run, whose first target fails: a redirect on the write after it went out, a
+    // redirect on the read before it, a clear refusal, a server error (no clear answer).
+    const cases: [string, { status: number; headers?: Record<string, string> }, { error: string; sendUnclear: boolean }][] = [
+      ['PATCH', { status: 302, headers: { location: `https://${HOST}/products/9` } }, { error: 'redirect', sendUnclear: true }],
+      ['GET', { status: 302, headers: { location: `https://${HOST}/products/9` } }, { error: 'redirect', sendUnclear: false }],
+      ['PATCH', { status: 422 }, { error: 'write_failed', sendUnclear: false }],
+      ['PATCH', { status: 500 }, { error: 'write_failed', sendUnclear: true }],
+    ];
+    for (const [method, answer, said] of cases) {
+      const s = shop();
+      const restore = serve(s);
+      try {
+        const c = client();
+        const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        s.special.set(`${method} /products/0`, answer);
+        await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(ledger.getPreview(runId)[0], `${method} ${String(answer.status)}`).toMatchObject({ ...said, applied: false });
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it('serves neither beside a target without an error, and applied beside an error left on an applied target', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], c);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      const t = ledger.getPreview(runId)[0]!;
+      expect([t.error, 'applied' in t, 'sendUnclear' in t]).toEqual([null, false, false]);
+      // An error a loop that lost its claim left on a target another loop applied.
+      engineDb.getDb().prepare("UPDATE bulk_targets SET error = 'conflict' WHERE run_id = ? AND seq = 0").run(runId);
+      // Its send stays counted as unanswered after it was recorded; the page shows no error on an
+      // applied target, so that does not reach a sentence.
+      expect(ledger.getPreview(runId)[0]).toMatchObject({ error: 'conflict', applied: true, sendUnclear: true });
+    } finally {
+      restore();
+    }
+  });
+
   it('halts at the first target on a refused or missing credential, leaving it unwritten and resumable', async () => {
     const s = shop();
     s.special.set('PATCH /products/0', { status: 401 });

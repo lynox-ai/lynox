@@ -233,7 +233,8 @@ function seedOldLegacy(path: string): void {
   db.close();
   const raw = new Database(path);
   raw.prepare('DELETE FROM schema_version WHERE version >= 8').run();
-  raw.exec('DROP INDEX IF EXISTS idx_relations_origin; ALTER TABLE relations DROP COLUMN origin_memory_id;');
+  // Back to v7: undo what v8 and every later step added.
+  raw.exec('DROP INDEX IF EXISTS idx_relations_origin; ALTER TABLE relations DROP COLUMN origin_memory_id; DROP TABLE untrusted_lines;');
   // Name the memories by letter so the assertions can read them.
   for (const [k, id] of Object.entries(ids)) {
     raw.prepare('UPDATE relations SET source_memory_id = ? WHERE source_memory_id = ?').run(`m-${k}`, id);
@@ -258,7 +259,7 @@ function seedOldEngine(path: string): void {
   // One edge per triple in engine.db: a kind per source keeps them apart.
   for (const k of ['a', 'b', 'c', 'e', 'f']) rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: `rel_${k}`, description: k, sourceMemoryId: `m-${k}` });
   db.prepare('DELETE FROM schema_version WHERE version >= 72').run();
-  db.exec('ALTER TABLE triggers DROP COLUMN last_run_member_notes; ALTER TABLE bulk_runs DROP COLUMN phase_before_undo; DROP INDEX IF EXISTS idx_bulk_runs_superseded; ALTER TABLE bulk_runs DROP COLUMN superseded_by; ALTER TABLE triggers DROP COLUMN last_escalation_chat_kind; ALTER TABLE triggers DROP COLUMN last_escalation_thread_id; ALTER TABLE triggers DROP COLUMN last_escalation_case; ALTER TABLE bulk_targets DROP COLUMN refusal_detail; ALTER TABLE bulk_targets DROP COLUMN target_title; DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause;');
+  db.exec('ALTER TABLE bulk_runs DROP COLUMN planner_untrusted; ALTER TABLE bulk_runs DROP COLUMN planner_grants; ALTER TABLE bulk_targets DROP COLUMN before_grants; ALTER TABLE bulk_targets DROP COLUMN write_grants; ALTER TABLE triggers DROP COLUMN last_run_member_notes; ALTER TABLE bulk_runs DROP COLUMN phase_before_undo; DROP INDEX IF EXISTS idx_bulk_runs_superseded; ALTER TABLE bulk_runs DROP COLUMN superseded_by; ALTER TABLE triggers DROP COLUMN last_escalation_chat_kind; ALTER TABLE triggers DROP COLUMN last_escalation_thread_id; ALTER TABLE triggers DROP COLUMN last_escalation_case; ALTER TABLE bulk_targets DROP COLUMN refusal_detail; ALTER TABLE bulk_targets DROP COLUMN target_title; DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id; ALTER TABLE triggers DROP COLUMN last_run_cause;');
   engine.close();
 }
 

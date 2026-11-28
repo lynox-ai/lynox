@@ -987,6 +987,83 @@ export class DataStore {
   }
 
   /**
+   * The union of the `_source_grants` of the rows with these `_id`s, sorted — what a bulk run
+   * that copies them carries forward. A row whose stamp is NULL, empty or does not parse adds
+   * `unknown`, as {@link sourceOfRow} reads it. Read in chunks of `chunk` ids, so the bound
+   * variables of one statement stay within SQLite's limit.
+   */
+  sourceGrantsOfIds(collection: string, ids: readonly number[], chunk = 500): string[] {
+    const grants = new Set<string>();
+    if (ids.length === 0) return [];
+    if (!COLLECTION_NAME_RE.test(collection) || RESERVED_NAMES.has(collection)) throw new Error(`Collection "${collection}" not found.`);
+    if (!this._getCollectionMeta(collection)) throw new Error(`Collection "${collection}" not found.`);
+    this._assertSourceColumns(collection);
+    const size = Math.max(1, chunk);
+    for (let i = 0; i < ids.length; i += size) {
+      const part = ids.slice(i, i + size);
+      const rows = this.db.prepare(
+        `SELECT "_source_grants" AS g FROM "ds_${collection}" WHERE "_id" IN (${part.map(() => '?').join(', ')})`,
+      ).all(...part) as Array<{ g: string | null }>;
+      for (const row of rows) {
+        let parsed: unknown = null;
+        try { parsed = row.g === null ? null : JSON.parse(row.g); } catch { parsed = null; }
+        if (!Array.isArray(parsed) || parsed.length === 0) { grants.add(UNKNOWN_GRANT); continue; }
+        for (const g of parsed) grants.add(typeof g === 'string' ? g : UNKNOWN_GRANT);
+      }
+    }
+    return [...grants].sort();
+  }
+
+  /**
+   * Whether any of the rows with these `_id`s carries the outside-content mark
+   * (`_written_untrusted`) — what a bulk run that copies them carries forward. Read in chunks of
+   * `chunk` ids, as {@link sourceGrantsOfIds}; the collection is checked as there.
+   */
+  sourceUntrustedOfIds(collection: string, ids: readonly number[], chunk = 500): boolean {
+    if (ids.length === 0) return false;
+    if (!COLLECTION_NAME_RE.test(collection) || RESERVED_NAMES.has(collection)) throw new Error(`Collection "${collection}" not found.`);
+    if (!this._getCollectionMeta(collection)) throw new Error(`Collection "${collection}" not found.`);
+    this._assertSourceColumns(collection);
+    const size = Math.max(1, chunk);
+    for (let i = 0; i < ids.length; i += size) {
+      const part = ids.slice(i, i + size);
+      const hit = this.db.prepare(
+        `SELECT 1 FROM "ds_${collection}" WHERE "_written_untrusted" = '1' AND "_id" IN (${part.map(() => '?').join(', ')}) LIMIT 1`,
+      ).get(...part);
+      if (hit !== undefined) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The `_source_grants` each row whose `keyColumn` value is among `values` holds, keyed by that
+   * value as a string — the stamp a bulk run must write back on an undo. A row whose stamp is
+   * NULL, empty or does not parse maps to null: unknown, as {@link sourceOfRow} reads it. A value
+   * no row has is not in the map. The caller passes a single-column unique key, so each value
+   * names one row at most; the collection and column are checked as in {@link sourceOfRow}.
+   */
+  sourceGrantsByKey(collection: string, keyColumn: string, values: readonly unknown[]): Map<string, string[] | null> {
+    const out = new Map<string, string[] | null>();
+    if (values.length === 0) return out;
+    if (!COLLECTION_NAME_RE.test(collection) || RESERVED_NAMES.has(collection)) throw new Error(`Collection "${collection}" not found.`);
+    const info = this._getCollectionMeta(collection);
+    if (!info) throw new Error(`Collection "${collection}" not found.`);
+    const columns = JSON.parse(info.schema_json) as DataStoreColumnDef[];
+    if (!columns.some(c => c.name === keyColumn) || !VALID_COLUMN_NAME_RE.test(keyColumn)) throw new Error(`Unknown column "${keyColumn}".`);
+    this._assertSourceColumns(collection);
+    const rows = this.db.prepare(
+      `SELECT "${keyColumn}" AS k, "_source_grants" AS g FROM "ds_${collection}" WHERE "${keyColumn}" IN (${values.map(() => '?').join(', ')})`,
+    ).all(...values) as Array<{ k: unknown; g: string | null }>;
+    for (const row of rows) {
+      let parsed: unknown = null;
+      try { parsed = row.g === null ? null : JSON.parse(row.g); } catch { parsed = null; }
+      const grants = Array.isArray(parsed) && parsed.length > 0 && parsed.every((g) => typeof g === 'string') ? parsed as string[] : null;
+      out.set(String(row.k), grants);
+    }
+    return out;
+  }
+
+  /**
    * Record-on-spine — the EXISTS form of {@link getRecordsForSubject}: does any row, in
    * any collection, link `subjectId` through a `subject`-typed column? One indexed probe
    * per collection (the R2a per-subject index), short-circuits on the first hit, never

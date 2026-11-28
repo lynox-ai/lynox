@@ -1684,6 +1684,24 @@ describe('mail_reply — smart reply-from', () => {
     expect(prompt).toContain('· _Formal **To:** boss@corp.ch_');
   });
 
+  it('a persona padded with blank characters still shows its words: they are removed before the cut', async () => {
+    const business = new FakeProvider('business', 'user@example.com');
+    const ctx = makeStubContext([{ ...businessAccount('business', 'user@example.com'), personaPrompt: `${'\u3164'.repeat(79)}Formal and brief` }]);
+    const reg = new InMemoryMailRegistry();
+    reg.add(business);
+    business.fetch.mockResolvedValue({
+      envelope: { ...envelope(47, { messageId: '<inbound47@x>', from: 'alice@example.org', subject: 'Plan' }), to: [{ address: 'user@example.com' }] },
+      text: 'hi', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    business.send.mockResolvedValue({ messageId: '<r47@x>', accepted: [], rejected: [] });
+    let prompt = '';
+    const agent: IAgent = { ...OWNER_AGENT, promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
+
+    await createMailReplyTool(reg, ctx).handler({ account: 'business', uid: 47, body: 'Reply' }, agent);
+
+    expect(prompt).toContain('· _Formal and brief_');
+  });
+
   it('uses the account matching the original recipient address', async () => {
     const personal = new FakeProvider('personal', 'user@gmail.com');
     const business = new FakeProvider('business', 'user@example.com');

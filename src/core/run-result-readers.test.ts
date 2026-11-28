@@ -11,7 +11,7 @@ import type { IAgent } from '../types/index.js';
 import { createToolContext } from './tool-context.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { lastRunResultFor, memberNotesRepeat } from './member-connection-notes.js';
-import { WORKER_NOTICES } from './worker-notices.js';
+import { WORKER_NOTICES, type MemberEnd } from './worker-notices.js';
 import { noticeLanguage } from './notice-language.js';
 import { loadConfig } from './config.js';
 import { triggerForRoute, rowForRoute } from '../server/http-api.js';
@@ -46,8 +46,8 @@ describe("a run's end with member lines, by reader", () => {
   };
   const stored = (id: string): { last_run_result: string | null; last_run_member_notes: string | null } =>
     engine.getDb().prepare('SELECT last_run_result, last_run_member_notes FROM triggers WHERE id = ?').get(id) as { last_run_result: string | null; last_run_member_notes: string | null };
-  const forMandatesHere = (): string => WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates;
-  const forMandatesTool = (): string => WORKER_NOTICES[noticeLanguage(undefined)].memberEndForMandates;
+  const forMandatesHere = (end: MemberEnd = 'ended'): string => WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates(end);
+  const forMandatesTool = (end: MemberEnd = 'ended'): string => WORKER_NOTICES[noticeLanguage(undefined)].memberEndForMandates(end);
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-run-result-readers-'));
@@ -81,12 +81,12 @@ describe("a run's end with member lines, by reader", () => {
   });
 
   it('the migration splits only a halted result with its lines: the owner reads it as before, a mandate the sentence; other ends stay as before', () => {
-    // A database from before: the column and its version taken back out, a result with its lines under it.
+    // A database from before: the column and its version taken back out, and those after it, a result with its lines under it.
     const path = join(dir, 'old.db');
     new EngineDb(path, '').close();
     const raw = new Database(path);
     const legacy = `${REPLY}\n• ${LINE}\n• Another line.`;
-    raw.exec('ALTER TABLE triggers DROP COLUMN last_run_member_notes; DELETE FROM schema_version WHERE version >= 80;');
+    raw.exec('ALTER TABLE bulk_runs DROP COLUMN planner_untrusted; ALTER TABLE bulk_runs DROP COLUMN planner_grants; ALTER TABLE bulk_targets DROP COLUMN before_grants; ALTER TABLE bulk_targets DROP COLUMN write_grants; ALTER TABLE triggers DROP COLUMN last_run_member_notes; DELETE FROM schema_version WHERE version >= 80;');
     raw.prepare("INSERT INTO triggers (id, title, source, effect, last_run_result, last_run_status) VALUES ('old', 'Old', 'cron', 'run_agent', ?, 'halted')").run(legacy);
     const listed = 'Done:\n• first item\n• second item';
     const failedWithList = `Found:\n• one\n• ${LINE}`;
@@ -195,6 +195,19 @@ describe("a run's end with member lines, by reader", () => {
     // The task routes answer a trigger through the same shaping.
     expect((rowForRoute(row, MANDATE) as Record<string, unknown>)['last_run_result']).toBe(forMandatesHere());
     expect((rowForRoute(row, OWNER_PRINCIPAL) as Record<string, unknown>)['last_run_result']).toBe(`${REPLY}\n• ${LINE}`);
+  });
+
+  it('a mandate reads why the last run ended, as its stored status tells it, on the trigger routes and in task_list', async () => {
+    for (const [id, status] of [['s', 'stopped'], ['f', 'failed'], ['h', 'halted'], ['t', 'timeout'], ['i', 'interrupted']] as const) {
+      seed(id);
+      tm.recordTaskRun(id, REPLY, status, { memberNotes: [LINE] });
+    }
+    const read = (id: string): unknown => (triggerForRoute(history.getTrigger(id)!, MANDATE) as Record<string, unknown>)['last_run_result'];
+    expect(['s', 'f', 'h', 't', 'i'].map(read)).toEqual([forMandatesHere('stopped'), forMandatesHere('failed'), forMandatesHere('ended'), forMandatesHere('timeout'), forMandatesHere('interrupted')]);
+    const listed = await taskListTool.handler({}, agent(MANDATE));
+    for (const end of ['stopped', 'failed', 'ended', 'timeout', 'interrupted'] as const) expect(listed).toContain(forMandatesTool(end));
+    // A halt reads neutrally, never as finished: the list cannot tell a finish with a note from a real halt.
+    expect(listed).not.toContain(forMandatesTool('finished'));
   });
 
   it('task_list: the owner reads the lines, a mandate the sentence and neither the name nor the profile', async () => {

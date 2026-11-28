@@ -531,13 +531,43 @@ function bulkFailureRateCause(run: Pick<BulkRunDetailData, 'heads' | 'passUnclea
 }
 
 /** Whether the preview marks this target with a failure: a write or read failure the row shows
- *  as such. A target with a diff shows the diff, not its error; a conflict and a send without a
- *  clear answer are not failures. A target left out after its second failed read shows that
- *  read's failure too. */
-export function bulkShowsFailure(target: Pick<BulkTarget, 'error' | 'change' | 'diff'>): boolean {
+ *  as such ({@link bulkShowsTargetError}), under its diff or in its place. A conflict and a send
+ *  without a clear answer are not failures. A target left out after its second failed read shows
+ *  that read's failure too. */
+export function bulkShowsFailure(target: Pick<BulkTarget, 'error' | 'change' | 'diff' | 'applied'>): boolean {
 	if (target.change === 'invalid') return target.error === 'read_failed';
-	return target.error !== null && target.diff.kind === 'none'
-		&& target.error !== 'conflict' && target.error !== 'sent_unknown';
+	return bulkShowsTargetError(target) && target.error !== 'conflict' && target.error !== 'sent_unknown';
+}
+
+/** The error codes a target still to write can carry, each with its own sentence under
+ *  `bulk.target_error.`: a read in planning that failed once, and every write failure. */
+const BULK_TARGET_ERROR_CODES: ReadonlySet<string> = new Set([
+	'read_failed', 'write_failed', 'path_changed', 'redirect', 'secret', 'conflict', 'sent_unknown',
+]);
+/** The codes that come before or after a send: their sentence says whether the change may have
+ *  arrived, by whether a send to the target has no clear answer ({@link BulkTarget.sendUnclear}). */
+const BULK_TARGET_ERROR_SENT: ReadonlySet<string> = new Set(['write_failed', 'redirect']);
+
+/** Whether a preview row shows its target's error as a sentence ({@link bulkTargetErrorText}):
+ *  under the diff, or in its place where there is none. Not on a target left out at planning,
+ *  which shows its reason instead, and not on a target recorded as applied: its error is one a
+ *  loop that lost its claim left on it, not the target's. */
+export function bulkShowsTargetError(target: Pick<BulkTarget, 'error' | 'change' | 'diff' | 'applied'>): boolean {
+	return target.error !== null && target.change !== 'invalid' && target.applied !== true;
+}
+
+/** The sentence a preview row shows for a target's error. A code this page does not know reads
+ *  as a neutral sentence, never as the code itself. A failed write or a redirect says the change
+ *  did not arrive only where the engine says no send to the target is unclear; an engine that
+ *  does not say gets the sentence that leaves it open, which claims less. A local run (no host)
+ *  has no provider to check: its open failed write points to the target itself. On a local run
+ *  a failed write is always open: its writer may throw after it wrote, and the engine still counts
+ *  that send as refused, so no unclear send there does not mean the change did not arrive. */
+export function bulkTargetErrorText(target: Pick<BulkTarget, 'error' | 'sendUnclear'>, local: boolean, i18n: Pick<BulkI18n, 't'>): string {
+	const error = target.error ?? '';
+	if (!BULK_TARGET_ERROR_CODES.has(error)) return i18n.t('bulk.target_error.other');
+	if (BULK_TARGET_ERROR_SENT.has(error) && target.sendUnclear === false && !local) return i18n.t(`bulk.target_error.${error}_not_arrived`);
+	return i18n.t(`bulk.target_error.${error}${local && error === 'write_failed' ? '_local' : ''}`);
 }
 
 /** What writing on lets fail before the run stops again. The next pass's failures are bounded
@@ -722,6 +752,17 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
+/** Above this length a key is not cut: a part per separator would cost a node each, without bound. */
+export const BULK_KEY_PARTS_MAX = 256;
+
+/** A target key cut after each hyphen, dot and underscore, where it may break (U-341). A key longer
+ *  than {@link BULK_KEY_PARTS_MAX} stays whole: in the table its column grows, in the list of what an
+ *  undo deletes it wraps where it would leave its box. */
+export function bulkKeyParts(key: string): string[] {
+	if (key.length > BULK_KEY_PARTS_MAX) return [key];
+	return key.split(/(?<=[-._])/);
+}
+
 /** At most this many characters of a refused link's domain on the page (U-311). */
 export const BULK_LINK_DOMAIN_SHOWN_MAX = 64;
 /** A refused link's domain as the page names it: visible as text, and cut with „…“ past
@@ -864,6 +905,12 @@ export interface BulkTarget {
 	written?: boolean | undefined;
 	/** A rollback or an undo took this run's write back. */
 	undone?: boolean | undefined;
+	/** Beside an error on a target still to write only: recorded as applied. Optional: an older
+	 *  engine sends it nowhere. */
+	applied?: boolean | undefined;
+	/** Beside an error on a target still to write only: a send to it has no clear answer, so the
+	 *  change may have arrived. Optional: an older engine sends it nowhere. */
+	sendUnclear?: boolean | undefined;
 	/** Written, and the store kept it with markup lynox did not send: the target the halt
 	 *  `markupAddedByShop` is about. Set only where it holds. */
 	shopAddedMarkup?: true | undefined;
@@ -1085,17 +1132,26 @@ export function bulkSecretInContextKey(shopify: boolean, dataStore: boolean): st
  *  "one of:" here: its values are the planner's text and are shown one by one by
  *  {@link bulkFieldChoices}, each in its own box, so a quote inside a value cannot end it. A shape
  *  the page does not know says nothing rather than showing the schema as JSON. */
-export function bulkFieldShapeText(shape: unknown, i18n: BulkI18n): string | null {
+export function bulkFieldShapeText(shape: unknown, i18n: BulkI18n, locale = 'en-GB'): string | null {
 	if (typeof shape !== 'object' || shape === null) return null;
 	const s = shape as Record<string, unknown>;
-	const num = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? String(v) : null);
+	// Numbers as the UI language writes them (32’000, 0.0000001), never as JavaScript prints them (1e-7).
+	// A value that reads as zero has no sign: a schema's -0, or a negative value too small to show.
+	// (Not `signDisplay: 'negative'`: an engine that predates that value throws on it.)
+	const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 20 });
+	const num = (v: unknown): string | null => {
+		if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+		const text = format.format(v);
+		return /^-[0.,]*$/.test(text) ? text.slice(1) : text;
+	};
 	switch (s['type']) {
 		case 'string': {
 			if (bulkFieldChoices(s) !== null) return i18n.t('bulk.shape.choice');
 			const max = num(s['maxLength']);
 			if (max === null) return i18n.t('bulk.shape.text');
 			const min = num(s['minLength']);
-			return min === null || min === '0' ? i18n.tf('bulk.shape.text_max', { max }) : i18n.tf('bulk.shape.text_range', { min, max });
+			if (min === null || s['minLength'] === 0) return i18n.tf('bulk.shape.text_max', { max });
+			return min === max ? i18n.tf('bulk.shape.text_exact', { n: max }) : i18n.tf('bulk.shape.text_range', { min, max });
 		}
 		case 'number':
 		case 'integer': {
@@ -1121,6 +1177,17 @@ export function bulkFieldChoices(shape: unknown): string[] | null {
 	const choices = (shape as Record<string, unknown>)['enum'];
 	return (shape as Record<string, unknown>)['type'] === 'string' && Array.isArray(choices) && choices.length > 0 && choices.every((c) => typeof c === 'string')
 		? (choices as string[]) : null;
+}
+
+/** The locale numbers are written in for the UI language. */
+export function bulkNumberLocale(lang: string): string {
+	return lang === 'de' ? 'de-CH' : 'en-GB';
+}
+
+/** Why a restart that needs a new cost limit is disabled, as the line under its button, or null:
+ *  only while the field is empty (an entered, too low amount has its own line). */
+export function bulkRestartHintKey(restartKind: string, capInput: string): string | null {
+	return restartKind === 'judge_cap' && capInput === '' ? 'bulk.restart.hint_cap' : null;
 }
 
 /** Why the judged run's start button is disabled, as the line under it (U-333), or null. The cost
@@ -1639,6 +1706,13 @@ export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>):
  *  target it wrote, or sent to without recording it, and did not take back. */
 export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
+}
+
+/** Whether the page marks this target as taken back: the run wrote it and an undo or a rollback
+ *  took that write back. A target the run never wrote, that a rollback only settled, or one found
+ *  already as planned, is not marked: nothing of the run's changed there. */
+export function bulkTakenBack(target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
+	return target.written === true && target.undone === true;
 }
 
 /** Per target the owner still writes: how many OTHER targets get the same new value in the same

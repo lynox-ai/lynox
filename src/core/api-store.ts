@@ -26,7 +26,7 @@ import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { OAUTH_PRESETS, presetClientKeys, presetScopeRequest } from './oauth-presets.js';
 import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
-import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, isMandateTag, principalTag } from './request-principal.js';
 import { normalizeHostName, normalizeHostTarget } from './send-target.js';
 import { credentialBearing, credentialHosts, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
 import { processErrorText, reducedErrorText } from './error-egress.js';
@@ -667,6 +667,44 @@ export function collectVaultKeys(profile: ApiProfile): string[] {
 /** Whether a mandate wrote this profile (see {@link ApiProfile.created_by}). */
 export function isMandateAuthored(profile: ApiProfile): boolean {
   return typeof profile.created_by === 'string' && profile.created_by.startsWith(MANDATE_TAG_PREFIX);
+}
+
+/**
+ * Whether a connection this principal makes would carry on this profile. On one a person with
+ * access set up, only that person's: the profile's view hides a token whose `connected_by` is not
+ * the profile's author from every reader, the owner included (`hiddenFromProfile`), so anyone
+ * else's connection would show as connected and carry nothing, and could take the place of the
+ * author's tokens in the profile's slots. The owner takes such a profile over by saving it as
+ * their own (`api_setup` create or update drops `created_by`); from then on it carries.
+ * The one condition the connect start, the OAuth callback, the `connect` tool and the token
+ * exchange ask, whatever the profile's grant already records.
+ */
+export function mayConnectAs(principal: RequestPrincipal, profile: ApiProfile): boolean {
+  if (!isMandateAuthored(profile)) return true;
+  return principal.kind === 'mandate' && profile.created_by === principalTag(principal);
+}
+
+/** `mayConnectAs` outside a mandate's session: whether the owner's connection would carry here. */
+export function ownerConnectionCarries(profile: ApiProfile): boolean {
+  return mayConnectAs(OWNER_PRINCIPAL, profile);
+}
+
+/**
+ * Whether a grant record stands for a connection, as opposed to the record a save mints for
+ * every new oauth2 profile (`withGrant`: a grant id and the credential fingerprints, nothing
+ * else). Read from the fields only a connection writes, each by a path of its own:
+ * - `state`: the OAuth callback (`connected`, `no-refresh`), a revocation, a refresh that died;
+ * - `connected_by`: the consent of every exchange since the tag is recorded;
+ * - `written`: what an exchange stored (a successful `fetch_token` drops `state`, so this is
+ *   what marks its connection);
+ * - `minted_for`: an exchange's refresh-token stamp, also on records from before the tag.
+ * A path that connects without setting any of the four would read as never connected; the
+ * tests name each path so that a new one shows there.
+ */
+export function isConnection(grant: OAuthGrantRecord | undefined): boolean {
+  if (grant === undefined) return false;
+  return grant.state !== undefined || grant.connected_by !== undefined
+    || (Array.isArray(grant.written) && grant.written.length > 0) || grant.minted_for !== undefined;
 }
 
 /**
@@ -2903,7 +2941,14 @@ export class ApiStore {
           throw err;
         }
       } else {
-        saved = persist();
+        // `_persist` registers the profile before it writes: a write that throws (the row or the
+        // file) leaves the store as it was, so memory goes back to it too, as in the branches above.
+        try {
+          saved = persist();
+        } catch (err: unknown) {
+          this._restoreAfterThrow(profile.id, prev, heldBefore);
+          throw err;
+        }
       }
       // The readers of what a known renewal wrote follow it; nothing else a kept save does
       // writes a credential.

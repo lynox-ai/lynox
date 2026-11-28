@@ -88,7 +88,10 @@ export type ContentBlock =
 	| { type: 'tool_call'; index: number }
 	/** A delegation, placed where it happened so the sub-agent panel renders in
 	 *  chronological order instead of being pinned to a tool row. */
-	| { type: 'spawn'; spawnId: string };
+	| { type: 'spawn'; spawnId: string }
+	/** The run ended with a sentence of lynox's own instead of a model reply (`done.notice`):
+	 *  shown as a lynox note, without the AI mark. `code` is the note code it renders as. */
+	| { type: 'notice'; code: string; text: string };
 
 /**
  * The slice of a chat message this module owns.

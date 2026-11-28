@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, sameValue,
+  BULK_CLAIM_HEARTBEAT_MS, BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, recreatedGrants, sameValue,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -66,8 +66,10 @@ export interface TargetWriter {
   /** `hostAddedMarkup`: the read-back holds markup the write never sent (PRD shopify-preset
    *  §21.2 item 6). The target is written all the same — the value is in the store — and is
    *  recorded with its mark; the run then halts. `hostRewrote`: the host stored the value otherwise
-   *  than sent, within what the run may write — counted on the target, not halted. */
-  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true; hostRewrote?: true }>;
+   *  than sent, within what the run may write — counted on the target, not halted.
+   *  `grants`: the stamp a data-store row is written with (`_source_grants`); null or absent is
+   *  unknown. A writer with no such stamp ignores it. */
+  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void, grants?: readonly string[] | null): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true; hostRewrote?: true }>;
 }
 
 /**
@@ -79,6 +81,14 @@ export class BulkWriterHalt extends Error {
   constructor(readonly reason: BulkHaltReason) {
     super(reason);
     this.name = 'BulkWriterHalt';
+  }
+}
+
+/** Thrown at a send by a loop whose claim on the target another loop holds now: nothing is sent. */
+class BulkClaimLost extends Error {
+  constructor() {
+    super('claim lost');
+    this.name = 'BulkClaimLost';
   }
 }
 
@@ -183,6 +193,9 @@ export interface BulkEffectDeps {
   /** The writer for the run's target system, or null when it is not available. */
   writerFor: (run: BulkRunForApply) => TargetWriter | null;
   now?: () => number;
+  /** How often a loop renews the claim on the target it writes ({@link BULK_CLAIM_HEARTBEAT_MS}).
+   *  Set by tests only. */
+  claimHeartbeatMs?: number;
   /** The worker's task signal. Read between targets only, never inside a write. */
   signal?: AbortSignal | undefined;
   /**
@@ -258,6 +271,7 @@ async function applyRunEffect(
   const { ledger } = deps;
   const say = deps.notices ?? BULK_NOTICES.en;
   const now = deps.now ?? Date.now;
+  const heartbeatMs = deps.claimHeartbeatMs ?? BULK_CLAIM_HEARTBEAT_MS;
   const run = ledger.getRunForApply(runId);
   if (!run) return { status: 'refused', summary: say.noRun };
   if ((effect === 'bulk_undo') !== (run.kind === 'undo')) {
@@ -391,33 +405,69 @@ async function applyRunEffect(
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.timeBudget), say) };
     }
-    if (!ledger.claimTarget(runId, seq, now())) continue;
+    const claimedAt = now();
+    if (!ledger.claimTarget(runId, seq, claimedAt)) continue;
     const target = ledger.loadTarget(runId, seq);
     if (!target) continue;
 
     // The connections of every request this target's write sends, its reads included: one
     // connection and grant per target, since a re-consent can land between two targets.
     const carried = writer.track?.() ?? null;
-    const outcome = await writeOne(writer, target, carried);
+    // The claim this loop holds, renewed on a heartbeat while the target's requests and waits run,
+    // and at each send: a live loop keeps it however long they take. `since` is the time of the
+    // last renewal, which every record of this target is fenced on.
+    const held = { since: claimedAt, lost: false };
+    // run-group-starter: renews this one target's claim until its write returns (cleared in the
+    // `finally` below, whichever way it ends); it writes only `claimed_at` and reports no spend.
+    const beat = setInterval(() => {
+      try {
+        const at = now();
+        if (ledger.renewClaim(runId, seq, held.since, at)) held.since = at;
+        else held.lost = true;
+      } catch {
+        // A missed beat (the store busy) is not a lost claim: the next one renews it.
+      }
+    }, heartbeatMs);
+    let outcome: Awaited<ReturnType<typeof writeOne>>;
+    try {
+      outcome = await writeOne(writer, target, carried, held);
+    } finally {
+      clearInterval(beat);
+    }
+    // Another loop may hold the target now (`lost`): it records what happens there, and this one
+    // records nothing on it. A halt this loop met still halts the run — a writer's halt holds for
+    // every target, and markup a host added is the run's to stop on — but never over an end the
+    // other loop already gave the run. Otherwise this loop goes on to the next target, where the
+    // checks between targets (the owner's stop among them) apply as on any other.
+    const lost = outcome.kind === 'lost' || held.lost;
+    // `taken`: this loop found the target taken, at the write or at its fenced record.
+    // When the other loop already ended or halted the run, this loop reports that, not its own reason.
+    const haltRun = (reason: BulkHaltReason, taken: boolean): BulkEffectOutcome => {
+      if (taken && !ledger.haltIfWriting(runId, reason)) {
+        return { status: 'halted', summary: summarize(ledger, runId, say.otherLoop, say) };
+      }
+      if (!taken) ledger.halt(runId, reason);
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', reason), say) };
+    };
+    if (outcome.kind === 'lost') continue;
     const via = carried?.() ?? null;
     if (outcome.kind === 'halt') {
-      // The target is released unwritten; a resume takes it again.
-      ledger.releaseClaim(runId, seq);
-      ledger.halt(runId, outcome.reason);
-      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', outcome.reason), say) };
+      // The target is released unwritten, while it is still this loop's; a resume takes it again.
+      const released = !lost && ledger.releaseClaim(runId, seq, held.since);
+      return haltRun(outcome.reason, !released);
     }
     if (outcome.kind === 'applied') {
-      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true);
-      if (outcome.hostAddedMarkup === true) {
-        // Written and recorded with its mark first, so a halt that another loop's reason
-        // overwrites still leaves the target marked: the mark is the truth, not `halt_reason`.
-        ledger.halt(runId, BULK_HALT_REASONS.markupAddedByShop);
-        return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.markupAddedByShop), say) };
-      }
+      const recorded = ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true, held.since);
+      // Recorded with its mark first where this loop still holds the target, so a halt that
+      // another loop's reason overwrites still leaves it marked: the mark is the truth, not
+      // `halt_reason`. Where the other loop holds it, that loop records what it finds there, or
+      // gives it back unrecorded on a halt of its own, and a resume reads it again.
+      if (outcome.hostAddedMarkup === true) return haltRun(BULK_HALT_REASONS.markupAddedByShop, lost || !recorded);
+      if (!recorded) continue;
       consecutive = 0;
       continue;
     }
-    ledger.recordFailed(runId, seq, outcome.kind, via);
+    if (lost || !ledger.recordFailed(runId, seq, outcome.kind, via, held.since)) continue;
     // No new attempt, so no failure: the send that left it unclear was counted, halted the
     // run, or belonged to a loop that died. Counting it on every pass would halt a small run
     // at the same target on every resume. It neither extends nor breaks a run of failures.
@@ -490,8 +540,11 @@ async function applyRunEffect(
   }
 
   /** One claimed target: what to record for it. */
-  async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
-    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
+  async function writeOne(
+    w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null,
+    /** This loop's claim on the target: renewed at each send, and lost once another loop holds it. */
+    held: { since: number; lost: boolean },
+  ): Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason } | { kind: 'lost' }> {
     let localSent = false;
     try {
       const cur = await w.read(t.key, fieldsOf(t));
@@ -520,10 +573,20 @@ async function applyRunEffect(
       if (w.reportsSend === true && ledger.hasUnknownSend(runId, t.seq)) return { kind: 'sent_unknown' };
       // Marked as it leaves, with the connection it leaves under: a loop that dies before the
       // target is recorded still left a row saying whose credential reached the host.
-      const sent = (): void => { ledger.markSent(runId, t.seq, carried?.() ?? null); };
+      // Each send first renews this loop's claim, a retry after a 429 included: a loop that lost
+      // it to another sends nothing, whatever it read before.
+      const sent = (): void => {
+        const at = now();
+        if (held.lost || !ledger.markSent(runId, t.seq, carried?.() ?? null, { since: held.since, now: at })) {
+          held.lost = true;
+          throw new BulkClaimLost();
+        }
+        held.since = at;
+      };
       const refused = (): void => { ledger.markRefused(runId, t.seq); };
       if (w.reportsSend !== true) { sent(); localSent = true; }
-      const out = await w.write(t.key, t.after, sent, refused);
+      // The run's stamp, or the one an undo target writes back (`ApplyTarget.writeGrants`).
+      const out = await w.write(t.key, t.after, sent, refused, t.writeGrants !== undefined ? t.writeGrants : run!.plannerGrants);
       if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
       return {
         kind: 'applied', result: out.result, actual: out.actual,
@@ -536,6 +599,7 @@ async function applyRunEffect(
       // never one a loop that died left before it. No count reads a local run's open sends today;
       // this keeps the column true for whatever reads it next.
       if (localSent) ledger.markRefused(runId, t.seq);
+      if (err instanceof BulkClaimLost) return { kind: 'lost' };
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
       if (err instanceof BulkSecretError) return { kind: 'secret' };
@@ -572,7 +636,10 @@ async function rollBack(
       }
       // Left as it is, and unmarked: the owner's view marks it as one to check by hand.
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
-      await writer.write(t.key, t.expected);
+      // Taken back with the stamp the row held before the run wrote it. A row the run deleted is
+      // re-created, and its recorded stamp may be older than the row it removed: `unknown` beside
+      // it (`recreatedGrants`).
+      await writer.write(t.key, t.expected, undefined, undefined, t.change === 'delete' ? recreatedGrants(t.beforeGrants) : t.beforeGrants);
       if (recorded) ledger.recordRolledBack(run, t.seq, now());
       else ledger.recordUnrecordedSettled(run.id, t.seq, now());
     } catch {
@@ -766,9 +833,11 @@ export function anchoredWorkspaceWriter(): TargetWriter {
 /**
  * Rows of one data-store collection, addressed by its single-column unique key. Rows are
  * read raw (subject cells as stored ids, like the before-images) and written whole with
- * {@link DataStore.putRowVerbatim}, which does not re-resolve subject cells.
+ * {@link DataStore.putRowVerbatim}, which does not re-resolve subject cells. `untrusted` marks
+ * every write as written from outside content (`_written_untrusted`); `markCreated` marks every
+ * write that creates a row.
  */
-export function dataStoreWriter(store: DataStore, collection: string): TargetWriter | null {
+export function dataStoreWriter(store: DataStore, collection: string, untrusted: boolean, markCreated: boolean): TargetWriter | null {
   const info = store.getCollectionInfo(collection);
   if (!info || !info.uniqueKey || info.uniqueKey.length !== 1) return null;
   const keyCol = info.uniqueKey[0]!;
@@ -788,16 +857,25 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
     async read(key) {
       return readRow(key);
     },
-    async write(key, after) {
+    async write(key, after, _onSend, _onRefused, grants) {
       if (after.absent) {
         store.deleteRecords({ collection, filter: { [keyCol]: coercePlainColumnValue(key, keyDef) } });
         return 'deleted';
       }
       const row = after.value;
       if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error('not a row');
-      // Bulk apply runs in the worker, outside any conversation, so it holds no grant set:
-      // the row reads as unknown, and an update keeps what the row already held beside it.
-      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null, writtenBy: null, untrusted: false });
+      // Bulk apply runs in the worker, outside any conversation, so the stamp comes with the
+      // write: the run's (`BulkRunForApply.plannerGrants`, the planning conversation's set with
+      // its source's), or for an undo the one the row held before its source wrote it — with
+      // `unknown` beside it where a row is re-created (`recreatedGrants`). A created row holds
+      // exactly the stamp passed; an update keeps what the row already held beside it. Null
+      // reads as unknown.
+      // The outside-content mark is the run's as well (`BulkRunForApply.plannerUntrusted`); the
+      // store keeps a row marked once any write marked it. A row an undo re-creates comes back
+      // without the mark it held, which the before-image does not carry (a system column): it is
+      // marked, as its grants get `unknown` beside them.
+      const marked = untrusted || (markCreated && readRow(key).absent);
+      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: grants ?? null, runId: null, writtenBy: null, untrusted: marked });
     },
   };
 }
@@ -811,7 +889,7 @@ export function bulkWriterFor(
   if (run.targetSystem === 'workspace') return workspaceWriter();
   if (run.targetSystem === 'data_store') {
     if (!store || run.targetCollection === null) return null;
-    return dataStoreWriter(store, run.targetCollection);
+    return dataStoreWriter(store, run.targetCollection, run.plannerUntrusted, run.kind === 'undo');
   }
   return null;
 }

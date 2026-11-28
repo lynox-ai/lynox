@@ -60,3 +60,13 @@ describe('connectionLine', () => {
 		expect(connectionLine({ connected_by: 'mandate:' })?.by).toEqual({ kind: 'other', tag: 'mandate:' });
 	});
 });
+
+describe('a grant the engine says its profile does not use', () => {
+	it('is no connection line, also when the reader gave the consent', () => {
+		expect(connectionLine({ connected_by: 'owner', connected_by_reader: true, unused: true })).toBeNull();
+	});
+
+	it('control: the same grant without the mark is the reader\'s', () => {
+		expect(connectionLine({ connected_by: 'owner', connected_by_reader: true })?.by).toEqual({ kind: 'you' });
+	});
+});

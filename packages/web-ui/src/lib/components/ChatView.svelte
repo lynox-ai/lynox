@@ -542,7 +542,8 @@
 		| { type: 'thinking'; text: string }
 		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status']; unsuccessful: boolean }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
-		| { type: 'spawn'; spawnId: string };
+		| { type: 'spawn'; spawnId: string }
+		| { type: 'notice'; code: string; text: string };
 
 	/** Wrap artifact content in a fenced code block whose delimiter is long
 	 *  enough to survive any backtick run inside the content. CommonMark closes
@@ -605,6 +606,8 @@
 				if (block.text) result.push({ type: 'thinking', text: block.text });
 			} else if (block.type === 'text' && block.text) {
 				result.push({ type: 'text', text: block.text });
+			} else if (block.type === 'notice') {
+				result.push({ type: 'notice', code: block.code, text: block.text });
 			} else if (block.type === 'spawn') {
 				// Never folded into a neighbouring group: a delegation is its own
 				// panel, and two batches in a row must stay two panels.
@@ -2474,6 +2477,54 @@
 	</button>
 {/snippet}
 
+{#snippet noteRow(note: { code: string; detail?: string; approval?: { id: string; outcome: string } })}
+	<!-- B-full failure note (display-only, survives reload). Localized
+	     from the engine's structured code; the raw provider detail is
+	     a small monospace line so the user can debug without it
+	     dominating the transcript. This row never enters the model's
+	     API context (filtered at resume hydration). -->
+	{@const approvalLines = approvalNoteLines(note.code, note.approval, getApprovalsViewer())}
+	{@const noteKey = approvalLines?.bodyKey ?? `chat.note.${note.code}`}
+	<!-- A message the content check did not send: its note carries the engine's sentence,
+	     the words the chat showed live, so that sentence is the body, not a debug line. -->
+	{@const refusedSentence = note.code === 'content_refused' && note.detail ? note.detail : undefined}
+	{@const noteBody = refusedSentence ?? (t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey))}
+	{@const titleKey = `chat.note.${note.code}.title`}
+	{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
+	{@const isInfoNote = note.code === 'context_compacted' || note.code === 'run_interrupted' || note.code === 'tool_loop_break' || note.code === 'continuation_loop' || note.code === 'thinking_loop' || note.code === 'tool_call_imitation' || note.code === 'turn_limit' || note.code === 'cost_budget' || note.code === 'input_required' || note.code === 'approval_sent' || note.code === 'hold_exhausted' || note.code === 'content_refused' || note.code === 'run_blocked'}
+	<div class="flex items-start gap-2 text-[13px] md:text-[12px] border-l-2 {isInfoNote ? 'border-border' : 'border-danger/40'} pl-3 py-1 my-1" role="status">
+		{#if isInfoNote}
+			<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-text-subtle mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
+		{:else}
+			<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-danger/70 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+		{/if}
+		<div class="min-w-0">
+			<div class="text-text-muted">{noteTitle}</div>
+			<div class="text-text-subtle">{noteBody}</div>
+			{#if (note.code === 'thinking_loop' || note.code === 'tool_call_imitation') && canChooseModel()}
+				<div class="text-text-subtle" data-model-choice>{t('chat.note.thinking_loop.model')}</div>
+			{/if}
+			{#if approvalLines?.nextKey}
+				<div class="text-text-subtle" data-approval-next>{t(approvalLines.nextKey)}</div>
+			{/if}
+			{#if approvalLines?.href}
+				<a href={approvalLines.href} class="inline-flex min-h-6 items-center py-1 text-accent hover:underline" data-approval-entry>{t('chat.note.approval_view_entry')}</a>
+			{/if}
+			{#if approvalLines?.rewriteId}
+				{@const rewriteId = approvalLines.rewriteId}
+				<div>
+					<button type="button" class="mt-1 inline-flex min-h-6 items-center rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text" onclick={() => rewriteApprovalInChat(rewriteId)} data-approval-rewrite>{t('chat.note.approval_rewrite')}</button>
+				</div>
+			{/if}
+			<!-- A hold_exhausted note's code carries the whole sentence; its detail is the engine's English copy of it. -->
+			{#if note.detail && note.code !== 'hold_exhausted' && refusedSentence === undefined}
+				<!-- A blocked run's reason is the engine's English sentence. -->
+				<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words" lang={note.code === 'run_blocked' ? 'en' : undefined}>{note.detail}</div>
+			{/if}
+		</div>
+	</div>
+{/snippet}
+
 {#snippet messageActions(msgKey: string, msgContent: string, hasArtifact: boolean, usage: UsageInfo | undefined, isStreamingMsg: boolean, isLast: boolean)}
 	<!-- Only the segments with a known value: a turn without counted tokens shows no `Σ 0 tokens`
 	     and no `-` for its cost, and with nothing known there is no stats line. -->
@@ -2909,47 +2960,7 @@
 						{/if}
 					</div>
 				{:else if msg.note}
-					<!-- B-full failure note (display-only, survives reload). Localized
-					     from the engine's structured code; the raw provider detail is
-					     a small monospace line so the user can debug without it
-					     dominating the transcript. This row never enters the model's
-					     API context (filtered at resume hydration). -->
-					{@const approvalLines = approvalNoteLines(msg.note.code, msg.note.approval, getApprovalsViewer())}
-					{@const noteKey = approvalLines?.bodyKey ?? `chat.note.${msg.note.code}`}
-					{@const noteBody = t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey)}
-					{@const titleKey = `chat.note.${msg.note.code}.title`}
-					{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
-					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'thinking_loop' || msg.note.code === 'tool_call_imitation' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget' || msg.note.code === 'input_required' || msg.note.code === 'approval_sent' || msg.note.code === 'hold_exhausted'}
-					<div class="flex items-start gap-2 text-[13px] md:text-[12px] border-l-2 {isInfoNote ? 'border-border' : 'border-danger/40'} pl-3 py-1 my-1" role="status">
-						{#if isInfoNote}
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-text-subtle mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
-						{:else}
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-danger/70 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
-						{/if}
-						<div class="min-w-0">
-							<div class="text-text-muted">{noteTitle}</div>
-							<div class="text-text-subtle">{noteBody}</div>
-							{#if (msg.note.code === 'thinking_loop' || msg.note.code === 'tool_call_imitation') && canChooseModel()}
-								<div class="text-text-subtle" data-model-choice>{t('chat.note.thinking_loop.model')}</div>
-							{/if}
-							{#if approvalLines?.nextKey}
-								<div class="text-text-subtle" data-approval-next>{t(approvalLines.nextKey)}</div>
-							{/if}
-							{#if approvalLines?.href}
-								<a href={approvalLines.href} class="inline-flex min-h-6 items-center py-1 text-accent hover:underline" data-approval-entry>{t('chat.note.approval_view_entry')}</a>
-							{/if}
-							{#if approvalLines?.rewriteId}
-								{@const rewriteId = approvalLines.rewriteId}
-								<div>
-									<button type="button" class="mt-1 inline-flex min-h-6 items-center rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text" onclick={() => rewriteApprovalInChat(rewriteId)} data-approval-rewrite>{t('chat.note.approval_rewrite')}</button>
-								</div>
-							{/if}
-							<!-- A hold_exhausted note's code carries the whole sentence; its detail is the engine's English copy of it. -->
-							{#if msg.note.detail && msg.note.code !== 'hold_exhausted'}
-								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>
-							{/if}
-						</div>
-					</div>
+					{@render noteRow(msg.note)}
 				{:else if msg.role === 'user' && scheduledTaskTurn(stripLoadedContext(stripNowMarker(msg.content)))}
 					<!-- A scheduled run's opening turn: the engine wrote it, not the owner, so it is
 					     shown as the task it carries out, not as the owner's bubble (U-160). -->
@@ -3029,7 +3040,10 @@
 					     reader's eye actually lands on the model's words. -->
 					{@const grouped = msg.blocks?.length ? groupedToolCalls(msg.blocks, msg.toolCalls ?? []) : []}
 					{@const firstTextIdx = grouped.findIndex((b) => b.type === 'text' && !!b.text)}
-					<div class="ai-message-wrap space-y-2" data-ai-generated="true">
+					<!-- A reply that holds only lynox's own sentence is not the model's: no AI mark, and
+					     not declared AI-generated. -->
+					{@const lynoxOnly = grouped.some((b) => b.type === 'notice') && !grouped.some((b) => b.type === 'text' || b.type === 'thinking' || b.type === 'tools' || b.type === 'plan' || b.type === 'spawn')}
+					<div class="ai-message-wrap space-y-2" data-ai-generated={lynoxOnly ? 'false' : 'true'}>
 						{#if msg.thinking && !msg.blocks?.some((b) => b.type === 'thinking')}
 							<!-- Legacy threads saved before interleaved thinking blocks
 							     existed keep the single trailing pill. New messages
@@ -3088,6 +3102,10 @@
 								</div>
 							{:else if gBlock.type === 'spawn'}
 								{@render subAgentPanel(msg, gBlock.spawnId)}
+							{:else if gBlock.type === 'notice'}
+								<!-- The run ended with lynox's own sentence, not a model reply: shown as the
+								     same note a reload shows, without the AI mark. -->
+								<div data-engine-notice data-ai-generated="false">{@render noteRow({ code: gBlock.code, detail: gBlock.text })}</div>
 							{:else if gBlock.type === 'thinking' && gBlock.text}
 								<!-- Mask once: the preview must be redacted too, not just
 								     the body — a secret in the first chars would otherwise
@@ -3117,7 +3135,8 @@
 						     segment makes the same numbers repeat and clutters the
 						     thumb zone. Aggregate hasArtifact across the whole
 						     message content. -->
-						{#if msg.blocks?.length && msg.content}
+						<!-- A note of lynox's alone has no reply to copy: no actions, as after a reload. -->
+						{#if msg.blocks?.length && msg.content && !lynoxOnly}
 							{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
 							{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 						{/if}
@@ -3486,7 +3505,7 @@
 					<ChangesetReview
 						files={pendingChangeset}
 						onReview={(action, rolledBackFiles) => submitChangesetReview(action, rolledBackFiles)}
-						messageWaiting={queueLength > 0}
+						messagesWaiting={queueLength}
 						{rollbackStopped}
 					/>
 				{/if}

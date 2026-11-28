@@ -632,9 +632,18 @@ export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> 
  */
 export const FALLBACK_MARKER = '[erased on request]';
 
+/**
+ * The ids of the runs and workflows of deleted chats, whose content stays blank after the delete
+ * (`deleted-chat-guard.ts`): a chat delete adds what it reached, the guard's triggers what starts
+ * under them later.
+ */
+export const DELETED_CHAT_RUNS = 'deleted_chat_runs';
+
 /** Which runs the fallback reaches: the runs of these threads, or of this period. */
 export type FallbackScope =
-  | { readonly threadIds: readonly string[] }
+  // `deletedChat`: the threads are being deleted, so what their runs write later stays blank too
+  // (`deleted-chat-guard.ts`). An erasure that leaves the threads standing does not set it.
+  | { readonly threadIds: readonly string[]; readonly deletedChat?: boolean | undefined }
   | { readonly from: string; readonly to: string };
 
 /** How each table's rows are reached from the scoped runs (temp table `erase_runs`). */
@@ -674,7 +683,7 @@ export function blankRunHistoryContent(historyDb: Database.Database, scope: Fall
  * images can stay in the WAL until a later checkpoint. Returns the number of rows changed and the
  * workflows reached, whose questions a caller may have to close.
  */
-export function blankRunHistoryRows(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly pipelineIds: readonly string[] } {
+export function blankRunHistoryRows(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly pipelineIds: readonly string[]; readonly workflowIds: readonly string[] } {
   const byThread = 'threadIds' in scope;
   // A bound that does not read as a time would compare as text and reach nothing, which would
   // then be reported as a clean run.
@@ -686,7 +695,8 @@ export function blankRunHistoryRows(historyDb: Database.Database, scope: Fallbac
   return historyDb.transaction(() => {
     historyDb.exec('CREATE TEMP TABLE IF NOT EXISTS erase_runs (id TEXT PRIMARY KEY); DELETE FROM erase_runs;'
       + ' CREATE TEMP TABLE IF NOT EXISTS erase_pipelines (id TEXT PRIMARY KEY); DELETE FROM erase_pipelines;');
-    // The scope's own runs and workflows, then everything they reach until nothing new is found:
+    // The scope's own runs and workflows (a workflow whose questions have their own thread is that
+    // thread's: its id is the thread's), then everything they reach until nothing new is found:
     // a run spawned or batched by a scoped run, a step run of a scoped workflow (the runner stores
     // the workflow's id as the step run's spawn parent), and a workflow nested in a
     // scoped run or workflow (its parent is the outer workflow's id). Period bounds go through
@@ -697,8 +707,8 @@ export function blankRunHistoryRows(historyDb: Database.Database, scope: Fallbac
       ? (threads.length === 0 ? 'SELECT 1 WHERE 0' : `INSERT OR IGNORE INTO erase_runs (id) SELECT id FROM runs WHERE session_id IN (${marks(threads.length)})`)
       : 'INSERT OR IGNORE INTO erase_runs (id) SELECT id FROM runs WHERE created_at >= datetime(?) AND created_at < datetime(?)').run(...scopeParams);
     historyDb.prepare(byThread
-      ? (threads.length === 0 ? 'SELECT 1 WHERE 0' : `INSERT OR IGNORE INTO erase_pipelines (id) SELECT id FROM pipeline_runs WHERE origin_thread_id IN (${marks(threads.length)})`)
-      : 'INSERT OR IGNORE INTO erase_pipelines (id) SELECT id FROM pipeline_runs WHERE started_at >= datetime(?) AND started_at < datetime(?)').run(...scopeParams);
+      ? (threads.length === 0 ? 'SELECT 1 WHERE 0' : `INSERT OR IGNORE INTO erase_pipelines (id) SELECT id FROM pipeline_runs WHERE origin_thread_id IN (${marks(threads.length)}) OR id IN (${marks(threads.length)})`)
+      : 'INSERT OR IGNORE INTO erase_pipelines (id) SELECT id FROM pipeline_runs WHERE started_at >= datetime(?) AND started_at < datetime(?)').run(...(byThread ? [...threads, ...threads] : scopeParams));
     const reachRuns = historyDb.prepare(`INSERT OR IGNORE INTO erase_runs (id) SELECT id FROM runs
       WHERE spawn_parent_id IN (SELECT id FROM erase_runs UNION SELECT id FROM erase_pipelines)
          OR batch_parent_id IN (SELECT id FROM erase_runs)`);
@@ -725,8 +735,13 @@ export function blankRunHistoryRows(historyDb: Database.Database, scope: Fallbac
       changed += historyDb.prepare(`UPDATE "${table}" SET ${set} WHERE ${where}`).run({ marker: FALLBACK_MARKER, ...params }).changes;
     }
     const pipelineIds = (historyDb.prepare('SELECT id FROM erase_pipelines').all() as Array<{ id: string }>).map((r) => r.id);
+    // The workflows those runs executed: a run's id is its own, the workflow's is `workflow_id`.
+    const workflowIds = (historyDb.prepare('SELECT DISTINCT workflow_id AS id FROM pipeline_runs WHERE workflow_id IS NOT NULL AND id IN (SELECT id FROM erase_pipelines)').all() as Array<{ id: string }>).map((r) => r.id);
+    // A chat delete keeps what it reached blank: a run or workflow still going writes into these
+    // ids afterwards, and the guard's triggers blank it there (`deleted-chat-guard.ts`).
+    if (byThread && scope.deletedChat === true) historyDb.exec(`INSERT OR IGNORE INTO ${DELETED_CHAT_RUNS} (id) SELECT id FROM erase_runs UNION SELECT id FROM erase_pipelines;`);
     historyDb.exec('DELETE FROM erase_runs; DELETE FROM erase_pipelines;');
-    return { rows: changed, pipelineIds };
+    return { rows: changed, pipelineIds, workflowIds };
   })();
 }
 

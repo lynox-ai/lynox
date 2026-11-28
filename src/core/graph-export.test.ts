@@ -297,6 +297,49 @@ describe('readMemoryTextsForExport', () => {
     expect(carried).toEqual(Object.keys(EXPORT_TABLES['agent-memory.db'].include).sort());
   });
 
+  it('carries the fingerprints of the remembered lines that came from an unchecked source, with their namespace and time', () => {
+    const db = new AgentMemoryDb(file);
+    db.addUntrustedLineKeys('knowledge', ['k-1', 'k-2']);
+    db.close();
+    const rows = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask })['agent-memory.db'].untrusted_lines;
+    expect(rows.map((r) => [r['namespace'], r['key']])).toEqual([['knowledge', 'k-1'], ['knowledge', 'k-2']]);
+    expect(rows.every((r) => typeof r['created_at'] === 'string'), 'each with its time').toBe(true);
+    expect(Object.keys(rows[0] ?? {}).sort(), 'a fingerprint, no text').toEqual(['created_at', 'key', 'namespace']);
+  });
+
+  it('reads a file from before that table, not yet migrated, as complete: it holds no marked lines', () => {
+    new AgentMemoryDb(file).close();
+    const raw = new Database(file);
+    raw.exec('DROP TABLE untrusted_lines');
+    raw.prepare('DELETE FROM schema_version WHERE version = 9').run();
+    raw.close();
+    const read = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(read['agent-memory.db'].untrusted_lines).toEqual([]);
+    expect(read.mayBeIncomplete).toBe(false);
+  });
+
+  it('reads the fingerprints of an older file that already has the table', () => {
+    const db = new AgentMemoryDb(file);
+    db.addUntrustedLineKeys('knowledge', ['k-1']);
+    db.close();
+    // Older than this build, with the table: the state of the newest file once a later
+    // migration exists.
+    const raw = new Database(file);
+    raw.prepare('DELETE FROM schema_version WHERE version = (SELECT MAX(version) FROM schema_version)').run();
+    raw.close();
+    const read = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(read['agent-memory.db'].untrusted_lines.map((r) => r['key'])).toEqual(['k-1']);
+    expect(read.mayBeIncomplete).toBe(false);
+  });
+
+  it('a current file without that table is read as incomplete', () => {
+    new AgentMemoryDb(file).close();
+    const raw = new Database(file);
+    raw.exec('DROP TABLE untrusted_lines');
+    raw.close();
+    expect(readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask }).mayBeIncomplete).toBe(true);
+  });
+
   it('with the subject graph on, carries the agent-memory.db entities and relations, masked, and with it off leaves them to the graph block', () => {
     const db = new AgentMemoryDb(file);
     const alice = db.createEntity({ canonicalName: 'Alice', entityType: 'person', description: 'pin hunter2', scopeType: 'global', scopeId: 'global' });
@@ -404,7 +447,7 @@ describe('readMemoryTextsForExport', () => {
     const before = fileState(file);
 
     const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
-    expect(texts['agent-memory.db'], 'a newer schema is not guessed at').toEqual({ memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [] });
+    expect(texts['agent-memory.db'], 'a newer schema is not guessed at').toEqual({ memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [], untrusted_lines: [] });
     expect(texts['engine.db'].memories.map(m => m['text'])).toEqual(['Bob is in Bern']);
     expect(texts.mayBeIncomplete).toBe(true);
     const after = fileState(file);
@@ -531,7 +574,7 @@ describe('readMemoryTextsForExport', () => {
   it('reads a fresh instance that holds no texts as complete, and creates no agent-memory.db', () => {
     const texts = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
     expect(texts).toEqual({
-      'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [] },
+      'agent-memory.db': { memories: [], mentions: [], supersedes: [], cooccurrences: [], metrics: [], entities: [], relations: [], untrusted_lines: [] },
       'engine.db': { memories: [], memory_subjects: [], relationships: [], relationships_note: MEMORY_TEXTS_RELATIONSHIPS_NOTE, supersedes: [], subject_cooccurrences: [], subject_mints: [] },
       mayBeIncomplete: false,
     });

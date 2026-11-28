@@ -1894,6 +1894,184 @@ describe('the start of a judged run, in words', () => {
 		expect(hint()).toBe(t('bulk.start.hint_cap'));
 		expect(supersede.getAttribute('aria-describedby')).toBe('bulk-start-hint');
 	});
+
+	// One word for the step (U-339): the owner reads „Beurteilung“ on the button, in the hints and in
+	// the push, so the two words cannot read as two steps. „Urteil“ stays only for what the model
+	// decides about one target. In English "judging", without "the".
+	it('calls the step „Beurteilung“ on the start and restart buttons and in the start sentences that name it, in English "judging" and never "a judge"', async () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		const keys = ['bulk.start.judge', 'bulk.restart.judge', 'bulk.start.judge_own_key', 'bulk.start.supersede',
+			'bulk.start.hint_cap', 'bulk.start.hint_domains', 'bulk.start.hint_both', 'bulk.start_domains.frozen',
+			'bulk.invalid.new_link_domain_judged', 'bulk.invalid.new_link_domain_judged_named'];
+		setLocale('de');
+		for (const key of keys) {
+			expect(t(key), key).not.toMatch(/Urteil|Beurteilens/);
+			expect(t(key), key).toMatch(/Beurteilung/);
+		}
+		expect(t('bulk.start.judge')).toBe('Beurteilung starten');
+		expect(t('bulk.restart.judge')).toBe('Beurteilung fortsetzen');
+		setLocale('en');
+		for (const key of keys) expect(t(key), key).not.toMatch(/the judging|\b(a|the) judge\b/i);
+		expect(t('bulk.start.judge')).toBe('Start judging');
+		expect(t('bulk.restart.judge')).toBe('Continue judging');
+		setLocale('de');
+		run = judged();
+		await render();
+		expect(startButton().textContent?.trim()).toBe('Beurteilung starten');
+	});
+
+	// Amounts on the run page read as the cost field does: the number, then „USD“ (U-339).
+	// The run a start would end has spent 0.50 (the engine's answer); this run has spent 0.25, so the
+	// sentence shows the other run's cost and not this one's.
+	it('shows the cost so far and the limit as amounts in USD, and the cost of the run a start ends too', async () => {
+		run = judged({ costUsd: 0.25, costCapUsd: 5 });
+		refuseResume = 'supersede_required';
+		await render();
+		expect(target.querySelector('[data-testid="bulk-head-cost"]')?.textContent).toBe('0.25\u00a0USD / 5.00\u00a0USD');
+		type(capField(), '5');
+		startButton().click();
+		await settle();
+		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50\u00a0USD' }));
+		expect(target.textContent).not.toContain('$0.50');
+	});
+
+	it('shows the cost of the run a restart ends in USD as well', async () => {
+		run = judged({ haltKey: 'unavailable', costUsd: 0.25 });
+		refuseResume = 'supersede_required';
+		await render();
+		buttonByText(t('bulk.restart.judge'))!.click();
+		await settle();
+		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50\u00a0USD' }));
+		expect(target.textContent).not.toContain('$0.50');
+	});
+
+	const headTerms = (): string[] => [...target.querySelectorAll('dl dt')].map((dt) => dt.textContent?.trim() ?? '');
+	const count = (part: string): number => (target.textContent ?? '').split(part).length - 1;
+
+	// A read list waiting for its start says the step once, in the head's „Nächster Schritt“ with the
+	// button to press; the list sentence under it names only the state (U-246).
+	it('says the step of an owner\'s read list once, in the head, and the state once, in the list sentence', async () => {
+		run = judged();
+		await render();
+		expect(headTerms()).toContain(t('bulk.head.next'));
+		expect(headTerms()).not.toContain(t('bulk.head.halted'));
+		const step = tf('bulk.halt.listed_start', { button: t('bulk.start.judge') });
+		expect(count(step)).toBe(1);
+		expect(target.querySelector('[data-testid="bulk-halt-cause"]')?.textContent).toBe(step);
+		expect(count(tf('bulk.start.listed', { n: '3' }))).toBe(1);
+		expect(target.textContent).not.toContain(t('bulk.awaiting_start'));
+	});
+
+	it('reads one listed target as one, in the singular', async () => {
+		run = judged({ total: 1 });
+		await render();
+		expect(count(tf('bulk.start.listed_one', { n: '1' }))).toBe(1);
+		expect(target.textContent).not.toContain(tf('bulk.start.listed', { n: '1' }));
+	});
+
+	it('says only the state under a read list that cannot start now, never to start it', async () => {
+		run = judged({ judgeServedBy: null });
+		await render();
+		expect(headTerms()).toContain(t('bulk.head.waiting'));
+		expect(count(tf('bulk.start.listed', { n: '3' }))).toBe(1);
+		expect(count(t('bulk.halt.wait_no_start'))).toBe(1);
+		expect(target.textContent).not.toContain(t('bulk.halt.listed_start').split('{button}')[0]);
+		expect(buttonByText(t('bulk.start.judge'))).toBeUndefined();
+	});
+
+	it('words the list sentence as its state only, in both languages', () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		setLocale('de');
+		expect([t('bulk.start.listed'), t('bulk.start.listed_one'), t('bulk.halt.listed_start')]).toEqual(['Die Liste ist gelesen: {n} Ziele.', 'Die Liste ist gelesen: {n} Ziel.', 'Prüf die Ziele, dann starte mit „{button}“.']);
+		setLocale('en');
+		expect([t('bulk.start.listed'), t('bulk.start.listed_one'), t('bulk.halt.listed_start')]).toEqual(['The list is read: {n} targets.', 'The list is read: {n} target.', 'Review the targets, then start with “{button}”.']);
+	});
+
+	it('keeps the halt row for a run that halted after it started', async () => {
+		run = judged({ haltKey: 'unavailable' });
+		await render();
+		expect(headTerms()).toContain(t('bulk.head.halted'));
+	});
+
+	// The restart that needs a new limit says why its button is disabled, as the start does (U-339).
+	it('says under a restart on its limit that a new limit is missing, and links it to both buttons', async () => {
+		run = judged({ haltKey: 'costCap', costUsd: 0.25, costCapUsd: 0.25 });
+		await render();
+		const restartHint = (): HTMLElement | null => target.querySelector('[data-testid="bulk-restart-hint"]');
+		expect(restartHint()?.textContent).toBe(t('bulk.restart.hint_cap'));
+		// The restart's own words: a new limit, and the step goes on rather than starts.
+		expect(t('bulk.restart.hint_cap')).toBe('Trag zuerst ein neues Kostenlimit ein, dann lässt sich die Beurteilung fortsetzen.');
+		const button = buttonByText(t('bulk.restart.judge'))!;
+		expect(button.disabled).toBe(true);
+		expect(button.getAttribute('aria-describedby')).toBe('bulk-restart-hint');
+		expect(restartHint()!.id).toBe('bulk-restart-hint');
+		type(capField(), '9');
+		await settle();
+		expect(restartHint()).toBeNull();
+		expect(button.getAttribute('aria-describedby')).toBeNull();
+		// A too low amount has its own line, not this one.
+		type(capField(), '0.1');
+		await settle();
+		expect(restartHint()).toBeNull();
+		// The supersede button carries the same link while the field is empty.
+		type(capField(), '');
+		refuseResume = 'supersede_required';
+		type(capField(), '9');
+		buttonByText(t('bulk.restart.judge'))!.click();
+		await settle();
+		type(capField(), '');
+		await settle();
+		expect(buttonByText(t('bulk.start.supersede_yes'))!.getAttribute('aria-describedby')).toBe('bulk-restart-hint');
+		expect(restartHint()?.textContent).toBe(t('bulk.restart.hint_cap'));
+	});
+
+	it('has no restart hint for a restart that needs no new limit', async () => {
+		run = judged({ haltKey: 'unavailable' });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-restart-hint"]')).toBeNull();
+		expect(buttonByText(t('bulk.restart.judge'))!.getAttribute('aria-describedby')).toBeNull();
+	});
+
+	// Shapes say an equal length once, and write numbers as the UI language does (U-339).
+	it('says „exactly“ for an equal length and writes numbers in the UI language\'s form', async () => {
+		const schema = { properties: {
+			code: { type: 'string', minLength: 5, maxLength: 5 },
+			body: { type: 'string', minLength: 10, maxLength: 32000 },
+			factor: { type: 'number', minimum: 1e-7, maximum: 1.5 },
+		} };
+		run = judged({ judgeRule: { rule: 'r', tier: 'standard', schema } });
+		await render();
+		expect(fieldLines()).toEqual([
+			`code: ${tf('bulk.shape.text_exact', { n: '5' })}`,
+			// Swiss German groups thousands with an apostrophe; which one the runtime's ICU writes varies.
+			`body: ${tf('bulk.shape.text_range', { min: '10', max: new Intl.NumberFormat('de-CH').format(32000) })}`,
+			`factor: ${tf('bulk.shape.number_range', { min: '0.0000001', max: '1.5' })}`,
+		]);
+		expect(new Intl.NumberFormat('de-CH').format(32000)).toMatch(/^32['’]000$/);
+		expect(t('bulk.shape.text_exact')).toBe('Text, genau {n} Zeichen');
+		unmount(component!);
+		component = undefined;
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		setLocale('en');
+		await render();
+		expect(fieldLines()).toEqual([
+			'code: Text, exactly 5 characters',
+			`body: ${tf('bulk.shape.text_range', { min: '10', max: '32,000' })}`,
+			`factor: ${tf('bulk.shape.number_range', { min: '0.0000001', max: '1.5' })}`,
+		]);
+	});
+
+	// The focus ring stands 4px outside the domain field; the label keeps more room than that.
+	it('leaves room between the domain field and its label for the focus ring', async () => {
+		run = judged({ startDomains: null });
+		await render();
+		const label = domainField().closest('label')!;
+		expect(label.classList.contains('space-y-2')).toBe(true);
+		expect(label.classList.contains('space-y-1')).toBe(false);
+	});
 });
 
 describe('a toggle on the run\'s page', () => {
