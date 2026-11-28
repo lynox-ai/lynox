@@ -1,8 +1,9 @@
 /**
  * The refusals the engine gives a reader who may not read a chat (register 1112): a chat that
  * holds data from a connected store and is neither the reader's nor read by the owner, and a live
- * run whose chat the engine cannot name. The engine sends its own English sentence and a `code`;
- * the page shows the sentence in its own language, keyed on the code (ux U-091).
+ * run the reader may not follow, with one answer whatever the cause (U-492). The engine sends
+ * its own English sentence and a `code`; the page shows the sentence in its own language, keyed on
+ * the code (U-091).
  */
 const KEYS = {
 	contained_thread: 'contained.thread_read_refused',
