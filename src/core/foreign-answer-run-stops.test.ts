@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { WorkerLoop, FOREIGN_ANSWER_RESULT, FOREIGN_ANSWER_NEXT_RUN, dueOnItsOwn } from './worker-loop.js';
+import { WorkerLoop, FOREIGN_ANSWER_RESULT, FOREIGN_ANSWER_NEXT_RUN, FOREIGN_ANSWER_ONE_SHOT, dueOnItsOwn } from './worker-loop.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager } from './task-manager.js';
@@ -47,6 +47,8 @@ interface Proc {
   ends: MandateEnds;
   /** The text of every agent turn the runs started, in order. */
   turns: string[];
+  /** What went to the owner's devices. */
+  notify: ReturnType<typeof vi.fn>;
 }
 
 function boot(threads: Record<string, string> = {}): Proc {
@@ -87,24 +89,26 @@ function boot(threads: Record<string, string> = {}): Proc {
     getMandateEnds: () => ends,
     getAuditLog: () => audit,
   } as unknown as Engine;
-  const router = { hasChannels: () => false, notify: vi.fn(async () => undefined) } as unknown as NotificationRouter;
+  // Channels on, so a push this change must not send would be seen.
+  const notify = vi.fn(async () => []);
+  const router = { hasChannels: () => true, notify } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000);
   closers.push(() => loop.stop());
-  return { loop, history, db: engineDb.getDb(), prompts, ends, turns };
+  return { loop, history, db: engineDb.getDb(), prompts, ends, turns, notify };
 }
 
 /** A stamped agent plan Eva shaped (it runs for her), parked on a question. */
-function parkedPlan(p: Proc, over: { once?: boolean; nextRunAt?: string; createdBy?: string } = {}): void {
+function parkedPlan(p: Proc, over: { once?: boolean; nextRunAt?: string; createdBy?: string; webhook?: boolean } = {}): void {
   const createdBy = over.createdBy ?? tag(EVA);
   p.history.insertTrigger({
-    id: 'p', title: 'Weekly report', source: 'cron', effect: 'run_agent',
-    ...(over.once === true ? {} : { scheduleCron: CRON }),
+    id: 'p', title: 'Weekly report', source: over.webhook === true ? 'webhook' : 'cron', effect: 'run_agent',
+    ...(over.once === true || over.webhook === true ? {} : { scheduleCron: CRON }),
     nextRunAt: over.nextRunAt ?? (over.once === true ? null : ahead()),
     confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner',
     createdBy, ...(createdBy === tag(EVA) ? { createdMandateId: `g-${EVA}` } : {}),
   });
   p.history.updateTrigger('p', { status: 'waiting', waitingUntil: new Date(Date.now() + 24 * H * 1000).toISOString() });
-  p.ends.record({ kind: 'mandate', email: EVA, mandateId: `g-${EVA}`, mandateExp: nowS() + 24 * H }, nowS() - H);
+  p.ends.record({ kind: 'mandate', email: EVA, mandateId: `g-${EVA}`, mandateExp: nowS() + 60 * 24 * H }, nowS() - H);
 }
 
 /** The run's question, asked in `chat` and answered there. `asker` stamps who asked it. */
@@ -145,6 +149,7 @@ describe('a run that only an answer from another chat made due', () => {
     expect(new Date(ended.next_run_at!).getUTCDay(), 'on the cron\'s weekday').toBe(1);
     expect(ended.status, 'the cron stays on').not.toBe('stopped');
     expect(p.prompts.getAnsweredForTrigger('p'), 'the answer was released').toBeUndefined();
+    expect(p.notify, 'and nothing was pushed').not.toHaveBeenCalled();
     await tick(p);
     expect(p.turns, 'and nothing runs after').toEqual([]);
     expect(row(p).next_run_at).toBe(ended.next_run_at);
@@ -159,7 +164,8 @@ describe('a run that only an answer from another chat made due', () => {
     expect(p.turns, 'not run').toEqual([]);
     const ended = row(p);
     expect([ended.status, ended.next_run_at, ended.last_run_status]).toEqual(['stopped', null, 'stopped']);
-    expect(ended.last_run_result).toBe(FOREIGN_ANSWER_RESULT);
+    expect(ended.last_run_result).toBe(`${FOREIGN_ANSWER_RESULT} ${FOREIGN_ANSWER_ONE_SHOT}`);
+    expect(p.notify, 'nothing was pushed').not.toHaveBeenCalled();
   });
 
   it('the owner\'s "Run now" between the re-arm and the pickup runs, without the answer', async () => {
@@ -176,7 +182,7 @@ describe('a run that only an answer from another chat made due', () => {
     expect(p.turns, 'and the schedule did not run it again').toHaveLength(1);
   });
 
-  it('a run due on its own schedule that finds such an answer runs its scheduled work', async () => {
+  it('a run due on its own schedule (its time came while it waited) that finds such an answer runs its scheduled work', async () => {
     const p = boot({ 'thread-owner': 'owner' });
     parkedPlan(p, { nextRunAt: PAST });
     answeredIn(p, 'thread-owner');
@@ -185,6 +191,32 @@ describe('a run that only an answer from another chat made due', () => {
     expect(p.turns, 'it ran').toHaveLength(1);
     expect(p.turns[0], 'without the answer').not.toContain('Last week.');
     expect(row(p).last_run_result).not.toBe(`${FOREIGN_ANSWER_RESULT} ${FOREIGN_ANSWER_NEXT_RUN}`);
+  });
+
+  it('after a process died while the run waited, the time that started it is not its own schedule: not run', async () => {
+    const p = boot({ 'thread-owner': 'owner' });
+    parkedPlan(p, { nextRunAt: PAST });
+    // The dead process's lease: taken when the asking run started, after its time, never given back.
+    p.db.prepare('UPDATE triggers SET lease_holder = ?, lease_since = ?, lease_until = ? WHERE id = ?')
+      .run('dead-process', '2026-01-05T09:00:05.000Z', '2026-01-05T09:10:00.000Z', 'p');
+    answeredIn(p, 'thread-owner');
+    await tick(p);
+    await tick(p);
+    expect(p.turns, 'not run').toEqual([]);
+    expect(row(p).last_run_status).toBe('stopped');
+    expect(Date.parse(row(p).next_run_at!), 'the schedule\'s own next run, ahead').toBeGreaterThan(Date.now());
+  });
+
+  it('a webhook\'s trigger is not marked: a later run of it runs, without the answer', async () => {
+    const p = boot({ 'thread-owner': 'owner' });
+    parkedPlan(p, { webhook: true });
+    answeredIn(p, 'thread-owner');
+    await tick(p);
+    const trigger = p.history.getTrigger('p')!;
+    await (p.loop as unknown as { executeTask: (t: typeof trigger, c: number | null) => Promise<void> }).executeTask(trigger, null);
+    await settle();
+    expect(p.turns, 'it ran').toHaveLength(1);
+    expect(p.turns[0], 'without the answer').not.toContain('Last week.');
   });
 
   it('control: an answer given in the run\'s own chat is taken', async () => {
@@ -199,6 +231,17 @@ describe('a run that only an answer from another chat made due', () => {
 });
 
 describe('an answer under an access that has ended', () => {
+  it('a run only the schedule starts is still recorded failed, not run', async () => {
+    const p = boot({ 'thread-owner': 'owner' });
+    parkedPlan(p, { createdBy: 'owner' });
+    answeredIn(p, 'thread-owner', { email: 'gone@x.ch', mandateId: 'g-gone' });
+    p.ends.record({ kind: 'mandate', email: 'gone@x.ch', mandateId: 'g-gone', mandateExp: nowS() - H }, nowS() - 2 * H);
+    await tick(p);
+    await tick(p);
+    expect(p.turns, 'not run').toEqual([]);
+    expect(row(p).last_run_status).toBe('failed');
+  });
+
   it('the owner\'s "Run now" runs, without the answer, instead of being recorded failed', async () => {
     const p = boot({ 'thread-owner': 'owner' });
     parkedPlan(p, { createdBy: 'owner' });
@@ -213,16 +256,30 @@ describe('an answer under an access that has ended', () => {
   });
 });
 
+describe('the result sentences (U-484 N2)', () => {
+  it('a cron or a watch says its next run asks again', () => {
+    expect(`${FOREIGN_ANSWER_RESULT} ${FOREIGN_ANSWER_NEXT_RUN}`).toBe('The run did not continue: its question had been asked in another chat, and this task now runs under a delegated access, so it does not take an answer from there. The next scheduled run asks again if it needs to.');
+  });
+  it('a one-shot says it does not run again, and what starting it again does', () => {
+    expect(`${FOREIGN_ANSWER_RESULT} ${FOREIGN_ANSWER_ONE_SHOT}`).toBe('The run did not continue: its question had been asked in another chat, and this task now runs under a delegated access, so it does not take an answer from there. It does not run again on its own. Starting it again runs it from the beginning, including the steps before the question; check first what it already did.');
+  });
+});
+
 describe('dueOnItsOwn', () => {
   const now = Date.parse('2026-03-02T10:00:00.000Z');
   it('a one-shot never is; a cron or a watch is once its next run has come', () => {
-    expect(dueOnItsOwn({ schedule_cron: undefined, watch_config: undefined, next_run_at: PAST }, now)).toBe(false);
-    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-09T09:00:00.000Z' }, now)).toBe(false);
-    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:00:00.000Z' }, now)).toBe(true);
-    expect(dueOnItsOwn({ schedule_cron: undefined, watch_config: '{"interval_minutes":60}', next_run_at: '2026-03-02T10:30:00.000Z' }, now)).toBe(false);
+    expect(dueOnItsOwn({ schedule_cron: undefined, watch_config: undefined, next_run_at: PAST }, now, null)).toBe(false);
+    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-09T09:00:00.000Z' }, now, null)).toBe(false);
+    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:00:00.000Z' }, now, null)).toBe(true);
+    expect(dueOnItsOwn({ schedule_cron: undefined, watch_config: '{"interval_minutes":60}', next_run_at: '2026-03-02T10:30:00.000Z' }, now, null)).toBe(false);
+  });
+  it('the time no later than the lease of a run that never ended is that run\'s, not the schedule\'s', () => {
+    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:00:00.000Z' }, now, '2026-03-02T09:00:01.000Z')).toBe(false);
+    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:00:00.000Z' }, now, '2026-03-02T09:00:00.000Z')).toBe(false);
+    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:30:00.000Z' }, now, '2026-03-02T09:00:01.000Z')).toBe(true);
   });
   it('a next run that cannot be read counts as due, so the row runs as before', () => {
-    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: null }, now)).toBe(true);
-    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: 'soon' }, now)).toBe(true);
+    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: null }, now, null)).toBe(true);
+    expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: 'soon' }, now, null)).toBe(true);
   });
 });

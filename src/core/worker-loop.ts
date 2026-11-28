@@ -169,20 +169,28 @@ export const THREAD_DELETED_RESULT = 'Workflow ended without an answer: the conv
 const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access, and that access ended before the run could continue.';
 /**
  * Whether a parked trigger is due on its own schedule at `now`: a cron or a watch whose next run
- * has come. A one-shot is not: its one run is the one that asked. A next run that cannot be read
- * counts as due, so such a row runs as it did before.
+ * has come. A one-shot is not: its one run is the one that asked. Nor is the time that started
+ * the asking run: a run that ended moved the row to its next time, but a process that died while
+ * the run waited wrote no end, so the row still holds that time, no later than when the run
+ * took its lease (`leaseSince`, kept by the dead process; `claimLease` reads it the same way).
+ * A next run that cannot be read counts as due, so such a row runs as it did before.
  */
-export function dueOnItsOwn(trigger: Pick<TriggerRecord, 'schedule_cron' | 'watch_config' | 'next_run_at'>, now: number): boolean {
+export function dueOnItsOwn(trigger: Pick<TriggerRecord, 'schedule_cron' | 'watch_config' | 'next_run_at'>, now: number, leaseSince: string | null): boolean {
   if (!trigger.schedule_cron && !trigger.watch_config) return false;
   if (trigger.next_run_at === null || trigger.next_run_at === undefined) return true;
   const at = Date.parse(trigger.next_run_at);
-  return Number.isNaN(at) || at <= now;
+  if (Number.isNaN(at)) return true;
+  const since = leaseSince === null ? Number.NaN : Date.parse(leaseSince);
+  if (!Number.isNaN(since) && at <= since) return false;
+  return at <= now;
 }
 
 /** What a run records that only an answer from another chat made due, and that does not take it (U-484). */
 export const FOREIGN_ANSWER_RESULT = 'The run did not continue: its question had been asked in another chat, and this task now runs under a delegated access, so it does not take an answer from there.';
 /** Said after {@link FOREIGN_ANSWER_RESULT} for a trigger with a schedule of its own (a cron or a watch). */
 export const FOREIGN_ANSWER_NEXT_RUN = 'The next scheduled run asks again if it needs to.';
+/** Said after {@link FOREIGN_ANSWER_RESULT} for a one-shot, which ends with this run (U-484 N2). */
+export const FOREIGN_ANSWER_ONE_SHOT = 'It does not run again on its own. Starting it again runs it from the beginning, including the steps before the question; check first what it already did.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 
@@ -1460,9 +1468,12 @@ export class WorkerLoop {
             if (!mandateNeedsOwnerStamp(parked) && answered.hand_run !== 1) {
               // Read before the write below moves it: whether the row was due on its own schedule.
               // A one-shot has none left (its run is the one that asked); a cron or a watch is due
-              // on its own once its next run has come.
-              if (!dueOnItsOwn(parked, Date.now())) this.#dueOnlyByAnswer.add(parked.id);
+              // on its own once its next run has come. A webhook's runs come from its events, never
+              // from this, so it is not marked. Marked only once the write went through.
+              const onlyByAnswer = parked.source !== 'webhook' && !dueOnItsOwn(parked, Date.now(), taskManager.leaseSince(parked.id));
               this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
+              if (onlyByAnswer) this.#dueOnlyByAnswer.add(parked.id);
+              else this.#dueOnlyByAnswer.delete(parked.id);
             }
             process.stderr.write(
               `[lynox:worker] "${parked.title}" (${parked.id}) got its answer — due again\n`,
@@ -2134,8 +2145,8 @@ export class WorkerLoop {
     };
     this.activeTasks.set(task.id, entry);
     // Taken by whichever run comes next, so it never outlives that run. A run started by hand is
-    // the starter's, not the answer's, and runs.
-    if (this.#dueOnlyByAnswer.delete(task.id) && !isStartedByHand(task.id)) entry.dueOnlyByAnswer = true;
+    // the starter's, not the answer's, and runs; so does a webhook's run of an event.
+    if (this.#dueOnlyByAnswer.delete(task.id) && !isStartedByHand(task.id) && event === undefined) entry.dueOnlyByAnswer = true;
     // A renewal fails for two reasons, and only one is another process: the row can also
     // be gone, because the schedule was deleted while the run went on. That is said once,
     // since every later interval would only repeat it.
@@ -2937,7 +2948,8 @@ export class WorkerLoop {
         return;
       }
       // Started by hand is read from the run's scope, not from `handStarter`: the owner's "Run now"
-      // carries no starter, and it runs, without the answer, as a mandate's run by hand does.
+      // carries no starter, and it runs, without the answer, as a mandate's run by hand does. (An
+      // asker who is a member of the plan paused it above, for the owner's "Run now" too.)
       if (!isStartedByHand(task.id)) {
         this.#recordRun(this.engine.getTaskManager(), task.id, MANDATE_ENDED_RESULT, 'failed', { starter: asker });
         process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was answered under an access that has since ended — not run\n`);
@@ -2973,7 +2985,7 @@ export class WorkerLoop {
       // hand, runs as before, without the answer.
       if (this.activeTasks.get(task.id)?.dueOnlyByAnswer === true) {
         const ownSchedule = Boolean(task.schedule_cron) || Boolean(task.watch_config);
-        this.#recordRun(this.engine.getTaskManager(), task.id, ownSchedule ? `${FOREIGN_ANSWER_RESULT} ${FOREIGN_ANSWER_NEXT_RUN}` : FOREIGN_ANSWER_RESULT, 'stopped');
+        this.#recordRun(this.engine.getTaskManager(), task.id, `${FOREIGN_ANSWER_RESULT} ${ownSchedule ? FOREIGN_ANSWER_NEXT_RUN : FOREIGN_ANSWER_ONE_SHOT}`, 'stopped');
         process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was made due only by an answer from another chat, which it does not take — not run\n`);
         return;
       }

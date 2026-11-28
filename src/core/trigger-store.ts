@@ -1337,6 +1337,13 @@ export class TriggerStore {
     return row?.lease_until ?? null;
   }
 
+  /** When the run that holds or last held the lease took it, or null when it was given back (a
+   *  run's end releases it). Kept after a process died mid-run, as `claimLease` reads it. */
+  leaseSince(id: string): string | null {
+    const row = this.db.prepare('SELECT lease_since FROM triggers WHERE id = ?').get(id) as { lease_since: string | null } | undefined;
+    return row?.lease_since ?? null;
+  }
+
   /** Who holds the current lease and until when; null when the trigger is gone. */
   leaseOf(id: string): { holder: string | null; until: string | null } | null {
     const row = this.db.prepare('SELECT lease_holder, lease_until FROM triggers WHERE id = ?').get(id) as { lease_holder: string | null; lease_until: string | null } | undefined;
