@@ -11454,23 +11454,30 @@ describe('LynoxHTTPApi', () => {
         });
       });
 
-      it('a live run of another person\'s contained chat does not stream to a helper; one that names no chat says so', async () => {
-        const { CONTAINED_THREAD_CODE, RUN_CHAT_UNKNOWN_REFUSAL, RUN_CHAT_UNKNOWN_CODE } = await import('./http-api.js');
+      it('a helper gets one answer for a live run it may not follow: an unknown id, a run that names no chat, a run of another person\'s contained chat', async () => {
+        const { RUN_CHAT_UNKNOWN_REFUSAL, RUN_CHAT_UNKNOWN_CODE } = await import('./http-api.js');
         const { RunBufferManager } = await import('../core/run-buffer.js');
         const mgr = new RunBufferManager();
-        for (const id of ['run-shop', 'run-notes', 'run-nowhere']) mgr.create(id).append({ type: 'text', text: 'hello', agent: 'main' });
-        const rows: Record<string, { thread_id: string }> = { 'run-shop': { thread_id: 'shop' }, 'run-notes': { thread_id: 'notes' } };
+        for (const id of ['run-shop', 'run-evas', 'run-notes', 'run-nowhere']) mgr.create(id).append({ type: 'text', text: 'hello', agent: 'main' });
+        const rows: Record<string, { thread_id: string }> = { 'run-shop': { thread_id: 'shop' }, 'run-evas': { thread_id: 'evas-shop' }, 'run-notes': { thread_id: 'notes' } };
         await swapEngine({
           getRunBufferManager: () => mgr,
           getRunRegistry: () => ({ getByRunId: (id: string) => rows[id] }),
           getThreadStore: () => ({ getThread: (id: string) => THREADS[id] ?? null }),
           getToolContext: () => ({ tools: [], containment }),
         }, async () => {
-          expect((await as(EVA, '/api/runs/run-shop/stream')).body['code']).toBe(CONTAINED_THREAD_CODE);
-          const nowhere = await as(EVA, '/api/runs/run-nowhere/stream');
-          expect({ status: nowhere.status, error: nowhere.body['error'], code: nowhere.body['code'] }).toEqual({ status: 403, error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE });
-          // Twins: a chat that is not contained, the owner on the contained one, and the owner on a
-          // run that names no chat. Each opens a stream.
+          // The whole answer, status and body as sent, so any difference between the cases shows.
+          const answer = async (runId: string): Promise<string> => {
+            api.setPrincipalResolverForTesting(() => EVA);
+            const res = await fetch(`${baseUrl}/api/runs/${runId}/stream`, { headers: authHeaders() });
+            return `${res.status} ${await res.text()}`;
+          };
+          const refused = `403 ${JSON.stringify({ error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE })}`;
+          expect(await answer('run-unknown'), 'an id no live run has').toBe(refused);
+          expect(await answer('run-shop'), 'a live run of another person\'s contained chat').toBe(refused);
+          expect(await answer('run-nowhere'), 'a live run that names no chat').toBe(refused);
+          // Twins: a chat that is not contained, the helper's own contained chat, the owner on the
+          // contained one, and the owner on a run that names no chat. Each opens a stream.
           const open = async (who: RequestPrincipal, runId: string): Promise<number> => {
             api.setPrincipalResolverForTesting(() => who);
             const res = await fetch(`${baseUrl}/api/runs/${runId}/stream`, { headers: authHeaders() });
@@ -11478,8 +11485,28 @@ describe('LynoxHTTPApi', () => {
             return res.status;
           };
           expect(await open(EVA, 'run-notes')).toBe(200);
+          expect(await open(EVA, 'run-evas')).toBe(200);
           expect(await open(OWNER_PRINCIPAL, 'run-shop')).toBe(200);
           expect(await open(OWNER_PRINCIPAL, 'run-nowhere')).toBe(200);
+        });
+      });
+
+      it('the list of live runs leaves out, for a helper, the runs and questions of another person\'s contained chat and a run that names no chat; the owner sees all', async () => {
+        const at = '2026-03-02 09:00:00';
+        const row = (run_id: string, thread_id: string, status: string) => ({ run_id, thread_id, status, started_at: at, last_activity: at, last_persisted_seq: 0 });
+        // `shop`'s run has ended, so the question waiting in it is listed on its own.
+        const active = [row('run-shop', 'shop', 'interrupted'), row('run-evas', 'evas-shop', 'running'), row('run-notes', 'notes', 'running'), row('run-nowhere', '', 'running')];
+        const pending = [{ id: 'q-shop', session_id: 'shop', created_at: at }, { id: 'q-evas', session_id: 'evas-shop', created_at: at }];
+        await swapEngine({
+          getRunRegistry: () => ({ getActive: () => active }),
+          getPromptStore: () => ({ getPending: () => undefined, listPendingSessions: () => pending }),
+          getThreadStore: () => ({ getThread: (id: string) => THREADS[id] ?? null }),
+          getRunHistory: () => ({ getPipelineRunOrigins: () => new Map() }),
+          getToolContext: () => ({ tools: [], containment }),
+        }, async () => {
+          const listed = async (who: RequestPrincipal): Promise<string[]> => ((await as(who, '/api/runs/active')).body['runs'] as Array<{ runId: string }>).map((r) => r.runId);
+          expect(await listed(EVA)).toEqual(['run-evas', 'run-notes']);
+          expect(await listed(OWNER_PRINCIPAL)).toEqual(['run-shop', 'run-evas', 'run-notes', 'run-nowhere', 'q-shop']);
         });
       });
     });
