@@ -307,6 +307,10 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     const marks = performance.now();
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301'.repeat(100_000)}${'\u0316'.repeat(100_000)}`, [], 'D'))).toContain(`saving “${'a\u0301\u0301\u0301\u0301'.normalize('NFC')}” needs`);
     expect(performance.now() - marks).toBeLessThan(2000);
+    // A spacing mark that composing reorders is not cut: only the raw head is composed.
+    const spacing = performance.now();
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'́\u{1D16D}'.repeat(100_000)}`, [], 'D'))).toContain('saving “…” needs');
+    expect(performance.now() - spacing).toBeLessThan(2000);
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', ' Wetter', [], 'D'))).toContain('saving “Wetter” needs');
     const huge = flattenPrompt(API_SETUP_DIALOG.en.save('API', `क${'ा'.repeat(200_000)}`, [], 'D'));
     expect(huge.length).toBeLessThan(400);
