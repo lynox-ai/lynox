@@ -49,20 +49,26 @@ export function followUpsOf<M extends FollowUpMessage>(reader: FollowUpReader<M>
   const own = item.messageId !== undefined ? messages.find((m) => m.messageId === item.messageId) : undefined;
   const since = own?.mailDate?.getTime();
   const reopenedBy = new Set<string>();
+  // Mails filed into the item after it was created by another mail of the thread. Their Date
+  // header is their sender's word, so one dated before the item's own mail still counts.
+  const joined = new Set<string>();
   for (const a of reader.listAuditForItem(item.id, item.tenantId)) {
-    if (a.action !== 'reopened_on_reply' && a.action !== 'raised_on_sensitive_follow_up') continue;
-    try {
-      const id = (JSON.parse(a.payloadJson) as { message_id?: unknown }).message_id;
-      if (typeof id === 'string') reopenedBy.add(id);
-    } catch {
-      // An unreadable payload names no message.
+    if (a.action !== 'reopened_on_reply' && a.action !== 'raised_on_sensitive_follow_up' && a.action !== 'joined_thread') continue;
+    const p = payloadOf(a);
+    const id = p['message_id'];
+    if (typeof id !== 'string') continue;
+    if (a.action === 'joined_thread') {
+      joined.add(id);
+      if (p['raised'] === true) reopenedBy.add(id);
+    } else {
+      reopenedBy.add(id);
     }
   }
   return messages.filter((m) =>
     m.messageId !== item.messageId
     && m.direction === 'inbound'
     && (m.autoReply === false || (m.autoReply === undefined && reopenedBy.has(m.messageId)))
-    && !(since !== undefined && m.mailDate !== undefined && m.mailDate.getTime() < since),
+    && (joined.has(m.messageId) || !(since !== undefined && m.mailDate !== undefined && m.mailDate.getTime() < since)),
   );
 }
 
@@ -169,7 +175,8 @@ function lastHandledAt(
     } else if (a.action === 'reopened_on_reply') {
       later(pending?.at);
       pending = undefined;
-    } else if (a.action === 'raised_on_sensitive_follow_up') {
+    } else if (a.action === 'raised_on_sensitive_follow_up' || (a.action === 'joined_thread' && p['raised'] === true)) {
+      // A joined mail that raised the item ends what was pending as a flagged follow-up does.
       const prior = p['prior_user_action'];
       if (pending?.logged === true || prior === 'replied' || prior === 'archived') later(pending?.at);
       pending = undefined;

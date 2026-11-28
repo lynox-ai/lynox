@@ -47,7 +47,7 @@ function seedReplied(): string {
     accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'requires_user', confidence: 0.9,
     reasonDe: 'Kundin fragt nach der Lieferung', classifiedAt: new Date('2026-11-03T08:00:00Z'),
     classifierVersion: 'v1', messageId: '<first@x>', subject: 'Lieferung', fromAddress: 'kunde@example.com',
-  });
+  }).id;
   inbox.insertThreadMessage({
     accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com',
     subject: 'Lieferung', direction: 'inbound', inboxItemId: id, mailDate: new Date('2026-11-03T08:00:00Z'),
@@ -225,7 +225,7 @@ describe('what does not count as dealing with the thread', () => {
       accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'auto_handled', confidence: 0.9,
       reasonDe: 'Newsletter', classifiedAt: new Date('2026-11-03T08:00:00Z'), classifierVersion: 'v1',
       messageId: '<first@x>', subject: 'Lieferung', fromAddress: 'kunde@example.com',
-    });
+    }).id;
     inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com', subject: 'Lieferung', direction: 'inbound', inboxItemId: id, mailDate: new Date('2026-11-03T08:00:00Z') });
     await hook()(ACCOUNT.id, envelope());
     inbox.appendAudit({ itemId: id, action: 'archived', actor: 'user', payloadJson: '{}', createdAt: new Date(Date.now() - 60_000) });
@@ -325,7 +325,7 @@ describe('a raise ends the reply or archive before it, whatever the item showed 
       accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'auto_handled', confidence: 0.9,
       reasonDe: 'Newsletter', classifiedAt: new Date('2026-11-03T08:00:00Z'), classifierVersion: 'v1',
       messageId: '<first@x>', subject: 'Lieferung', fromAddress: 'kunde@example.com',
-    });
+    }).id;
     inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com', subject: 'Lieferung', direction: 'inbound', inboxItemId: id, mailDate: new Date('2026-11-03T08:00:00Z') });
     await hook()(ACCOUNT.id, envelope());
     return id;

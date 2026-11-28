@@ -99,6 +99,7 @@ describe('createInboxClassifierHook — enqueue path', () => {
         messageId: '<m1@x>',
         inReplyTo: undefined,
       },
+      mail: env,
     });
     // No item written yet — queue's onSuccess does that asynchronously.
     expect(inbox.listItems()).toHaveLength(0);
@@ -160,7 +161,7 @@ describe('createInboxClassifierHook — short-circuit and skip', () => {
       reasonDe: 'pre-existing',
       classifiedAt: new Date(),
       classifierVersion: 'haiku-2026-05',
-    });
+    }).id;
     const future = new Date(Date.now() + 7 * 24 * 60_000 * 60); // 7d out
     inbox.setSnooze(itemId, future, null, /* unsnoozeOnReply */ true);
 
@@ -187,7 +188,7 @@ describe('createInboxClassifierHook — short-circuit and skip', () => {
       reasonDe: 'pre-existing',
       classifiedAt: new Date(),
       classifierVersion: 'haiku-2026-05',
-    });
+    }).id;
     const future = new Date(Date.now() + 7 * 24 * 60_000 * 60);
     inbox.setSnooze(itemId, future, null, /* unsnoozeOnReply */ false);
 

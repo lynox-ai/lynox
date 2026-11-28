@@ -56,7 +56,7 @@ function seedReplied(bucket: InboxBucket = 'requires_user', action: 'replied' | 
     accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket, confidence: 0.9,
     reasonDe: 'Kundin fragt nach der Lieferung', classifiedAt: new Date('2026-11-03T08:00:00Z'),
     classifierVersion: 'v1', messageId: '<first@x>', subject: 'Bestellung 1043', fromAddress: 'kunde@example.com',
-  });
+  }).id;
   inbox.insertThreadMessage({
     accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com',
     subject: 'Bestellung 1043', direction: 'inbound', inboxItemId: id,
@@ -103,7 +103,7 @@ describe('follow-up mails in a known thread (part 1b)', () => {
       accountId: ACCOUNT.id, channel: 'email', threadKey: 'gmail:thread-2', bucket: 'requires_user', confidence: 0.9,
       reasonDe: 'andere Mail', classifiedAt: new Date('2026-11-03T12:00:00Z'), classifierVersion: 'v1',
       mailDate: new Date('2026-11-03T12:00:00Z'),
-    });
+    }).id;
     expect(inbox.listItems({ bucket: 'requires_user' }).map((i) => i.id)).toEqual([newer, id]);
 
     await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-04T09:00:00Z') }));
@@ -344,7 +344,7 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     const theirs = inbox.insertItem({
       accountId: other.id, channel: 'email', threadKey: THREAD, bucket: 'requires_user', confidence: 0.9,
       reasonDe: 'zweites Konto', classifiedAt: new Date('2026-11-05T08:00:00Z'), classifierVersion: 'v1',
-    });
+    }).id;
     inbox.insertThreadMessage({ accountId: other.id, threadKey: THREAD, messageId: '<follow@x>', fromAddress: 'kunde@example.com', subject: 'Re', direction: 'inbound', inboxItemId: theirs });
     reconcileOutboundReply(inbox, ACCOUNT.id, {
       input: { to: [], subject: 'Re', text: 'ok' }, result: { messageId: '<sent2@x>', accepted: [], rejected: [] },
@@ -496,7 +496,7 @@ describe('a flagged follow-up brings its item back to where the owner sees it', 
       accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket, confidence: 0.9,
       reasonDe: 'Newsletter', classifiedAt: new Date('2026-11-03T08:00:00Z'),
       classifierVersion: 'v1', messageId: '<first@x>', subject: 'Bestellung 1043', fromAddress: 'kunde@example.com',
-    });
+    }).id;
     inbox.insertThreadMessage({
       accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com',
       subject: 'Bestellung 1043', direction: 'inbound', inboxItemId: id,
@@ -703,7 +703,7 @@ describe('a snooze set to wake on a reply wakes for the messages that may reopen
       accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'requires_user', confidence: 0.9,
       reasonDe: 'Kundin fragt nach der Lieferung', classifiedAt: new Date('2026-11-03T08:00:00Z'),
       classifierVersion: 'v1', messageId: '<first@x>', subject: 'Bestellung 1043', fromAddress: 'kunde@example.com',
-    });
+    }).id;
     inbox.insertThreadMessage({
       ...(tenantId !== undefined ? { tenantId } : {}),
       accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com',

@@ -457,15 +457,12 @@ export class InboxStateDb {
   // ── Items ────────────────────────────────────────────────────────────────
 
   /**
-   * Insert an item. Handles the watcher-hook dedup race (two mails on the
-   * same thread classify in parallel): the v8 UNIQUE index on
-   * `(tenant_id, account_id, thread_key)` collapses the second insert via
-   * ON CONFLICT DO NOTHING; we then return the existing row's id so audit
-   * entries still attach to the canonical item. Both racing callers see a
-   * single item, with two `classified` audit entries — informative rather
-   * than corrupting.
+   * Insert an item. The v8 UNIQUE index on `(tenant_id, account_id, thread_key)` keeps one item
+   * per thread: a second insert for the same thread writes nothing and returns the existing row's
+   * id with `created: false`, so the caller can file its mail into that item instead of writing
+   * over it.
    */
-  insertItem(input: InboxItemInput): string {
+  insertItem(input: InboxItemInput): { id: string; created: boolean } {
     // An item is either filed by a rule or names one that was withheld, never both.
     if (input.matchedRuleId !== undefined && input.ruleWithheld !== undefined) {
       throw new Error('insertItem: matchedRuleId and ruleWithheld are exclusive');
@@ -510,8 +507,8 @@ export class InboxStateDb {
         input.ruleWithheld?.name ?? null,
         input.ruleWithheld?.reason ?? null,
       ) as { changes: number };
-    if (result.changes > 0) return id;
-    // Race lost — another job inserted first. Return that row's id.
+    if (result.changes > 0) return { id, created: true };
+    // The thread has its item already. Return that row's id.
     const existing = this.db
       .prepare<[string, string, string], { id: string }>(
         `SELECT id FROM inbox_items
@@ -521,20 +518,21 @@ export class InboxStateDb {
     if (!existing) {
       throw new Error('insertItem: ON CONFLICT fired but no existing row found');
     }
-    return existing.id;
+    return { id: existing.id, created: false };
   }
 
   /**
    * Atomic insert-item + append-audit in a single transaction. Halves the
    * SQLite fsync cost on the watcher's hot path (each call previously did
    * two separate prepared-statement runs and two journal flushes per mail).
-   * Returns the item id (post-INSERT-OR-IGNORE-fallback, see `insertItem`).
+   * The audit is written only when this call created the item: an item that
+   * existed already keeps its own verdict's audit (see `insertItem`).
    */
-  insertItemWithAudit(item: InboxItemInput, audit: Omit<InboxAuditInput, 'itemId'>): string {
+  insertItemWithAudit(item: InboxItemInput, audit: Omit<InboxAuditInput, 'itemId'>): { id: string; created: boolean } {
     const txn = this.db.transaction(() => {
-      const id = this.insertItem(item);
-      this.appendAudit({ ...audit, itemId: id });
-      return id;
+      const inserted = this.insertItem(item);
+      if (inserted.created) this.appendAudit({ ...audit, itemId: inserted.id });
+      return inserted;
     });
     return txn();
   }
@@ -705,6 +703,29 @@ export class InboxStateDb {
                      AND (snooze_until IS NULL OR snooze_until <= ?))`,
       )
       .run(mailDate.getTime(), now, id, tenantId, now) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /**
+   * Brings an item to "requires you" for a mail of its thread whose own verdict needs the owner,
+   * filed after the item was created by another mail of the thread: no user action, not snoozed,
+   * with that mail's reason and classifier version, so the list says why it is there. The item's
+   * mail date stays as it is. Only ever raises, as `raiseToRequiresUser`. Returns whether the row
+   * changed.
+   */
+  raiseForJoinedMail(id: string, tenantId: string, reasonDe: string, classifierVersion: string, at: Date = new Date()): boolean {
+    const now = at.getTime();
+    const result = this.db
+      .prepare<[string, string, number, string, string, number], unknown>(
+        `UPDATE inbox_items
+            SET bucket = 'requires_user', user_action = NULL, user_action_at = NULL,
+                snooze_until = NULL, snooze_condition = NULL, notify_on_unsnooze = 0,
+                reason_de = ?, classifier_version = ?, classified_at = ?
+          WHERE id = ? AND tenant_id = ?
+            AND NOT (bucket = 'requires_user' AND user_action IS NULL
+                     AND (snooze_until IS NULL OR snooze_until <= ?))`,
+      )
+      .run(reasonDe, classifierVersion, now, id, tenantId, now) as { changes: number };
     return result.changes > 0;
   }
 
