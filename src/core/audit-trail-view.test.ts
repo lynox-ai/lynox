@@ -777,6 +777,8 @@ describe('nameReads: what a read was about, by name, resolved when the view is r
     expect(nameOf(event('GET /api/crm/contacts/:name/interactions', '/api/crm/contacts/Anna%20Muster/interactions'), none)).toBe('Anna Muster');
     expect(nameOf(event('GET /api/files/read', '/api/files/read?path=docs%2Fangebot.md'), none)).toBe('docs/angebot.md');
     expect(nameOf(event('GET /api/files/download', '/api/files/download?path=a.pdf'), none)).toBe('a.pdf');
+    // Only the `path` value names the file, wherever it stands in the query.
+    expect(nameOf(event('GET /api/files/read', '/api/files/read?other=x&path=a.md'), none)).toBe('a.md');
     // A masked address is not a name.
     expect(nameOf(event('GET /api/crm/contacts/:name/deals', '/api/crm/contacts/<address>/deals'), none)).toBeUndefined();
     expect(nameOf(event('GET /api/files/read', '/api/files/read'), none)).toBeUndefined();
