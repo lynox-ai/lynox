@@ -122,7 +122,7 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     }).done;
     expect(h.recordedStatus).toEqual(['halted']);
     expect(h.sent.map((m) => [m.audience, m.title.startsWith('\u23F8')])).toEqual([['owner', true], ['all_mandates', true]]);
-    // The owner reads the line; a grant reads the fact and the owner's name for it, without the line.
+    // The owner reads the line; a grant reads the fact and that only the owner resolves it, without the line.
     expect(h.sent[0]!.body).toContain('Verbindung nicht genutzt: eine Notiz.');
     expect(h.sent[1]).toMatchObject({ audience: 'all_mandates', body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}` });
   });
