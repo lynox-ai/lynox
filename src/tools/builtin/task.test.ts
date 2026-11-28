@@ -5,14 +5,14 @@ import { tmpdir } from 'node:os';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { PLAN_UPDATE_FIELDS, TaskManager } from '../../core/task-manager.js';
-import { taskCreateTool, taskUpdateTool, taskListTool, triggerDetailLine } from './task.js';
+import { FIXED_NOTICE_SENTENCES, VALUE_NOTICES, engineRunResults, taskCreateTool, taskUpdateTool, taskListTool, triggerDetailLine } from './task.js';
 import type { IAgent, MemoryScopeRef } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { OWNER_PRINCIPAL, mandateNeedsOwnerStamp, ownerInstructionCounts } from '../../core/request-principal.js';
 import { recipientsConfirmable } from '../../core/recipient-confirm.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { testAuditLog } from '../../../tests/helpers/audit-log.js';
-import { MANDATE_UNSTAMPED_RESULT, WATCH_URL_MISSING_RESULT, WORKER_NOTICES } from '../../core/worker-notices.js';
+import { MANDATE_UNSTAMPED_RESULT, MEMBER_ENDS, WATCH_URL_MISSING_RESULT, WORKER_NOTICES, memberEndOfStatus } from '../../core/worker-notices.js';
 
 let sharedTaskManager: TaskManager | null = null;
 let sharedHistory: RunHistory | null = null;
@@ -1598,6 +1598,24 @@ describe('Task Tools', () => {
         expect(owners[2]).toMatch(/^Recorded by the last run of a trigger whose workflow was set up by eva@firm\.example\. /);
       });
 
+      // A person with access reads, for a run that could not use a connection, lynox's fixed
+      // sentence for how the run ended in place of its result. It is lynox's own, so it stays on
+      // the line, also for a trigger another mandate set up.
+      describe.each(['failed', 'stopped', 'timeout', 'interrupted', 'halted'] as const)('a run that ended %s without a connection it may use', (status) => {
+        it.each(['en', 'de'] as const)('reads in %s as lynox\'s own sentence, unfenced', async (language) => {
+          const id = await mkSchedule(`Member end ${status} ${language}`);
+          setTrigger(id, 'created_by', 'mandate:eva@firm.example');
+          history.updateTriggerRunResult(id, { lastRunAt: '2026-09-21T08:00:00.000Z', lastRunResult: NOTE, lastRunStatus: status, lastRunCause: null, lastRunMemberNotes: ['Shop: not allowed'] });
+          const reader = { kind: 'mandate', email: 'bob@firm.example', mandateId: 'grant-bob' } as RequestPrincipal;
+          const out = await taskListTool.handler({}, { ...makeAgent(undefined, reader), noticeLanguage: language } as IAgent);
+          const sentence = WORKER_NOTICES[language].memberEndForMandates(memberEndOfStatus(status));
+          const line = after(out, `Member end ${status} ${language}`)[0] ?? '';
+          expect(line.endsWith(`: ${sentence}`)).toBe(true);
+          expect(out).not.toContain('other_run_text');
+          expect(out).not.toContain(NOTE);
+        });
+      });
+
       it('a closing tag in the result stays inside the fence', async () => {
         const id = await mkSchedule('Breakout check');
         setTrigger(id, 'created_by', 'mandate:eva@firm.example');
@@ -2281,5 +2299,26 @@ describe.each([false, true])('a mandate\'s turn and its to-dos (subject graph %s
     const t = tm.create({ title: 'Mandate to-do', createdBy: TAG });
     await taskUpdateTool.handler({ task_id: t.id, title: 'changed' }, makeAgent());
     expect(tm.getTask(t.id)!.title).toBe('changed');
+  });
+});
+
+describe('the worker notices that are functions, for the results lynox shows as its own', () => {
+  it.each(Object.keys(WORKER_NOTICES) as (keyof typeof WORKER_NOTICES)[])('every one in %s is either listed with its sentences or named as putting in a value', (language) => {
+    const functions = Object.entries(WORKER_NOTICES[language]).filter(([, v]) => typeof v === 'function').map(([k]) => k);
+    const unplaced = functions.filter((k) => !(k in FIXED_NOTICE_SENTENCES) && !VALUE_NOTICES.has(k as never));
+    expect(unplaced).toEqual([]);
+    const both = functions.filter((k) => k in FIXED_NOTICE_SENTENCES && VALUE_NOTICES.has(k as never));
+    expect(both).toEqual([]);
+  });
+
+  it('every listed sentence, in every language, is one lynox shows freely', () => {
+    for (const notices of Object.values(WORKER_NOTICES)) {
+      for (const sentences of Object.values(FIXED_NOTICE_SENTENCES)) {
+        const all = sentences?.(notices) ?? [];
+        expect(all.length).toBeGreaterThan(0);
+        for (const sentence of all) expect(engineRunResults().has(sentence)).toBe(true);
+      }
+    }
+    expect(FIXED_NOTICE_SENTENCES.memberEndForMandates?.(WORKER_NOTICES.en)).toHaveLength(MEMBER_ENDS.length);
   });
 });

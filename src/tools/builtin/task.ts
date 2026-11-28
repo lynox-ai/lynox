@@ -10,7 +10,7 @@ import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, isP
 import { foreignWorkflowScheduleRefusalKind } from '../../core/plan-stamp.js';
 import { lastRunResultFor } from '../../core/member-connection-notes.js';
 import { noticeLanguage } from '../../core/notice-language.js';
-import { MANDATE_ENDED_RESULT, MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WAIT_EXPIRED_RESULT, WATCH_READ_UNRECORDED_RESULT, WATCH_URL_MISSING_RESULT, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, memberEndOfStatus } from '../../core/worker-notices.js';
+import { MANDATE_ENDED_RESULT, MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WAIT_EXPIRED_RESULT, WATCH_READ_UNRECORDED_RESULT, WATCH_URL_MISSING_RESULT, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, MEMBER_ENDS, memberEndOfStatus, type WorkerNotices } from '../../core/worker-notices.js';
 import { withoutForeignMarks } from '../../core/foreign-marks.js';
 import { otherRunTextBlock, setUpByPhrase } from '../../core/other-run-text.js';
 import { planMakerOf } from './diagnose-workflow.js';
@@ -260,10 +260,32 @@ otherRun?: string | undefined): string {
  * here, so a result built from one stays in the block. Built on first use, after the modules it
  * reads have loaded.
  */
+/**
+ * The worker's notices that are functions. Each is either listed with every sentence it can
+ * return, all fixed (an end out of a closed set, never a value from a run), or named as one that
+ * puts in a value and so stays out of the results lynox shows freely. A new notice that is a
+ * function must be put in one of the two; a test fails until it is.
+ */
+export const FIXED_NOTICE_SENTENCES: { readonly [K in keyof WorkerNotices]?: (notices: WorkerNotices) => readonly string[] } = {
+  memberEndForMandates: (notices) => MEMBER_ENDS.map((end) => notices.memberEndForMandates(end)),
+};
+export const VALUE_NOTICES: ReadonlySet<keyof WorkerNotices> = new Set<keyof WorkerNotices>([
+  'consentManyTitle', 'consentOneBody', 'failed', 'workflowRefUnresolved',
+  'workflowStepIdReserved', 'stoppedWith', 'titleWithNote', 'workflowIncomplete',
+  'helperPlanFailedTitle', 'helperWorkflowIncomplete', 'helperWatchTitle', 'questionFrom',
+  'helperQuestionTitle', 'budgetCut', 'stepReported', 'stepReportedItem', 'unnamedStep',
+  'stepReportedUnnamed', 'stepFailedUnnamed', 'stepDeclinedUnnamed', 'stepFailed',
+  'stepFailedItem', 'stepDeclined', 'stepDeclinedItem', 'workflowRef', 'workflowReply',
+  'workflowCompleted', 'workflowGone', 'eventReason', 'eventsNotRun', 'unknownEffect',
+  'resumedRunNotContained', 'watchChanged', 'watchFetchFailed', 'watchFetchReason',
+  'watchPolicyRefused',
+]);
+
 let engineResults: ReadonlySet<string> | undefined;
 export function engineRunResults(): ReadonlySet<string> {
   engineResults ??= new Set([
     ...Object.values(WORKER_NOTICES).flatMap((notices) => Object.values(notices).filter((v): v is string => typeof v === 'string')),
+    ...Object.values(WORKER_NOTICES).flatMap((notices) => Object.values(FIXED_NOTICE_SENTENCES).flatMap((sentences) => sentences?.(notices) ?? [])),
     ACCESS_ENDED_RESULT, ACCESS_ENDED_PAUSED_RESULT, PLAN_ENDED_RESULT,
     MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WEBHOOK_ASKS_RESULT,
     WAIT_EXPIRED_RESULT, MANDATE_ENDED_RESULT, WATCH_URL_MISSING_RESULT, WATCH_READ_UNRECORDED_RESULT,
