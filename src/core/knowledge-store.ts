@@ -1730,7 +1730,8 @@ export class KnowledgeStore {
 
   /** Two-layer secret masking for display surfaces (H7): tenant-known secret VALUES
    *  (`maskSecrets`) then secret-SHAPED tokens (`maskSecretPatterns` — API keys, JWTs,
-   *  Bearer). Shared by {@link renderBlocks} and the read-surface reads. */
+   *  Bearer). Used by {@link renderBlocks}, the blocks, the sources and the search results;
+   *  the entry lists use {@link _maskListedText}. */
   private _maskText(text: string): string {
     const tenantMasked = this.secretStore ? this.secretStore.maskSecrets(text) : text;
     return maskSecretPatterns(tenantMasked);

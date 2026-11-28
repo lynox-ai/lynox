@@ -65,7 +65,7 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     expect(ks.listRejectedOrSupersededMasked(1).map(e => e.id), 'the limit holds').toEqual([c.id]);
   });
 
-  it('masks in its lists what its write check refuses: a long token without a prefix in a pending and a rejected entry, and a known secret in the subject name', () => {
+  it('masks in its lists what its write check refuses: a long token without a prefix in a pending, a rejected and an active entry from the check\'s length on, and a known secret in the subject name', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-'));
     tmpDirs.push(dir);
     const engine = new EngineDb(join(dir, 'engine.db'), '');
@@ -95,6 +95,15 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(short), shortOne.id);
     const active = ks.write({ text: 'Ships from Basel', subjectName: 'Acme', sourceChannel: 'agent', sourceUntrusted: false });
     expect(active.status, 'fixture: an active entry').toBe('active');
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(long), active.id);
+    // At the check's own length, and one character under it.
+    const sized = (n: number): string => `${'ab '.repeat(40).slice(0, n - token.length - 1).padEnd(n - token.length - 1, '.')} ${token}`;
+    const atEdge = ks.write({ text: 'edge', subjectName: 'Rand', sourceChannel: 'agent', sourceUntrusted: true });
+    const underEdge = ks.write({ text: 'under', subjectName: 'Unter', sourceChannel: 'agent', sourceUntrusted: true });
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(sized(GENERIC_SHAPE_MIN_TEXT)), atEdge.id);
+    db.prepare('UPDATE knowledge_entries SET text = ? WHERE id = ?').run(engine.enc(sized(GENERIC_SHAPE_MIN_TEXT - 1)), underEdge.id);
+    expect([sized(GENERIC_SHAPE_MIN_TEXT).length, matchesSecretPattern(sized(GENERIC_SHAPE_MIN_TEXT)) !== null], 'fixture: refused at the edge').toEqual([GENERIC_SHAPE_MIN_TEXT, true]);
+    expect([sized(GENERIC_SHAPE_MIN_TEXT - 1).length, matchesSecretPattern(sized(GENERIC_SHAPE_MIN_TEXT - 1))], 'fixture: let through under it').toEqual([GENERIC_SHAPE_MIN_TEXT - 1, null]);
     const filedUnder = subjects.findOrCreate({ kind: 'organization', name: `Acme ${known}` });
     if (filedUnder.ambiguous) throw new Error('fixture: one subject');
     db.prepare('UPDATE knowledge_entries SET subject_id = ? WHERE id = ?').run(filedUnder.id, active.id);
@@ -104,11 +113,15 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     expect(queue.find(e => e.id === pending.id)?.text, 'the pending entry').toBe(masked);
     expect(queue.find(e => e.id === pending.id)?.subjectHint, 'its subject name').toBe('Lager ***');
     expect(queue.find(e => e.id === shortOne.id)?.text, 'a text the check lets through stays as it is').toBe(short);
+    expect(queue.find(e => e.id === atEdge.id)?.text, 'at the check\'s length, masked').toBe(`${sized(GENERIC_SHAPE_MIN_TEXT).slice(0, -token.length)}***${token.slice(-4)}`);
+    expect(queue.find(e => e.id === underEdge.id)?.text, 'one under it, as the check lets it through').toBe(sized(GENERIC_SHAPE_MIN_TEXT - 1));
     const thread = ks.listPendingForThreadMasked('t-1');
     expect(thread.map(e => [e.text, e.subjectHint]), 'the thread\'s queue').toEqual([[masked, 'Lager ***']]);
     const retired = ks.listRejectedOrSupersededMasked();
     expect(retired.map(e => [e.id, e.text, e.subjectHint]), 'the rejected entry').toEqual([[rejected.id, masked, 'Muster ***']]);
-    expect(ks.listActive().find(e => e.id === active.id)?.subjectName, 'the subject an active entry is filed under').toBe('Acme ***');
+    const listed = ks.listActive().find(e => e.id === active.id);
+    expect(listed?.text, 'an active entry').toBe(masked);
+    expect(listed?.subjectName, 'the subject an active entry is filed under').toBe('Acme ***');
   });
 
   // ── Tier derivation + routing (D-3/D-6, acceptance §7) ──
