@@ -611,6 +611,8 @@ vi.mock('../tools/builtin/pipeline.js', async (importActual) => {
     getPipeline: mockGetPipeline,
     workflowRunTrail: actual.workflowRunTrail,
     WORKFLOW_RUN_UNRECORDED_RESULT: actual.WORKFLOW_RUN_UNRECORDED_RESULT,
+    // The chat delete forgets the deleted chat's retry outputs (thread-delete-provenance.test.ts).
+    forgetExecutedStatesOfChat: actual.forgetExecutedStatesOfChat,
   };
 });
 

@@ -793,11 +793,12 @@ export class PromptStore {
    * could no longer be answered; the run waiting on one is released now, and reads the reason,
    * instead of waiting for the TTL. Only this thread's questions, and only live waits
    * (`trigger_id IS NULL`): a parked question belongs to its trigger's wait, which ends on its
-   * own deadline.
+   * own deadline. `includeParked` closes a parked one too, for a delete that blanked its text:
+   * nobody should answer a question they can no longer read.
    */
-  withdrawForDeletedThread(sessionId: string): number {
+  withdrawForDeletedThread(sessionId: string, includeParked = false): number {
     const rows = this.db
-      .prepare(`SELECT id FROM pending_prompts WHERE session_id = ? AND status = 'pending' AND trigger_id IS NULL`)
+      .prepare(`SELECT id FROM pending_prompts WHERE session_id = ? AND status = 'pending'${includeParked ? '' : ' AND trigger_id IS NULL'}`)
       .all(sessionId) as { id: string }[];
     const close = this.db.prepare(
       `UPDATE pending_prompts SET status = 'expired', closed_reason = 'thread_deleted' WHERE id = ? AND status = 'pending'`,
