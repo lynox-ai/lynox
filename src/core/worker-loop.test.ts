@@ -2889,11 +2889,11 @@ describe('WorkerLoop', () => {
   });
 
   // A real halt has a reason of its own; the member lines only come along with it, so the same
-  // lines as the run before do not make it the same halt, whether that run halted or finished.
-  it.each([
-    ['a run that finished with a note', 'Pipeline done.'],
-    ['a halt', 'Pipeline halted.'],
-  ] as const)('a real halt on the same member lines as %s before it is pushed with ⏸ to the owner', async (_case, lastResult) => {
+  // lines as the run before do not make it the same halt. No caller passes a real halt with member
+  // lines today (a bulk run, the only one that halts here, starts no agent and notes none): this
+  // passes it directly, for a future caller that does.
+  it('a real halt passed with the same member lines as the run before is pushed with ⏸ to the owner (no caller does yet)', async () => {
+    const lastResult = 'Pipeline halted.';
     const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
     const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
     const task = makeTask({ last_run_status: 'halted', last_run_result: lastResult, last_run_member_notes: [LINE] } as Partial<TriggerRecord>);

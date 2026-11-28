@@ -15,7 +15,7 @@ import { noteMemberConnection, runCollectingMemberNotes } from './member-connect
 const R = BULK_HALT_REASONS;
 const CLOSING = 'Lösen kann das nur der Inhaber.';
 
-function harness(opts: { reason: string | null; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant' }) {
+function harness(opts: { reason: string | null; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant'; last?: Partial<TriggerRecord> }) {
   const recorded: string[] = [];
   const recordedNotes: (readonly string[] | undefined)[] = [];
   const recordedStatus: string[] = [];
@@ -35,7 +35,7 @@ function harness(opts: { reason: string | null; plannedBy: 'owner' | 'mandate' |
     notify: vi.fn(async (m: NotificationMessage) => { sent.push(m); }),
   } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000);
-  const task = { id: 't-1', title: 'Bulk apply run-1', effect: 'bulk_apply', bulk_run_id: 'run-1' } as unknown as TriggerRecord;
+  const task = { id: 't-1', title: 'Bulk apply run-1', effect: 'bulk_apply', bulk_run_id: 'run-1', ...opts.last } as unknown as TriggerRecord;
   const end = (summary: string, said?: string, done: boolean | 'halted' | 'interrupted' = false): void => {
     (loop as unknown as { recordAndNotify: (t: TriggerRecord, s: string, e: boolean | 'halted' | 'interrupted', said?: string) => void }).recordAndNotify(task, summary, done, said);
   };
@@ -109,6 +109,22 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
       expect(h.sent.map((m) => [m.title, m.priority]), end).toEqual([[title, priority], [title, priority]]);
       expect(h.sent.every((m) => !m.title.includes('Hinweis')), end).toBe(true);
     }
+  });
+
+  // No bulk run notes member lines today (it starts no agent): this passes them, for a future
+  // write path that does. A real halt is told even on the same lines as the run before.
+  it('pushes a halt passed with the same member lines as the run before to the owner and every grant (no caller does yet)', async () => {
+    const h = harness({ reason: R.storeAccessEnded, plannedBy: 'mandate', last: { last_run_status: 'halted', last_run_member_notes: ['Connection not used: a note.'] } });
+    const summary = `${BULK_NOTICES.de.halted('apply', R.storeAccessEnded)}${COUNTS}`;
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection('Connection not used: the model\'s line', () => ({ en: 'Connection not used: a note.', de: 'Verbindung nicht genutzt: eine Notiz.' }));
+      h.end(summary, undefined, 'halted');
+    }).done;
+    expect(h.recordedStatus).toEqual(['halted']);
+    expect(h.sent.map((m) => [m.audience, m.title.startsWith('\u23F8')])).toEqual([['owner', true], ['all_mandates', true]]);
+    // The owner reads the line; a grant reads the fact without it.
+    expect(h.sent[0]!.body).toContain('Verbindung nicht genutzt: eine Notiz.');
+    expect(h.sent[1]!.body).not.toContain('Verbindung nicht genutzt');
   });
 
   it('builds every grant\'s push from the sentence in the owner\'s language, as before the lines were left out', async () => {
