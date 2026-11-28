@@ -826,17 +826,20 @@ describe('a turn queued before a reload waits for the review the server holds', 
 			expect(activeGets - asked, 'one wait: an ask every two seconds, not two').toBeLessThanOrEqual(11);
 		});
 
-		it('the queued turn is not sent after the run\'s end while a review is open', async () => {
-			await reopenAndLose('aborted');
-			changed = notes;
-			liveRunActive = false;
-			await wait(2300);
-			await settle();
-			await wait(200);
-			await settle();
-			expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
-			expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
-		});
+		for (const stream of ['aborted', 'unreachable', 'refused'] as const) {
+			it(`${stream}: the queued turn is not sent after the run's end while a review is open`, async () => {
+				await reopenAndLose(stream);
+				changed = notes;
+				liveRunActive = false;
+				await wait(2300);
+				await settle();
+				await wait(200);
+				await settle();
+				expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
+				expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
+				expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+			});
+		}
 	});
 
 	describe('a turn queued behind a run whose own stream drops, when the re-attach lets go before the run ends', () => {
