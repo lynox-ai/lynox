@@ -1391,13 +1391,17 @@ async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<R
 	// authoritative persisted transcript instead of leaving the turn invisible
 	// until a manual reload. Return true so the caller skips its own
 	// (now stale-indexed) cleanup + tail.
-	endStreaming();
-	streamingActivity = 'idle';
-	streamingToolName = null;
-	streamingToolPhase = null;
-	pendingPermission = null;
-	pendingTabsPrompt = null;
-	await reconcileThread();
+	// Another thread opened meanwhile has its own state (the card of a question waiting there):
+	// it is left as it is, and it is not this turn's to reconcile.
+	if (sessionId === sid) {
+		endStreaming();
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		pendingPermission = null;
+		pendingTabsPrompt = null;
+		await reconcileThread();
+	}
 	// The stream could not be reached or its reading was refused: the run may still go on. When
 	// this turn still streamed, the wait for its end that reattachRun started stopped at once; now
 	// that it does not, a turn queued behind it waits for the run's end from here (a wait that
@@ -2399,8 +2403,10 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 
 	// The streaming state is the open chat's. A run started since (in a new chat, or in this one
-	// opened again) owns it now, and this run's end leaves it as that run has it.
-	if (streamEpoch === turn.epoch) {
+	// opened again) owns it now, and this run's end leaves it as that run has it. Another thread
+	// opened since without a run of its own has its own state too (the card of a question waiting
+	// there): this run's end leaves it.
+	if (streamEpoch === turn.epoch && sessionId === sid) {
 		endStreaming(turn.assistantMsg);
 		streamingActivity = 'idle';
 		streamingToolName = null;
