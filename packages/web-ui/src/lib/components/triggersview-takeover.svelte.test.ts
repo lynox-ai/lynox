@@ -824,4 +824,51 @@ describe('a completed plan says so, and a completed paused one its workflow case
 		await remount();
 		expect(text()).toBe('An access ended. If the plan should run again, the owner must first take over the workflow FX-monat; ask them to. After that, you can create a new plan.');
 	});
+
+	it('tells a person with access that a new plan on another live person\'s workflow is the owner\'s, or that lynox writes one of their own (U-489)', async () => {
+		viewer = 'mandate';
+		const HELPER = { ...DONE_WF, paused_who: undefined, paused_ended: undefined };
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat', refused: 'foreign' } }];
+		await render();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('foreign');
+		expect(text()).toBe('Ein Zugang endete. Den Workflow FX-monat hat eine andere Person mit Zugang angelegt oder zuletzt geändert, darum kannst du keinen neuen Plan darauf anlegen. Soll der Plan wieder laufen, bitte den Inhaber, einen neuen anzulegen, oder lass lynox im Chat einen eigenen Workflow für diese Aufgabe schreiben.');
+		expect(foreignPlaces(hint()!)).toEqual([['FX-monat', true]]);
+		rows = [{ ...HELPER, paused_done_workflow: { name: null, refused: 'foreign' } }];
+		await remount();
+		expect(text()).toBe('Ein Zugang endete. Seinen Workflow hat eine andere Person mit Zugang angelegt oder zuletzt geändert, darum kannst du keinen neuen Plan darauf anlegen. Soll der Plan wieder laufen, bitte den Inhaber, einen neuen anzulegen, oder lass lynox im Chat einen eigenen Workflow für diese Aufgabe schreiben.');
+		setLocale('en');
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat', refused: 'foreign' } }];
+		await remount();
+		expect(text()).toBe('An access ended. The workflow FX-monat was set up or last changed by another person with access, so you cannot create a new plan on it. If the plan should run again, ask the owner to create a new one, or have lynox write a workflow of your own for this task in chat.');
+		rows = [{ ...HELPER, paused_done_workflow: { name: null, refused: 'foreign' } }];
+		await remount();
+		expect(text()).toBe('An access ended. Its workflow was set up or last changed by another person with access, so you cannot create a new plan on it. If the plan should run again, ask the owner to create a new one, or have lynox write a workflow of your own for this task in chat.');
+	});
+
+	it('tells a person with access that only the owner may plan on a workflow whose setup lynox cannot read (U-489)', async () => {
+		viewer = 'mandate';
+		const HELPER = { ...DONE_WF, paused_who: undefined, paused_ended: undefined };
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat', refused: 'unreadable' } }];
+		await render();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('unreadable');
+		expect(text()).toBe('Ein Zugang endete. Beim Workflow FX-monat kann lynox nicht lesen, wer ihn angelegt hat, darum darf nur der Inhaber einen neuen Plan darauf anlegen. Soll der Plan wieder laufen, bitte ihn darum, oder lass lynox im Chat einen eigenen Workflow für diese Aufgabe schreiben.');
+		expect(foreignPlaces(hint()!)).toEqual([['FX-monat', true]]);
+		rows = [{ ...HELPER, paused_done_workflow: { name: null, refused: 'unreadable' } }];
+		await remount();
+		expect(text()).toBe('Ein Zugang endete. Bei seinem Workflow kann lynox nicht lesen, wer ihn angelegt hat, darum darf nur der Inhaber einen neuen Plan darauf anlegen. Soll der Plan wieder laufen, bitte ihn darum, oder lass lynox im Chat einen eigenen Workflow für diese Aufgabe schreiben.');
+		setLocale('en');
+		rows = [{ ...HELPER, paused_done_workflow: { name: 'FX-monat', refused: 'unreadable' } }];
+		await remount();
+		expect(text()).toBe('An access ended. lynox cannot read who set up the workflow FX-monat, so only the owner may create a new plan on it. If the plan should run again, ask them to, or have lynox write a workflow of your own for this task in chat.');
+		rows = [{ ...HELPER, paused_done_workflow: { name: null, refused: 'unreadable' } }];
+		await remount();
+		expect(text()).toBe('An access ended. lynox cannot read who set up its workflow, so only the owner may create a new plan on it. If the plan should run again, ask them to, or have lynox write a workflow of your own for this task in chat.');
+	});
+
+	it('CONTROL: the owner reads "create a new one" where the engine marks a refusal, which is never the owner\'s', async () => {
+		rows = [{ ...DONE_WF, paused_done_workflow: { name: 'FX-monat', refused: 'foreign' } }];
+		await render();
+		expect(hint()?.dataset['triggerPausedDoneHint']).toBe('none');
+		expect(text()).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.');
+	});
 });

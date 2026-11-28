@@ -491,7 +491,8 @@ describe('sending a failed turn again', () => {
 		await retry;
 		await settle();
 		expect(calls.some((u) => u.includes('/runs/r1/stream'))).toBe(false);
-		expect(toasts).toEqual([]);
+		// The tap did nothing because of that turn, and says so once.
+		expect(toasts).toEqual([{ message: t('chat.still_running'), type: 'info' }]);
 		fresh.close();
 		await settle();
 	});

@@ -2892,10 +2892,15 @@ describe('WorkerLoop', () => {
     expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title.startsWith(mark)])).toEqual([['owner', true], ['all_mandates', true]]);
   });
 
-  it('a workflow halt on the same lines as the halt before is not pushed again', async () => {
+  // A real halt has a reason of its own; the member lines only come along with it, so the same
+  // lines as the run before do not make it the same halt. No caller passes a real halt with member
+  // lines today (a bulk run, the only one that halts here, starts no agent and notes none): this
+  // passes it directly, for a future caller that does.
+  it('a real halt passed with the same member lines as the run before is pushed with ⏸ to the owner (no caller does yet)', async () => {
+    const lastResult = 'Pipeline halted.';
     const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
     const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
-    const task = makeTask({ last_run_status: 'halted', last_run_result: 'Pipeline halted.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const task = makeTask({ last_run_status: 'halted', last_run_result: lastResult, last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
     const tm = makeTaskManager([task]);
     const router = makeNotificationRouter();
     const loop = new WorkerLoop(makeEngine({ taskManager: tm }), router, 60_000);
@@ -2904,6 +2909,29 @@ describe('WorkerLoop', () => {
       (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: 'halted') => void }).recordAndNotify(task, 'Pipeline halted.', 'halted');
     }).done;
     expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, 'Pipeline halted.', 'halted', { memberNotes: [LINE] });
+    const sent = vi.mocked(router.notify).mock.calls.map(([m]) => m);
+    expect(sent.map((m) => [m.audience, m.title, m.priority])).toEqual([
+      ['owner', `\u23F8 ${task.title}`, 'normal'],
+      ['all_mandates', `\u23F8 ${task.title}`, 'normal'],
+    ]);
+    // The owner reads the line under the result; the mandates read the fixed sentence, without it.
+    expect(sent[0]!.body).toContain(LINE);
+    expect(sent[1]!.body).not.toContain('setup@example.org');
+  });
+
+  // Control: a run that finishes on the same lines as the run before has nothing new to say.
+  it('a workflow that finishes with a note on the same lines as the run before is not pushed again', async () => {
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask({ last_run_status: 'halted', last_run_result: 'Pipeline done.', last_run_member_notes: [LINE] } as Partial<TriggerRecord>);
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm }), router, 60_000);
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection(LINE);
+      (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: boolean) => void }).recordAndNotify(task, 'Pipeline done.', true);
+    }).done;
+    expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, 'Pipeline done.', 'halted', { memberNotes: [LINE] });
     expect(router.notify).not.toHaveBeenCalled();
   });
 

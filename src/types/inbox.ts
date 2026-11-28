@@ -38,6 +38,9 @@ export type InboxAuditAction =
   | 'raised_on_sensitive_follow_up'
   /** A flagged follow-up on an item already open in "requires you": nothing raised, the flag noted. */
   | 'sensitive_follow_up_kept_open'
+  /** A mail filed into its thread's item after that item was created by another mail of the
+   *  thread: its own verdict, and whether that verdict raised the item to "requires you". */
+  | 'joined_thread'
   | 'rule_applied'
   | 'generation_requested';
 

@@ -67,10 +67,12 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  *
  * Two things about the character class, both measured rather than assumed:
  *
- * 1. It is NOT the reason a leftover character is harmless. C1 controls (U+0085
- *    NEL, U+0084, U+009B) survive `\s` — and are inert anyway, because neither
- *    JS's LineTerminator set nor CSS's segment-break set contains them, so
- *    `marked` can never see one as a line end and no renderer breaks on one.
+ * 1. `\s` is NOT the reason a control character is harmless. DEL and the C1
+ *    controls (U+0085 NEL, U+0084, U+009B) pass `\s`, and as line ends they are
+ *    inert anyway, because neither JS's LineTerminator set nor CSS's
+ *    segment-break set contains them, so `marked` can never see one as a line
+ *    end and no renderer breaks on one. DEL and the C1 controls other than NEL
+ *    are named below for another reason (point 4).
  *    That is a property of the ENVIRONMENT, not of this class. Anyone extending
  *    this to a consumer that does treat C1 as a break (a terminal, a CSV or
  *    header export) has to re-derive the class, not trust this one.
@@ -80,11 +82,40 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  *    guard the same kind of prompt. A SHARED helper that is weaker than the two
  *    local ones it generalises is an invitation to a regression — the natural
  *    next refactor ("just use the central one") would quietly remove a guard.
+ * 3. It also removes what renders blank without being a format character, so a
+ *    value cannot pad itself onto what looks like a further line of the dialog:
+ *    every default-ignorable code point (the Hangul fillers U+115F, U+1160,
+ *    U+3164, U+FFA0, the combining grapheme joiner, the variation selectors,
+ *    U+17B4, U+180B …). The price, accepted for a dialog value: an emoji loses
+ *    its U+FE0F and may show in its text form, a Japanese name loses its
+ *    ideographic variation selector, Mongolian its free variation selectors, a
+ *    run its grapheme joiner. Korean in decomposed form keeps its vowels and
+ *    final consonants, none of which is default-ignorable.
+ *    Two characters render as blank width without being any of these: U+2800,
+ *    the braille blank, and U+1D159, the musical null notehead. They are
+ *    collapsed like a space rather than removed, so braille words stay apart
+ *    and two names that differ only by one of them do not become equal.
+ * 4. It keeps at most four non-spacing or enclosing marks (`\p{Mn}`, `\p{Me}`)
+ *    on one base character; a longer run is cut, so stacked marks cannot paint
+ *    over the text around a value. Vietnamese needs two, Indic scripts one or
+ *    two; Tibetan stacks, Hebrew with cantillation and Quranic Arabic can carry
+ *    more than four and are cut too, accepted. Spacing marks
+ *    (`\p{Mc}`) are visible and stay uncapped. DEL and the C1 controls other
+ *    than NEL are removed before the cap: inert as line ends (point 1), they
+ *    still sit between two mark runs as a base of no width, so runs of four on
+ *    each would stack on one place. NEL is collapsed like a space instead.
+ * All of this runs before any cut a caller makes, so characters past a cut
+ * cannot shorten what the cut keeps.
  */
 export function singleLine(value: string): string {
-  // Format characters removed outright; every break-ish character collapsed to
-  // one space. `\s` misses most of C0 and all of C1, so both are named.
-  return value.replace(/\p{Cf}/gu, '').replace(/[\s\u0000-\u001f\u0085]+/gu, ' ');
+  // Format, default-ignorable, DEL and C1 control characters (NEL aside)
+  // removed outright, long mark runs cut, every break-ish or blank character
+  // collapsed to one space. `\s` misses most of C0 and all of C1, so both are
+  // named, as are the two blanks above.
+  return value
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u007f-\u0084\u0086-\u009f]/gu, '')
+    .replace(/([\p{Mn}\p{Me}]{4})[\p{Mn}\p{Me}]+/gu, '$1')
+    .replace(/[\s\u0000-\u001f\u0085\u2800\u{1D159}]+/gu, ' ');
 }
 
 // --- The structural boundary: frame vs. value, carried by the type ---
