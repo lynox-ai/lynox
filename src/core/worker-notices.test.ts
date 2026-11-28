@@ -897,6 +897,14 @@ describe('a watch change, marked as the page\'s summary that lynox did not check
     expect(over.endsWith('y…')).toBe(true);
   });
 
+  it('a cut never leaves half of a character that takes two units', () => {
+    for (const lead of ['', 'a']) {
+      const push = WORKER_NOTICES.en.watchChanged(URL, `${lead}${'\u{1F600}'.repeat(200)}`);
+      expect(push.length).toBeLessThanOrEqual(PUSH_BODY_MAX);
+      expect(push.endsWith('\u{1F600}…')).toBe(true);
+    }
+  });
+
   it('an address that fits is not cut, even with a long summary', () => {
     const url = `https://shop.example/${'p'.repeat(90)}`;
     expect(WORKER_NOTICES.en.watchChanged(url, 'x'.repeat(500))).toContain(`${url} changed. ${EN_MARK}`);
