@@ -215,7 +215,9 @@ export interface RunOptions {
    *  (`cron`/`watch`/`webhook`/`inbox_event`/`manual`) so a scheduled
    *  automation turn is distinguishable from a user chat turn (which leaves
    *  this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension from
-   *  `run_type`; observability only, never gates money. */
+   *  `run_type`. Never gates money. It does decide one thing: a run the budget or a run hook
+   *  blocks is kept in the thread (message + note) only without it — a scheduled task or a watch
+   *  at the cap would otherwise add both on every tick. */
   triggerOrigin?: string | undefined;
   /** The trigger this run is a run of, for the author its typed turn is recorded with
    *  (`runAuthorTag`): a trigger's turn is never recorded as the owner's. */
@@ -1107,6 +1109,11 @@ export class Session {
       // An internal (compaction) run must NOT return the block string — it would
       // be injected as the thread's authoritative summary. Throw instead.
       if (runOptions?.internal === true) throw new InternalRunBlockedError(reason);
+      // Kept for the person, not for the model, as the content check's refusals are: a reload
+      // shows the message and the note the live chat showed. Only for a turn a person sent: a
+      // scheduled task or a watch at the cap would otherwise leave a message and a note in its
+      // thread on every tick (`triggerOrigin` marks those runs).
+      if (runOptions?.triggerOrigin === undefined) persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked');
       this._lastRunNotice = 'run_blocked';
       return reason;
     }
@@ -1157,6 +1164,9 @@ export class Session {
         type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox',
         ...(holdExhausted ? { reason: RUN_BLOCKED_HOLD_EXHAUSTED } : {}),
       });
+      // Kept under the note the live chat shows for it: a run with nothing of the budget free is
+      // a hold_exhausted note there, so a reload shows that note, not the plain block note.
+      if (runOptions?.triggerOrigin === undefined) persistRefusedTurn(threadStore, this.sessionId, task, reason, holdExhausted ? RUN_BLOCKED_HOLD_EXHAUSTED : 'run_blocked');
       this._lastRunNotice = 'run_blocked';
       return `Run blocked: ${reason}`;
     }

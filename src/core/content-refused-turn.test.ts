@@ -260,3 +260,137 @@ describe('a message the content check refused is kept for the person, not for th
     expect(engine.getThreadStore()!.getMessages(session.sessionId)).toEqual([]);
   });
 });
+
+describe('a message the budget or a run hook blocked is kept for the person, not for the model', { timeout: 60_000 }, () => {
+  const CAP = 'Daily spending cap ($5) reached. Today: $5.12.';
+  const HOOK = 'AI budget for this period reached.';
+
+  it('budget: after a reload the message and the note are shown; the next turn and a resume carry neither', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    budget.refuse = CAP;
+    expect(await session.run('summarise the quarter')).toBe(CAP);
+
+    const rows = shown(engine, session);
+    expect(rows.map((r) => r.role)).toEqual(['user', 'assistant']);
+    expect(rows[0]!.content).toBe('summarise the quarter');
+    expect(rows[1]!.note).toEqual({ code: 'run_blocked', detail: CAP });
+    expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true })).toEqual([]);
+    expect(engine.getThreadStore()!.getThread(session.sessionId)?.message_count).toBe(2);
+
+    budget.refuse = undefined;
+    mockProcess.mockResolvedValueOnce(endTurn('Paris.'));
+    await session.run('what is the capital of France');
+    expect(sentToModel()).toContain('what is the capital of France');
+    expect(sentToModel()).not.toContain('summarise the quarter');
+    expect(sentToModel()).not.toContain('spending cap');
+
+    const history = resumed(engine, session);
+    expect(history).toContain('what is the capital of France');
+    expect(history).not.toContain('summarise the quarter');
+    expect(history).not.toContain('spending cap');
+    expect(history).not.toContain('run_blocked');
+    expect(shown(engine, session).map((r) => r.note?.code ?? r.role)).toEqual(['user', 'run_blocked', 'user', 'assistant']);
+  });
+
+  it('hook: the note keeps the reason the live chat showed, without the "Run blocked:" prefix', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.registerHooks({ onBeforeRun: async () => { throw new Error(HOOK); } });
+    expect(await session.run('draft the offer')).toBe(`Run blocked: ${HOOK}`);
+    const rows = shown(engine, session);
+    expect(rows.map((r) => r.content === 'draft the offer' ? 'message' : r.note?.code)).toEqual(['message', 'run_blocked']);
+    expect(rows[1]!.note!.detail).toBe(HOOK);
+    expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true })).toEqual([]);
+    expect(mockProcess).not.toHaveBeenCalled();
+  });
+
+  it('nothing of the AI budget free: kept as the hold_exhausted note the live chat shows, not as a block note', async () => {
+    // Kills: the code fixed to run_blocked for this refusal (a reload would show another note
+    // than the live chat did).
+    const engine = await boot();
+    const session = engine.createSession();
+    session.registerHooks({ onBeforeRun: async () => ({ maxCostCents: 0 }) });
+    const result = await session.run('draft the offer');
+    expect(result.startsWith('Run blocked: ')).toBe(true);
+    const sentence = result.slice('Run blocked: '.length);
+    const rows = shown(engine, session);
+    expect(rows.map((r) => r.content === 'draft the offer' ? 'message' : r.note?.code)).toEqual(['message', 'hold_exhausted']);
+    expect(rows[1]!.note!.detail).toBe(sentence);
+    // The live notice stays what it was: the chat takes `run_blocked`, never the note code.
+    expect(session.getLastRunNotice()).toBe('run_blocked');
+    expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true })).toEqual([]);
+    expect(mockProcess).not.toHaveBeenCalled();
+  });
+
+  it('nothing of the AI budget free in a scheduled run: nothing is kept', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.registerHooks({ onBeforeRun: async () => ({ maxCostCents: 0 }) });
+    await session.run('draft the offer', { triggerOrigin: 'cron' });
+    expect(engine.getThreadStore()!.getMessages(session.sessionId)).toEqual([]);
+  });
+
+  it('a hook\'s text is kept as the note\'s detail only, cut and without control characters', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    const long = `line one\nline two\u0007${'x'.repeat(400)}`;
+    session.registerHooks({ onBeforeRun: async () => { throw new Error(long); } });
+    await session.run('draft the offer');
+    const note = shown(engine, session)[1]!.note!;
+    expect(note.code).toBe('run_blocked');
+    expect(note.detail).not.toMatch(/[\u0000-\u001f\u007f]/);
+    expect(note.detail!.length).toBeLessThanOrEqual(300);
+    expect(note.detail!.startsWith('line one line two')).toBe(true);
+  });
+
+  it('a blocked message with an attachment is kept as its blocks, out of the model\'s rows', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    budget.refuse = CAP;
+    const blocks = [{ type: 'text', text: 'what is on this receipt' }];
+    await session.run(blocks);
+    const rows = shown(engine, session);
+    expect(JSON.stringify(rows[0]!.content)).toContain('what is on this receipt');
+    expect(rows[1]!.note!.code).toBe('run_blocked');
+    expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true })).toEqual([]);
+  });
+
+  it('a blocked first message does not take the title from the next accepted one', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    budget.refuse = CAP;
+    await session.run('summarise the quarter');
+    const store = engine.getThreadStore()!;
+    expect(store.getThread(session.sessionId)?.title ?? '').toBe('');
+    budget.refuse = undefined;
+    mockProcess.mockResolvedValue(endTurn('Paris.'));
+    await session.run('what is the capital of France');
+    const title = store.getThread(session.sessionId)?.title ?? '';
+    expect(title).not.toBe('');
+    expect(title.toLowerCase()).not.toContain('quarter');
+  });
+
+  it('a scheduled or watch run the budget or a hook blocks keeps nothing: no thread fills up tick by tick', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    budget.refuse = CAP;
+    expect(await session.run('check the inbox', { triggerOrigin: 'cron' })).toBe(CAP);
+    budget.refuse = undefined;
+    session.registerHooks({ onBeforeRun: async () => { throw new Error(HOOK); } });
+    expect(await session.run('summarise the page', { triggerOrigin: 'watch' })).toBe(`Run blocked: ${HOOK}`);
+    expect(engine.getThreadStore()!.getMessages(session.sessionId)).toEqual([]);
+    expect(engine.getThreadStore()!.getThread(session.sessionId)?.message_count ?? 0).toBe(0);
+  });
+
+  it('an internal run the budget or a hook blocks keeps nothing in the thread', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    budget.refuse = CAP;
+    await expect(session.run('compact this', { internal: true })).rejects.toThrow(CAP);
+    budget.refuse = undefined;
+    session.registerHooks({ onBeforeRun: async () => { throw new Error(HOOK); } });
+    await expect(session.run('compact this', { internal: true })).rejects.toThrow(HOOK);
+    expect(engine.getThreadStore()!.getMessages(session.sessionId)).toEqual([]);
+  });
+});
