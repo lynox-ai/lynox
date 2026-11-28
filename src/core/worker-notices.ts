@@ -117,17 +117,31 @@ export type { ShownMandate };
  * How a run that noted the owner's member-connection lines ended, as a grant is told it: the class
  * of the end only, never its error text or a number from the owner's context (U-411 N).
  */
-export type MemberEnd = 'finished' | 'stopped' | 'cost' | 'turns' | 'unanswered' | 'failed';
-export const MEMBER_ENDS: readonly MemberEnd[] = ['finished', 'stopped', 'cost', 'turns', 'unanswered', 'failed'];
+export type MemberEnd = 'finished' | 'stopped' | 'cost' | 'turns' | 'unanswered' | 'failed' | 'timeout' | 'interrupted' | 'ended';
+export const MEMBER_ENDS: readonly MemberEnd[] = ['finished', 'stopped', 'cost', 'turns', 'unanswered', 'failed', 'timeout', 'interrupted', 'ended'];
 
 /**
- * The end as a run's stored status tells it, for a reader of the trigger's last run: the status
- * does not tell a ceiling or an unanswered question from a failure, so each reads as failed, as
- * the status beside it does. Any other status reads as finished: a run that finished with lines is
- * stored `halted`.
+ * The end as a run's stored status tells it, for a reader of the trigger's last run. Only a status
+ * named here has a reason; any other, a later one too, reads `ended`, never as finished. The status
+ * does not tell a ceiling or an unanswered question from a failure, so each reads as failed, as the
+ * status beside it does. A stop reads without who stopped it: the owner, a mandate, an access that
+ * ended and switched-off bulk runs all store `stopped`.
+ *
+ * `halted` reads `ended`: a run that finished with lines is stored `halted`, as a real halt is, and
+ * the list cannot tell them apart; "finished" would say too much of a halt (U-411 N5). The push
+ * tells them apart. ⚠ `interrupted` has a sentence of its own, though no run with lines is recorded
+ * interrupted today (a restart records it outside the run): a caller that reaches it with lines
+ * needs that sentence checked first.
  */
 export function memberEndOfStatus(status: string | null | undefined): MemberEnd {
-  return status === 'stopped' ? 'stopped' : status === 'failed' ? 'failed' : 'finished';
+  switch (status) {
+    case 'success': return 'finished';
+    case 'stopped': return 'stopped';
+    case 'failed': return 'failed';
+    case 'timeout': return 'timeout';
+    case 'interrupted': return 'interrupted';
+    default: return 'ended';
+  }
 }
 
 export interface WorkerNotices {
@@ -349,11 +363,14 @@ const EN: WorkerNotices = Object.freeze({
   stopped: 'Stopped on your instruction.',
   memberEndForMandates: (end: MemberEnd) => `${({
     finished: 'The run finished.',
-    stopped: 'The owner stopped the run.',
+    stopped: 'The run was stopped.',
     cost: 'The run reached its cost ceiling and stopped.',
     turns: 'The run reached its turn limit and stopped.',
     unanswered: 'A question of the run went unanswered, so it ended.',
     failed: 'The run failed.',
+    timeout: 'The run exceeded its time limit and was cut off.',
+    interrupted: 'The run was interrupted.',
+    ended: 'The run ended.',
   } satisfies Record<MemberEnd, string>)[end]} It was not allowed to use one of the connections, so its result may be incomplete. Contact the owner of this instance.`,
   titleWithNote: (name: string) => `With a note: ${name}`,
   chipRunAgain: 'Run again',
@@ -497,11 +514,14 @@ const DE: WorkerNotices = Object.freeze({
   stopped: 'Auf deine Anweisung gestoppt.',
   memberEndForMandates: (end: MemberEnd) => `${({
     finished: 'Der Lauf ist fertig.',
-    stopped: 'Der Inhaber hat den Lauf gestoppt.',
+    stopped: 'Der Lauf wurde gestoppt.',
     cost: 'Der Lauf hat seine Kostengrenze erreicht und ist angehalten.',
     turns: 'Der Lauf hat sein Rundenlimit erreicht und ist angehalten.',
     unanswered: 'Eine Frage des Laufs blieb unbeantwortet, darum ist er beendet.',
     failed: 'Der Lauf ist fehlgeschlagen.',
+    timeout: 'Der Lauf hat sein Zeitlimit überschritten und wurde abgebrochen.',
+    interrupted: 'Der Lauf wurde unterbrochen.',
+    ended: 'Der Lauf ist beendet.',
   } satisfies Record<MemberEnd, string>)[end]} Eine Verbindung durfte er nicht nutzen, darum kann sein Ergebnis unvollständig sein. Wende dich an den Inhaber dieser Instanz.`,
   titleWithNote: (name: string) => `Mit Hinweis: ${name}`,
   chipRunAgain: 'Erneut ausführen',

@@ -2874,7 +2874,7 @@ describe('WorkerLoop', () => {
 
   it.each([
     ['failed', false, '\u2717', 'failed'],
-    ['interrupted', 'interrupted', '\u26A0', 'finished'],
+    ['interrupted', 'interrupted', '\u26A0', 'interrupted'],
     ['stopped', 'stopped', '\u23F9', 'stopped'],
   ] as const)('a workflow end that %s after a run that noted the same lines is still told, and every grant reads it by its status', async (status, end, mark, memberEnd) => {
     const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
@@ -2918,6 +2918,8 @@ describe('WorkerLoop', () => {
     // The owner reads the line under the result; the mandates read the fixed sentence, without it.
     expect(sent[0]!.body).toContain(LINE);
     expect(sent[1]!.body).not.toContain('setup@example.org');
+    // A real halt is no finish: every grant reads that the run ended, not that it finished.
+    expect(sent[1]!.body).toBe(WORKER_NOTICES.en.memberEndForMandates('ended'));
   });
 
   // Control: a run that finishes on the same lines as the run before has nothing new to say.

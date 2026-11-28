@@ -1101,7 +1101,7 @@ describe('the recorded word for a run that returns rather than throws', () => {
     expect(note.body, 'the ceiling is still reported').toContain('cost ceiling');
   });
 
-  it('stopped while parked AND on its ceiling with a member\'s connection: every grant reads that the owner stopped it', async () => {
+  it('stopped while parked AND on its ceiling with a member\'s connection: every grant reads that it was stopped, not by whom', async () => {
     const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
     const h = makeHarness({ park: true, withChannels: true, lastRunStop: { cause: 'budget_cap', pendingToolCount: 2 }, memberLine: LINE });
     await h.parked;
@@ -1112,6 +1112,7 @@ describe('the recorded word for a run that returns rather than throws', () => {
     const grant = h.notifications().find((n) => (n as { audience?: string }).audience === 'all_mandates')!;
     expect(grant.title.startsWith('\u23f9')).toBe(true);
     expect(grant.body).toBe(WORKER_NOTICES.en.memberEndForMandates('stopped'));
+    expect(grant.body).toMatch(/^The run was stopped\. /);
   });
 
   it('stopped while parked in a CONTAINED run: the stop is told, and the run\'s text is not', async () => {
@@ -1226,6 +1227,20 @@ describe('a run whose starter\'s grant has ended', () => {
       () => h.history.getTrigger('trg-stop')?.last_run_status != null,
     );
     expect(h.history.getTrigger('trg-stop')!.last_run_status).toBe('stopped');
+  });
+
+  // The sweep stops through `stopTask`, as the owner does: the grant's sentence names no one.
+  it('parked with a member\'s connection and stopped because its starter\'s grant ended: every grant reads it was stopped, not that the owner stopped it', async () => {
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const h = makeHarness({ park: true, withChannels: true, memberLine: LINE });
+    await h.parked;
+    entryOf(h).starter = EVA;
+    expect(h.loop.stopEndedStarters(() => false)).toEqual(['trg-stop']);
+    await waitUntil('every grant to be told', () => h.notifications().some((n) => (n as { audience?: string }).audience === 'all_mandates'));
+    expect(h.history.getTrigger('trg-stop')!.last_run_status).toBe('stopped');
+    const grant = h.notifications().find((n) => (n as { audience?: string }).audience === 'all_mandates')!;
+    expect(grant.body).toMatch(/^The run was stopped\. /);
+    expect(grant.body).not.toContain('owner stopped');
   });
 
   it('leaves a run the schedule fired, which is the owner\'s', async () => {

@@ -4087,8 +4087,10 @@ export class WorkerLoop {
       const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
       if (readers === null && withLines) {
         // Not split by reader, but with the owner's member-connection lines: see #notifyMemberEnd.
-        // A grant reads why the run ended as its status tells it, as the trigger's readers do.
-        void this.#notifyMemberEnd(message, WORKER_NOTICES[lang].memberEndForMandates(memberEndOfStatus(told.status)));
+        // A grant reads why the run ended as its status tells it, as the trigger's readers do; a
+        // real halt is no finish, so it reads neutrally here, where it is told apart.
+        const memberEnd: MemberEnd = finishedWithNote ? 'finished' : told.status === 'halted' ? 'ended' : memberEndOfStatus(told.status);
+        void this.#notifyMemberEnd(message, WORKER_NOTICES[lang].memberEndForMandates(memberEnd));
         return;
       }
       void this.notificationRouter.notify({

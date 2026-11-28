@@ -207,24 +207,30 @@ describe('a grant\'s sentence for a run that noted the owner\'s member-connectio
   it('leads with why the run ended, as its class only, in both languages', () => {
     expect(MEMBER_ENDS.map((e) => WORKER_NOTICES.de.memberEndForMandates(e))).toEqual([
       `Der Lauf ist fertig. ${rest.de}`,
-      `Der Inhaber hat den Lauf gestoppt. ${rest.de}`,
+      `Der Lauf wurde gestoppt. ${rest.de}`,
       `Der Lauf hat seine Kostengrenze erreicht und ist angehalten. ${rest.de}`,
       `Der Lauf hat sein Rundenlimit erreicht und ist angehalten. ${rest.de}`,
       `Eine Frage des Laufs blieb unbeantwortet, darum ist er beendet. ${rest.de}`,
       `Der Lauf ist fehlgeschlagen. ${rest.de}`,
+      `Der Lauf hat sein Zeitlimit überschritten und wurde abgebrochen. ${rest.de}`,
+      `Der Lauf wurde unterbrochen. ${rest.de}`,
+      `Der Lauf ist beendet. ${rest.de}`,
     ]);
     expect(MEMBER_ENDS.map((e) => WORKER_NOTICES.en.memberEndForMandates(e))).toEqual([
       `The run finished. ${rest.en}`,
-      `The owner stopped the run. ${rest.en}`,
+      `The run was stopped. ${rest.en}`,
       `The run reached its cost ceiling and stopped. ${rest.en}`,
       `The run reached its turn limit and stopped. ${rest.en}`,
       `A question of the run went unanswered, so it ended. ${rest.en}`,
       `The run failed. ${rest.en}`,
+      `The run exceeded its time limit and was cut off. ${rest.en}`,
+      `The run was interrupted. ${rest.en}`,
+      `The run ended. ${rest.en}`,
     ]);
   });
-  it('reads a stored status as the end a trigger\'s reader is told: stopped, failed, otherwise finished', () => {
-    expect(['stopped', 'failed', 'halted', 'success', 'interrupted', null, undefined].map(memberEndOfStatus))
-      .toEqual(['stopped', 'failed', 'finished', 'finished', 'finished', 'finished', 'finished']);
+  it('reads only a named stored status as its reason, and any other, a halt too, as ended, never as finished', () => {
+    expect(['success', 'stopped', 'failed', 'timeout', 'interrupted', 'halted', 'paused', '', null, undefined].map(memberEndOfStatus))
+      .toEqual(['finished', 'stopped', 'failed', 'timeout', 'interrupted', 'ended', 'ended', 'ended', 'ended', 'ended']);
   });
 });
 

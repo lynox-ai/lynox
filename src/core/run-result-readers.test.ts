@@ -46,8 +46,8 @@ describe("a run's end with member lines, by reader", () => {
   };
   const stored = (id: string): { last_run_result: string | null; last_run_member_notes: string | null } =>
     engine.getDb().prepare('SELECT last_run_result, last_run_member_notes FROM triggers WHERE id = ?').get(id) as { last_run_result: string | null; last_run_member_notes: string | null };
-  const forMandatesHere = (end: MemberEnd = 'finished'): string => WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates(end);
-  const forMandatesTool = (end: MemberEnd = 'finished'): string => WORKER_NOTICES[noticeLanguage(undefined)].memberEndForMandates(end);
+  const forMandatesHere = (end: MemberEnd = 'ended'): string => WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates(end);
+  const forMandatesTool = (end: MemberEnd = 'ended'): string => WORKER_NOTICES[noticeLanguage(undefined)].memberEndForMandates(end);
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-run-result-readers-'));
@@ -198,14 +198,16 @@ describe("a run's end with member lines, by reader", () => {
   });
 
   it('a mandate reads why the last run ended, as its stored status tells it, on the trigger routes and in task_list', async () => {
-    for (const [id, status] of [['s', 'stopped'], ['f', 'failed'], ['h', 'halted']] as const) {
+    for (const [id, status] of [['s', 'stopped'], ['f', 'failed'], ['h', 'halted'], ['t', 'timeout'], ['i', 'interrupted']] as const) {
       seed(id);
       tm.recordTaskRun(id, REPLY, status, { memberNotes: [LINE] });
     }
     const read = (id: string): unknown => (triggerForRoute(history.getTrigger(id)!, MANDATE) as Record<string, unknown>)['last_run_result'];
-    expect(['s', 'f', 'h'].map(read)).toEqual([forMandatesHere('stopped'), forMandatesHere('failed'), forMandatesHere('finished')]);
+    expect(['s', 'f', 'h', 't', 'i'].map(read)).toEqual([forMandatesHere('stopped'), forMandatesHere('failed'), forMandatesHere('ended'), forMandatesHere('timeout'), forMandatesHere('interrupted')]);
     const listed = await taskListTool.handler({}, agent(MANDATE));
-    for (const end of ['stopped', 'failed', 'finished'] as const) expect(listed).toContain(forMandatesTool(end));
+    for (const end of ['stopped', 'failed', 'ended', 'timeout', 'interrupted'] as const) expect(listed).toContain(forMandatesTool(end));
+    // A halt reads neutrally, never as finished: the list cannot tell a finish with a note from a real halt.
+    expect(listed).not.toContain(forMandatesTool('finished'));
   });
 
   it('task_list: the owner reads the lines, a mandate the sentence and neither the name nor the profile', async () => {
