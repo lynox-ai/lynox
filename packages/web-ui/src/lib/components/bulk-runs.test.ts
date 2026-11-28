@@ -2224,7 +2224,7 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 	// the sentence says the rule was taken when the run was planned, with no pointer to Artifacts (U-461).
 	it('says at a restart and at the approval that the rule was taken when the run was planned, word for word', () => {
 		const fr = 'Prüf, ob sie sagt, was du willst, bevor du die Beurteilung fortsetzt.';
-		const fe = 'Check that it says what you want before you continue the judging.';
+		const fe = 'Check that it says what you want before you continue judging.';
 		const ar = 'Prüf, ob sie sagt, was du willst, bevor du freigibst.';
 		const ae = 'Check that it says what you want before you approve.';
 		expect([de['bulk.restart.rule_from_artifact'], en['bulk.restart.rule_from_artifact']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus {title} übernommen. ${fr}`, `This rule was taken word for word from {title} when the run was planned. ${fe}`]);
@@ -2346,5 +2346,51 @@ describe('the sentence for an answer the rule refused', () => {
 		);
 		// A Shopify run keeps its own sentence about the product.
 		expect(bulkInvalidText('verdict_invalid', true, true, EN)).toBe(en['bulk.invalid.verdict_invalid']);
+	});
+});
+
+// The step that decides each target's values has one name: „Beurteilung“ / "judging" (U-339).
+// „Urteil“ stays for the result of one target. A sweep over every bulk sentence, so a sentence
+// that arrives later with another word for the step fails here, not in a review.
+describe('every bulk sentence names the judging step with one word', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const Q = String.raw`'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"`;
+	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.[^']+)': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
+	const KEY = /^\s*'(bulk\.[^']+)': \{/;
+	const sentences: Record<string, { de: string; en: string }> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) sentences[m[1]!] = { de: (m[2] ?? m[3])!, en: (m[4] ?? m[5])! };
+	}
+	// „urteilt“ only as a word of its own, so „beurteilt“ passes; „bewertet“ in any case.
+	const banned = (s: { de: string; en: string }): string[] => [
+		...(/(?<!\p{L})urteilt/u.test(s.de) ? ['urteilt'] : []),
+		...(/(?<!\p{L})[Bb]ewertet/u.test(s.de) ? ['bewertet'] : []),
+		...(/the judging/.test(s.en) ? ['the judging'] : []),
+	];
+
+	it('reads every bulk sentence of the table, one line each', () => {
+		const keys = source.split('\n').flatMap((l) => KEY.exec(l)?.[1] ?? []);
+		expect(keys.length).toBeGreaterThan(500);
+		expect(Object.keys(sentences).sort()).toEqual([...new Set(keys)].sort());
+	});
+
+	it('says neither „urteilt“ nor „bewertet“ in German, nor "the judging" in English, in any bulk sentence', () => {
+		expect(Object.entries(sentences).flatMap(([k, s]) => banned(s).map((w) => `${k}: ${w}`))).toEqual([]);
+	});
+
+	it('catches each word it bans, and lets „beurteilt“ and „Urteil“ pass', () => {
+		expect(banned({ de: 'lynox urteilt …', en: '' })).toEqual(['urteilt']);
+		expect(banned({ de: 'Bewertet wurde nichts.', en: '' })).toEqual(['bewertet']);
+		expect(banned({ de: 'nichts bewertet', en: '' })).toEqual(['bewertet']);
+		expect(banned({ de: '', en: 'before you start the judging.' })).toEqual(['the judging']);
+		expect(banned({ de: 'lynox beurteilt die Ziele … das Urteil steht', en: 'start judging' })).toEqual([]);
+	});
+
+	it('words the sentences bound for the working line, an unreadable rule and a missing model', () => {
+		expect(sentences['bulk.working.judge']!.de).toBe('lynox beurteilt die Ziele … {k} von {n}');
+		expect(sentences['bulk.working.judge_open']!.de).toBe('lynox beurteilt die Ziele …');
+		expect(sentences['bulk.rule_source.unreadable']!.de).toContain(' Beurteilt wurde nichts. ');
+		expect(sentences['bulk.start.no_judge_model']!.en).toMatch(/^No AI model is available right now to judge the targets of this run, so it cannot be started\. /);
 	});
 });

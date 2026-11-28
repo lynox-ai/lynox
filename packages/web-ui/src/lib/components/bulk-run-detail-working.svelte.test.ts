@@ -191,10 +191,10 @@ describe('a run the engine works on', () => {
 	it('says lynox judges, with the verdicts so far out of the targets it reads, moves with each ask, and the head names only the targets', async () => {
 		run = makeRun({ total: 5, judge: { tier: 'standard', unjudged: 4, judged: 1 } });
 		await render();
-		expect(line()).toBe('lynox urteilt … 1 von 5');
+		expect(line()).toBe('lynox beurteilt die Ziele … 1 von 5');
 		run = { ...run, judge: { tier: 'standard', unjudged: 1, judged: 4 } };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox urteilt … 4 von 5');
+		expect(line()).toBe('lynox beurteilt die Ziele … 4 von 5');
 		expect(counts()).toBe('5 Ziele');
 		expect(title()).toMatch(/^5 Ziele · /);
 	});
@@ -202,7 +202,7 @@ describe('a run the engine works on', () => {
 	it('says lynox judges without numbers where the engine does not count the verdicts', async () => {
 		run = makeRun({ judge: { tier: 'standard', unjudged: 4 } });
 		await render();
-		expect(line()).toBe('lynox urteilt …');
+		expect(line()).toBe('lynox beurteilt die Ziele …');
 	});
 
 	it('says lynox writes, with the targets done out of those it writes, approved and while writing, and the head moves too', async () => {
@@ -243,7 +243,7 @@ describe('a run the engine works on', () => {
 		const asks = targetAsks;
 		run = { ...run, listFirstPage: null, total: 4, changes: UPDATES(4), judge: { tier: 'standard', unjudged: 3, judged: 1 } };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox urteilt … 1 von 4');
+		expect(line()).toBe('lynox beurteilt die Ziele … 1 von 4');
 		expect(counts()).toBe('4 Ziele');
 		// Loaded anew, its targets with it.
 		expect(targetAsks).toBeGreaterThan(asks);
