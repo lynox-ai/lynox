@@ -76,31 +76,65 @@ describe('the first connect of a profile on a built-in provider', () => {
 		expect(q('api-connect-first-not-yours')).toBeNull();
 	});
 
-	it('the owner, a profile a person with access set up: no first connect, the form stays', async () => {
-		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com' }]);
+	const TAKE_OVER = 'Diese Verbindung hat eine Person mit Zugang eingerichtet; verbinden kann sie nur diese Person. Willst du sie selbst verbinden, sag lynox im Chat, dass du sie übernimmst. Danach kannst du sie hier verbinden.';
+	const ANNA = 'mandate:anna@example.com';
+	const ago = (): string => new Date(Date.now() - DAY).toISOString();
+
+	// The owner on a profile a person with access set up: the way to take it over stands where the
+	// first connect would, below the app credentials' Save, and only where the engine says the
+	// owner's save goes through (`owner_may_take_over`, the condition the save itself asks).
+	it('the owner, never connected: no first connect; the way to take it over, once, below Save in the form', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true }]);
 		await render();
-		expect(q('preset-client-form')).not.toBeNull();
+		const form = q('preset-client-form');
+		expect(form).not.toBeNull();
 		expect(q('api-connect-first')).toBeNull();
 		expect(q('api-connect-first-link')).toBeNull();
 		expect(q('api-connect-first-not-yours')).toBeNull();
-		// The way: taking it over in the chat, said once.
-		expect(q('api-set-up-by-member')?.textContent).toBe('Diese Verbindung hat eine Person mit Zugang eingerichtet. Verbindest du sie selbst, nutzt lynox das nicht. Willst du sie übernehmen, sag es lynox im Chat; danach kannst du sie verbinden.');
+		const line = q('api-set-up-by-member');
+		expect(line?.textContent).toBe(TAKE_OVER);
 		expect(all('api-set-up-by-member')).toBe(1);
+		expect(form?.contains(line)).toBe(true);
+		const save = [...form!.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Speichern');
+		expect(save).toBeDefined();
+		expect(save!.compareDocumentPosition(line!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
-	it('the owner, a profile a person with access set up, revoked: no reconnect, the line once', async () => {
-		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false, oauth_grant: { connection: true, state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString(), connected_by: 'mandate:anna@example.com' } }]);
+	it('the owner, the person who set it up connected it and their access lasts: no way to take it over, their connection shown', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: false, oauth_grant: { connection: true, state: 'connected', connected_by: ANNA, connected_by_reader: false } }]);
 		await render();
+		expect(q('api-set-up-by-member')).toBeNull();
+		expect(q('api-connection')).not.toBeNull();
+		expect(q('api-connect-first-link')).toBeNull();
+	});
+
+	it('the owner, that person\'s grant revoked while their access lasts: no way to take it over, no reconnect', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: false, oauth_grant: { connection: true, state: 'revoked', revoked_at: ago(), connected_by: ANNA } }]);
+		await render();
+		expect(q('api-set-up-by-member')).toBeNull();
 		expect(q('api-reconnect')).toBeNull();
 		expect(q('api-reconnect-not-yours')).toBeNull();
+	});
+
+	it('the owner, that person\'s access ended: the way to take it over, once', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true, oauth_grant: { connection: true, state: 'connected', connected_by: ANNA, connected_by_reader: false } }]);
+		await render();
+		expect(q('api-set-up-by-member')?.textContent).toBe(TAKE_OVER);
 		expect(all('api-set-up-by-member')).toBe(1);
 	});
 
-	it('the owner, an own connection on a profile a person with access set up: not shown as connected', async () => {
-		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: false, oauth_grant: { connection: true, state: 'connected', connected_by: 'owner', connected_by_reader: true, unused: true } }]);
+	it('the owner, an own connection on a profile a person with access set up: not shown as connected, the way once', async () => {
+		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true, oauth_grant: { connection: true, state: 'connected', connected_by: 'owner', connected_by_reader: true, unused: true } }]);
 		await render();
 		expect(q('api-connection')).toBeNull();
 		expect(all('api-set-up-by-member')).toBe(1);
+	});
+
+	it('the owner, such a profile signing in without a built-in provider: the way on its own line', async () => {
+		serve('owner', [{ id: 'crm', name: 'CRM', base_url: 'https://crm.example', description: '', auth: { type: 'oauth2', oauth: {} }, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true }]);
+		await render();
+		expect(q('preset-client-form')).toBeNull();
+		expect(q('api-set-up-by-member')?.textContent).toBe(TAKE_OVER);
 	});
 
 	it('control: the owner\'s connection on the owner\'s profile is shown as connected', async () => {
@@ -122,7 +156,7 @@ describe('the first connect of a profile on a built-in provider', () => {
 	it('the person who set it up, client pair not released: who has to act, no link', async () => {
 		serve('mandate', [{ ...shop, created_by: 'mandate:anna@example.com', reader_may_connect: true, reader_client_withheld: true }]);
 		await render();
-		expect(q('api-connect-first-withheld')?.textContent).toBe('Verbinden kannst du diese Verbindung, sobald der Inhaber dir die Zugangsdaten der App dafür freigegeben hat. Bitte ihn darum.');
+		expect(q('api-connect-first-withheld')?.textContent).toBe('Verbinden kannst du diese Verbindung, sobald der Inhaber dir ihren App-Zugang freigegeben hat. Bitte den Inhaber darum.');
 		expect(q('api-connect-first-member')).toBeNull();
 	});
 

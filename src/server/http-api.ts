@@ -37,9 +37,9 @@ import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '..
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
 import type { StorePass } from '../core/store-pass.js';
 import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
-import { accessTokenKey, lapsedSlots, mayConnectAs, ownerConnectionCarries, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
+import { accessTokenKey, isMandateAuthored, lapsedSlots, mayConnectAs, ownerConnectionCarries, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { connectionShown, mandateMayConnect, mayServeAsClientId, ownerSaveHeldByMemberConnection, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { planAsks, planOfTrigger, stampEntriesFor, workflowAsks, workflowAsksOnSchedule, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
@@ -14719,6 +14719,9 @@ export class LynoxHTTPApi {
       // profile's view withholds its client pair from them (the owner has not released it), so
       // the page offers the first connect only where the start can read the client id. Nobody else
       // gets the field, nor the reason a release is refused.
+      // `owner_may_take_over`: only to the owner, on a profile a person with access set up, whether
+      // the owner's save would take it over (`ownerSaveHeldByMemberConnection`, the condition the
+      // save asks), so the page offers the way only where it goes through.
       const reader = this._principalOf(req);
       const now = Date.now();
       const vault = engine.getSecretStore();
@@ -14736,6 +14739,7 @@ export class LynoxHTTPApi {
             ...profileForReader(p, reader),
             reader_may_connect: mayStartConnect(reader, p),
             ...(withheld === undefined ? {} : { reader_client_withheld: withheld }),
+            ...(reader.kind === 'owner' && isMandateAuthored(p) ? { owner_may_take_over: !ownerSaveHeldByMemberConnection(p, readCtx.ends) } : {}),
             built_in_provider: builtInPresetOf(p)?.label ?? null,
             ...(end === null ? {} : { store_access_ends: { host: end.host, ended: end.ended, ...(end.until === null ? {} : { at: new Date(end.until).toISOString() }) } }),
           };

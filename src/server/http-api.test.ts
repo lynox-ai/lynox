@@ -7338,6 +7338,43 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // Whether the owner's save would take a profile a person with access set up over: the page
+    // offers that way only there. The same condition the save asks (`ownerSaveHeldByMemberConnection`):
+    // held while that person's connection (or its revoked record) stands and their access lasts.
+    it('tells only the owner, per profile a person with access set up, whether the owner may take it over', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      const oauth = (id: string, author: string | undefined, grant?: Record<string, unknown>) => ({
+        id, name: id, base_url: `https://${id}.example/v1`, description: 'd',
+        auth: { type: 'oauth2' as const, oauth: { token_url: `https://${id}.example/token`, client_id_key: `${id.toUpperCase()}_CLIENT_ID`, client_secret_key: `${id.toUpperCase()}_CLIENT_SECRET` } },
+        ...(author === undefined ? {} : { created_by: author }),
+        ...(grant === undefined ? {} : { oauth_grant: grant }),
+      });
+      store.register(oauth('never', TAG) as never);
+      store.register(oauth('live', TAG, { state: 'connected', connected_by: TAG, connected_mandate_id: 'TEST-MANDATE-1' }) as never);
+      store.register(oauth('revoked', TAG, { state: 'revoked', connected_by: TAG, connected_mandate_id: 'TEST-MANDATE-1' }) as never);
+      store.register(oauth('ended', TAG, { state: 'connected', connected_by: TAG, connected_mandate_id: 'TEST-MANDATE-OLD' }) as never);
+      store.register(oauth('owners', undefined) as never);
+      mockGetApiStore.mockReturnValue(store);
+      const eng = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const priorEnds = eng['getMandateEnds'];
+      eng['getMandateEnds'] = () => ({ isLive: (mid: string) => mid === 'TEST-MANDATE-1' });
+      const fields = async (asMandate: boolean): Promise<Record<string, unknown>> => {
+        const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
+        const res = await fetch(`${baseUrl}/api/api-profiles`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        const list = await res.json() as { profiles: Record<string, unknown>[] };
+        return Object.fromEntries(list.profiles.map((p) => [p['id'] as string, 'owner_may_take_over' in p ? p['owner_may_take_over'] : 'absent']));
+      };
+      try {
+        expect(await fields(false)).toEqual({ never: true, live: false, revoked: false, ended: true, owners: 'absent' });
+        expect(await fields(true)).toEqual({ never: 'absent', live: 'absent', revoked: 'absent', ended: 'absent', owners: 'absent' });
+      } finally {
+        eng['getMandateEnds'] = priorEnds;
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
     // The page's sign-in chip names a provider only where the engine signs in through one: a
     // preset id is stored after a check of its form alone, so an id the register does not know,
     // or one on a profile that is not oauth2, names none.

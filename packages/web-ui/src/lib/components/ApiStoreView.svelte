@@ -28,6 +28,8 @@
 		/** Sent only to the person who set up an oauth2 profile: whether its client pair is still
 		 *  withheld from them (the owner has not released it). */
 		reader_client_withheld?: boolean;
+		/** Only to the owner, on a profile a person with access set up: whether the owner's save would take it over. */
+		owner_may_take_over?: boolean;
 		/** A store whose access runs out soon, has, or whose refresh ended (`storeAccessEnd` in the engine). */
 		store_access_ends?: StoreAccessEnd;
 		/** The built-in provider the profile signs in through, by its display name; null for none (`builtInPresetOf`). */
@@ -356,11 +358,19 @@
 						<!-- No connect for the owner on a profile a person with access set up: the view hides a
 						     connection the owner makes there from every reader, the owner included, so it would show as
 						     connected and carry nothing (`hiddenFromProfile`); the engine refuses the start too. The line
-						     names the way, taking it over in the chat. The client pair can still be set for that person. -->
-						<div class="border-t border-border px-4 py-3 space-y-2">
-							<p class="text-xs text-text-muted" data-testid="api-set-up-by-member">{t('apis.set_up_by_member_owner')}</p>
-							{#if onBuiltInProvider(profile)}<PresetClientForm profileId={profile.id} connectHref={null} />{/if}
-						</div>
+						     names the way, taking it over in the chat, where the first connect would stand, and only where
+						     the engine says that save goes through (`owner_may_take_over`): not over that person's
+						     connection while their access lasts. The client pair can still be set for that person. -->
+						{@const takeOver = profile.owner_may_take_over === true ? t('apis.set_up_by_member_owner') : null}
+						{#if onBuiltInProvider(profile)}
+							<div class="border-t border-border px-4 py-3">
+								<PresetClientForm profileId={profile.id} connectHref={null} connectNote={takeOver} />
+							</div>
+						{:else if takeOver !== null}
+							<div class="border-t border-border px-4 py-3">
+								<p class="text-sm text-text-muted" data-testid="api-set-up-by-member">{takeOver}</p>
+							</div>
+						{/if}
 					{:else if onBuiltInProvider(profile) && isOwnerSession()}
 						<div class="border-t border-border px-4 py-3">
 							<PresetClientForm profileId={profile.id} connectHref={notYetConnected(profile) ? connectHref(getApiBase(), profile.id) : null} />

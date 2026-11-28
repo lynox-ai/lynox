@@ -49,7 +49,7 @@ import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { noteMemberRefusal, refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, sendSlots, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle, settingsVersion, bindingOf } from '../../core/profile-secret-view.js';
+import { connectionWaits, ownerSaveHeldByMemberConnection, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, sendSlots, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle, settingsVersion, bindingOf } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -2581,8 +2581,8 @@ ${draftJson}
       // refuses for a live connection. Once the access has ended the tokens wait for the owner
       // anyway (`connectionTokenAllowed`), so a save changes nothing there.
       const storedForSave = agent.toolContext?.apiStore?.storedProfile(profile.id);
-      if (storedForSave && isOwnerPrincipal(agent.principal) && isMandateConnection(storedForSave)
-        && !connectionWaits(storedForSave, agent.toolContext?.mandateEnds ?? null)) {
+      if (storedForSave && isOwnerPrincipal(agent.principal)
+        && ownerSaveHeldByMemberConnection(storedForSave, agent.toolContext?.mandateEnds ?? null)) {
         const theirs = noteMemberRefusal(storedForSave, agent.principal, agent.toolContext?.mandateEnds ?? null);
         return `Error: API profile "${profile.id}" was not saved. ${theirs ?? 'Its connection was made in a mandate\'s session that is still active.'}`;
       }

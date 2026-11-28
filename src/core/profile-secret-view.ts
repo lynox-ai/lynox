@@ -1171,6 +1171,18 @@ export function connectionWaits(profile: ApiProfile, ends: Pick<MandateEnds, 'is
 }
 
 /**
+ * Whether the owner's save of `profile` is held back by a connection a mandate made there with its
+ * own login, while that mandate's access lasts: a save makes the profile the owner's, and over
+ * such a connection that would hand the owner its account. A record of one counts, revoked too.
+ * The one condition the save asks (`api_setup` create/update) and the profile list answers the
+ * owner with (`owner_may_take_over`), so the page offers taking a profile over only where the
+ * save goes through.
+ */
+export function ownerSaveHeldByMemberConnection(profile: ApiProfile, ends: Pick<MandateEnds, 'isLive'> | null): boolean {
+  return isMandateConnection(profile) && !connectionWaits(profile, ends);
+}
+
+/**
  * Whether `reader` is the person who made `profile`'s connection with their own login, and so the
  * one its tokens may reach. `read`: the same tag as the consent and the same grant, both known.
  * `write` (the first consent, or a later grant of the same address connecting its profile again):

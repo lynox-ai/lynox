@@ -99,8 +99,8 @@ export const OAUTH_RESULT_TEXTS = {
   },
   // The owner on a profile a person with access set up (`ownerConnectionCarries`).
   setUpByMember: {
-    en: 'A person with access set up this connection, so lynox would not use a connection you make here. Tell lynox in the chat that you are taking it over, then connect it. Nothing was sent to the provider.',
-    de: 'Diese Verbindung hat eine Person mit Zugang eingerichtet, darum würde lynox eine Verbindung, die du hier machst, nicht nutzen. Sag lynox im Chat, dass du sie übernimmst, und verbinde sie dann. An den Anbieter wurde nichts gesendet.',
+    en: 'A person with access set up this connection, so only they can connect it. To connect it yourself, tell lynox in the chat that you are taking it over, then connect it. Nothing was sent to the provider.',
+    de: 'Diese Verbindung hat eine Person mit Zugang eingerichtet; verbinden kann sie nur diese Person. Willst du sie selbst verbinden, sag lynox im Chat, dass du sie übernimmst, und verbinde sie danach. An den Anbieter wurde nichts gesendet.',
   },
   tokenSlotNotOwn: {
     en: 'This connection would store its token under a name that is not this session\'s to fill. Nothing was sent to the provider.',
