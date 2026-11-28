@@ -83,7 +83,7 @@ describe('the first connect of a profile on a built-in provider', () => {
 	// The owner on a profile a person with access set up: the way to take it over stands where the
 	// first connect would, below the app credentials' Save, and only where the engine says the
 	// owner's save goes through (`owner_may_take_over`, the condition the save itself asks).
-	it('the owner, never connected: no first connect; the way to take it over, once, below Save in the form', async () => {
+	it('the owner, never connected: no first connect; the way to take it over, once, below Save in its own row', async () => {
 		serve('owner', [{ ...shop, created_by: ANNA, reader_may_connect: false, owner_may_take_over: true }]);
 		await render();
 		const form = q('preset-client-form');
@@ -112,13 +112,20 @@ describe('the first connect of a profile on a built-in provider', () => {
 		}));
 	}
 	it.each([
-		['its app credentials failed to load', () => Promise.resolve(Response.json({ error: 'x' }, { status: 500 }))],
-		['it reads other names', () => Promise.resolve(Response.json({ preset: 'shopify', client_id_key: 'K', client_secret_key: 'S', client_id: 'c', client_secret_set: true, redirect_uri: 'https://tenant.example/api/oauth/callback', reads_other_names: true }))],
-		['its app credentials are still loading', () => new Promise<Response>(() => {})],
-	])('the owner, never connected, the form showing that %s: the way to take it over, once', async (_state, client) => {
-		serveClient(client);
+		['its app credentials failed to load', 'failed', () => Promise.resolve(Response.json({ error: 'x' }, { status: 500 }))],
+		['it reads other names', 'other-names', () => Promise.resolve(Response.json({ preset: 'shopify', client_id_key: 'K', client_secret_key: 'S', client_id: 'c', client_secret_set: true, redirect_uri: 'https://tenant.example/api/oauth/callback', reads_other_names: true }))],
+		['its app credentials are still loading', 'loading', () => new Promise<Response>(() => {})],
+	])('the owner, never connected, the form showing that %s: the way to take it over, once', async (_state, shown, client) => {
+		// The app credentials' request reached this case's answer (still open, for loading).
+		let reached = false;
+		serveClient(() => { reached = true; return (client as () => Promise<Response>)(); });
 		await render();
+		expect(reached).toBe(true);
 		expect(q('preset-client-form')).toBeNull();
+		// The form is in the state the case names, not merely absent.
+		const failed = target.textContent?.includes('Laden fehlgeschlagen. Ist die Engine erreichbar?') ?? false;
+		const otherNames = q('preset-client-other-names') !== null;
+		expect({ failed, otherNames }).toEqual({ failed: shown === 'failed', otherNames: shown === 'other-names' });
 		expect(q('api-set-up-by-member')?.textContent).toBe(TAKE_OVER);
 		expect(all('api-set-up-by-member')).toBe(1);
 	});
