@@ -4,6 +4,16 @@
 
 ### Upgrade notes
 
+- With durable memory switched off, turning a chat private now removes the
+  durable knowledge entries that chat seeded while durable memory was on, and
+  deleting a chat marks their source as a deleted chat. Switching durable memory
+  off never deleted those entries, and until now both actions left them as they
+  were.
+- Managed instances now sign the Google connect start token in the
+  provider-bound v2 format. A control plane that does not accept v2 yet answers
+  every Connect with `bad_signature`, so the control plane has to be updated
+  before the engine. Self-hosted instances are unaffected: the brokered connect
+  only exists on managed hosting.
 - `docker-compose.yml` and the compose file the installer writes no longer pin
   `platform: linux/amd64`. ARM and Apple Silicon hosts get the native arm64 image
   after `docker compose pull && docker compose up -d` instead of the amd64 image
@@ -15,6 +25,16 @@
   `web_search`), which runs at the provider rather than through this
   instance's network settings. It is offered only under no policy,
   `allow-all` or `guarded`, and never to an agent whose policy cannot be read.
+- A watch (`task_create` with `watch_url`) now follows `network_policy` like
+  every other credential-free read: under `allow-list` a page outside the list
+  is not watched, under `deny-all` no page is, and with `enforce_https` a plain
+  `http://` page is not either; an address that is not http or https is refused
+  when the watch is set up instead of failing at every check. A new watch is refused when it is
+  set up; an existing one stops being read at its next check and records why,
+  and the Triggers view says on its row why the page is not read and who can
+  change that.
+  Apart from that, watches on a page in the list and watches under `guarded`
+  and `allow-all` are unchanged.
 - `POST /api/tasks/:id/confirm` now requires `{ "expect": "<digest>" }`, the
   digest from `GET /api/tasks/:id/stamp-preview`, and answers 400 without it.
   Until now a confirm without it stamped whatever the schedule held when the
@@ -22,6 +42,163 @@
   from the release that carries #2207 on; a tab opened before the upgrade gets
   "confirm failed" until it is reloaded. An API client that confirms schedules
   reads the preview first.
+- In sidecar mode with the egress proxy, a `bash` call whose tool round started after
+  the conversation read outside content (a web page, a search, a mail, a
+  previous `bash` call) no longer reaches every host under `allow-all` or no
+  policy. Its proxy credential then names the built-in provider hosts, the
+  operator's `network_allowed_hosts` and the hosts the owner typed in the thread; under
+  `guarded` a connected API's host is left out. `allow-list` and `deny-all` are
+  unchanged. A command that needs another host after that reaches it once the
+  owner names the host in the chat.
+- `GET /api/export` now sets `contacts_may_be_incomplete`,
+  `deals_may_be_incomplete`, `datastore_may_be_incomplete`,
+  `threads_may_be_incomplete` and `durable_knowledge.may_be_incomplete` to
+  `true` when the store behind the block could not be opened at boot. Until now
+  those blocks came out empty and marked complete, as if the account held no
+  contacts, deals, tables, chats or memory entries. A client that reads the
+  flags only as "a cap was reached" also sees them on such an instance.
+- With durable memory switched off, `GET /api/export` now carries the durable
+  knowledge entries and memory blocks still held from when it was on, read
+  without changing anything. Switching it off never deleted them, and until now
+  the block came out empty and marked complete. The block's new `enabled` field
+  says whether durable memory is switched on. The same read runs when durable
+  memory is on but its store did not open. Entries the owner rejected or that
+  were retired (`superseded`) are still stored, and the block now carries them
+  in `rejected_or_superseded_entries`, each with its `status` and `supersededBy`
+  (null where no successor was recorded), masked like the other entries; they
+  mark the block incomplete only when that list reaches its 500-entry cap.
+- `GET /api/export` has three new fields. `knowledge_graph_may_be_incomplete`
+  is `true` when the knowledge graph was not read in full: reading it failed,
+  a read fell back to the older store, the subject graph is on without
+  `engine.db`, an entity reached the per-entity relation limit, or a remembered
+  text could not be read (see `knowledge_graph.memories` below). While the graph is switched off, or on
+  without its layer, the export still reads what the graph holds, since
+  switching it off deletes nothing: the block carries those entities and
+  relations with `enabled: false` (or `true`). `agent-memory.db` is opened
+  read-only for that: no migration and no checkpoint, so the file and its
+  `-wal` stay as they are; SQLite may create the `-shm`, and an empty `-wal`
+  where none was, beside them. A file from a newer build is left unread, and
+  one that cannot be read gives an empty block, both with the flag `true`; one
+  stamped with an older schema is read, and the flag is `true`. `secrets` now also lists names
+  written to the vault after boot (mail and OAuth credentials, for example).
+  `secrets_may_be_incomplete` is `true` when the secret store or its vault did
+  not open. `secrets_note` says that only secret names are exported, never
+  values.
+- With the subject graph on, `GET /api/export` reads the knowledge graph's
+  entities by key instead of by offset, so its time grows with the number of
+  subjects rather than with the square of that number;
+  `knowledge_graph.entities` is then in id order, unless a key read fails and
+  the export pages by offset instead. Without a search term, the entity list
+  of the web app on the subject graph cuts its page in the query and breaks
+  ties in its order by id.
+- `GET /api/export` now carries the remembered texts of the knowledge graph,
+  under `knowledge_graph.memories`, keyed by the store that holds them:
+  `agent-memory.db` with its `memories`, `mentions`, `supersedes`,
+  `cooccurrences` and `metrics` (with the subject graph on also its `entities`
+  and `relations`, which the graph block then reads from `engine.db`; where the
+  subject graph's store did not open, or `engine.db` is missing, the graph block
+  reads them instead), and `engine.db` with its `memories`, `memory_subjects`,
+  every row of `relationships` (with `source_deleted` and a
+  `relationships_note`), `supersedes`, `subject_cooccurrences` and
+  `subject_mints`; the graph block lists only the subjects it maps to entities,
+  so relations between other subjects were in no block. Every stored column is
+  included except the embedding, and replaced or retired texts are included as
+  well, with their `is_active` and `superseded_by`. Texts, the names, aliases,
+  descriptions and metadata of those legacy entities, their relations' types and
+  descriptions, relationship descriptions, relationship notes, and the reason
+  one text replaced another are masked the way durable knowledge is. A text that
+  cannot be decrypted, or is not stored as text, is written as a marker, never
+  as what is stored. `knowledge_graph_may_be_incomplete` no longer turns `true`
+  just because such texts are stored. It turns `true` when one of these tables
+  could not be read, a table returned more than 20,000 rows (the rest is left
+  out), a text could not be decrypted, `engine.db` is not open, or
+  `agent-memory.db` comes from a newer build. It also stays `true` while graph
+  rows are stored that no block carries: subjects the graph block does not list
+  (archived ones and those of kind `service` or `other` with the subject graph
+  on, every subject with it off), rows in an `agent-memory.db` table this build
+  does not export (one an older schema kept), and with the subject graph off
+  relations neither of whose entities is stored. Those are counted, not read.
+  Both files are only read, as for the entities and relations.
+- When a database was set aside as corrupt (`<name>.corrupt-<ms>`: by the boot
+  for `history.db` and `engine.db`, by a restore for those and `datastore.db`
+  and `agent-memory.db`, and an `engine.db.migration-tmp.corrupt-<ms>` left by
+  older builds), `GET /api/export` now names the set-aside files in
+  `set_aside_databases` (names only) and marks the blocks read from that
+  database incomplete: the threads for `history.db`; durable knowledge for
+  `engine.db`, and the knowledge graph too; the
+  knowledge graph for `agent-memory.db`; contacts, deals and tables for
+  `datastore.db`. Until now the database opened in its place exported as
+  complete, while the older data sat in the set-aside file. When the data
+  directory cannot be listed, `set_aside_databases_unknown` is set and all
+  of those blocks are marked.
+- The person erasure's preview and answer now name the set-aside copies of the
+  databases it deletes in (`engine.db`, its `migration-tmp` staging copy, and
+  `agent-memory.db`) in `setAsideCopies` (file names only, never content):
+  each copy with the `-wal` and `-shm` beside it in `companions`, and a `-wal`
+  or `-shm` whose copy is gone as a copy itself. The web app lists them under
+  "Not covered" with the way to them for the instance's hosting; self-hosted,
+  the companions are named with it. Such a copy may still hold data about the
+  person, and the erasure does not reach it; until now the answer did not say
+  so. When the data directory cannot be listed, `setAsideCopies` is `null` and
+  the web app says the copies could not be checked.
+
+### Changed: web UI
+
+- The person erasure's done line uses the singular for a count of one, leaves
+  out a count of zero, and says "no entries and no memories" when both are zero.
+  On a narrow screen the subject panel is now opaque, so the page behind it no
+  longer shows through.
+- Once a person erasure has finished, its panel says so: the heading reads
+  "Erasure finished" and the button "Close" instead of offering to erase and to
+  cancel, and the panel is no longer drawn in the warning colour. After a
+  partial erasure all of it stays as it was. The subject list and panel show a
+  subject's kind as a word in the page's language instead of the stored value
+  in a code font, and the kind "other" is tinted like the rest. A kind the web
+  UI does not know shows as "other", never as the stored value.
+
+## 2.18.0 — 2026-11-17
+
+### Upgrade notes
+
+- The self-host containers now run as the owner of their data, and the container
+  starts for a host uid that has no name in the image. (#2126, #2355)
+- The installer has a non-interactive mode, `--non-interactive`, that takes every
+  answer from flags and the environment and takes API keys from the environment
+  only. A health-check timeout no longer prints the success banner. (#2249)
+- Mistral calls go to its EU regional endpoint, and Mistral is priced at that
+  endpoint's rate. A pool tier pairs its endpoint with the vendor of its key.
+  (#2296, #2315, #2190, #2179)
+- The engine pins TLS 1.2 as its floor at boot. (#2372)
+- Shell sidecar mode refuses to start unless the host has
+  `fs.protected_hardlinks=1`; the refusal says how to set it. (#2164)
+- On first start `engine.db` moves from schema **53** to **68**, `history.db`
+  from **69** to **72** and `mail-state.db` from **18** to **20**. The steps add
+  tables, columns and indexes, and fill two new columns for existing rows: each
+  API connection gets an opaque id, and a bulk target whose write to an external
+  API was sent but never confirmed is marked as unclear, so a resumed run does
+  not send it again. There is no down path. (#2137, #2139, #2183, #2100,
+  #2130, #2154, #2167, #2254, #2337, #2389)
+- On Anthropic and Vertex the bulk-run judge is now Sonnet 4.6 instead of Haiku 4.5.
+  A judge call costs about three times as much, so the owner's cost limit covers
+  fewer targets. A blocklist entry for Sonnet also blocks the judge. With the
+  model limit lowered to `fast` there is no judge on Anthropic and Vertex, and
+  a run that needs a judge cannot start and says why. Mistral and Fireworks are
+  unchanged. (#2431)
+- `POST /api/speak` answers 400 when the request names a `model` other than
+  `voxtral-mini-tts-3-0`; leave `model` out. (#2415)
+- The request log (on stderr) no longer writes query values, path segments
+  that hold an address, or a contact's name in a CRM route. Lines written before
+  2.18.0, for example in `docker logs`, may hold them; clear them, or rotate a
+  key that was passed in a URL. (#2369)
+- With `LYNOX_SHOPIFY_EXCHANGE` set to `1` or `true`, chats, runs, workers, the
+  bulk-run judge, the mail classifier and the "Test connection" button in the
+  model settings send model requests only to Anthropic's API or Fireworks'
+  endpoint, with the key the control plane supplies. For these, Mistral, Vertex,
+  another base URL and a key the owner brings are refused before anything is
+  sent, so on a self-hosted or own-key instance with the switch on they make no
+  model calls. The batch API and
+  speech output are off, and transcription uses only the local whisper.cpp.
+  (#2239)
 - `StreamProcessor.process` now throws `StreamIncompleteError` when a stream ends
   before any stop reason (no `message_delta` naming one, no `message_stop`), instead
   of returning the partial reply as finished. The Agent retries such a call.
@@ -127,6 +304,268 @@
   $0.006 cached, $1.20 output per 1M tokens). It is now the first model of the
   Fireworks tile in the tier pickers. The older id stays registered and
   selectable, so a slot that names it keeps it.
+
+### Added: bulk runs and the Shopify preset
+
+- A run an undo took back reads "undone" on its page: when, and how many
+  targets have their previous value back, with a link to the undo. (#2416)
+- A Shopify bulk run can write a product's image alt text. A judged list run
+  can write Shopify products too: the owner takes targets out of the preview
+  before approval and sees the full preview; the markup a verdict or plan adds
+  is checked before it is recorded. (#2162, #2167)
+- A Shopify list run can be narrowed by product type or vendor, and a list
+  filter can name several values. The owner can list the link domains a judged
+  list run may add when it starts. (#2159, #2393, #2154)
+- Shopify connections ask for `write_products` behind a consent page; the
+  preset is held to its asked scopes and store case. (#2306, #2161)
+- Image runs are planned only where the connection may write files. (#2312)
+- The owner can switch bulk runs on the tool permissions page. (#2194)
+- A bulk target whose earlier send got no clear answer is never sent again;
+  a resume that would only read unclear sends offers a check, not a write.
+  (#2130, #2316, #2400)
+- An atomic run that runs out of time halts before its first write; after a
+  rollback the targets route says per target whether the run wrote it and
+  whether the write was taken back, and the run page marks the ones an
+  incomplete rollback left. (#2200, #2197)
+- The preview marks products whose page title gains an ampersand, shows the
+  markup a bulk target changes, keeps a refused link's domain, and says when a
+  run has nothing to approve or what an approval covers at one target or none.
+  (#2353, #2366, #2345, #2381, #2378)
+- A bulk run refused for want of a probe names what it lacks; the probe step
+  shows only where a run has one; a run's unchecked probe is kept when a later
+  run confirms one. (#1982, #2383, #2311)
+- Shopify descriptions a store reformats are compared and counted in the form
+  the store saves; a store that adds markup to a written description halts the
+  run. (#2264, #2295, #2254, #2338)
+- A Shopify title or SEO text may not hold a link, address or tag; a bulk
+  rewrite's added markup is checked. (#2229, #2155)
+- A bulk run's reasons are kept through a resume and its halts are worded for
+  the owner, in German too, with a way to mail support. (#2368, #2226, #2225,
+  #2359, #2363)
+- A Shopify target is named "Product <number>" and links to the product in the
+  store's admin: in the target list of a preview, a run and its result, in the
+  undo lists and in the probe box. Before, the page showed the raw product key.
+  (#2455)
+- A Shopify list run can be narrowed by product status (`active`, `draft`,
+  `archived`, `unlisted`), and the run page says which statuses the list reads.
+  Without a status the list reads every product in every status, gift cards
+  included, and a filter naming all four statuses reads as no status filter.
+  (#2448, #2461)
+- A bulk run's page follows the run
+  while the engine reads its list, judges it, writes or takes it back, and shows
+  the next step without a reload. (#2439)
+
+### Added: plans, workflows and the approval queue
+
+- The owner can take over a paused plan from the schedules view (owner only,
+  never at a bulk run), with a confirmation built from the takeover preview;
+  the pause notice and an advance warning before a helper's access ends reach
+  the owner. A plan pauses once a mandate it depends on has provably ended.
+  (#2172, #2183, #2139, #2224, #2390, #2334, #2207)
+- The owner can review and confirm a workflow's changed steps, and sees what a
+  step's role grants and sets. (#2196, #2203, #2205)
+- A workflow saved in chat can be run from chat as its author; the library
+  shows ended and foreign mandate workflows up front. (#2310, #2299)
+- A webhook trigger's recorded events run. (#2100)
+- The approval queue is shown to the owner and listed with a count of what
+  waits; the owner and mandates are told when a mail waits for approval, and a
+  waiting approval mail can be changed in chat. (#2103, #2098, #2089, #2125,
+  #2153)
+- The owner can write a not-sent approved email again in a chat. (#2191)
+- A read-only inbox tool exists; an inbox item reopens when a follow-up mail
+  arrives, and a reply in chat answers the newest follow-up. (#2309, #2332,
+  #2337)
+- Mail triage shows the inbox classifier's verdict and reason. (#2289, #2303)
+- The owner has a view of the instance log. (#2141)
+- A thread where a scheduled run's question waits is marked; every re-send at
+  such a question is held. (#2157, #2374)
+
+### Added: other
+
+- The installer has a non-interactive mode. (#2249)
+- The health body says whether durable knowledge runs. (#2215)
+- Settings show why the server refused a save, and a config write is checked
+  by the loader before it is saved. (#2265, #2288)
+- Large JSON responses are shaped, with size notes in front of the data.
+  (#2165)
+- The footer counts the paid API calls of a run and of a workflow started in
+  chat, and shows stats only for values that are known. (#2260, #2293, #2379)
+- A stop ends a local bash command and the `plan_task` planner. (#2078)
+- The release image carries a build provenance attestation. (#2362)
+- Mistral: calls go to its EU endpoint, the model catalog is refreshed against
+  the EU list, and the locked voice settings name Mistral Voxtral. (#2296,
+  #2315, #2323, #2322)
+- The vault can be asked whether a token is there without reading it out.
+  (#2406)
+- A managed engine reports where its vault key came from. (#2336)
+
+### Changed: models and cost
+
+- Where a stored model is replaced, the tier says so. (#2291)
+- Config-file model profiles are dropped on a pool tier; the pool's Mistral
+  key serves the EU inbox and only its spend is debited. (#2177, #2179, #2192)
+- Model calls the stream timeout, a run stop or a judge ends are booked, a
+  judge call at its worst case before it is made. (#2380, #2377, #2386)
+- A provider error's own type decides whether it is retried, also inside the
+  stream, and the failed attempt is booked. (#2397, #2391)
+- A run stops after two thinking-only or three blank truncated turns in a row,
+  and a reply that writes the same tool call out as text three times in a row
+  instead of calling the tool. A continuation loop keeps
+  its completed work. (#2220, #2238, #2376, #2242)
+- Voice output moves to Voxtral TTS 3 (`voxtral-mini-tts-3-0`), which speaks the
+  German voice; German text is read aloud when the model refuses a voice.
+  Speech is booked at $13 per million characters. (#2399, #2415)
+- The status bar's cost refreshes when a run ends. (#2395)
+- Bulk runs are judged by Sonnet on Anthropic and Vertex. Under a title rule,
+  Haiku dropped parts of the product name, so different products got the same
+  title. (#2431)
+
+### Changed: API profiles and connections
+
+- A preset profile that is not connected yet, or has its own refresh slot, is
+  named to the model; no connection token is offered as a `secret:`
+  reference. (#2405, #2398, #2317)
+- A host is named once when a profile is saved; store profiles stay on the
+  pinned API version. A declined renewal names the built-in provider. (#2402,
+  #2404)
+- A profile's provider account shows only to whoever connected it; the page
+  says whether the reader made a profile's connection. (#2135, #2246)
+- A deleted profile's refresh slot no longer passes to its reader. (#2269)
+- A provider's pending erasure is told on a profile connected again; a held
+  erasure is superseded only where the owner's record covers it. (#2101,
+  #2294)
+- The Google claim stays in the URL until it ends and is parked again when the
+  engine refused it unsent; the account is named before a managed claim is
+  taken. (#2314, #2396, #2121)
+- A Drive move is refused when the file's current folder is unknown. (#2358)
+- A Shopify store label is bounded and a changed WooCommerce list source is
+  refused. (#2407)
+- The OAuth consent and result pages share one frame in the instance's
+  language, and their policy closes frame, base and form targets. (#2412)
+
+### Changed: inbox, memory and mail
+
+- Inbound mail is deferred during an inbox rebootstrap instead of dropped, and
+  deferred mail survives a restart; the drain is bounded and hands its backlog
+  over. (#2360, #2389, #2392)
+- A clean turn's assistant-half fact goes to review, not into memory;
+  instructions for the current job and drafted text stay out of durable
+  memory. (#2351, #2235, #2388)
+- Relations whose source memory was deleted are hidden and reaped in both GC
+  sweeps; a promoted memory is recorded as moved. (#2107, #2102, #2106)
+- A watch keeps its last summary with its baseline. (#2375)
+
+### Changed: backup, restore and migration
+
+- Restores are serialized and refuse entries that would break the swap
+  midway; what was left out is shown. Only entries a backup writes are
+  restored, and a path named twice is refused. (#2329, #2321, #2112)
+- The backup list keeps its signature checks while a manifest is unchanged.
+  (#2330)
+- The data export decides for every data-dir entry and table what it carries.
+  (#2113)
+
+### Changed: notices, wording and web UI
+
+- Worker and bulk notices speak the owner's language; the plan pause notice
+  and the remaining notices are in German. (#2261, #2278, #2363, #2359)
+- A chat refused for want of an AI provider says who can set one up; a
+  question closed because an answer came too late says why; the model
+  connection test is the owner's. (#2275, #2286, #2272)
+- Owner-only acts (workflow and plan actions, the introduction, erasing a
+  person) are offered only to the owner's session, and a mandate sees the
+  settings as text, not as fields it cannot save. (#2281, #2287, #2284, #2280,
+  #2279, #2274, #2270)
+- A file that cannot be read is said so instead of "File not found", and a
+  failed delete is named; the engine asks before deleting a file. (#2313,
+  #2307)
+- A flagged briefing block is marked at that block, not the whole briefing.
+  (#2302)
+- Run now is hidden at a completed plan that keeps its pause. (#2394)
+- The workflow schema names the step time limit the engine applies. (#2247)
+- A workflow stored with a hidden step id has a way out. (#2277)
+- `/reply` answers only the named question. (#2248)
+- Review diffs that were cut are marked and not counted as compared; the
+  review's reads before and after a write are capped at the file tools' 5 MB
+  limit. (#2174, #2163, #2168)
+- The changeset rollback names the files it leaves as they are. (#2199)
+
+### Changed: mandates and plans
+
+- A helper's connect always passes a page of this instance, before the
+  provider's login, that says what the owner sees of the connection. (#2411)
+- The model no longer names a place for a planned bulk run; the result does
+  not give one. (#2413)
+- A chat that read a store only reads it and plans no bulk run; a bulk run is
+  promised from a read-only chat only where one can run. A workflow run
+  started from a chat that only reads is marked. (#2134, #2175, #2236)
+- A plan whose workflow cannot be read pauses in the login, and the runs of a
+  plan paused at login stop without waiting for the sweep. (#2339, #2276)
+- A mandate's schedule on another mandate's workflow is refused, a workflow
+  is written by one resolved id, never by every prefix match, and every
+  headless workflow run needs a principal. (#2268, #2283, #2241)
+- A markup a verdict or plan adds to a text field of an external run is
+  refused; a placeholder in a list plan's fixed after is refused. (#2171,
+  #2211)
+- A mandate keeps off the vault size and the listing's names, and the
+  workflow copies that carry their source's mandate mark are named. (#2343,
+  #2285)
+- A contained or private chat's history stays out of resume summaries; an
+  owner's erasure cancel is bounded to the current epoch. (#2166, #2213)
+- Store profiles point at the Shopify preset while its exchange is on.
+  (#2233)
+- A bulk conflict is worded as of the last read; the judge reads the record's
+  other fields as context, and a too-long judge rule names the counted
+  length. (#2319, #2333, #2228)
+- The note about an approved email names the reason and the entry; the Google
+  card names the Workspace admin's approval; a chat on a loaded approval draft
+  is titled by the engine. (#2186, #2188, #2342)
+- The HTTP request limit tells the model the way on. (#2156)
+- The briefing scan reaches past the closers of the engine's own blocks.
+  (#2292)
+
+### Security
+
+- Keys typed after a cue word are caught more often, and a key a mandate's
+  helper types is refused before anything keeps it. (#2387, #2364)
+- Request logs redact query values and address segments; a refused endpoint is
+  quoted without credentials, query or fragment. (#2369, #2324)
+- File tools check the file a write actually reaches, inside and outside the
+  open folders, and the artifact store does not follow links. (#2326, #2327,
+  #2328)
+- Hidden and zero-width characters are stripped or refused in stored plan
+  text, task routes, workflow step ids, titles and due dates. (#2223, #2210,
+  #2231, #2263, #2258)
+- HTML field values are read with one parser, the way the page reads them, and
+  GraphQL mutation checks are stricter. (#2262, #2271, #2300)
+- Outbound address checks read more IPv6 forms, and hosts are matched exactly
+  at the outbound gates. (#2114, #2305)
+- A contained chat stays with its owner and its starter, and a contained
+  run's push is a fixed sentence. (#2250, #2244, #2245, #2259)
+- A sub-run stops when a maker's access ends, and whether a wakeup reached its
+  owner is shown to the owner only. (#2346, #2149)
+- Error text a run, a schedule or a request reaches is reduced before it is
+  kept or shown. (#2357)
+- A hint for a missing secret never offers a name that does not belong where
+  the call goes. (#2099)
+- A delegate's turn cannot open credential dialogs. (#2320)
+- A settings body asked for before a sign-in reset is dropped. (#2325)
+- `edit_file` and `batch_files` are guarded like `write_file`. (#2104, #2116)
+- A mandate's writes are recorded inside the instance before they happen, and
+  the writes it causes outside its tool calls too. (#2118, #2193)
+- The trail keeps addresses out of rows and names an API profile by an opaque
+  id. (#2137, #2170, #2204, #2209)
+- The entrypoint no longer mints a vault key over an existing one, and
+  plaintext secrets are kept while the vault key does not open every entry.
+  (#2119, #2335)
+
+### Fixed
+
+- A reply stream that ends before its stop reason is retried. (#2401)
+- The container starts for a host uid the image has no name for. (#2355)
+- A missing vault key over encrypted data is reported. (#2212)
+- A resumed run's new thread is contained like the one it replaces. (#2245)
+- The sign-in reset stays for pages that read `/config` themselves. (#2290)
 
 ## 2.17.1 — 2026-11-02
 

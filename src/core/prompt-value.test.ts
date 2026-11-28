@@ -150,21 +150,23 @@ describe('promptUser callers', () => {
   const AUTHORSHIP_EXEMPT: Record<string, { proof: RegExp } | { unmarked: string }> = {
     'tools/builtin/plan-task.ts': { proof: /joinPrompts\(/ },
     'integrations/mail/tools/mail-send.ts': { proof: /const preview = buildSendPreview\(/ },
-    // Not `buildSendPreview` — this one assembles its own `pv`. The first draft
+    // Not `buildSendPreview` — this one asks with its own question from the mail dialog table
+    // (`said = MAIL_DIALOG[…]`, then `said.reply(…)`, frame and values). The first draft
     // gave both mail files the same proof and this test caught it, which is the
     // point: a reason copied from a neighbour is not a reason.
-    'integrations/mail/tools/mail-reply.ts': { proof: /const preview = pv`/ },
+    'integrations/mail/tools/mail-reply.ts': { proof: /const said = MAIL_DIALOG\[[\s\S]*?const preview = said\.reply\(/ },
     'integrations/google/google-sheets.ts': { proof: /confirmMsg:\s*PromptText/ },
     'integrations/google/google-calendar.ts': { proof: /confirmMsg:\s*PromptText/ },
     'integrations/google/google-drive.ts': { proof: /confirmMsg:\s*PromptText/ },
     // The danger gate asks with `DangerSignal.prompt`, which `_detectDanger` builds with
     // `framed`: the agent's command preview and paths are values (`agentText`), the rest is
     // the system's own text. Asking with `.warning`, the plain string, would carry them
-    // unmarked again. The proof checks the text of the file: both danger-gate calls ask with
-    // `effectiveSignal.prompt`, and `effectiveSignal.warning` appears nowhere but in its
+    // unmarked again. The proof checks the text of the file: the danger gate asks with
+    // `guardPrompt`, which is `effectiveSignal.prompt` or that prompt with a sentence of the
+    // system's own appended (`pv`), and `effectiveSignal.warning` appears nowhere but in its
     // `[BLOCKED` check. An alias of the signal is not seen, and the file's other promptUser
     // calls are not checked by this entry.
-    'core/agent.ts': { proof: /^(?![\s\S]*effectiveSignal\.warning(?!\.includes\('\[BLOCKED'\)))(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, consentOptions\(kind\), consentMeta\(kind, askMeta\)\))/ },
+    'core/agent.ts': { proof: /^(?![\s\S]*effectiveSignal\.warning(?!\.includes\('\[BLOCKED'\)))(?=[\s\S]*\? pv`\$\{effectiveSignal\.prompt\}[^`]*`\s*: effectiveSignal\.prompt;)(?=[\s\S]*this\.promptUser\(guardPrompt, consentOptions\(kind\), consentMeta\(kind, askMeta\)\))/ },
   };
 
   /** Blank out comment bodies and string contents, keeping offsets intact. */

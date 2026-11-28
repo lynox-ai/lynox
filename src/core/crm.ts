@@ -10,8 +10,10 @@
  *   interactions:  contact_name, type, channel, summary, date
  */
 
-import type { DataStore, RowStamp } from './data-store.js';
+import type { DataStore, RowSource, RowStamp } from './data-store.js';
 import type { EngineDb } from './engine-db.js';
+import { domainToUnicode } from 'node:url';
+import { normalizeMailTarget } from './send-target.js';
 import { SubjectStore, ambiguityError } from './subject-store.js';
 import { reducedErrorText } from './error-egress.js';
 import { RelationshipStore } from './relationship-store.js';
@@ -210,6 +212,37 @@ export class CRM {
 
     const result = this.ds.queryRecords({ collection: 'contacts', filter, limit: 1 });
     return (result.rows[0] as unknown as ContactRecord | undefined) ?? null;
+  }
+
+  /**
+   * Where the contact with this address came from (`DataStore.sourceOfRow`), or `null` when
+   * there is none. A contact stores its address lower case as typed ({@link upsertContact}), so
+   * an international domain may be stored in either form: the address is looked up in every
+   * spelling with the same normal form as a send target (`normalizeMailTarget`), the domain as
+   * typed, in ASCII and in Unicode. When more than one spelling has a row, the answer is the least
+   * trusting, as for several rows of one spelling.
+   */
+  contactOrigin(email: string): RowSource | null {
+    const target = normalizeMailTarget(email);
+    if (target === null) return null;
+    const at = target.value.lastIndexOf('@');
+    const local = target.value.slice(0, at);
+    const ascii = target.value.slice(at + 1);
+    const spellings = new Set<string>([email.trim().toLowerCase(), target.value, `${local}@${domainToUnicode(ascii)}`]);
+    this.ensureSchema();
+    const found: RowSource[] = [];
+    for (const spelling of spellings) {
+      if (spelling.length === 0) continue;
+      const source = this.ds.sourceOfRow('contacts', 'email', spelling);
+      if (source !== null) found.push(source);
+    }
+    if (found.length === 0) return null;
+    const first = found[0]!.writtenBy;
+    return {
+      writtenBy: found.every(f => f.writtenBy === first) ? first : null,
+      untrusted: found.some(f => f.untrusted),
+      grants: [...new Set(found.flatMap(f => [...f.grants]))].sort(),
+    };
   }
 
   /**

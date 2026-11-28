@@ -5,6 +5,7 @@
  * contract, the in-memory copies that grant each exact body, and the real client.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { SHOPIFY_CONSENT_VERSION } from './oauth-presets.js';
 
 vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn().mockResolvedValue([{ address: '23.227.38.65', family: 4 }]) },
@@ -16,7 +17,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, type BulkRunForPreview } from './bulk-ledger.js';
+import { BULK_HALT_REASONS, BulkLedger, type BulkRunForPreview } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { BulkHostBudget, externalClient, graphqlWriteAnswer, parseBulkContract, type ExternalClient } from './bulk-external.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
@@ -36,10 +37,10 @@ import { BULK_MAX_TARGETS } from './bulk-plan.js';
 import type { IAgent } from '../types/index.js';
 
 const HOST = 'acme.myshopify.com';
-// The store connection of HOST, granted the scope image alt texts need (`shopifyMediaWritable`), so a
+// The store connection of HOST, granted the scope image alt texts need (`shopifyMediaAccess`), so a
 // plan in the image form gets past the scope check to what this file tests.
 const IMAGE_WRITING_STORE = {
-  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] }, scope: 'read_products write_products write_files' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'], asked_scope: ['read_products', 'write_products', 'write_files'], store_binding: 'bound' } } : undefined,
 };
 const ENDPOINT = `https://${HOST}/admin/api/2026-10/graphql.json`;
 const product = (n: number): string => `gid://shopify/Product/${String(n)}`;
@@ -98,6 +99,17 @@ describe('the media documents and bodies', () => {
 
   it('selects the fileUpdate userErrors, with their code', () => {
     expect(SHOPIFY_WRITE_DOCUMENTS.shopify_media_alt).toMatch(/userErrors \{ field message code \}/);
+  });
+
+  // `write_files` lets `fileUpdate` replace a file's content (`originalSource`, `previewImageSource`)
+  // and rename it. The bulk image form sets the alt text and nothing else: the one input object
+  // carries exactly `id` and `alt`, and the variables of a write body are those two.
+  it('sends fileUpdate exactly the id and the alt text, nothing that replaces or renames a file', () => {
+    const inputs = [...SHOPIFY_WRITE_DOCUMENTS.shopify_media_alt.matchAll(/fileUpdate\(files: \[\{([^}]*)\}\]\)/g)].map((m) => m[1]!);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]!.split(',').map((f) => f.split(':')[0]!.trim()).sort()).toEqual(['alt', 'id']);
+    expect(SHOPIFY_WRITE_DOCUMENTS.shopify_media_alt).not.toMatch(/originalSource|previewImageSource|filename|fileCreate|fileDelete/);
+    expect(Object.keys(JSON.parse(shopifyMediaAltWriteBody(image(7), { alt: 'Blue mug' })!).variables).sort()).toEqual(['alt', 'id']);
   });
 });
 
@@ -392,8 +404,11 @@ describe('reading a store\'s images', () => {
 });
 
 describe('applying a media run', () => {
-  const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
-    ledger, trailFor: () => null,
+  const CURRENT_GRANT = { consent_version: SHOPIFY_CONSENT_VERSION };
+  const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply', grant: unknown = CURRENT_GRANT): Promise<{ status: string }> => runBulkEffect(id, effect, {
+    // By default a connection confirmed under the current consent text: the alt text is beyond what an
+    // older one covers. The test of the hold passes another grant.
+    ledger, trailFor: () => null, shopifyGrantOf: () => grant,
     // The worker's own writer: the form it reads and writes with comes from the run's rows.
     writerFor: (run) => bulkWriterFor(run, null, (r) => externalRunWriter(r, ledger, (rr, _q, _r, shopifyApply) => {
       const stored = rr.contractJson === null ? null : parseBulkContract(rr.contractJson);
@@ -413,6 +428,22 @@ describe('applying a media run', () => {
     ] });
     // An image's alt is not compared in the form a store saves a product in: nothing of it is measured.
     expect(ledger.comparedInSavedForm(id)).toBe(false);
+  });
+
+  it.each([
+    ['no grant', null],
+    ['a grant from before the version was recorded', {}],
+    ['an earlier text', { consent_version: '0123456789abcdef' }],
+  ])('holds an image run under %s, before any write', async (_name, grant) => {
+    fill(1);
+    const id = await previewed();
+    expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+    const was = mediaOf(image(11))!.alt;
+    s.requests.length = 0;
+    expect((await apply(id, 'bulk_apply', grant)).status).toBe('refused');
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.consentOutdated);
+    expect(s.requests).toEqual([]);
+    expect(mediaOf(image(11))!.alt).toBe(was);
   });
 
   it('writes its probe, one image, and goes wide only after this run\'s probe is confirmed', async () => {

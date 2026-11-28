@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { getLynoxDir } from '../../core/config.js';
 import { ensureDirSync } from '../../core/atomic-write.js';
 import { scrubFreedPages, zeroDeletedContent } from '../../core/sqlite-constants.js';
+import { normalizeMailTarget } from '../../core/send-target.js';
 import type { MailAccountConfig, MailAccountType, MailAuthType, MailAddress, MailEnvelope, MailPresetSlug } from './provider.js';
 import { isValidAccountType, isValidAuthType } from './provider.js';
 import type { DeltaCursor, DeltaCursorStore } from './providers/oauth-graph.js';
@@ -31,7 +32,20 @@ function defaultDbPath(): string {
  */
 const RESERVED_ACCOUNT_PREFIXES: ReadonlyArray<string> = [];
 
-const MIGRATIONS: string[] = [
+/** A migration: SQL run as one script, or a step that reads the schema before it changes it. */
+type Migration = string | ((db: Database.Database) => void);
+
+/** v23's table and index, kept in one place: v25 creates them too where v23 never ran (see v25).
+ *  The text is the one v23 has always written, so `sqlite_master` reads the same either way. */
+const OWNER_KNOWN_DDL = `CREATE TABLE IF NOT EXISTS mail_sent_owner_known (
+     sent_id TEXT NOT NULL,
+     tenant_id TEXT NOT NULL,
+     address TEXT NOT NULL,
+     PRIMARY KEY (sent_id, address)
+   );
+   CREATE INDEX IF NOT EXISTS idx_mail_sent_owner_known_address ON mail_sent_owner_known(tenant_id, address);`;
+
+const MIGRATIONS: Migration[] = [
   // v1: Initial schema — Message-ID dedup table
   `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
    INSERT OR IGNORE INTO schema_version (version) VALUES (1);
@@ -615,6 +629,58 @@ const MIGRATIONS: string[] = [
    ALTER TABLE inbox_items ADD COLUMN matched_rule_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_inbox_items_matched_rule ON inbox_items(tenant_id, matched_rule_id);
    COMMIT;`,
+
+  // v22: whether every recipient of a sent mail was one the owner had named before it went out
+  // (`SentMailLogInput.originOwnerKnown`). Only such a send makes its recipients count as known
+  // later (`isOwnerKnownRecipient`). Every older row is 0: nothing recorded it before, and a
+  // send approved on a card is 0 too, since an approval is not the owner naming the address.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (22);
+   ALTER TABLE mail_sent_log ADD COLUMN origin_owner_known INTEGER NOT NULL DEFAULT 0;
+   COMMIT;`,
+
+  // v23: the recipients of the sends flagged in v22, one normalized address per row, so the
+  // check before a send (`isOwnerKnownRecipient`) is one indexed probe instead of a scan of the
+  // whole log. Written with the log row by `recordSentMail`, only for a flagged send. No
+  // backfill: nothing set the flag before this version was written, and an address missing
+  // here only reads as not known.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (23);
+   ${OWNER_KNOWN_DDL}
+   COMMIT;`,
+
+  // v24: the rule that named an item but was not applied: its id, its name as it was then, and
+  // why (one of the reasons the CHECK below lists). Written with the item, as the bucket is, and
+  // never by a later write: an item is classified once. Deleting the rule clears the id and keeps
+  // name and reason. Rows from before carry NULL, which reads as "no rule withheld"; nothing is
+  // backfilled, as no released version withheld a rule. One transaction, as v17.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (24);
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_id TEXT;
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_name TEXT;
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_reason TEXT
+     CHECK (rule_withheld_reason IS NULL OR rule_withheld_reason IN
+       ('rule_withheld_sensitive', 'rule_withheld_classifier', 'rule_withheld_unchecked', 'forwarded_by_person'));
+   COMMIT;`,
+
+  // v25: which prefilter rule an inbox item's mail met (`automated_sender`,
+  // `bounce`, `newsletter_domain`, `bulk_subdomain`), NULL when none did. The watcher no
+  // longer drops mail on these rules, so an automated sender's mail now costs a
+  // classifier call; this column lets that spend be counted per rule. Not shown
+  // to the user. One transaction, as v17. A build of this change once ran from a branch
+  // image that added the column as v23, so the column is added only when it is missing:
+  // such a database then opens, and its values stay. That database reads 23 and so never
+  // ran main's v23; its table and index are created here, from the same text.
+  (db) => {
+    db.transaction(() => {
+      db.prepare('INSERT OR IGNORE INTO schema_version (version) VALUES (25)').run();
+      const columns = db.prepare<[], { name: string }>('PRAGMA table_info(inbox_items)').all();
+      if (!columns.some((c) => c.name === 'prefilter_rule')) {
+        db.exec('ALTER TABLE inbox_items ADD COLUMN prefilter_rule TEXT');
+      }
+      db.exec(OWNER_KNOWN_DDL);
+    })();
+  },
 ];
 
 export interface MailStateDbOptions {
@@ -781,6 +847,8 @@ export interface SentMailLogInput {
   bodyChars: number;
   sentAt?: Date | undefined;
   followupId?: string | undefined;
+  /** Every recipient was one the owner had named before the send (v22). Absent: false. */
+  originOwnerKnown?: boolean | undefined;
 }
 
 export interface SentMailLogEntry {
@@ -1261,8 +1329,16 @@ export class MailStateDb {
     const drop = this.db.prepare('DELETE FROM mail_deferred WHERE account_id = ? AND message_id = ?');
     for (const row of rows) {
       try {
-        const env = JSON.parse(row.envelope) as MailEnvelope & { date: string };
-        out.push({ ...env, uid: stableUid ? env.uid : 0, date: new Date(env.date) });
+        const env = JSON.parse(row.envelope) as Omit<MailEnvelope, 'date' | 'arrivedAt'> & { date: string; arrivedAt?: string | undefined };
+        const { arrivedAt, ...rest } = env;
+        const arrived = typeof arrivedAt === 'string' ? new Date(arrivedAt) : undefined;
+        out.push({
+          ...rest,
+          uid: stableUid ? env.uid : 0,
+          date: new Date(env.date),
+          // Kept as text; one that no longer reads as a date leaves the mail without an arrival.
+          ...(arrived !== undefined && Number.isFinite(arrived.getTime()) ? { arrivedAt: arrived } : {}),
+        });
       } catch {
         drop.run(accountId, row.message_id);
       }
@@ -1399,33 +1475,71 @@ export class MailStateDb {
    */
   recordSentMail(input: SentMailLogInput): string {
     const id = randomUUID().slice(0, 12);
-    this.db
-      .prepare<[
-        string, string, string, string, string | null,
-        string, string | null, string | null,
-        string, number, number, string | null,
-      ], unknown>(
-        `INSERT INTO mail_sent_log (
-           id, tenant_id, account_id, message_id, in_reply_to,
-           to_json, cc_json, bcc_json,
-           subject, body_chars, sent_at, followup_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        input.tenantId ?? 'default',
-        input.accountId,
-        input.messageId,
-        input.inReplyTo ?? null,
-        JSON.stringify(input.to),
-        input.cc && input.cc.length > 0 ? JSON.stringify(input.cc) : null,
-        input.bcc && input.bcc.length > 0 ? JSON.stringify(input.bcc) : null,
-        input.subject,
-        input.bodyChars,
-        (input.sentAt ?? new Date()).getTime(),
-        input.followupId ?? null,
-      );
+    // The log row and its owner-known recipients in one transaction: a recipient is never
+    // counted for a send the log does not hold.
+    this.db.transaction(() => {
+      this.db
+        .prepare<[
+          string, string, string, string, string | null,
+          string, string | null, string | null,
+          string, number, number, string | null, number,
+        ], unknown>(
+          `INSERT INTO mail_sent_log (
+             id, tenant_id, account_id, message_id, in_reply_to,
+             to_json, cc_json, bcc_json,
+             subject, body_chars, sent_at, followup_id, origin_owner_known
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.tenantId ?? 'default',
+          input.accountId,
+          input.messageId,
+          input.inReplyTo ?? null,
+          JSON.stringify(input.to),
+          input.cc && input.cc.length > 0 ? JSON.stringify(input.cc) : null,
+          input.bcc && input.bcc.length > 0 ? JSON.stringify(input.bcc) : null,
+          input.subject,
+          input.bodyChars,
+          (input.sentAt ?? new Date()).getTime(),
+          input.followupId ?? null,
+          input.originOwnerKnown === true ? 1 : 0,
+        );
+      if (input.originOwnerKnown === true) {
+        const tenantId = input.tenantId ?? 'default';
+        const insert = this.db.prepare<[string, string, string], unknown>(
+          'INSERT OR IGNORE INTO mail_sent_owner_known (sent_id, tenant_id, address) VALUES (?, ?, ?)',
+        );
+        for (const entry of [...input.to, ...(input.cc ?? []), ...(input.bcc ?? [])]) {
+          const address = normalizeMailTarget(entry.address)?.value;
+          if (address !== undefined) insert.run(id, tenantId, address);
+        }
+      }
+    })();
     return id;
+  }
+
+  /**
+   * Whether `address` was a recipient — to, cc or bcc — of a send whose every recipient the
+   * owner had named (`origin_owner_known = 1`). Addresses are compared as whole normalized
+   * tokens (`normalizeMailTarget`: lower case, the domain in ASCII form), never as substrings,
+   * so `x@firma.ch` does not match a send to `max@firma.ch`. An address that does not
+   * normalize is never known.
+   */
+  isOwnerKnownRecipient(address: string, opts: { tenantId?: string | undefined } = {}): boolean {
+    const wanted = normalizeMailTarget(address)?.value;
+    if (wanted === undefined) return false;
+    // One indexed probe on the normalized recipients of flagged sends (v23), joined to the log
+    // row so a recipient whose send is gone, or no longer flagged, does not count.
+    const row = this.db
+      .prepare<[string, string], { hit: number }>(
+        `SELECT 1 AS hit FROM mail_sent_owner_known r
+         JOIN mail_sent_log l ON l.id = r.sent_id
+         WHERE r.tenant_id = ? AND r.address = ? AND l.origin_owner_known = 1
+         LIMIT 1`,
+      )
+      .get(opts.tenantId ?? 'default', wanted);
+    return row !== undefined;
   }
 
   /**
@@ -1655,7 +1769,9 @@ export class MailStateDb {
   private _migrate(): void {
     const current = this._getVersion();
     for (let i = current; i < MIGRATIONS.length; i++) {
-      runMultiStatement(this.db, MIGRATIONS[i]!);
+      const migration = MIGRATIONS[i]!;
+      if (typeof migration === 'string') runMultiStatement(this.db, migration);
+      else migration(this.db);
     }
   }
 

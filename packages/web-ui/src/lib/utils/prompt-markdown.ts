@@ -324,14 +324,57 @@ export const VALUE_SLOT = '\uE000';
  * and the link override already rejects a non-allowlisted target — but a future
  * frame that did would put escaped text somewhere escaping is not sufficient.
  */
-export function renderPromptSegments(segments: readonly RenderablePromptSegment[]): string {
+/**
+ * The box a value someone else wrote stands in, when the question asks for it (`box`): the same
+ * shape as `MarkedLine`'s, an isolated element with a 1 px edge, so the value cannot pass for
+ * lynox's words nor turn the direction of the text around it. A value inside a quote (a mail's
+ * text, a plan's lines) is set apart by the quote already and stays as it is.
+ */
+const VALUE_BOX_OPEN = '<bdi data-foreign-value class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone font-mono">';
+const VALUE_BOX_CLOSE = '</bdi>';
+
+/**
+ * Every character the engine escapes in a value it quotes (`escapeQuoted` in `src/tools/dialog-text.ts`):
+ * `\\` and each character that reads as a double quotation mark. Kept equal to the engine's by a test.
+ */
+const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞❠ʺ˝˵˶⹂🙶🙷🙸‴‷⁗\u{030B}\u{030E}\u{030F}]/gu;
+const ESCAPED_QUOTE_LIKE = new RegExp(`\\\\(${QUOTE_LIKE.source})`, 'gu');
+
+/**
+ * The exact inverse of the engine's `escapeQuoted`: a `\` before a character it escapes is dropped,
+ * any other `\` stays. Only for a value shown in its box, where the box is the boundary; the
+ * question's flat text (a notification, what the model reads) keeps the escapes.
+ */
+export function unescapeQuoted(text: string): string {
+	return text.replace(ESCAPED_QUOTE_LIKE, '$1');
+}
+
+/** The opening and closing marks a dialog quotes a value in (en “…”, de „…“). */
+const QUOTE_OPEN = /[“„]$/u;
+const QUOTE_CLOSE = /^[”“]/u;
+
+/** Whether the value at `index` stands between a frame's opening mark and the next frame's closing one. */
+function quotedValue(segments: readonly RenderablePromptSegment[], index: number): boolean {
+	const before = segments[index - 1];
+	const after = segments[index + 1];
+	return before?.kind === 'frame' && QUOTE_OPEN.test(before.text) && after?.kind === 'frame' && QUOTE_CLOSE.test(after.text);
+}
+
+/** Whether `html` ends inside a quote: more blockquotes opened than closed. */
+function insideQuote(html: string): boolean {
+	return (html.match(/<blockquote[\s>]/g)?.length ?? 0) > (html.match(/<\/blockquote>/g)?.length ?? 0);
+}
+
+export function renderPromptSegments(segments: readonly RenderablePromptSegment[], options: { box?: boolean } = {}): string {
 	if (segments.length === 0) return renderPromptMarkdown('');
 
 	const values: string[] = [];
+	const quoted: boolean[] = [];
 	const withSlots = segments
-		.map((segment) => {
+		.map((segment, index) => {
 			if (segment.kind === 'frame') return segment.text;
 			values.push(segment.text.split(VALUE_SLOT).join(''));
+			quoted.push(quotedValue(segments, index));
 			return VALUE_SLOT;
 		})
 		.join('');
@@ -354,8 +397,14 @@ export function renderPromptSegments(segments: readonly RenderablePromptSegment[
 	let index = 0;
 	return parts.reduce((acc, part, i) => {
 		if (i === 0) return part;
-		const value = values[index++] ?? '';
-		return acc + escapeValueText(value, lone) + part;
+		const raw = values[index] ?? '';
+		const isQuoted = quoted[index] === true;
+		index++;
+		// In its box a quoted value is shown as written: the box is the boundary, not the escapes.
+		if (options.box === true && !insideQuote(acc)) {
+			return acc + VALUE_BOX_OPEN + escapeValueText(isQuoted ? unescapeQuoted(raw) : raw, lone) + VALUE_BOX_CLOSE + part;
+		}
+		return acc + escapeValueText(raw, lone) + part;
 	}, '');
 }
 

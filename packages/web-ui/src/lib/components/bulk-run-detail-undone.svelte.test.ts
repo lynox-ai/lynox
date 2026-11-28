@@ -51,8 +51,9 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });
@@ -119,6 +120,57 @@ describe('an undone run’s page', () => {
 		expect(afters()[1]!.classList.contains('text-success')).toBe(true);
 	});
 
+	it('shows the before-value of a target taken back as the value that holds again, not struck out; a live one tinted, not struck', async () => {
+		const back = { ...written(1, true), diff: fieldsDiff('Alt 1', 'Neu 1') } as BulkTarget;
+		const live = { ...written(2, false), diff: fieldsDiff('Alt 2', 'Neu 2') } as BulkTarget;
+		const text = { ...written(3, true), diff: { kind: 'text', from: 0, removed: ['Alt 3'], added: ['Neu 3'] } } as BulkTarget;
+		const liveText = { ...written(4, false), diff: { kind: 'text', from: 0, removed: ['Alt 4'], added: ['Neu 4'] } } as BulkTarget;
+		targets = [back, live, text, liveText];
+		await render();
+		const befores = [...target.querySelectorAll<HTMLElement>('[data-testid="bulk-before"]')];
+		expect(befores.map((el) => [el.tagName, el.textContent?.trim()])).toEqual([['SPAN', 'Alt 1'], ['DEL', 'Alt 2'], ['SPAN', '- Alt 3'], ['DEL', '- Alt 4']]);
+		expect(['no-underline', 'bg-danger/10', 'dark:bg-danger/20'].every((c) => befores[3]!.classList.contains(c))).toBe(true);
+		expect(befores[0]!.classList.contains('text-text')).toBe(true);
+		expect(befores[0]!.classList.contains('text-danger')).toBe(false);
+		expect(befores[1]!.classList.contains('text-danger')).toBe(true);
+		// Marked by a tint, not struck: a line through a „1“ reads as „4“.
+		expect(['no-underline', 'bg-danger/10', 'dark:bg-danger/20'].every((c) => befores[1]!.classList.contains(c))).toBe(true);
+		expect(befores[2]!.classList.contains('text-text')).toBe(true);
+	});
+
+	it('shows a before-value with hidden characters marked, taken back or tinted, in a cell that breaks a long value', async () => {
+		const odd = 'Alt\u202Eb\u200Bc\u0007';
+		const marked = 'Alt⟨U+202E⟩b⟨U+200B⟩c⟨U+0007⟩';
+		const back = { ...written(1, true), diff: fieldsDiff(odd, 'Neu 1') } as BulkTarget;
+		const live = { ...written(2, false), diff: fieldsDiff(odd, 'Neu 2') } as BulkTarget;
+		const text = { ...written(3, true), diff: { kind: 'text', from: 0, removed: [odd], added: ['Neu 3'] } } as BulkTarget;
+		const liveText = { ...written(4, false), diff: { kind: 'text', from: 0, removed: [odd], added: ['Neu 4'] } } as BulkTarget;
+		targets = [back, live, text, liveText];
+		await render();
+		const befores = [...target.querySelectorAll<HTMLElement>('[data-testid="bulk-before"]')];
+		expect(befores.map((el) => [el.tagName, el.textContent?.trim()])).toEqual([['SPAN', marked], ['DEL', marked], ['SPAN', `- ${marked}`], ['DEL', `- ${marked}`]]);
+		// None of the hidden characters reaches the page as itself.
+		for (const el of befores) expect(/[\u202E\u200B\u0007]/.test(el.textContent ?? '')).toBe(false);
+		// The field cell and the text block both break a long value inside the cell.
+		for (const el of befores) expect(el.closest('div, pre')!.classList.contains('[overflow-wrap:anywhere]')).toBe(true);
+	});
+
+	it('greys every mark beside a target taken back, and only there: the whole row is a record', async () => {
+		const marks = { seoEntityFields: ['seo_title'], shopAddedMarkup: true } as Partial<BulkTarget>;
+		const rewrote = { hostRewrote: true } as Partial<BulkTarget>;
+		targets = [{ ...written(1, true), ...marks } as BulkTarget, { ...written(2, false), ...marks } as BulkTarget,
+			{ ...written(3, true), ...rewrote } as BulkTarget, { ...written(4, false), ...rewrote } as BulkTarget];
+		await render();
+		const grey = (el: Element | undefined): boolean => el!.classList.contains('text-text-subtle') && el!.classList.contains('bg-bg-muted');
+		for (const id of ['bulk-seo-entity', 'bulk-shop-added-markup', 'bulk-host-rewrote']) {
+			const [back, live] = [...target.querySelectorAll(`[data-testid="${id}"]`)];
+			expect(grey(back), id).toBe(true);
+			expect(grey(live), id).toBe(false);
+		}
+		const [seoLive] = [...target.querySelectorAll('[data-testid="bulk-seo-entity"]')].slice(1);
+		expect(seoLive!.classList.contains('text-warning')).toBe(true);
+	});
+
 	it('says when and how many, and opens the undo', async () => {
 		const before = getLocale();
 		setLocale('de');
@@ -133,6 +185,62 @@ describe('an undone run’s page', () => {
 		expect(line?.textContent?.trim()).toMatch(new RegExp(`^2 Ziele haben ihren Wert von vorher zurück\\. Zurückgenommen am ${date.replace(/\./g, '\\.')} um ${time}\\.`));
 		[...line!.querySelectorAll('button')].find((b) => b.textContent?.trim() === t('bulk.undone.open'))!.click();
 		expect(opened).toEqual(['u1']);
+	});
+
+	const takenBackMarks = (): (string | undefined)[] => [...target.querySelectorAll('tbody tr, [role="row"]')]
+		.filter((row) => row.querySelector('[data-testid="bulk-after"]') !== null)
+		.map((row) => row.querySelector('[data-testid="bulk-taken-back"]')?.textContent?.trim());
+
+	for (const locale of ['de', 'en'] as const) {
+		it(`marks a target the run wrote and the undo took back as taken back in ${locale}, greyed, and a live one not`, async () => {
+			const before = getLocale();
+			setLocale(locale);
+			onTestFinished(() => setLocale(before));
+			targets = [written(1, true), written(2, false)];
+			await render();
+			expect(takenBackMarks()).toEqual([locale === 'de' ? 'zurückgenommen' : 'taken back', undefined]);
+			const mark = target.querySelector('[data-testid="bulk-taken-back"]')!;
+			expect(['bg-bg-muted', 'text-text-subtle'].every((c) => mark.classList.contains(c))).toBe(true);
+			expect(mark.classList.contains('text-warning')).toBe(false);
+		});
+	}
+
+	it('does not mark a target the run never wrote that a rollback only settled, and keeps its grey row', async () => {
+		run = makeRun({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete', atomic: true, undoneBy: null });
+		const settled = { ...written(1, true), written: false } as BulkTarget;
+		targets = [settled, written(2, true)];
+		await render();
+		expect(takenBackMarks()).toEqual([undefined, t('bulk.target.taken_back')]);
+		// The settled one keeps the grey row it had.
+		expect(afters()[0]!.classList.contains('text-text-subtle')).toBe(true);
+	});
+
+	it('keeps „not taken back“ as it was after a rollback that did not complete, and never shows both marks on one target', async () => {
+		run = makeRun({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete', atomic: true, undoneBy: null });
+		targets = [written(1, false), written(2, true)];
+		await render();
+		const left = [...target.querySelectorAll('[data-testid="bulk-rollback-left"]')];
+		expect(left.map((el) => el.textContent?.trim())).toEqual([t('bulk.target.not_taken_back')]);
+		expect(left[0]!.classList.contains('text-warning')).toBe(true);
+		expect(takenBackMarks()).toEqual([undefined, t('bulk.target.taken_back')]);
+		for (const row of target.querySelectorAll('tbody tr, [role="row"]')) {
+			expect(row.querySelector('[data-testid="bulk-rollback-left"]') !== null && row.querySelector('[data-testid="bulk-taken-back"]') !== null).toBe(false);
+		}
+	});
+
+	it('points the incomplete rollback\'s sentence at the mark „not taken back“ by its name, beside a target marked taken back', async () => {
+		const before = getLocale();
+		setLocale('de');
+		onTestFinished(() => setLocale(before));
+		run = makeRun({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete', atomic: true, undoneBy: null, haltReason: 'atomicRollbackIncomplete' });
+		targets = [written(1, false), written(2, true)];
+		await render();
+		expect(target.textContent).toContain('Bei den Zielen mit der Marke „nicht zurückgenommen“ hat lynox die Änderung nicht zurückgenommen.');
+		expect(target.textContent).not.toContain('Bei den markierten Zielen');
+		// It names the mark by the label the mark itself carries, and that mark stands on the page.
+		expect(target.textContent).toContain(`„${t('bulk.target.not_taken_back')}“`);
+		expect(target.querySelector('[data-testid="bulk-rollback-left"]')?.textContent?.trim()).toBe(t('bulk.target.not_taken_back'));
+		expect(takenBackMarks()).toEqual([undefined, 'zurückgenommen']);
 	});
 
 	it('one target reads in the singular', async () => {

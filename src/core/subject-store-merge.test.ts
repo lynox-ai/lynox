@@ -36,7 +36,7 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
   it('migration v7 adds merged_into (schema at latest version)', () => {
     const { db, engine } = makeStore();
     const v = (db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v;
-    expect(v).toBe(69); // v58 (bulk_runs.start_domains) + v59 (bulk_targets.deselected_at) + v60 (covered_* and paused_db_at for the takeover) + v61/v62 (the webhook drain) + v63 (connections.trail_id) + v64 (plan_advance_warnings) + v65 (bulk_targets.shop_added_markup) + v66 (bulk_targets.host_rewrote) + v67 (bulk_targets.context) + v68 (bulk_targets.link_domain) + v69 (workflow_stamp_marker) is the latest migration
+    expect(v).toBe(81); // v58 (bulk_runs.start_domains) + v59 (bulk_targets.deselected_at) + v60 (covered_* and paused_db_at for the takeover) + v61/v62 (the webhook drain) + v63 (connections.trail_id) + v64 (plan_advance_warnings) + v65 (bulk_targets.shop_added_markup) + v66 (bulk_targets.host_rewrote) + v67 (bulk_targets.context) + v68 (bulk_targets.link_domain) + v69 (workflow_stamp_marker) + v70 (idx_audit_log_mandate) + v73 (triggers.last_run_cause) + v74 (owner_sessions) + v75 (bulk_targets.target_title) + v76 (bulk_targets.refusal_detail) + v79 (bulk_runs.phase_before_undo) + v80 (triggers.last_run_member_notes) + v81 (bulk_runs.planner_grants, bulk_targets.before_grants/write_grants) is the latest migration
     const cols = (db.prepare("PRAGMA table_info('subjects')").all() as Array<{ name: string }>).map(c => c.name);
     expect(cols).toContain('merged_into');
     engine.close();

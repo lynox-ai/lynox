@@ -133,6 +133,10 @@ export const FLAGGED_REMINDER_TEXT: Readonly<Record<NoticeLanguage, string>> = {
 export interface InboxNotifyOptions {
   /** The sensitive check flagged this mail: the push names no subject or reason taken from it. */
   flagged?: boolean;
+  /** Who wrote the message the push is for, when it is not the item's own sender (a follow-up). */
+  sender?: { address: string; name?: string | undefined } | undefined;
+  /** The subject of the message the push is for, when it is not the item's own (a joined mail). */
+  subject?: string | undefined;
 }
 
 export interface InboxNotifier {
@@ -143,7 +147,7 @@ export interface InboxNotifier {
  * Strip C0 control chars + HTML angle brackets so a crafted `<script>`
  * in subject/from-name cannot reach the OS toast renderer. Also drops
  * Unicode bidi/format overrides (U+202A-202E, U+2066-2069) — without
- * this a sender like `evil‮gro.acme` reverse-renders as
+ * this a sender like `evil\u202Egro.acme` reverse-renders as
  * `acme.gro.live` in the toast and can spoof a known contact. Caps
  * length defensively — web-push is ~4KB, the subject column isn't.
  */
@@ -214,10 +218,11 @@ export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
       // Treat empty-string fromName as missing — exactOptionalPropertyTypes
       // makes `undefined` the canonical "no value", but envelope parsers
       // sometimes set the field to '' when a header is present-but-empty.
-      const fromLabel = item.fromName !== undefined && item.fromName !== ''
-        ? sanitisePushText(item.fromName, 80)
-        : sanitisePushText(item.fromAddress, 80);
-      const subject = sanitisePushText(item.subject || item.reasonDe, 200);
+      const sender = notifyOpts.sender ?? { address: item.fromAddress, name: item.fromName };
+      const fromLabel = sender.name !== undefined && sender.name !== ''
+        ? sanitisePushText(sender.name, 80)
+        : sanitisePushText(sender.address, 80);
+      const subject = sanitisePushText(notifyOpts.subject || item.subject || item.reasonDe, 200);
       const body = notifyOpts.flagged === true
         ? FLAGGED_PUSH_TEXT[noticeLanguage(opts.language?.())]
         : fromLabel ? `${fromLabel}: ${subject}` : subject;

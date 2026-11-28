@@ -115,7 +115,7 @@ describe('cap-stop banners are renderable', () => {
     const hits = CHAT_VIEW.split('\n').filter((l) => l.trim().startsWith('{@const isInfoNote'));
     expect(hits.length, `expected exactly one live isInfoNote line, found ${hits.length}`).toBe(1);
     expect((hits[0] as string).trim()).toBe(
-      "{@const isInfoNote = note.code === 'context_compacted' || note.code === 'run_interrupted' || note.code === 'tool_loop_break' || note.code === 'continuation_loop' || note.code === 'thinking_loop' || note.code === 'tool_call_imitation' || note.code === 'turn_limit' || note.code === 'cost_budget' || note.code === 'input_required' || note.code === 'approval_sent' || note.code === 'content_refused' || note.code === 'run_blocked'}",
+      "{@const isInfoNote = note.code === 'context_compacted' || note.code === 'run_interrupted' || note.code === 'tool_loop_break' || note.code === 'continuation_loop' || note.code === 'thinking_loop' || note.code === 'tool_call_imitation' || note.code === 'turn_limit' || note.code === 'cost_budget' || note.code === 'input_required' || note.code === 'approval_sent' || note.code === 'hold_exhausted' || note.code === 'content_refused' || note.code === 'run_blocked'}",
     );
   });
 });

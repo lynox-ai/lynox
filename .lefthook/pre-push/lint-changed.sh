@@ -13,7 +13,7 @@ fi
 here="$(cd "$(dirname "$0")" && pwd)"
 lint="$here/../../scripts/lint-changed.mjs"
 cd "$(git rev-parse --show-toplevel)" || exit 2
-ranges=$(bash "$here/pushed-ranges.sh" lint-changed) || exit $?
+ranges=$(bash "$here/pushed-ranges.sh" lint-changed "${1-}") || exit $?
 while read -r base tip; do
   [ -n "$base" ] || continue  # no line at all: the push only deletes refs
   # Lower CPU priority only; the exit code is passed through unchanged.
