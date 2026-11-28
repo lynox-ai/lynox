@@ -434,6 +434,19 @@ describe('the refresh of an expiring store connection', () => {
     expect(lines().some((l) => l.includes('outcome=ok'))).toBe(false);
   });
 
+  it('a refresh whose answer changes neither the access token nor the refresh token and whose real row write throws is dead: a read-back cannot tell it from a stored save', async () => {
+    const { refresh_token: _r, ...noRotation } = RENEWED;
+    hold.answer = async () => answer({ ...noRotation, access_token: 'at-old' });
+    const expiryBefore = profile().auth?.oauth?.token_expires_at;
+    // Only the refresh's own save moves the expiry; the mark after it keeps the one in memory.
+    db.getDb().exec(`CREATE TRIGGER refuse_refresh_row BEFORE UPDATE ON connections WHEN json_extract(NEW.config_json, '$.auth.oauth.token_expires_at') IS NOT json_extract(OLD.config_json, '$.auth.oauth.token_expires_at') BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`);
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    db.getDb().exec('DROP TRIGGER refuse_refresh_row');
+    expect(profile().auth?.oauth?.token_expires_at).toBe(expiryBefore);
+    expect(lines().filter((l) => l.includes('outcome=dead (due): the new tokens are in the vault but the profile could not be saved; connect the store again'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('outcome=ok'))).toBe(false);
+  });
+
   it('a refresh that rotates nothing and whose real row write throws is dead: the unchanged stamp alone does not read as saved', async () => {
     const { refresh_token: _r, ...noRotation } = RENEWED;
     hold.answer = async () => answer(noRotation);
