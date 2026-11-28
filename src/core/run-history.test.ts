@@ -456,15 +456,16 @@ describe('RunHistory', () => {
     h.updateRun(r, { tokensIn: 1, tokensOut: 1, costUsd: 0.03, durationMs: 1, status: 'completed' });
     h.close();
     // Pin created_at to a fixed UTC time 30 min BEFORE midnight, so a +2h local
-    // shift crosses into the next calendar day. A wide window keeps the row in
-    // scope regardless of the test clock — the assertion is purely the BUCKET.
+    // shift crosses into the next calendar day. The window reaches back past the row
+    // from whatever day the test runs — the assertion is purely the BUCKET.
     const raw = new BetterSqlite3(dbPath);
     raw.prepare("UPDATE runs SET created_at = '2026-06-04 23:30:00' WHERE id = ?").run(r);
     raw.close();
 
     const h2 = new RunHistory(dbPath);
-    const utc = h2.getCostByDay(3650, { tzOffsetMin: 0 });
-    const local = h2.getCostByDay(3650, { tzOffsetMin: -120 }); // Zurich summer = UTC+2
+    const days = Math.ceil((Date.now() - Date.parse('2026-06-04T23:30:00Z')) / 86_400_000) + 2;
+    const utc = h2.getCostByDay(days, { tzOffsetMin: 0 });
+    const local = h2.getCostByDay(days, { tzOffsetMin: -120 }); // Zurich summer = UTC+2
     expect(utc[0]!.day).toBe('2026-06-04');   // UTC bucket
     expect(local[0]!.day).toBe('2026-06-05'); // shifted into the next LOCAL day
     expect(local[0]!.cost_usd).toBeCloseTo(0.03, 6);
