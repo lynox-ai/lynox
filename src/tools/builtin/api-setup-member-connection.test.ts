@@ -648,6 +648,7 @@ describe('the record each connecting path leaves reads as a connection; the fres
       // Not a connection, so not one the profile leaves unused either.
       expect(profileForReader(store.get('crm-api')!, OWNER_PRINCIPAL).oauth_grant).toMatchObject({ connection: false });
       expect(profileForReader(store.get('crm-api')!, OWNER_PRINCIPAL).oauth_grant?.unused).toBeUndefined();
+      expect(profileForReader(store.get('crm-api')!, MANDATE).oauth_grant).toMatchObject({ connection: false });
       expect(profileForReader(store.get('crm-api')!, MANDATE).oauth_grant?.unused).toBeUndefined();
     } finally {
       db.close();
