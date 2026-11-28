@@ -187,6 +187,47 @@ describe('an undone run’s page', () => {
 		expect(opened).toEqual(['u1']);
 	});
 
+	const takenBackMarks = (): (string | undefined)[] => [...target.querySelectorAll('tbody tr, [role="row"]')]
+		.filter((row) => row.querySelector('[data-testid="bulk-after"]') !== null)
+		.map((row) => row.querySelector('[data-testid="bulk-taken-back"]')?.textContent?.trim());
+
+	for (const locale of ['de', 'en'] as const) {
+		it(`marks a target the run wrote and the undo took back as taken back in ${locale}, greyed, and a live one not`, async () => {
+			const before = getLocale();
+			setLocale(locale);
+			onTestFinished(() => setLocale(before));
+			targets = [written(1, true), written(2, false)];
+			await render();
+			expect(takenBackMarks()).toEqual([locale === 'de' ? 'zurückgenommen' : 'taken back', undefined]);
+			const mark = target.querySelector('[data-testid="bulk-taken-back"]')!;
+			expect(['bg-bg-muted', 'text-text-subtle'].every((c) => mark.classList.contains(c))).toBe(true);
+			expect(mark.classList.contains('text-warning')).toBe(false);
+		});
+	}
+
+	it('does not mark a target the run never wrote that a rollback only settled, and keeps its grey row', async () => {
+		run = makeRun({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete', atomic: true, undoneBy: null });
+		const settled = { ...written(1, true), written: false } as BulkTarget;
+		targets = [settled, written(2, true)];
+		await render();
+		expect(takenBackMarks()).toEqual([undefined, t('bulk.target.taken_back')]);
+		// The settled one keeps the grey row it had.
+		expect(afters()[0]!.classList.contains('text-text-subtle')).toBe(true);
+	});
+
+	it('keeps „not taken back“ as it was after a rollback that did not complete, and never shows both marks on one target', async () => {
+		run = makeRun({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete', atomic: true, undoneBy: null });
+		targets = [written(1, false), written(2, true)];
+		await render();
+		const left = [...target.querySelectorAll('[data-testid="bulk-rollback-left"]')];
+		expect(left.map((el) => el.textContent?.trim())).toEqual([t('bulk.target.not_taken_back')]);
+		expect(left[0]!.classList.contains('text-warning')).toBe(true);
+		expect(takenBackMarks()).toEqual([undefined, t('bulk.target.taken_back')]);
+		for (const row of target.querySelectorAll('tbody tr, [role="row"]')) {
+			expect(row.querySelector('[data-testid="bulk-rollback-left"]') !== null && row.querySelector('[data-testid="bulk-taken-back"]') !== null).toBe(false);
+		}
+	});
+
 	it('one target reads in the singular', async () => {
 		const before = getLocale();
 		setLocale('de');

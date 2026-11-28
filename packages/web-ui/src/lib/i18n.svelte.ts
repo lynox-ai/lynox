@@ -814,6 +814,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.halt.support_mail': { de: 'Mail an den Support', en: 'Email support' },
 	'bulk.halt.support_subject': { de: 'lynox: Massenlauf {run} auf {host} angehalten', en: 'lynox: bulk run {run} on {host} halted' },
 	'bulk.target.not_taken_back': { de: 'nicht zurückgenommen', en: 'not taken back' },
+	'bulk.target.taken_back': { de: 'zurückgenommen', en: 'taken back' },
 	'bulk.target_error.read_failed': { de: 'lynox konnte dieses Ziel nicht lesen.', en: 'lynox could not read this target.' },
 	'bulk.target_error.write_failed': { de: 'Beim Schreiben dieses Ziels kam ein Fehler zurück. Ob die Änderung trotzdem angekommen ist, ist offen. Sieh beim Anbieter nach.', en: 'Writing this target returned an error. Whether the change arrived anyway is unclear. Check at the provider.' },
 	'bulk.target_error.write_failed_not_arrived': { de: 'Das Schreiben dieses Ziels ist gescheitert. Die Änderung ist nicht angekommen.', en: 'Writing this target failed. The change did not arrive.' },
