@@ -21,6 +21,14 @@ export interface EscalateOpts {
   /** What the push says instead of `body`, when the push speaks the owner's language and the seed
    *  stays model context (ux Rest-P E15). Cut like `body`. */
   pushBody?: string | undefined;
+  /**
+   * The body carries text that came from outside: a model's summary of a page someone else
+   * controls. The thread then keeps the record of outside reads (`ConversationLatch`), written
+   * with the seed, so the owner's reply there counts as having read outside content and a durable
+   * write it talks the model into is not stored as the owner's. Leave it out only where the body is
+   * lynox's own words.
+   */
+  readOutside?: boolean | undefined;
   /** Channel passthrough merged into the push (`threadId` is always added). */
   data?: Record<string, string> | undefined;
   /**
@@ -32,6 +40,9 @@ export interface EscalateOpts {
    */
   onReported?: ((delivery: DeliverySummary, detail?: DeliveryDetail) => void) | undefined;
 }
+
+/** The longest push body an escalation sends: a longer one is cut to this, its end replaced by `…`. */
+export const PUSH_BODY_MAX = 200;
 
 /** Sends the wakeup and hands its delivery to `onReported`. Never rejects. */
 function sendWakeup(router: NotificationRouter, msg: NotificationMessage, onReported: EscalateOpts['onReported'], threadId?: string): void {
@@ -119,6 +130,8 @@ export function escalateToUser(
     seeds.push({ role: 'user', content: [{ type: 'text', text: opts.opener }] });
   }
   seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(opts.body) }] });
+  // Armed before the write: the record goes in the seed's transaction, or the seed is not stored.
+  if (opts.readOutside === true) threadStore.armReadOutside(threadId);
   threadStore.appendMessages(threadId, seeds, startSeq, { message_count: currentCount + seeds.length });
   // Re-mark unread + bump updated_at → floats to the top of the thread list.
   threadStore.updateThread(threadId, { is_unread: true });
@@ -126,7 +139,7 @@ export function escalateToUser(
   const pushed = opts.pushBody ?? opts.body;
   sendWakeup(router, {
     title: opts.title,
-    body: pushed.length > 200 ? pushed.slice(0, 197) + '…' : pushed,
+    body: pushed.length > PUSH_BODY_MAX ? pushed.slice(0, PUSH_BODY_MAX - 3) + '…' : pushed,
     priority: 'high',
     data: { ...(opts.data ?? {}), threadId },
   }, opts.onReported, threadId);

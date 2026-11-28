@@ -21,7 +21,7 @@ import { WatchFetchFailure, WatchHttpStatusError, watchFetchCause } from './watc
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
-  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
+  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, watchChangedSeed, type WorkerNotices,
 } from './worker-notices.js';
 import { BULK_NOTICES, bulkHaltForReaders, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -4433,8 +4433,11 @@ export class WorkerLoop {
         title: othersWatch ? notices.helperWatchTitle(shownMandate(task)) : `\uD83D\uDD0D ${task.title}`,
         opener: notices.reportOpener,
         // The helper's case is lynox's own bubble to the owner, so in the owner's language.
-        body: othersWatch ? notices.helperWatchChanged : `${config.url} changed.\n\n${truncatedAnalysis}`,
+        body: othersWatch ? notices.helperWatchChanged : watchChangedSeed(config.url, truncatedAnalysis),
         pushBody: othersWatch ? notices.helperWatchChangedPush : notices.watchChanged(config.url, truncatedAnalysis),
+        // The analysis is a model's summary of a page someone else controls: the owner's reply in
+        // this thread has read outside content. The helper's body is lynox's fixed sentence.
+        readOutside: !othersWatch,
         data: { taskId: task.id },
         onReported: this.#recordEscalation(task.id),
       });
