@@ -387,7 +387,7 @@ describe('the refresh of an expiring store connection', () => {
     expect(lines().some((l) => l.includes('marked ended') || l.includes('left as it is'))).toBe(false);
   });
 
-  it('a save that throws after it went through leaves the new binding as it is, and the line says so, not that a mark is missing', async () => {
+  it('a save that throws after it went through is renewed, keeps the new binding, and its line names the throw', async () => {
     const realSave = store.save.bind(store);
     const save = vi.spyOn(store, 'save').mockImplementation((p, dir, opts) => {
       const r = realSave(p, dir, opts);
@@ -395,14 +395,68 @@ describe('the refresh of an expiring store connection', () => {
       return r;
     });
     try {
-      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('renewed');
     } finally {
       save.mockRestore();
     }
     expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-new'));
+    expect(profile().oauth_grant?.minted_for).toBe(tokenFingerprint('rt-new'));
     expect(profile().oauth_grant?.state).not.toBe('refresh-dead');
-    expect(lines().filter((l) => l.includes('could not be saved; connect the store again; the connection was left as it is (changed meanwhile)'))).toHaveLength(1);
-    expect(lines().some((l) => l.includes('could not be marked ended'))).toBe(false);
+    expect(lines().filter((l) => l.includes('outcome=ok (due): new tokens stored and bound; the profile save threw after it went through'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('could not be saved') || l.includes('marked ended') || l.includes('left as it is'))).toBe(false);
+  });
+
+  /** Lets SQLite refuse every row write that carries `marker` (a stamp or binding only the refresh's own save writes), never the mark after it. */
+  const refuseRowWith = (marker: string): void => {
+    db.getDb().exec(`CREATE TRIGGER refuse_refresh_row BEFORE UPDATE ON connections WHEN NEW.config_json LIKE '%${marker}%' BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`);
+  };
+
+  it('a refresh whose real row write throws reads the profile back as not saved: dead, and the line says the profile could not be saved', async () => {
+    refuseRowWith(tokenFingerprint('rt-new'));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    db.getDb().exec('DROP TRIGGER refuse_refresh_row');
+    expect(vault.get(accessTokenKey(ID))).toBe('at-new');
+    expect(profile().oauth_grant?.minted_for).toBe(tokenFingerprint('rt-old'));
+    expect(profile().oauth_grant?.store_binding).toBeUndefined();
+    expect(profile().oauth_grant?.state).toBe('refresh-dead');
+    expect(lines().filter((l) => l.includes('outcome=dead (due): the new tokens are in the vault but the profile could not be saved; connect the store again'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('outcome=ok') || l.includes('could not be marked ended'))).toBe(false);
+  });
+
+  it('a refresh that keeps the access token, rotates the refresh token and whose row write throws is dead: the unchanged binding alone does not read as saved', async () => {
+    hold.answer = async () => answer({ ...RENEWED, access_token: 'at-old' });
+    refuseRowWith(tokenFingerprint('rt-new'));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    db.getDb().exec('DROP TRIGGER refuse_refresh_row');
+    expect(vault.get(refreshTokenKey(ID))).toBe('rt-new');
+    expect(profile().oauth_grant?.minted_for).toBe(tokenFingerprint('rt-old'));
+    expect(lines().filter((l) => l.includes('outcome=dead (due): the new tokens are in the vault but the profile could not be saved; connect the store again'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('outcome=ok'))).toBe(false);
+  });
+
+  it('a refresh whose answer changes neither the access token nor the refresh token and whose real row write throws is dead: a read-back cannot tell it from a stored save', async () => {
+    const { refresh_token: _r, ...noRotation } = RENEWED;
+    hold.answer = async () => answer({ ...noRotation, access_token: 'at-old' });
+    const expiryBefore = profile().auth?.oauth?.token_expires_at;
+    // Only the refresh's own save moves the expiry; the mark after it keeps the one in memory.
+    db.getDb().exec(`CREATE TRIGGER refuse_refresh_row BEFORE UPDATE ON connections WHEN json_extract(NEW.config_json, '$.auth.oauth.token_expires_at') IS NOT json_extract(OLD.config_json, '$.auth.oauth.token_expires_at') BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`);
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    db.getDb().exec('DROP TRIGGER refuse_refresh_row');
+    expect(profile().auth?.oauth?.token_expires_at).toBe(expiryBefore);
+    expect(lines().filter((l) => l.includes('outcome=dead (due): the new tokens are in the vault but the profile could not be saved; connect the store again'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('outcome=ok'))).toBe(false);
+  });
+
+  it('a refresh that rotates nothing and whose real row write throws is dead: the unchanged stamp alone does not read as saved', async () => {
+    const { refresh_token: _r, ...noRotation } = RENEWED;
+    hold.answer = async () => answer(noRotation);
+    refuseRowWith(bind(ID, ORIGIN, 'at-new')!);
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    db.getDb().exec('DROP TRIGGER refuse_refresh_row');
+    expect(vault.get(accessTokenKey(ID))).toBe('at-new');
+    expect(profile().oauth_grant?.store_binding).not.toBe(bind(ID, ORIGIN, 'at-new'));
+    expect(lines().filter((l) => l.includes('outcome=dead (due): the new tokens are in the vault but the profile could not be saved; connect the store again'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('outcome=ok'))).toBe(false);
   });
 
   it('a profile removed while an ending refresh was out is left as it is, and the line does not say it was connected again', async () => {

@@ -135,8 +135,10 @@ describe('the chat\'s note row is wired to those lines (source)', () => {
 	// shows each line under the condition that line exists. It does not render: what it looks like is
 	// checked on screenshots.
 	it('the note row takes its sentence, its step and its link from the helper', () => {
-		expect(CHAT_VIEW).toMatch(/approvalNoteLines\(msg\.note\.code, msg\.note\.approval, getApprovalsViewer\(\)\)/);
-		expect(CHAT_VIEW).toMatch(/noteKey = approvalLines\?\.bodyKey \?\? `chat\.note\.\$\{msg\.note\.code\}`/);
+		// The note row is one snippet, rendered for a stored note and for lynox's own sentence at a run's end.
+		expect(CHAT_VIEW).toMatch(/\{@render noteRow\(msg\.note\)\}/);
+		expect(CHAT_VIEW).toMatch(/approvalNoteLines\(note\.code, note\.approval, getApprovalsViewer\(\)\)/);
+		expect(CHAT_VIEW).toMatch(/noteKey = approvalLines\?\.bodyKey \?\? `chat\.note\.\$\{note\.code\}`/);
 		// Each line inside the guard that holds it, and nothing else in that guard.
 		expect(CHAT_VIEW).toMatch(/\{#if approvalLines\?\.nextKey\}\s*<div[^>]*>\{t\(approvalLines\.nextKey\)\}<\/div>\s*\{\/if\}/);
 		// The link's hit area is at least 24 px high (WCAG 2.5.8, ux U-054), by padding, not by type size.

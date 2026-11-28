@@ -6,7 +6,7 @@ import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, bulkLabelParts, bulkUndoApproveText, bulkUndoExplainText,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
-	bulkSentenceParts, bulkSecretInContextKey, bulkListUnread,
+	bulkSentenceParts, bulkSecretInContextKey, bulkListUnread, bulkFieldShapeText,
 	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
 	bulkRefusalText, bulkRefusalSentence, BULK_REFUSAL_KINDS,
 } from './bulk-runs.js';
@@ -730,14 +730,14 @@ describe('going on from a run that halted', () => {
 			.toBe('You can continue. If the run halts again right away, shop.example.invalid or the AI model is not answering yet; try again later.');
 		expect(bulkHaltText(at('unrecorded'), true, EN, true)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE, true)?.cause)
-			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, angerechnet sind 0.0034 USD.');
+			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00\u00a0USD, angerechnet sind 0.0034\u00a0USD.');
 		// What counts toward the limit, not what was paid: a judge call without an answer counts at
 		// its worst case (ux U-174).
 		expect([de['bulk.halt.costCap'], en['bulk.halt.costCap'], de['bulk.halt.costCap_mandate'], en['bulk.halt.costCap_mandate']]).toEqual([
-			'Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: {cap} USD, angerechnet sind {spent} USD.',
-			'The run reached the AI cost limit you set at its start: {cap} USD, with {spent} USD counted toward it.',
-			'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap} USD, angerechnet sind {spent} USD.',
-			'The run reached the AI cost limit the owner set at its start: {cap} USD, with {spent} USD counted toward it.',
+			'Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: {cap}\u00a0USD, angerechnet sind {spent}\u00a0USD.',
+			'The run reached the AI cost limit you set at its start: {cap}\u00a0USD, with {spent}\u00a0USD counted toward it.',
+			'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap}\u00a0USD, angerechnet sind {spent}\u00a0USD.',
+			'The run reached the AI cost limit the owner set at its start: {cap}\u00a0USD, with {spent}\u00a0USD counted toward it.',
 		]);
 		expect(bulkHaltText(at('blocked'), true, DE, true)).toEqual({
 			cause: 'Deine Instanz darf shop.example.invalid nicht erreichen.',
@@ -2196,6 +2196,23 @@ describe('bulkSecretInContextKey', () => {
 		expect(bulkSecretInContextKey(true, false)).toBe('bulk.invalid.secret_in_context');
 		expect(bulkSecretInContextKey(false, true)).toBe('bulk.invalid.secret_in_context_column');
 		expect(bulkSecretInContextKey(false, false)).toBe('bulk.invalid.secret_in_context_field');
+	});
+});
+
+// A schema arrives as JSON, where -0 survives `JSON.parse`; the shape reads 0, as it did before
+// numbers were formatted in the UI language. So does a negative value too small to show, while a
+// negative bound keeps its sign.
+describe('bulkFieldShapeText with a negative zero or a negative bound', () => {
+	const words: BulkI18n = { t: (k) => k, tf: (k, v) => `${k}:${Object.values(v).join('|')}` };
+	it('reads a schema\'s -0 as 0 in both UI languages', () => {
+		const shape = JSON.parse('{"type":"integer","minimum":-0,"maximum":9}') as unknown;
+		expect(Object.is((shape as { minimum: number }).minimum, -0)).toBe(true);
+		expect(bulkFieldShapeText(shape, words, 'de-CH')).toBe('bulk.shape.integer_range:0|9');
+		expect(bulkFieldShapeText(shape, words, 'en-GB')).toBe('bulk.shape.integer_range:0|9');
+	});
+	it('reads a negative value too small to show as 0, and keeps the sign of a negative bound', () => {
+		expect(bulkFieldShapeText({ type: 'number', minimum: -1e-30, maximum: 1 }, words, 'de-CH')).toBe('bulk.shape.number_range:0|1');
+		expect(bulkFieldShapeText({ type: 'number', minimum: -5, maximum: -0.5 }, words, 'en-GB')).toBe('bulk.shape.number_range:-5|-0.5');
 	});
 });
 

@@ -22,7 +22,7 @@ import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
   MANDATE_ENDED_RESULT, WAIT_EXPIRED_RESULT, WATCH_READ_UNRECORDED_RESULT, WATCH_URL_MISSING_RESULT,
-  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
+  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, memberEndOfStatus, type MemberEnd, type WorkerNotices,
 } from './worker-notices.js';
 import { BULK_NOTICES, bulkHaltForReaders, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -181,10 +181,11 @@ const BULK_EFFECTS: ReadonlySet<string> = new Set(Object.keys(BULK_EFFECT_KEYS))
  * which is why the lease is long. A lease that lapses under a live run is reported as
  * interrupted by whichever process finds it, and the run is not started a second time —
  * except for an effect that resumes after loss ({@link RESUMES_AFTER_LOSS}), which another
- * process then runs beside the live one. A bulk run's per-target claim keeps the two apart
- * only while that claim is younger than `BULK_CLAIM_STALE_MS` (30 s): a run stalled long
- * enough to lose its lease has stale target claims too, so a target it is still writing can
- * be written a second time.
+ * process then runs beside the live one. A bulk run's per-target claim keeps the two apart:
+ * a run stalled long enough to lose its lease has stale target claims too, and the other
+ * process may take its targets over. Once the stalled run runs again it sends no further write
+ * to a target taken from it and records nothing on it (`BulkLedger.renewClaim`); a send it had
+ * already started when it stalled can still land, and between targets it goes on as before.
  */
 const LEASE_HEARTBEAT_MS = 30_000;
 const LEASE_TTL_MS = 15 * 60_000;
@@ -3535,8 +3536,12 @@ export class WorkerLoop {
           { label: notices.chipRunAgain, task: stripHidden(task.description ?? task.title) },
         ],
       };
-      // With the owner's member-connection lines, told by reader (#notifyMemberEnd).
-      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, notices.memberEndForMandates);
+      // With the owner's member-connection lines, told by reader (#notifyMemberEnd); a grant reads
+      // why the run ended as the title tells it, by its class only.
+      const memberEnd: MemberEnd = endedByOwner ? 'stopped'
+        : capStop !== null ? (stop?.cause === 'budget_cap' ? 'cost' : 'turns')
+          : questionWentUnanswered ? 'unanswered' : 'finished';
+      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, notices.memberEndForMandates(memberEnd));
       else await this.notificationRouter.notify(message);
     }
   }
@@ -4080,7 +4085,10 @@ export class WorkerLoop {
       const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
       if (readers === null && withLines) {
         // Not split by reader, but with the owner's member-connection lines: see #notifyMemberEnd.
-        void this.#notifyMemberEnd(message, WORKER_NOTICES[lang].memberEndForMandates);
+        // A grant reads why the run ended as its status tells it, as the trigger's readers do; a
+        // real halt is no finish, so it reads neutrally here, where it is told apart.
+        const memberEnd: MemberEnd = finishedWithNote ? 'finished' : told.status === 'halted' ? 'ended' : memberEndOfStatus(told.status);
+        void this.#notifyMemberEnd(message, WORKER_NOTICES[lang].memberEndForMandates(memberEnd));
         return;
       }
       void this.notificationRouter.notify({

@@ -22,8 +22,14 @@
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; /** Who set it up (`owner` or `mandate:<address>`). */ created_by?: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
-		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
+		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up,
+		 *  the owner's on every profile but one a person with access set up. */
 		reader_may_connect?: boolean;
+		/** Sent only to the person who set up an oauth2 profile: whether its client pair is still
+		 *  withheld from them (the owner has not released it). */
+		reader_client_withheld?: boolean;
+		/** Only to the owner, on a profile a person with access set up: whether the owner's save would take it over. */
+		owner_may_take_over?: boolean;
 		/** A store whose access runs out soon, has, or whose refresh ended (`storeAccessEnd` in the engine). */
 		store_access_ends?: StoreAccessEnd;
 		/** The built-in provider the profile signs in through, by its display name; null for none (`builtInPresetOf`). */
@@ -74,9 +80,11 @@
 
 	// Never connected: the first connect is still to make, unless a revocation view already offers
 	// its own reconnect link, so the two never show together. An erasure past its hold shows no
-	// link of its own, and the first connect is then the way back.
+	// link of its own, and the first connect is then the way back. Whether a grant is a connection
+	// is the engine's answer (`connection`): a save records a grant for every new profile before
+	// anyone connected it.
 	function notYetConnected(p: ApiProfile): boolean {
-		return onBuiltInProvider(p) && (p.oauth_grant === undefined || p.oauth_grant === null)
+		return onBuiltInProvider(p) && p.oauth_grant?.connection !== true
 			&& !viewLinks(revocationView(p.oauth_grant, notices.get(p.id), now));
 	}
 
@@ -301,9 +309,11 @@
 									<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 									<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
 										class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+								{:else if isOwnerSession()}
+									<!-- The owner, on a profile a person with access set up: the line below the card says why. -->
 								{:else}
-									<!-- No link (ux U-109): the server says `false` only to a mandate, which reconnects
-									     only a profile it set up; the line says why. -->
+									<!-- No link (U-109): to a mandate the server says `false` for a profile it did not
+									     set up; the line says why. -->
 									<p data-testid="api-reconnect-not-yours">{t('apis.reconnect_not_yours')}</p>
 								{/if}
 							{/if}
@@ -337,17 +347,46 @@
 							{:else if access.mayConnect}
 								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
 									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							{:else if isOwnerSession()}
+								<!-- The owner, on a profile a person with access set up: the line below says why. -->
 							{:else}
 								<p data-testid="api-reconnect-not-yours">{t('apis.reconnect_not_yours')}</p>
 							{/if}
 						</div>
 					{/if}
-					{#if onBuiltInProvider(profile) && isOwnerSession()}
-						<!-- No first connect on a profile a person with access set up: the view hides a connection the
-						     owner makes there from every reader, the owner included, so it would show as connected and
-						     carry nothing (`hiddenFromProfile`). -->
+					{#if isOwnerSession() && setUpByMember(profile) && profile.auth?.type === 'oauth2'}
+						<!-- No connect for the owner on a profile a person with access set up: the view hides a
+						     connection the owner makes there from every reader, the owner included, so it would show as
+						     connected and carry nothing (`hiddenFromProfile`); the engine refuses the start too. The line
+						     names the way, taking it over in the chat, below the app credentials where the first connect
+						     would stand, and only where the engine says that save goes through (`owner_may_take_over`): not
+						     over that person's connection while their access lasts. Its own row, outside the form, so it
+						     stands whatever state the form is in (loading, failed, other names). The client pair can still
+						     be set for that person. -->
+						{#if onBuiltInProvider(profile)}
+							<div class="border-t border-border px-4 py-3">
+								<PresetClientForm profileId={profile.id} connectHref={null} />
+							</div>
+						{/if}
+						{#if profile.owner_may_take_over === true}
+							<div class="border-t border-border px-4 py-3" data-testid="api-set-up-by-member-row">
+								<p class="text-sm text-text-muted" data-testid="api-set-up-by-member">{t('apis.set_up_by_member_owner')}</p>
+							</div>
+						{/if}
+					{:else if onBuiltInProvider(profile) && isOwnerSession()}
 						<div class="border-t border-border px-4 py-3">
-							<PresetClientForm profileId={profile.id} connectHref={notYetConnected(profile) && !setUpByMember(profile) ? connectHref(getApiBase(), profile.id) : null} />
+							<PresetClientForm profileId={profile.id} connectHref={notYetConnected(profile) ? connectHref(getApiBase(), profile.id) : null} />
+						</div>
+					{:else if notYetConnected(profile) && profile.reader_client_withheld === false && profile.reader_may_connect !== false}
+						<!-- The person who set it up, once the owner released the client pair to it: the first connect. -->
+						<div class="border-t border-border px-4 py-3">
+							<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-connect-first-member"
+								class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.connect_first')}</a>
+						</div>
+					{:else if notYetConnected(profile) && profile.reader_client_withheld === true}
+						<!-- The person who set it up, before the owner released the client pair: who has to act. -->
+						<div class="border-t border-border px-4 py-3 text-xs text-text-muted">
+							<p data-testid="api-connect-first-withheld">{t('apis.connect_first_client_withheld')}</p>
 						</div>
 					{:else if notYetConnected(profile) && profile.reader_may_connect === false}
 						<!-- The server says `false` only to a mandate, which connects only a profile it set up. -->

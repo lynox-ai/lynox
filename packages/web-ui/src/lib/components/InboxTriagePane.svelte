@@ -18,6 +18,7 @@
 	} from '../stores/inbox.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { inboxHeadline } from '../utils/inbox-headline.js';
+	import { shownReplyFraming } from '../utils/inbox-shown.js';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import Icon from '../primitives/Icon.svelte';
@@ -41,7 +42,9 @@
 	// seeded with this mail item; the agent drafts + sends via mail_reply.
 	function replyInChat(item: InboxItem): void {
 		newChat();
-		const framing = `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
+		// An item whose list row shows another mail than its own names none of that mail's values
+		// here: the server's context for the item carries them (see shownReplyFraming).
+		const framing = shownReplyFraming(item, t) ?? `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
 		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
 		void goto('/app');
 	}

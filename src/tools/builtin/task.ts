@@ -10,7 +10,7 @@ import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, isP
 import { foreignWorkflowScheduleRefusalKind } from '../../core/plan-stamp.js';
 import { lastRunResultFor } from '../../core/member-connection-notes.js';
 import { noticeLanguage } from '../../core/notice-language.js';
-import { MANDATE_ENDED_RESULT, MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WAIT_EXPIRED_RESULT, WATCH_READ_UNRECORDED_RESULT, WATCH_URL_MISSING_RESULT, WEBHOOK_ASKS_RESULT, WORKER_NOTICES } from '../../core/worker-notices.js';
+import { MANDATE_ENDED_RESULT, MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WAIT_EXPIRED_RESULT, WATCH_READ_UNRECORDED_RESULT, WATCH_URL_MISSING_RESULT, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, memberEndOfStatus } from '../../core/worker-notices.js';
 import { withoutForeignMarks } from '../../core/foreign-marks.js';
 import { otherRunTextBlock, setUpByPhrase } from '../../core/other-run-text.js';
 import { planMakerOf } from './diagnose-workflow.js';
@@ -327,7 +327,7 @@ function formatTaskLine(
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
   // Whose plan the run's text comes from is read only for a run whose result the line shows.
   const ended = t.last_run_status !== undefined && t.last_run_status !== 'success';
-  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates()) }, workflowReader, ended ? otherRunOf(t, reader.workflowAuthorship) : undefined)}`;
+  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates(t.last_run_status)) }, workflowReader, ended ? otherRunOf(t, reader.workflowAuthorship) : undefined)}`;
 }
 
 /**
@@ -336,7 +336,8 @@ function formatTaskLine(
  */
 interface TaskReader {
   readonly owner: () => boolean;
-  readonly forMandates: () => string;
+  /** The sentence for the last run's end, by its stored status (`memberEndOfStatus`). */
+  readonly forMandates: (status: string | null | undefined) => string;
   /** Who made a workflow, for a trigger that runs one (`otherRunOf`); absent without a run history. */
   readonly workflowAuthorship?: ((id: string) => { createdBy?: string | null | undefined; mandateEditor?: string | null | undefined } | undefined) | undefined;
 }
@@ -345,7 +346,7 @@ interface TaskReader {
 function taskReaderOf(agent: IAgent): TaskReader {
   return {
     owner: () => isOwnerPrincipal(agent.principal),
-    forMandates: () => WORKER_NOTICES[agent.noticeLanguage ?? noticeLanguage(undefined)].memberEndForMandates,
+    forMandates: (status) => WORKER_NOTICES[agent.noticeLanguage ?? noticeLanguage(undefined)].memberEndForMandates(memberEndOfStatus(status)),
     workflowAuthorship: workflowAuthorshipOf(agent),
   };
 }

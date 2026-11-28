@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, recreatedGrants, sameValue,
+  BULK_CLAIM_HEARTBEAT_MS, BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, recreatedGrants, sameValue,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -81,6 +81,14 @@ export class BulkWriterHalt extends Error {
   constructor(readonly reason: BulkHaltReason) {
     super(reason);
     this.name = 'BulkWriterHalt';
+  }
+}
+
+/** Thrown at a send by a loop whose claim on the target another loop holds now: nothing is sent. */
+class BulkClaimLost extends Error {
+  constructor() {
+    super('claim lost');
+    this.name = 'BulkClaimLost';
   }
 }
 
@@ -185,6 +193,9 @@ export interface BulkEffectDeps {
   /** The writer for the run's target system, or null when it is not available. */
   writerFor: (run: BulkRunForApply) => TargetWriter | null;
   now?: () => number;
+  /** How often a loop renews the claim on the target it writes ({@link BULK_CLAIM_HEARTBEAT_MS}).
+   *  Set by tests only. */
+  claimHeartbeatMs?: number;
   /** The worker's task signal. Read between targets only, never inside a write. */
   signal?: AbortSignal | undefined;
   /**
@@ -260,6 +271,7 @@ async function applyRunEffect(
   const { ledger } = deps;
   const say = deps.notices ?? BULK_NOTICES.en;
   const now = deps.now ?? Date.now;
+  const heartbeatMs = deps.claimHeartbeatMs ?? BULK_CLAIM_HEARTBEAT_MS;
   const run = ledger.getRunForApply(runId);
   if (!run) return { status: 'refused', summary: say.noRun };
   if ((effect === 'bulk_undo') !== (run.kind === 'undo')) {
@@ -393,33 +405,69 @@ async function applyRunEffect(
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.timeBudget), say) };
     }
-    if (!ledger.claimTarget(runId, seq, now())) continue;
+    const claimedAt = now();
+    if (!ledger.claimTarget(runId, seq, claimedAt)) continue;
     const target = ledger.loadTarget(runId, seq);
     if (!target) continue;
 
     // The connections of every request this target's write sends, its reads included: one
     // connection and grant per target, since a re-consent can land between two targets.
     const carried = writer.track?.() ?? null;
-    const outcome = await writeOne(writer, target, carried);
+    // The claim this loop holds, renewed on a heartbeat while the target's requests and waits run,
+    // and at each send: a live loop keeps it however long they take. `since` is the time of the
+    // last renewal, which every record of this target is fenced on.
+    const held = { since: claimedAt, lost: false };
+    // run-group-starter: renews this one target's claim until its write returns (cleared in the
+    // `finally` below, whichever way it ends); it writes only `claimed_at` and reports no spend.
+    const beat = setInterval(() => {
+      try {
+        const at = now();
+        if (ledger.renewClaim(runId, seq, held.since, at)) held.since = at;
+        else held.lost = true;
+      } catch {
+        // A missed beat (the store busy) is not a lost claim: the next one renews it.
+      }
+    }, heartbeatMs);
+    let outcome: Awaited<ReturnType<typeof writeOne>>;
+    try {
+      outcome = await writeOne(writer, target, carried, held);
+    } finally {
+      clearInterval(beat);
+    }
+    // Another loop may hold the target now (`lost`): it records what happens there, and this one
+    // records nothing on it. A halt this loop met still halts the run — a writer's halt holds for
+    // every target, and markup a host added is the run's to stop on — but never over an end the
+    // other loop already gave the run. Otherwise this loop goes on to the next target, where the
+    // checks between targets (the owner's stop among them) apply as on any other.
+    const lost = outcome.kind === 'lost' || held.lost;
+    // `taken`: this loop found the target taken, at the write or at its fenced record.
+    // When the other loop already ended or halted the run, this loop reports that, not its own reason.
+    const haltRun = (reason: BulkHaltReason, taken: boolean): BulkEffectOutcome => {
+      if (taken && !ledger.haltIfWriting(runId, reason)) {
+        return { status: 'halted', summary: summarize(ledger, runId, say.otherLoop, say) };
+      }
+      if (!taken) ledger.halt(runId, reason);
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', reason), say) };
+    };
+    if (outcome.kind === 'lost') continue;
     const via = carried?.() ?? null;
     if (outcome.kind === 'halt') {
-      // The target is released unwritten; a resume takes it again.
-      ledger.releaseClaim(runId, seq);
-      ledger.halt(runId, outcome.reason);
-      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', outcome.reason), say) };
+      // The target is released unwritten, while it is still this loop's; a resume takes it again.
+      const released = !lost && ledger.releaseClaim(runId, seq, held.since);
+      return haltRun(outcome.reason, !released);
     }
     if (outcome.kind === 'applied') {
-      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true);
-      if (outcome.hostAddedMarkup === true) {
-        // Written and recorded with its mark first, so a halt that another loop's reason
-        // overwrites still leaves the target marked: the mark is the truth, not `halt_reason`.
-        ledger.halt(runId, BULK_HALT_REASONS.markupAddedByShop);
-        return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.markupAddedByShop), say) };
-      }
+      const recorded = ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true, held.since);
+      // Recorded with its mark first where this loop still holds the target, so a halt that
+      // another loop's reason overwrites still leaves it marked: the mark is the truth, not
+      // `halt_reason`. Where the other loop holds it, that loop records what it finds there, or
+      // gives it back unrecorded on a halt of its own, and a resume reads it again.
+      if (outcome.hostAddedMarkup === true) return haltRun(BULK_HALT_REASONS.markupAddedByShop, lost || !recorded);
+      if (!recorded) continue;
       consecutive = 0;
       continue;
     }
-    ledger.recordFailed(runId, seq, outcome.kind, via);
+    if (lost || !ledger.recordFailed(runId, seq, outcome.kind, via, held.since)) continue;
     // No new attempt, so no failure: the send that left it unclear was counted, halted the
     // run, or belonged to a loop that died. Counting it on every pass would halt a small run
     // at the same target on every resume. It neither extends nor breaks a run of failures.
@@ -492,8 +540,11 @@ async function applyRunEffect(
   }
 
   /** One claimed target: what to record for it. */
-  async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
-    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
+  async function writeOne(
+    w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null,
+    /** This loop's claim on the target: renewed at each send, and lost once another loop holds it. */
+    held: { since: number; lost: boolean },
+  ): Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason } | { kind: 'lost' }> {
     let localSent = false;
     try {
       const cur = await w.read(t.key, fieldsOf(t));
@@ -522,7 +573,16 @@ async function applyRunEffect(
       if (w.reportsSend === true && ledger.hasUnknownSend(runId, t.seq)) return { kind: 'sent_unknown' };
       // Marked as it leaves, with the connection it leaves under: a loop that dies before the
       // target is recorded still left a row saying whose credential reached the host.
-      const sent = (): void => { ledger.markSent(runId, t.seq, carried?.() ?? null); };
+      // Each send first renews this loop's claim, a retry after a 429 included: a loop that lost
+      // it to another sends nothing, whatever it read before.
+      const sent = (): void => {
+        const at = now();
+        if (held.lost || !ledger.markSent(runId, t.seq, carried?.() ?? null, { since: held.since, now: at })) {
+          held.lost = true;
+          throw new BulkClaimLost();
+        }
+        held.since = at;
+      };
       const refused = (): void => { ledger.markRefused(runId, t.seq); };
       if (w.reportsSend !== true) { sent(); localSent = true; }
       // The run's stamp, or the one an undo target writes back (`ApplyTarget.writeGrants`).
@@ -539,6 +599,7 @@ async function applyRunEffect(
       // never one a loop that died left before it. No count reads a local run's open sends today;
       // this keeps the column true for whatever reads it next.
       if (localSent) ledger.markRefused(runId, t.seq);
+      if (err instanceof BulkClaimLost) return { kind: 'lost' };
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
       if (err instanceof BulkSecretError) return { kind: 'secret' };
