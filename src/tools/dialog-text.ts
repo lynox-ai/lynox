@@ -1094,8 +1094,9 @@ interface ContentFlagText {
 
 /**
  * The run's result after the content check flagged a request and it was not allowed. A person
- * reads it in the chat; it is not stored, and the model never sees it (the run ends before the
- * model is called). It starts with what happened, then the reason, then the way out.
+ * reads it in the chat, and it is kept as a display-only note so a reload shows it again; the
+ * model never sees it (the run ends before the model is called, and display-only rows stay out
+ * of its context). It starts with what happened, then the reason, then the way out.
  */
 export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>> = {
   en: {
