@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -343,5 +343,83 @@ describe('person erasure routes (real engine)', () => {
     const { status, body: pv } = await preview(p.subjectId);
     expect(status).toBe(200);
     expect((await erase({ subjectId: p.subjectId, plan: pv['plan'] })).status).toBe(200);
+  });
+
+  describe('set-aside copies of the databases it deletes in', () => {
+    const made: string[] = [];
+    const corrupt = (name: string): void => { writeFileSync(join(dir!, name), ''); made.push(name); };
+    afterEach(() => { for (const f of made.splice(0)) rmSync(join(dir!, f), { force: true }); });
+
+    it('names none when there are none', async () => {
+      const p = seedPerson();
+      const r = await preview(p.subjectId);
+      expect(r.status).toBe(200);
+      expect(r.body['setAsideCopies']).toEqual([]);
+    });
+
+    it('names every copy of engine.db and agent-memory.db, the staging copy included, with the -wal and -shm beside it, in the preview and the answer, and no other database', async () => {
+      corrupt('engine.db.corrupt-100');
+      corrupt('engine.db.corrupt-100-wal');
+      corrupt('engine.db.corrupt-100-shm');
+      corrupt('engine.db.migration-tmp.corrupt-200');
+      corrupt('agent-memory.db.corrupt-300');
+      corrupt('agent-memory.db.corrupt-300-wal');
+      corrupt('history.db.corrupt-400');
+      corrupt('history.db.corrupt-400-wal');
+      corrupt('datastore.db.corrupt-500');
+      const want = [
+        { file: 'agent-memory.db.corrupt-300', companions: ['agent-memory.db.corrupt-300-wal'] },
+        { file: 'engine.db.corrupt-100', companions: ['engine.db.corrupt-100-wal', 'engine.db.corrupt-100-shm'] },
+        { file: 'engine.db.migration-tmp.corrupt-200', companions: [] },
+      ];
+      const p = seedPerson();
+      const { status, body: pv } = await preview(p.subjectId);
+      expect(status).toBe(200);
+      expect(pv['setAsideCopies']).toEqual(want);
+      const r = await erase({ subjectId: p.subjectId, plan: pv['plan'] });
+      expect(r.status).toBe(200);
+      expect(r.body['erased']).toBe(true);
+      expect(r.body['setAsideCopies']).toEqual(want);
+    });
+
+    it('names a -wal or -shm whose copy is gone as a copy itself, and no other database\'s', async () => {
+      corrupt('engine.db.corrupt-600-wal');
+      corrupt('agent-memory.db.corrupt-700-shm');
+      corrupt('history.db.corrupt-800-wal');
+      const p = seedPerson();
+      const r = await preview(p.subjectId);
+      expect(r.status).toBe(200);
+      expect(r.body['setAsideCopies']).toEqual([
+        { file: 'agent-memory.db.corrupt-700-shm', companions: [] },
+        { file: 'engine.db.corrupt-600-wal', companions: [] },
+      ]);
+    });
+
+    it('names them in the 500 answer of a step that failed as well', async () => {
+      corrupt('engine.db.corrupt-900');
+      const p = seedPerson();
+      const { body: pv } = await preview(p.subjectId);
+      vi.spyOn(engine().getKnowledgeLayer()!, 'purgeLegacyMemoriesForErasure').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
+      const r = await erase({ subjectId: p.subjectId, plan: pv['plan'] });
+      expect(r.status).toBe(500);
+      expect(r.body['erased']).toBe(false);
+      expect(r.body['setAsideCopies']).toEqual([{ file: 'engine.db.corrupt-900', companions: [] }]);
+    });
+
+    it.skipIf(process.getuid?.() === 0)('answers null, not an empty list, when the data directory cannot be listed', async () => {
+      const p = seedPerson();
+      const { body: pv } = await preview(p.subjectId);
+      chmodSync(dir!, 0o300);
+      try {
+        const again = await preview(p.subjectId);
+        expect(again.status).toBe(200);
+        expect(again.body['setAsideCopies']).toBeNull();
+        const r = await erase({ subjectId: p.subjectId, plan: pv['plan'] });
+        expect(r.status).toBe(200);
+        expect(r.body['setAsideCopies']).toBeNull();
+      } finally {
+        chmodSync(dir!, 0o700);
+      }
+    });
   });
 });

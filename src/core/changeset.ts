@@ -67,6 +67,7 @@ const DIFF_CUT_NOTE = `(Diff cut: only its start is shown, as it is longer than 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
+import { ownedBy, type RequestPrincipal } from './request-principal.js';
 
 export class ChangesetManager {
   private entries: Map<string, ChangesetEntry> = new Map();
@@ -93,10 +94,26 @@ export class ChangesetManager {
   /** `runId` names the session run this manager belongs to (one per user run, not the HTTP
    *  run registry's id). The review shows it and its answer carries it back, so an answer to
    *  one run's review never reaches the next run's files. */
-  constructor(private readonly cwd: string, readonly runId: string, otherRoots: readonly string[] = []) {
+  constructor(
+    private readonly cwd: string,
+    readonly runId: string,
+    otherRoots: readonly string[] = [],
+    review: ChangesetReviewOrigin = {},
+  ) {
     this.realCwd = realOr(cwd);
     this.roots = [this.realCwd, ...otherRoots.map(realOr)];
+    this.createdBy = review.createdBy;
+    this.shownForReview = review.shownForReview === true;
   }
+
+  /** The tag of the principal whose run made this changeset (`principalTag`). Who may answer
+   *  its review is decided from it ({@link mayAnswerReview}), not from whoever ran last in the
+   *  session: a run that fails before it replaces the manager must not hand the review on. */
+  readonly createdBy: string | undefined;
+  /** Whether the client of the run that made this changeset shows the review after the run.
+   *  Only such a review holds that client's next message; one made by a client without a
+   *  review card (a bot, the API) never does. */
+  readonly shownForReview: boolean;
 
   /** `cwd` with symlinks resolved: the workspace, which names in the review are relative to. */
   private readonly realCwd: string;
@@ -508,7 +525,8 @@ export class ChangesetManager {
   rollbackAll(): string[] {
     const notRestored: string[] = [];
     for (const [abs, entry] of this.entries) {
-      if (!this._rollbackOne(abs, entry)) notRestored.push(abs);
+      if (this._rollbackOne(abs, entry)) this._forget(abs);
+      else notRestored.push(abs);
     }
     return notRestored;
   }
@@ -523,10 +541,30 @@ export class ChangesetManager {
       const abs = resolve(file);
       const entry = this.entries.get(abs);
       if (entry) {
-        if (!this._rollbackOne(abs, entry)) notRestored.push(abs);
+        if (this._rollbackOne(abs, entry)) this._forget(abs);
+        else notRestored.push(abs);
       }
     }
     return notRestored;
+  }
+
+  /**
+   * The files still tracked, by the names the review shows. After a rollback that stopped
+   * partway these are the ones it has not restored: each restored file is forgotten as soon
+   * as it is back, so a second rollback finds only what is left, with its backup.
+   */
+  pendingNames(): string[] {
+    return [...this.entries.keys()].map((abs) => relative(this.realCwd, abs));
+  }
+
+  /** One file is done with: its backup copy goes, and the review no longer holds it. */
+  private _forget(abs: string): void {
+    const backupPath = this._backupPathOf(abs);
+    if (backupPath !== null) rmSync(backupPath, { force: true });
+    this.entries.delete(abs);
+    this.originalBytes.delete(abs);
+    this.anchored.delete(abs);
+    this.written.delete(abs);
   }
 
   /**
@@ -574,12 +612,7 @@ export class ChangesetManager {
       // Kept: a tracked file that is gone or unreadable is not "unchanged".
       if (entry.status === 'modified' && !this._isUnchanged(abs)) continue;
       if (entry.status === 'added' && this._readTracked(abs) !== null) continue;
-      const backupPath = this._backupPathOf(abs);
-      if (backupPath !== null) rmSync(backupPath, { force: true });
-      this.entries.delete(abs);
-      this.originalBytes.delete(abs);
-      this.anchored.delete(abs);
-      this.written.delete(abs);
+      this._forget(abs);
     }
     if (this.entries.size === 0) this.cleanup();
   }
@@ -730,6 +763,22 @@ export class ChangesetManager {
  * with `edit_file` is reviewed and can be rolled back like a workspace file; the file tools
  * bypass the artifact store's version ring, so nothing else could undo it.
  */
-export function workspaceChangeset(runId: string): ChangesetManager {
-  return new ChangesetManager(getWorkspaceCwd(), runId, writeRootsBesidesWorkspace());
+export function workspaceChangeset(runId: string, review: ChangesetReviewOrigin = {}): ChangesetManager {
+  return new ChangesetManager(getWorkspaceCwd(), runId, writeRootsBesidesWorkspace(), review);
+}
+
+/** Who made a changeset's run, and whether that run's client shows the review. */
+export interface ChangesetReviewOrigin {
+  readonly createdBy?: string | undefined;
+  readonly shownForReview?: boolean | undefined;
+}
+
+/**
+ * Whether a principal may answer a changeset's review. The one rule behind the review card,
+ * the hold on the next message and the answer itself, so a person is never held by a review
+ * they cannot see or answer. The owner answers every review, a mandate only one its own run
+ * made, the control plane none.
+ */
+export function mayAnswerReview(csm: ChangesetManager, p: RequestPrincipal): boolean {
+  return ownedBy({ created_by: csm.createdBy }, p);
 }

@@ -81,7 +81,7 @@ describe('the tables (history.db v70)', () => {
     raw.close();
     const upgraded = new RunHistory(path);
     try {
-      expect((upgraded.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(73);
+      expect((upgraded.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(74);
       new ContainmentMirror(upgraded.getDb()).write('t1', SHOP);
       expect(new ContainmentMirror(upgraded.getDb()).has('t1')).toBe(true);
     } finally {
