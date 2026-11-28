@@ -1418,8 +1418,13 @@ function refuseContainedSource(res: ServerResponse, body: unknown, containment: 
 export const CONTAINED_THREAD_READ_REFUSAL = 'This chat was marked as holding data from a connected shop, so only the owner of this instance and the person who started it can read it. To work on the task yourself, start a new chat.';
 /** The `code` beside {@link CONTAINED_THREAD_READ_REFUSAL}, which the Web UI shows in its own language (ux U-091). */
 export const CONTAINED_THREAD_CODE = 'contained_thread';
-/** Why a live run that names no chat is not streamed to anyone but the owner: its chat cannot be checked (ux U-091). */
-export const RUN_CHAT_UNKNOWN_REFUSAL = 'lynox could not read which chat this run belongs to, so only the owner of this instance can follow it live. If the run belongs to a chat of yours, open that chat from the chat list.';
+/**
+ * The one answer a helper gets for a live run it may not follow: an id the run registry does not
+ * hold, a run that names no chat, a run in a contained chat of another. No reason, so it does not
+ * tell which (U-492).
+ */
+export const RUN_CHAT_UNKNOWN_REFUSAL = 'You cannot follow this run live. If it belongs to a chat of yours, open that chat from the chat list.';
+/** The `code` beside {@link RUN_CHAT_UNKNOWN_REFUSAL}, for all three cases despite its name: the Web UI keys its text on it. */
 export const RUN_CHAT_UNKNOWN_CODE = 'run_chat_unknown';
 
 /** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
@@ -3320,7 +3325,9 @@ export class LynoxHTTPApi {
    * owner and to whoever started the chat (`ownedBy`; the owner owns every row). A chat whose row
    * is missing is no one's, so anyone else is refused on a contained id even then. A live run that
    * names no chat cannot be checked and is refused; a recorded run that names none answers as not
-   * found. `null` when the read may go on.
+   * found. A live run is refused with one answer whether its id is unknown or names a contained chat
+   * of another, so the answer does not tell whether such a run is going on. `null` when the read
+   * may go on.
    */
   private _containedReadRefusal(principal: RequestPrincipal, named: ThreadNamed): { status: number; error: string; code?: string } | null {
     if (named === null || isOwnerPrincipal(principal)) return null;
@@ -3346,6 +3353,7 @@ export class LynoxHTTPApi {
     threadId = this._chatsOf([threadId]).get(threadId) ?? threadId;
     if (ownedBy(engine?.getThreadStore()?.getThread(threadId) ?? undefined, principal)) return null;
     if (!threadIsContained(engine?.getToolContext().containment ?? null, threadId)) return null;
+    if ('liveRun' in named) return { status: 403, error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE };
     return { status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE };
   }
 
@@ -6347,7 +6355,8 @@ export class LynoxHTTPApi {
           if (csm?.hasChanges()) {
             res.write(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: csm.size, runId: csm.runId })}\n\n`);
           }
-          res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined })}\n\n`);
+          // `notice`: the result is lynox's own sentence, not the model's (set by the engine only).
+          res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined, notice: session.getLastRunNotice() })}\n\n`);
           res.end();
         }
       } catch (err: unknown) {
@@ -6426,8 +6435,11 @@ export class LynoxHTTPApi {
     // from a pending prompt rather than tracked as a separate write, keeping the
     // registry a simple liveness mirror with a single source of truth for
     // "blocked on the user". Whole-tenant (single-tenant engine, no per-user
-    // scoping — see PRD-RUN-RESILIENCE N5).
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/active', async (_req, res) => {
+    // scoping — see PRD-RUN-RESILIENCE N5), except that a helper is not shown
+    // the runs and questions of a contained chat of another, nor a run that
+    // names no chat (`_unreadableChats`): it cannot follow them, and the list
+    // would hand it their run ids and which of them wait on a question.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/active', async (req, res) => {
       const registry = this.engine?.getRunRegistry();
       if (!registry) { jsonResponse(res, 200, { runs: [] }); return; }
       const promptStoreForRuns = this.engine?.getPromptStore();
@@ -6471,7 +6483,8 @@ export class LynoxHTTPApi {
           attachable: false,
         });
       }
-      jsonResponse(res, 200, { runs });
+      const unreadable = this._unreadableChats(this._principalOf(req), runs.map((r) => r.threadId));
+      jsonResponse(res, 200, { runs: runs.filter((r) => !unreadable.has(r.threadId)) });
     }, READS));
 
     // DELETE /runs/:runId — abort a live run by id (AC10). Works from any
@@ -6512,6 +6525,9 @@ export class LynoxHTTPApi {
     // Ownership (S3, D-S3): an unknown / not-live runId returns 404 — never 403
     // (no existence oracle). The buffer is the liveness source of truth: it
     // exists only while the run is live, so a completed/never-existed run 404s.
+    // A helper is refused before this handler, with one 403 for an id the
+    // registry does not hold and for a run it may not follow
+    // (`_containedReadRefusal`), so it reaches the 404 only for a chat it may read.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/:runId/stream', async (req, res, params) => {
       const runId = params['runId'] ?? '';
       const buffer = this.engine?.getRunBufferManager()?.get(runId);
@@ -10065,8 +10081,8 @@ export class LynoxHTTPApi {
       // A mandate is shown the flags only for a run it may stop — its own hand run — the
       // same line the stop route (one 403) and a delete (`not_stopped`) draw. This keeps
       // the controls consistent; it is NOT a confidentiality boundary: the `READS` routes
-      // are tenant-wide for a mandate (`GET /api/runs/active` lists every run). Who
-      // started a run is not added to the row either way.
+      // are tenant-wide for a mandate (`GET /api/runs/active` lists every run in a chat it
+      // may read). Who started a run is not added to the row either way.
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
       const history = engine.getRunHistory();

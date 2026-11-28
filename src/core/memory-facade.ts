@@ -3,8 +3,8 @@ import { processErrorText } from './error-egress.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { MemoryNamespace } from '../types/index.js';
 
-/** A memory doc line's date stamp — stripped so the KG mirror matches the stored statement text. */
-export const DATE_PREFIX_RE = /^\[\d{4}-\d{2}-\d{2}\]\s*/;
+import { DATE_PREFIX_RE, untrustedLineKeys } from './memory-line-key.js';
+export { DATE_PREFIX_RE };
 
 /**
  * Single choke point for memory MUTATIONS so the flat-file document store and the
@@ -75,8 +75,13 @@ export class MemoryFacade {
     // malformed request can't wipe the whole notebook (the KG side already guards
     // empty in _eraseInKg; this guards the flat-file delete too).
     if (!pattern.trim()) return 0;
+    const erased = ((await this.memory.load(ns)) ?? '').split('\n').filter(l => l.includes(pattern));
     const count = await this.memory.delete(ns, pattern);
     await this._eraseInKg(pattern, ns);
+    // Erased means gone: the untrusted marks of the erased lines go too (only their hashes are
+    // kept, but a short line's hash can be confirmed by a guess). The same text in another
+    // scope's file loses its mark with them.
+    this.knowledgeLayer?.forgetUntrustedLines(ns, untrustedLineKeys(erased.join('\n')));
     return count;
   }
 

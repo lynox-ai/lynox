@@ -296,6 +296,7 @@ const mockSessionInstance = {
   getModelTier: vi.fn().mockReturnValue('balanced'),
   getChangesetManager: vi.fn().mockReturnValue(null),
   getLastRunUsage: vi.fn().mockReturnValue(null),
+  getLastRunNotice: vi.fn().mockReturnValue(undefined),
   getAgent: vi.fn().mockReturnValue(null),
   sessionId: 'mock-session-id',
 };
@@ -3433,6 +3434,37 @@ describe('LynoxHTTPApi', () => {
       expect(text).not.toContain('event: error');
       expect(text).toContain('event: done');
       expect(text).toContain('Approve the refund?');
+    });
+
+    /** The `done` frame's data, parsed. */
+    function doneFrame(text: string): Record<string, unknown> {
+      const lines = text.split('\n');
+      const at = lines.findIndex((l) => l === 'event: done');
+      expect(at, 'a done frame').toBeGreaterThanOrEqual(0);
+      return JSON.parse(lines[at + 1]!.replace(/^data:\s*/, '')) as Record<string, unknown>;
+    }
+
+    it('done says when the result is lynox\'s own sentence, as the session reports it', async () => {
+      mockSessionRun.mockResolvedValueOnce('⚠ Request blocked by content policy: x. This request was not sent to the AI model.');
+      mockSessionInstance.getLastRunNotice.mockReturnValueOnce('content_refused');
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'x' }) });
+      expect(doneFrame(await res.text())).toMatchObject({ notice: 'content_refused' });
+    });
+
+    it('control: a model reply\'s done carries no notice', async () => {
+      mockSessionRun.mockResolvedValueOnce('Paris.');
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'capital of France' }) });
+      const done = doneFrame(await res.text());
+      expect(done['result']).toBe('Paris.');
+      expect('notice' in done).toBe(false);
+    });
+
+    it('a run that ended needing input carries no notice: its question may be the model\'s own words', async () => {
+      mockSessionRun.mockImplementationOnce(async () => { throw new InputRequiredError('Approve the refund?'); });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'refund' }) });
+      const done = doneFrame(await res.text());
+      expect(done['result']).toContain('Approve the refund?');
+      expect('notice' in done).toBe(false);
     });
 
     it('echoes the run usage in the done event', async () => {
@@ -11788,23 +11820,30 @@ describe('LynoxHTTPApi', () => {
         });
       });
 
-      it('a live run of another person\'s contained chat does not stream to a helper; one that names no chat says so', async () => {
-        const { CONTAINED_THREAD_CODE, RUN_CHAT_UNKNOWN_REFUSAL, RUN_CHAT_UNKNOWN_CODE } = await import('./http-api.js');
+      it('a helper gets one answer for a live run it may not follow: an unknown id, a run that names no chat, a run of another person\'s contained chat', async () => {
+        const { RUN_CHAT_UNKNOWN_REFUSAL, RUN_CHAT_UNKNOWN_CODE } = await import('./http-api.js');
         const { RunBufferManager } = await import('../core/run-buffer.js');
         const mgr = new RunBufferManager();
-        for (const id of ['run-shop', 'run-notes', 'run-nowhere']) mgr.create(id).append({ type: 'text', text: 'hello', agent: 'main' });
-        const rows: Record<string, { thread_id: string }> = { 'run-shop': { thread_id: 'shop' }, 'run-notes': { thread_id: 'notes' } };
+        for (const id of ['run-shop', 'run-evas', 'run-notes', 'run-nowhere']) mgr.create(id).append({ type: 'text', text: 'hello', agent: 'main' });
+        const rows: Record<string, { thread_id: string }> = { 'run-shop': { thread_id: 'shop' }, 'run-evas': { thread_id: 'evas-shop' }, 'run-notes': { thread_id: 'notes' } };
         await swapEngine({
           getRunBufferManager: () => mgr,
           getRunRegistry: () => ({ getByRunId: (id: string) => rows[id] }),
           getThreadStore: () => ({ getThread: (id: string) => THREADS[id] ?? null }),
           getToolContext: () => ({ tools: [], containment }),
         }, async () => {
-          expect((await as(EVA, '/api/runs/run-shop/stream')).body['code']).toBe(CONTAINED_THREAD_CODE);
-          const nowhere = await as(EVA, '/api/runs/run-nowhere/stream');
-          expect({ status: nowhere.status, error: nowhere.body['error'], code: nowhere.body['code'] }).toEqual({ status: 403, error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE });
-          // Twins: a chat that is not contained, the owner on the contained one, and the owner on a
-          // run that names no chat. Each opens a stream.
+          // The whole answer, status and body as sent, so any difference between the cases shows.
+          const answer = async (runId: string): Promise<string> => {
+            api.setPrincipalResolverForTesting(() => EVA);
+            const res = await fetch(`${baseUrl}/api/runs/${runId}/stream`, { headers: authHeaders() });
+            return `${res.status} ${await res.text()}`;
+          };
+          const refused = `403 ${JSON.stringify({ error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE })}`;
+          expect(await answer('run-unknown'), 'an id no live run has').toBe(refused);
+          expect(await answer('run-shop'), 'a live run of another person\'s contained chat').toBe(refused);
+          expect(await answer('run-nowhere'), 'a live run that names no chat').toBe(refused);
+          // Twins: a chat that is not contained, the helper's own contained chat, the owner on the
+          // contained one, and the owner on a run that names no chat. Each opens a stream.
           const open = async (who: RequestPrincipal, runId: string): Promise<number> => {
             api.setPrincipalResolverForTesting(() => who);
             const res = await fetch(`${baseUrl}/api/runs/${runId}/stream`, { headers: authHeaders() });
@@ -11812,8 +11851,40 @@ describe('LynoxHTTPApi', () => {
             return res.status;
           };
           expect(await open(EVA, 'run-notes')).toBe(200);
+          expect(await open(EVA, 'run-evas')).toBe(200);
           expect(await open(OWNER_PRINCIPAL, 'run-shop')).toBe(200);
           expect(await open(OWNER_PRINCIPAL, 'run-nowhere')).toBe(200);
+        });
+      });
+
+      it('the list of live runs leaves out, for a helper, the runs and questions of another person\'s contained chat and a run that names no chat; the owner sees all', async () => {
+        const at = '2026-03-02 09:00:00';
+        const row = (run_id: string, thread_id: string, status: string) => ({ run_id, thread_id, status, started_at: at, last_activity: at, last_persisted_seq: 0 });
+        const ask = (id: string, session_id: string) => ({ id, session_id, created_at: at });
+        let active: Array<ReturnType<typeof row>> = [];
+        let pending: Array<ReturnType<typeof ask>> = [];
+        await swapEngine({
+          getRunRegistry: () => ({ getActive: () => active }),
+          getPromptStore: () => ({ getPending: () => undefined, listPendingSessions: () => pending }),
+          getThreadStore: () => ({ getThread: (id: string) => THREADS[id] ?? null }),
+          getRunHistory: () => ({
+            getPipelineRunOrigins: (ids: readonly string[]) => new Map(ids.flatMap((id): Array<[string, string]> => { const o = PIPELINES[id]; return typeof o === 'string' ? [[id, o]] : []; })),
+          }),
+          getToolContext: () => ({ tools: [], containment }),
+        }, async () => {
+          const listed = async (who: RequestPrincipal): Promise<string[]> => ((await as(who, '/api/runs/active')).body['runs'] as Array<{ runId: string }>).map((r) => r.runId);
+          // Runs at work: another person's contained chat, the helper's own, one not contained, one
+          // that names no chat.
+          active = [row('run-shop', 'shop', 'running'), row('run-evas', 'evas-shop', 'running'), row('run-notes', 'notes', 'running'), row('run-nowhere', '', 'running')];
+          pending = [];
+          expect(await listed(EVA), 'runs at work').toEqual(['run-evas', 'run-notes']);
+          expect(await listed(OWNER_PRINCIPAL), 'runs at work').toEqual(['run-shop', 'run-evas', 'run-notes', 'run-nowhere']);
+          // Questions, each in a chat no live run holds: in another person's contained chat, in the
+          // helper's own, in one not contained, and in a workflow that `shop` started.
+          active = [row('run-shop', 'shop', 'interrupted'), row('run-evas', 'evas-shop', 'interrupted')];
+          pending = [ask('q-shop', 'shop'), ask('q-evas', 'evas-shop'), ask('q-notes', 'notes'), ask('q-wf', 'wf-shop')];
+          expect(await listed(EVA), 'questions').toEqual(['run-evas', 'q-evas', 'q-notes']);
+          expect(await listed(OWNER_PRINCIPAL), 'questions').toEqual(['run-shop', 'run-evas', 'q-shop', 'q-evas', 'q-notes', 'q-wf']);
         });
       });
     });

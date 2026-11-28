@@ -124,6 +124,22 @@ describe('bulk_plan takes a judge rule from a saved artifact', () => {
     expect(await planWith({ rule_artifact: saved.id })).toBe('["gA","gS","unknown"]');
   });
 
+  it('a data-store run whose rule is read from an artifact is marked as carrying outside content; one with a typed rule, from a clean turn and clean rows, is not', async () => {
+    const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
+    data.createCollection({ name: 'products', scope, columns: [{ name: 'sku', type: 'string' }, { name: 'title', type: 'string' }], uniqueKey: ['sku'] });
+    data.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }], uniqueKey: ['target'] });
+    data.insertRecords({ collection: 'staged', records: [{ target: 'A' }], stamp: TEST_STAMP });
+    const planWith = async (judge: Record<string, unknown>): Promise<number | null> => {
+      const out = await bulkPlanTool.handler({
+        target_system: 'data_store', target_collection: 'products', source_collection: 'staged',
+        judge: { ...judge, schema: { title: { type: 'string', maxLength: 70 } } },
+      } as unknown as Parameters<typeof bulkPlanTool.handler>[0], agent());
+      return (engineDb.getDb().prepare('SELECT planner_untrusted AS u FROM bulk_runs WHERE id = ?').get(runId(out)) as { u: number | null }).u;
+    };
+    expect(await planWith({ rule: 'Set a title.' }), 'a typed rule').toBe(0);
+    expect(await planWith({ rule_artifact: saved.id }), 'a rule from an artifact').toBe(1);
+  });
+
   it('keeps no title for an artifact without one, and at most 200 characters of a long one', async () => {
     const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
     const titled = (title: unknown): Pick<ArtifactStore, 'get'> => ({ get: (id: string) => ({ ...artifacts.get(saved.id)!, id, title: title as string }) });

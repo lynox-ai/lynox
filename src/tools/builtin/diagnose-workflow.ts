@@ -7,6 +7,7 @@ import { WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERR
 import { GateExpiredError, GateRejectedError } from '../../types/orchestration.js';
 import { shownRunStepId, storedSteps } from '../../orchestrator/step-id.js';
 import { setUpByOther, shownMandate, type ShownMandate } from '../../core/request-principal.js';
+import { otherRunTextBlock, setUpByPhrase } from '../../core/other-run-text.js';
 
 interface DiagnoseInput {
   run_id?: string | undefined;
@@ -191,6 +192,18 @@ export const diagnoseWorkflowTool: ToolEntry<DiagnoseInput> = {
     const workflowId = run.workflow_id;
     const maker: PlanMaker = workflowId ? planMakerOf(() => runHistory.getWorkflowAuthorship(workflowId)) : { kind: 'owner' };
 
+    // Someone else's plan, or one whose maker cannot be read: every recorded text goes into one
+    // fenced block that names the plan's maker, and its line points there. lynox's own texts stay.
+    const otherRun = maker.kind === 'other'
+      ? `this run of a workflow ${setUpByPhrase(maker.by)}`
+      : maker.kind === 'unknown' ? 'this run of a workflow whose author cannot be read' : undefined;
+    const fenced: string[] = [];
+    const shown = (e: ShownError, at: string): string => {
+      if (otherRun === undefined || !e.quoted) return e.text;
+      fenced.push(`${at}: ${e.text}`);
+      return `in the block below, as ${at}`;
+    };
+
     const lines: string[] = [];
     if (maker.kind === 'other') lines.push(helperPlanNotice(maker.by));
     if (maker.kind === 'unknown') lines.push(UNKNOWN_PLAN_NOTICE);
@@ -201,7 +214,7 @@ export const diagnoseWorkflowTool: ToolEntry<DiagnoseInput> = {
         : `Run ${run.id} · workflow "${flat(run.manifest_name)}" · status: ${run.status}`);
     if (run.workflow_id) lines.push(`Workflow id: ${run.workflow_id}`);
     if (runError?.quoted === true || [...stepError.values()].some(e => e.quoted)) lines.push(DIAGNOSE_ERRORS_QUOTED);
-    if (runError) lines.push(`Run error${runError.recordedLabel ? `, ${runError.recordedLabel}` : ''}: ${runError.text}`);
+    if (runError) lines.push(`Run error${runError.recordedLabel ? `, ${runError.recordedLabel}` : ''}: ${shown(runError, 'run')}`);
     lines.push(`Cost: $${run.total_cost_usd.toFixed(4)}`);
     lines.push('');
     if (steps.length === 0) {
@@ -211,9 +224,10 @@ export const diagnoseWorkflowTool: ToolEntry<DiagnoseInput> = {
       for (const s of steps) {
         const cost = `$${s.cost_usd.toFixed(4)}`;
         const err = stepError.get(s);
-        lines.push(`  [${s.status}] ${shownId(s.step_id)} (${cost})${err ? ` · error${err.recordedLabel ? ` ${err.recordedLabel}` : ''}: ${err.text}` : ''}`);
+        lines.push(`  [${s.status}] ${shownId(s.step_id)} (${cost})${err ? ` · error${err.recordedLabel ? ` ${err.recordedLabel}` : ''}: ${shown(err, `step ${shownId(s.step_id)}`)}` : ''}`);
       }
     }
+    if (otherRun !== undefined && fenced.length > 0) lines.push(otherRunTextBlock(otherRun, fenced.join('\n')));
     lines.push('');
     // Only steer the user to edit the workflow if it still EXISTS — a run can
     // outlive a deleted workflow, and naming a gone id would send the agent into
