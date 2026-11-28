@@ -3040,8 +3040,8 @@
 					     reader's eye actually lands on the model's words. -->
 					{@const grouped = msg.blocks?.length ? groupedToolCalls(msg.blocks, msg.toolCalls ?? []) : []}
 					{@const firstTextIdx = grouped.findIndex((b) => b.type === 'text' && !!b.text)}
-					<!-- A reply that holds only lynox's own sentence (and the person's typed answer) is not
-					     the model's: no AI mark, and not declared AI-generated. -->
+					<!-- A reply that holds only lynox's own sentence is not the model's: no AI mark, and
+					     not declared AI-generated. -->
 					{@const lynoxOnly = grouped.some((b) => b.type === 'notice') && !grouped.some((b) => b.type === 'text' || b.type === 'thinking' || b.type === 'tools' || b.type === 'plan' || b.type === 'spawn')}
 					<div class="ai-message-wrap space-y-2" data-ai-generated={lynoxOnly ? 'false' : 'true'}>
 						{#if msg.thinking && !msg.blocks?.some((b) => b.type === 'thinking')}
