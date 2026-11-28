@@ -506,9 +506,14 @@ describe('going on from a run that halted', () => {
 		}
 		// The words decided for the page, one of each kind.
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete' }, DE)!.cause)
-			.toBe('lynox konnte nicht alles zurücknehmen. Bei den markierten Zielen hat lynox die Änderung nicht zurückgenommen. Prüf sie und korrigiere sie falls nötig von Hand.');
+			.toBe('lynox konnte nicht alles zurücknehmen. Bei den Zielen mit der Marke „nicht zurückgenommen“ hat lynox die Änderung nicht zurückgenommen. Prüf sie und korrigiere sie falls nötig von Hand.');
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicTimeRollbackIncomplete' }, EN)!.cause)
-			.toBe('The time for this run ran out. lynox could not take everything back. lynox did not take the change back on the marked targets. Check them and correct them by hand if needed.');
+			.toBe('The time for this run ran out. lynox could not take everything back. On the targets marked “not taken back”, lynox did not take the change back. Check them and correct them by hand if needed.');
+		// The sentence points at the mark „not taken back“ by its name, in every form: a target taken back carries a mark too.
+		for (const haltKey of ['atomicRollbackIncomplete', 'atomicStoppedRollbackIncomplete', 'atomicTimeRollbackIncomplete']) {
+			expect(bulkRollbackText({ phase: 'aborted', haltKey }, DE)!.cause, haltKey).toContain('Bei den Zielen mit der Marke „nicht zurückgenommen“ hat lynox die Änderung nicht zurückgenommen.');
+			expect(bulkRollbackText({ phase: 'aborted', haltKey }, EN)!.cause, haltKey).toContain('On the targets marked “not taken back”, lynox did not take the change back.');
+		}
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicTimeRolledBack' }, DE)!.cause.startsWith('Die Zeit für diesen Lauf ist abgelaufen. ')).toBe(true);
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicStoppedRolledBack' }, EN)!.cause)
 			.toBe('The run was stopped. Because it is meant to apply completely or not at all, lynox took everything back. Nothing is changed.');

@@ -1835,8 +1835,9 @@ export class BulkLedger {
   /**
    * The owner's view of a run: per target the before-image, the planned after-state and
    * their diff, in plan order; with `changed`, only the targets the plan changes (every one
-   * but `unchanged`), the written ones first, so a page can name what a run wrote without loading
-   * what it left alone or the plan before it.
+   * but `unchanged`), the written ones first, then the ones with an error from the run (not a
+   * reason the plan left a target out for, except a read that failed), so a page can name what a
+   * run wrote and what failed in it without loading what it left alone or the plan before it.
    * Its one caller is the human-facing route
    * `GET /api/bulk/runs/:id/targets`. NEVER wire this to a model-facing tool (see the
    * module comment).
@@ -1850,7 +1851,7 @@ export class BulkLedger {
          (((applied_at IS NOT NULL AND found_unsent = 0) OR (applied_at IS NULL AND write_sent = 1 AND undone_at IS NULL)) AND ${WRITING_SQL}) AS written,
          undone_at IS NOT NULL AS undone, applied_at IS NOT NULL AS applied, unknown_sends > 0 AS send_unclear,
          shop_added_markup, host_rewrote, context_secret_field, link_domain, target_title, refusal_detail
-       FROM bulk_targets WHERE run_id = ?${opts.changed === true ? " AND change != 'unchanged' ORDER BY written DESC, seq" : ' ORDER BY seq'} LIMIT ? OFFSET ?`,
+       FROM bulk_targets WHERE run_id = ?${opts.changed === true ? " AND change != 'unchanged' ORDER BY written DESC, (applied_at IS NULL AND error IS NOT NULL AND (change != 'invalid' OR error = 'read_failed')) DESC, seq" : ' ORDER BY seq'} LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;

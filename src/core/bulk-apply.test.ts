@@ -749,6 +749,29 @@ describe('the owner view', () => {
     expect(ledger.getPreview(id, { changed: true }).map((t) => [t.key, t.written])).toEqual([['k7', true], ['k5', false]]);
     expect(ledger.getPreview(id).map((t) => t.key).slice(5)).toEqual(['k5', 'k6', 'k7']);
   });
+
+  it('serves the targets with an error from the run right after the written ones, a read that failed among them, not a reason the plan left one out for', () => {
+    // Eight changed targets: the page opens on a first page of six, so a failed target late in the
+    // plan has to come before the open ones to be seen there.
+    const targets: PlannedTarget[] = Array.from({ length: 8 }, (_, i) => ({ key: `k${String(i)}`, before: { absent: false, value: 'v' }, after: `w${String(i)}` }));
+    const { id } = ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem', targets });
+    approve(id);
+    // k6 written, k7 failed, k5 a conflict; k3 left out at planning on a failed read, k4 for another reason.
+    expect(ledger.claimTarget(id, 6)).toBe(true);
+    ledger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 6, 'ok');
+    expect(ledger.claimTarget(id, 7)).toBe(true);
+    ledger.recordFailed(id, 7, 'write_failed');
+    expect(ledger.claimTarget(id, 5)).toBe(true);
+    ledger.recordFailed(id, 5, 'conflict');
+    const db = engineDb.getDb();
+    db.prepare("UPDATE bulk_targets SET change = 'invalid', error = 'read_failed' WHERE run_id = ? AND seq = 3").run(id);
+    db.prepare("UPDATE bulk_targets SET change = 'invalid', error = 'not_found' WHERE run_id = ? AND seq = 4").run(id);
+    expect(ledger.getPreview(id, { changed: true }).map((t) => t.key)).toEqual(['k6', 'k3', 'k5', 'k7', 'k0', 'k1', 'k2', 'k4']);
+    // The first page of six holds the written one and every one with an error from the run.
+    expect(ledger.getPreview(id, { changed: true, limit: 6 }).map((t) => t.key)).toEqual(['k6', 'k3', 'k5', 'k7', 'k0', 'k1']);
+    // Control: without it, plan order.
+    expect(ledger.getPreview(id).map((t) => t.key)).toEqual(['k0', 'k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7']);
+  });
 });
 
 describe('the claim predicate (BulkLedger.claimTarget)', () => {
