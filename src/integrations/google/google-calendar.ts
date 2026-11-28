@@ -1,5 +1,8 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
-import { currentCallSignal } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTargetOrigin } from '../../core/call-connection.js';
+import { heldTargets, originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originUnreadable, type OriginTargets, type SendOrigin } from '../../core/origin-notices.js';
+import { noticeLanguage } from '../../core/notice-language.js';
+import { UNATTENDED_BLOCK_ANSWER } from '../../core/prompt-store.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
@@ -7,10 +10,13 @@ import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import type { ConsentAction } from '../../contract/prompt.js';
+import { GOOGLE_DIALOG, type DialogLanguage } from '../../tools/dialog-text.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { ADDRESS_PLACEHOLDER, namedTarget } from '../../core/audit-log.js';
-import { mailTargets, type SendTarget } from '../../core/send-target.js';
+import { mailTargets, normalizeMailTarget, type SendTarget } from '../../core/send-target.js';
 
 // === Types ===
 
@@ -279,21 +285,43 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
         if (CONFIRM_ACTIONS.has(input.action) && !agent.promptUser) {
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
         }
+        // The guests already on an event the update changes, before anything is asked.
+        const guestCheck: GuestCheck = input.action === 'update_event' && agent.promptUser
+          ? await checkExistingGuests(auth, input, agent)
+          : { kind: 'pass' };
+        if (guestCheck.kind === 'refused') return guestCheck.text;
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
           // `pv` splits frame from value — this prompt has a real FIELD
           // STRUCTURE (`Time:` on its own line), which is exactly what a
           // newline in a value used to be able to imitate. The renderer puts
           // values in text nodes, so a forged field line is no longer possible
           // rather than merely unlikely. See core/prompt-value.ts.
+          const language = agent.dialogLanguage ?? 'en';
           let confirmMsg: PromptText = pv``;
+          let action: ConsentAction = 'create';
           switch (input.action) {
-            case 'create_event': confirmMsg = describeEventCreate(input.calendar_id, newEvent); break;
-            case 'update_event': confirmMsg = describeEventUpdate(input.event_id, input.calendar_id, eventUpdates); break;
-            case 'delete_event': confirmMsg = pv`Delete event ${input.event_id ?? '(unknown)'}${calendarLine(input.calendar_id)}\nThis cannot be undone.`; break;
+            case 'create_event': confirmMsg = describeEventCreate(input.calendar_id, newEvent, language); action = 'create'; break;
+            case 'update_event': confirmMsg = describeEventUpdate(input.event_id, input.calendar_id, eventUpdates, language); action = 'update'; break;
+            case 'delete_event': confirmMsg = GOOGLE_DIALOG[language].deleteEvent(input.event_id ?? GOOGLE_DIALOG[language].unknown, calendarLine(input.calendar_id, language)); action = 'delete'; break;
           }
-          const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
-          if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-            return 'Action cancelled by user.';
+          // One question: a guest already invited whom the owner did not name is asked about in
+          // the confirmation of the update itself, which is then a blocked question.
+          if (guestCheck.kind === 'ask') {
+            const lang = agent.noticeLanguage ?? noticeLanguage(undefined);
+            confirmMsg = pv`${confirmMsg}\n\n${originAsk('google_calendar', input, 'mail', guestCheck.targets, guestCheck.origin, lang)}`;
+          }
+          const answer = await agent.promptUser(confirmMsg, consentOptions('google'), consentMeta('google', guestCheck.kind === 'ask' ? { blocked: true } : undefined, action));
+          // Before the key is read: a run nobody watches refuses the blocked question as such, not as
+          // a question nobody answered.
+          if (guestCheck.kind === 'ask' && answer === UNATTENDED_BLOCK_ANSWER) {
+            return guestCheck.refused(originRefusedUnattended(guestCheck.targets, guestCheck.origin));
+          }
+          // Only the `confirm` key goes ahead; its button names `action`, which decides nothing.
+          const consent = decideConsent('google', answer);
+          if (consent !== 'confirm') {
+            // The guests named by position follow the refusal's own sentences, why-not-understood included.
+            if (guestCheck.kind !== 'ask') return consentRefusal(consent, 'Action cancelled by user.');
+            return `${consentRefusal(consent, originDenied(guestCheck.targets, guestCheck.origin, 'mail', false))}${heldTargets(guestCheck.targets, 'mail')}`;
           }
         }
 
@@ -390,23 +418,24 @@ export function buildEventCreate(input: CalendarInput): { ok: true; event: Recor
 }
 
 /** Every field the new event carries, one line each; each guest and each rule is its own value. */
-export function describeEventCreate(calendarId: string | undefined, event: Record<string, unknown>): PromptText {
+export function describeEventCreate(calendarId: string | undefined, event: Record<string, unknown>, language: DialogLanguage = 'en'): PromptText {
+  const said = GOOGLE_DIALOG[language];
   const when = (v: unknown): string => {
     const t = v as { date?: string; dateTime?: string; timeZone?: string };
     return t.date ?? (t.timeZone ? `${t.dateTime ?? '?'} (${t.timeZone})` : (t.dateTime ?? '?'));
   };
   const lines: PromptText[] = [
-    pv`Create event "${String(event['summary'])}"${calendarLine(calendarId)}`,
-    pv`Time: ${when(event['start'])} – ${when(event['end'])}`,
+    said.createEvent(String(event['summary']), calendarLine(calendarId, language)),
+    said.time(when(event['start']), when(event['end'])),
   ];
-  if (typeof event['location'] === 'string') lines.push(pv`Location: ${event['location']}`);
+  if (typeof event['location'] === 'string') lines.push(said.location(event['location']));
   if (Array.isArray(event['recurrence'])) {
-    lines.push(pv`Repeats: ${joinPrompts((event['recurrence'] as unknown[]).map((r) => pv`${String(r)}`), '; ')}`);
+    lines.push(said.repeats(joinPrompts((event['recurrence'] as unknown[]).map((r) => pv`${String(r)}`), '; ')));
   }
-  if (typeof event['description'] === 'string') lines.push(pv`Description: ${event['description']}`);
+  if (typeof event['description'] === 'string') lines.push(said.description(event['description']));
   if (Array.isArray(event['attendees'])) {
-    lines.push(pv`Guests: ${joinPrompts((event['attendees'] as { email: string }[]).map((g) => pv`${g.email}`), ', ')}`);
-    lines.push(pv`Everyone listed under Guests can see this event.`);
+    lines.push(said.guests(joinPrompts((event['attendees'] as { email: string }[]).map((g) => pv`${g.email}`), ', ')));
+    lines.push(said.guestsSee);
   }
   return joinPrompts(lines, '\n');
 }
@@ -508,30 +537,99 @@ export function buildEventUpdates(input: CalendarInput): { ok: true; updates: Re
 }
 
 /** `Calendar: <id>` when the action targets a calendar other than the person's own. */
-function calendarLine(calendarId: string | undefined): PromptText {
-  return calendarId !== undefined && calendarId !== 'primary' ? pv`\nCalendar: ${calendarId}` : pv``;
+function calendarLine(calendarId: string | undefined, language: DialogLanguage): PromptText {
+  return calendarId !== undefined && calendarId !== 'primary' ? GOOGLE_DIALOG[language].calendar(calendarId) : pv``;
 }
 
 /** One line per field the update changes; each guest is its own value. */
-export function describeEventUpdate(eventId: string | undefined, calendarId: string | undefined, updates: Record<string, unknown>): PromptText {
-  const head = pv`Update event ${eventId ?? '(unknown)'}${calendarLine(calendarId)}`;
+export function describeEventUpdate(eventId: string | undefined, calendarId: string | undefined, updates: Record<string, unknown>, language: DialogLanguage = 'en'): PromptText {
+  const said = GOOGLE_DIALOG[language];
+  const head = said.updateEvent(eventId ?? said.unknown, calendarLine(calendarId, language));
   const keys = Object.keys(updates);
-  if (keys.length === 0) return pv`${head}\nNothing changes.`;
+  if (keys.length === 0) return said.nothingChanges(head);
   const lines = keys.map((key) => {
     const value = updates[key];
     if (key === 'attendees' && Array.isArray(value)) {
       const guests = (value as { email: string }[]).map((g) => pv`${g.email}`);
-      return guests.length === 0
-        ? pv`Guests: none — every current guest is removed`
-        : pv`Guests (replace the current list): ${joinPrompts(guests, ', ')}`;
+      return guests.length === 0 ? said.guestsNone : said.guestsReplace(joinPrompts(guests, ', '));
     }
-    return pv`${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`;
+    return said.field(key, typeof value === 'string' ? value : JSON.stringify(value));
   });
   const guestsChange = keys.includes('attendees');
   return joinPrompts(
-    [pv`${head}\nThese fields change:`, ...lines, ...(guestsChange ? [pv`Everyone listed under Guests can see this event.`] : [])],
+    [said.fieldsChange(head), ...lines, ...(guestsChange ? [said.guestsSee] : [])],
     '\n',
   );
+}
+
+/**
+ * The guests of the event an update changes, read before the update. `null` when they could not
+ * be read: then none of them is known, and the check counts that as a guest the owner did not name.
+ */
+async function existingGuests(auth: GoogleAuth, input: CalendarInput): Promise<string[] | null> {
+  if (!input.event_id) return [];
+  try {
+    const calendarId = input.calendar_id ?? 'primary';
+    const response = await calendarFetch(auth, `${CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(input.event_id)}`, { method: 'GET' });
+    if (!response.ok) return null;
+    const event = await response.json() as { attendees?: unknown };
+    if (event.attendees === undefined) return [];
+    if (!Array.isArray(event.attendees)) return null;
+    const out: string[] = [];
+    for (const a of event.attendees) {
+      const email = typeof a === 'object' && a !== null ? (a as { email?: unknown }).email : undefined;
+      if (typeof email !== 'string') return null;
+      // The calendar's own entry for the owner is not a guest the change goes out to.
+      if ((a as { self?: unknown }).self === true) continue;
+      out.push(email);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** What the check of an event's existing guests found before an update. */
+type GuestCheck =
+  | { readonly kind: 'pass' }
+  | { readonly kind: 'refused'; readonly text: string }
+  | { readonly kind: 'ask'; readonly targets: OriginTargets; readonly origin: SendOrigin; readonly refused: (text: string) => string };
+
+/**
+ * The guests already on the event an update changes, checked before the confirmation, so the
+ * owner is never asked a yes that is then refused. A guest list that cannot be read, or a guest
+ * that does not read as an address, refuses the update unasked; a guest the owner did not name is
+ * refused in a session of someone else and otherwise asked about in the same question as the
+ * update itself.
+ *
+ * Read, then changed: a guest someone adds to the event between this read and the update is not
+ * checked. The update sends only the fields it changes, so Google keeps that guest and notifies
+ * them. The window is the length of the confirmation; closing it needs a conditional update
+ * (an ETag), which this tool does not send yet.
+ */
+async function checkExistingGuests(auth: GoogleAuth, input: CalendarInput, agent: IAgent): Promise<GuestCheck> {
+  const guests = await existingGuests(auth, input);
+  const report = (targets: OriginTargets, origin: SendOrigin): void => {
+    try { agent.onOriginRefused?.({ targets, noun: 'mail', origin }); } catch { /* the refusal stands */ }
+  };
+  if (guests === null || guests.some((g) => normalizeMailTarget(g) === null)) {
+    report({ values: [], unreadable: true }, { kind: 'unknown' });
+    return { kind: 'refused', text: originUnreadable('mail') };
+  }
+  // The guest list was read: a guest on it comes from it, and every sentence says so.
+  const origin: SendOrigin = { kind: 'eventGuests' };
+  const checked = new Set(currentCallTargetOrigin()?.known ?? []);
+  const unnamed: string[] = [];
+  for (const g of guests) {
+    const target = normalizeMailTarget(g)!;
+    if (checked.has(target.value)) continue;
+    if ((agent.ownerKnown?.known(target) ?? 'foreign') !== 'known') unnamed.push(target.value);
+  }
+  if (unnamed.length === 0) return { kind: 'pass' };
+  const targets: OriginTargets = { values: unnamed, unreadable: false };
+  const refused = (text: string): string => { report(targets, origin); return text; };
+  if (agent.principal.kind !== 'owner') return { kind: 'refused', text: refused(originRefusedMandate(targets, origin, 'mail')) };
+  return { kind: 'ask', targets, origin, refused };
 }
 
 async function handleUpdateEvent(auth: GoogleAuth, input: CalendarInput, updates: Record<string, unknown>): Promise<string> {

@@ -18,7 +18,7 @@ import type {
 } from '../types/index.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
 import { processErrorText } from './error-egress.js';
-import type { MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
+import type { MemoryRow, RelationRow, ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { embedToBlob } from './embedding.js';
 import { EntityResolver, toEntityRecord } from './entity-resolver.js';
@@ -34,7 +34,7 @@ import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
 import { UndecryptableTextError } from './engine-db.js';
 import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution, makeSubjectExternalRefs } from './subject-store.js';
-import type { SubjectRow, SubjectExternalRefs } from './subject-store.js';
+import type { SubjectListRow, SubjectRow, SubjectExternalRefs } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
@@ -84,12 +84,21 @@ function addCreated(into: KnowledgeCreatedCounts, made: Partial<KnowledgeCreated
   into.subjects += made.subjects ?? 0;
 }
 
+/** The `metrics` row name for an entity extraction refused only because a run held the balance. */
+export const KG_EXTRACTION_REFUSED_METRIC = 'kg_extraction_refused_within_balance';
+
 /**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
  *
  * Integrates: AgentMemoryDb (SQLite) + EntityResolver + RetrievalEngine +
  * ContradictionDetector + KpiEngine + RunHistory (for insights).
  */
+/**
+ * How many relations of one entity the data export reads, newest first. An entity that returns
+ * this many may hold more, so the export marks its graph block as possibly incomplete.
+ */
+export const EXPORT_RELATIONS_PER_ENTITY = 50;
+
 export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly db: AgentMemoryDb;
   private readonly embeddingProvider: EmbeddingProvider;
@@ -562,6 +571,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // stub now would leave one no purge can reach — purges find stubs through legacy ids.
     if (options?.cancelled?.()) return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false, created: noneCreated() };
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;
+    if (extractGate?.refusedWithinBalance === true) this.noteExtractionRefusedWithinBalance(memoryId);
 
     // Slice B (Context-Hierarchy Scoping): if this memory's source thread is anchored
     // to a subject (project/client via set_thread_context), that anchor becomes the
@@ -1485,6 +1495,19 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   // === Entity Operations ===
 
+  /**
+   * The next page of entities after `after`, by key, for a walk over every entity (the data export).
+   * Only the subject graph reads this way; with it off, or when the read fails (counted as a read
+   * fallback), the answer is `null` and the caller pages with {@link listEntities} instead.
+   */
+  async listEntitiesAfter(after: string | null, limit: number): Promise<EntityRecord[] | null> {
+    if (this.subjectGraphEnabled && this.subjectStore) {
+      try { return listSubjectEntitiesAfterOn(this.subjectStore, after, limit); }
+      catch (err: unknown) { this._logReadFallback('listEntitiesAfter', err); }
+    }
+    return null;
+  }
+
   async listEntities(opts?: { type?: string; limit?: number; offset?: number }): Promise<EntityRecord[]> {
     if (this.subjectGraphEnabled && this.subjectStore) {
       try { return this._listSubjectEntities(opts); }
@@ -1602,23 +1625,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * stored belongs in the export until the reap removes it. Same store choice and cap.
    */
   async getEntityRelationsForExport(entityId: string): Promise<Array<RelationRecord & { sourceDeleted: boolean }>> {
-    const limit = 50;
+    const limit = EXPORT_RELATIONS_PER_ENTITY;
     if (this.subjectGraphEnabled && this.relationshipStore) {
       try {
         return this.relationshipStore.getRelationshipsForSubjectForExport(entityId, limit)
           .map(r => ({ ...this._relRowToRelationRecord(r), sourceDeleted: r.source_deleted === 1 }));
       } catch (err: unknown) { this._logReadFallback('getEntityRelationsForExport', err); }
     }
-    return this.db.getEntityRelationsForExport(entityId, limit).map(r => ({
-      fromEntityId: r.from_entity_id,
-      toEntityId: r.to_entity_id,
-      relationType: r.relation_type,
-      description: r.description,
-      confidence: r.confidence,
-      sourceMemoryId: r.source_memory_id ?? '',
-      createdAt: r.created_at,
-      sourceDeleted: r.source_deleted === 1,
-    }));
+    return this.db.getEntityRelationsForExport(entityId, limit).map(legacyRelationForExport);
   }
 
   // === Subject-graph read mappers (S1d — flag-gated, additive) ===
@@ -1630,7 +1644,37 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * degrades to "not found" (subject ids don't resolve legacy rows) rather than
    * returning wrong data.
    */
+  /**
+   * How many subject-graph reads fell back to the legacy store since boot. A reader that needs
+   * the whole set (the data export) compares it before and after: a fallback read answers from
+   * another store, by-id reads degrade to "not found", so the result may be partial.
+   */
+  get readFallbackCount(): number {
+    return this._readFallbacks;
+  }
+
+  /**
+   * Whether this layer reads the subject graph: the setting as it was when the layer started.
+   * A later config reload does not rebuild the layer, so a reader that must agree with what the
+   * layer returns takes the setting from here, not from the current config.
+   */
+  get readsSubjectGraph(): boolean {
+    return this.subjectGraphEnabled;
+  }
+
+  /**
+   * The subject graph is switched on but its store is missing (engine.db did not open at boot).
+   * Every read then answers from the legacy store alone, without a fallback being logged, and
+   * what only engine.db holds is not in it.
+   */
+  get subjectGraphUnavailable(): boolean {
+    return this.subjectGraphEnabled && this.subjectStore === null;
+  }
+
+  private _readFallbacks = 0;
+
   private _logReadFallback(method: string, err: unknown): void {
+    this._readFallbacks += 1;
     process.stderr.write(
       `[lynox:subject-graph] read ${method} fell back to legacy: ${err instanceof Error ? err.message : String(err)}\n`,
     );
@@ -1653,84 +1697,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     );
   }
 
-  /**
-   * The subject-graph read of the entity list: maps Subjects back to the stable
-   * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
-   * Filter order: kind (`type`) → name/alias substring (`q`) → mention-count
-   * backfill → offset/limit slice. Rows come `updated_at DESC` (via `listSubjects`);
-   * the legacy path orders by `mention_count DESC`, so browse ORDER still differs from
-   * legacy, but `mentionCount` is now the real memory_subjects link count (batched via
-   * {@link SubjectStore.getMentionCounts}), not a hardcoded 0.
-   */
+  /** The subject-graph read of the entity list ({@link listSubjectEntitiesOn}) on this layer's store. */
   private _listSubjectEntities(
     opts?: { type?: string | undefined; q?: string | undefined; limit?: number | undefined; offset?: number | undefined },
   ): EntityRecord[] {
-    const store = this.subjectStore;
-    if (!store) return [];
-    // A `type` from the legacy KG vocabulary maps to a subject kind; one that maps
-    // to nothing (concept/location/collection) yields no rows.
-    const kindFilter = opts?.type ? entityTypeToSubjectKind(opts.type) : null;
-    if (opts?.type && !kindFilter) return [];
-    const rows = store.listSubjects(kindFilter ? { kind: kindFilter } : undefined);
-    let mapped = rows
-      .map(r => this._subjectRowToEntityRecord(r))
-      .filter((e): e is EntityRecord => e !== null);
-    const q = opts?.q?.trim().toLowerCase();
-    if (q) {
-      mapped = mapped.filter(e =>
-        e.canonicalName.toLowerCase().includes(q) ||
-        e.aliases.some(a => a.toLowerCase().includes(q)),
-      );
-    }
-    const offset = Math.max(opts?.offset ?? 0, 0);
-    const limit = opts?.limit ?? mapped.length;
-    const page = mapped.slice(offset, offset + limit);
-    // Populate the real mention count (memory_subjects links) — the subject path
-    // otherwise reports 0 for every entity (the "0× Erwähnungen" bug). Counted for
-    // the returned page ONLY: bounded against the SQLite variable cap on a large
-    // graph, and no wasted counting of rows we slice away.
-    const counts = store.getMentionCounts(page.map(e => e.id));
-    for (const e of page) e.mentionCount = counts.get(e.id) ?? 0;
-    return page;
+    return this.subjectStore ? listSubjectEntitiesOn(this.subjectStore, opts) : [];
   }
 
-  /** Map a Subject row to the stable `EntityRecord` DTO, or null when the kind has no KG equivalent. */
   private _subjectRowToEntityRecord(row: SubjectRow, mentionCount = 0): EntityRecord | null {
-    const entityType = subjectKindToEntityType(row.kind);
-    if (!entityType) return null;
-    let aliases: string[];
-    try {
-      const parsed: unknown = JSON.parse(row.aliases || '[]');
-      aliases = Array.isArray(parsed) ? parsed.filter((a): a is string => typeof a === 'string') : [];
-    } catch {
-      aliases = [];
-    }
-    return {
-      id: row.id,
-      canonicalName: row.name,
-      entityType,
-      aliases,
-      description: '',
-      scopeType: 'global',
-      scopeId: 'global',
-      mentionCount,
-      firstSeenAt: row.created_at,
-      lastSeenAt: row.updated_at,
-    };
+    return subjectRowToEntityRecord(row, mentionCount);
   }
 
-  /** Map a relationship row to the stable `RelationRecord` DTO. */
   private _relRowToRelationRecord(r: RelationshipRow): RelationRecord {
-    return {
-      fromEntityId: r.from_subject_id,
-      toEntityId: r.to_subject_id,
-      relationType: r.kind,
-      description: r.description,
-      confidence: r.confidence,
-      sourceMemoryId: r.source_memory_id ?? '',
-      createdAt: r.created_at,
-    };
+    return relRowToRelationRecord(r);
   }
+
 
   async mergeEntities(sourceId: string, targetId: string): Promise<void> {
     return this.entityResolver.merge(sourceId, targetId);
@@ -1817,8 +1798,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   markMoved(ids: string[], successorId: string): void {
     this.db.markReplaced(ids, successorId);
     if (this.memoryGraphStore) {
+      const memoryGraph = this.memoryGraphStore;
       try {
-        this.memoryGraphStore.markReplaced(ids, successorId);
+        this.engineDb!.getDb().transaction(() => {
+          // The copy may have no stub (the subject graph was off, or its mirror failed); the
+          // originals' edges need one to move to, so it is carried from the legacy row first.
+          if (!memoryGraph.getStub(successorId) && ids.some(id => memoryGraph.getStub(id) !== null)) {
+            const copy = this.db.getMemory(successorId);
+            if (copy) memoryGraph.ensureStubFrom(copy);
+          }
+          memoryGraph.markReplaced(ids, successorId);
+        })();
       } catch (err: unknown) {
         this._reportMirrorParityLoss('supersede', `${ids.length} id(s) for a move`, err);
         throw err;
@@ -1863,6 +1853,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       }
     }
     return ids.length;
+  }
+
+  /**
+   * Records that the entity extraction for `memoryId` was refused only because a run held the
+   * balance: the memory is stored, its graph entities are not, and nothing extracts them later
+   * unless the memory is edited. One `metrics` row per memory (`metric_name` =
+   * {@link KG_EXTRACTION_REFUSED_METRIC}, `scope_type` 'memory', `scope_id` the memory id,
+   * `value` how often), so the gap can be counted and found again. No text is written.
+   * Best-effort: a failed write never affects the memory write.
+   */
+  noteExtractionRefusedWithinBalance(memoryId: string): void {
+    if (!memoryId) return;
+    try {
+      const prior = this.db.getMetric(KG_EXTRACTION_REFUSED_METRIC, 'memory', memoryId);
+      const count = (prior?.value ?? 0) + 1;
+      this.db.upsertMetric({ metricName: KG_EXTRACTION_REFUSED_METRIC, value: count, sampleCount: count, scopeType: 'memory', scopeId: memoryId });
+    } catch { /* best-effort record */ }
   }
 
   /**
@@ -1976,6 +1983,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;
+    if (extractGate?.refusedWithinBalance === true) this.noteExtractionRefusedWithinBalance(id);
     if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
       const createdAt = this.db.getMemoryCreatedAt(id);
       // Slice B: keep the memory's project/client anchor across a text edit — resolve
@@ -2227,6 +2235,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // short-circuits (`existing && incoming`) when either row is missing, so retiring
         // first would make it silently pass. Order is load-bearing, not stylistic.
         if (!this.db.supersedMemory(candidate.id, id, { trustGate: true })) throw TIER_RAISE_REFUSED;
+        this.db.repointRelations(candidate.id, id);
         this.db.createSupersedes(id, candidate.id, 'tier-raise');
         this.db.addConfirmations(id, candidate.confirmation_count);
         return id;
@@ -2285,6 +2294,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           confirmationCount: candidate.confirmation_count,
         });
         if (oldMentions.length > 0) memoryGraph.linkSubjects(newId, oldMentions);
+        // After the new stub exists: the relationships' source is a foreign key to it.
+        memoryGraph.repointRelationships(candidate.id, newId);
       })();
       this._emitMirrorDivergences(diverged, namespace);
     } catch (err: unknown) {
@@ -2325,9 +2336,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       const memoryGraph = this.memoryGraphStore;
       try {
         this.engineDb!.getDb().transaction(() => {
+          // A keeper written before the subject graph has no stub; the duplicate's edges need one
+          // to move to. It is carried from the legacy row, whose confirmation count already holds
+          // every transfer of this run, so a stub written here takes no further additions.
+          const written = new Set<string>();
           for (const p of pairs) {
-            memoryGraph.markSuperseded(p.victimId, p.keeperId);
-            memoryGraph.addConfirmations(p.keeperId, p.victimConfirmations);
+            if (memoryGraph.getStub(p.victimId) && !memoryGraph.getStub(p.keeperId)) {
+              const keeper = this.db.getMemory(p.keeperId);
+              if (keeper && memoryGraph.ensureStubFrom(keeper)) written.add(p.keeperId);
+            }
+            memoryGraph.markSuperseded(p.victimId, p.keeperId, { carryRelationships: true });
+            if (!written.has(p.keeperId)) memoryGraph.addConfirmations(p.keeperId, p.victimConfirmations);
           }
         })();
       } catch (err: unknown) {
@@ -2338,4 +2357,127 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
     return pairs.length;
   }
+}
+
+// ── Subject-graph read mappers, on any store ────────────────────
+// Module functions so a reader without a layer (the data export while the graph is switched
+// off) maps the subject graph exactly as the layer does.
+
+/**
+ * The subject-graph read of the entity list: maps Subjects back to the stable
+ * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
+ * Without `q` the store cuts the page (`listSubjectPage`), so no page builds every subject in
+ * memory; SQLite still orders all rows of the kinds for each page, so a walk over every entity
+ * uses {@link listSubjectEntitiesAfterOn} instead. With `q` the match runs here, on all rows of
+ * the kind, since the name and alias match is case-insensitive beyond ASCII, which the query
+ * cannot do.
+ * Filter order: kind (`type`) → name/alias substring (`q`) → offset/limit slice → mention-count
+ * backfill. Rows come `updated_at DESC`, ties by `id`;
+ * the legacy path orders by `mention_count DESC`, so browse ORDER still differs from
+ * legacy, but `mentionCount` is now the real memory_subjects link count (batched via
+ * {@link SubjectStore.getMentionCounts}), not a hardcoded 0.
+ */
+export function listSubjectEntitiesOn(
+  store: SubjectStore,
+  opts?: { type?: string | undefined; q?: string | undefined; limit?: number | undefined; offset?: number | undefined },
+): EntityRecord[] {
+  // A `type` from the legacy KG vocabulary maps to a subject kind; one that maps
+  // to nothing (concept/location/collection) yields no rows.
+  const kindFilter = opts?.type ? entityTypeToSubjectKind(opts.type) : null;
+  if (opts?.type && !kindFilter) return [];
+  const offset = Math.max(opts?.offset ?? 0, 0);
+  const q = opts?.q?.trim().toLowerCase();
+  let page: EntityRecord[];
+  if (!q && opts?.limit !== undefined) {
+    const kinds = kindFilter ? [kindFilter] : ENTITY_MAPPABLE_SUBJECT_KINDS;
+    page = store.listSubjectPage({ kinds, limit: opts.limit, offset })
+      .map(r => subjectRowToEntityRecord(r))
+      .filter((e): e is EntityRecord => e !== null);
+  } else {
+    const rows = store.listSubjects(kindFilter ? { kind: kindFilter } : undefined);
+    let mapped = rows
+      .map(r => subjectRowToEntityRecord(r))
+      .filter((e): e is EntityRecord => e !== null);
+    if (q) {
+      mapped = mapped.filter(e =>
+        e.canonicalName.toLowerCase().includes(q) ||
+        e.aliases.some(a => a.toLowerCase().includes(q)),
+      );
+    }
+    const limit = opts?.limit ?? mapped.length;
+    page = mapped.slice(offset, offset + limit);
+  }
+  // Populate the real mention count (memory_subjects links) — the subject path
+  // otherwise reports 0 for every entity (the "0× Erwähnungen" bug). Counted for
+  // the returned page ONLY: bounded against the SQLite variable cap on a large
+  // graph, and no wasted counting of rows we slice away.
+  const counts = store.getMentionCounts(page.map(e => e.id));
+  for (const e of page) e.mentionCount = counts.get(e.id) ?? 0;
+  return page;
+}
+
+/**
+ * The subject-graph entities after the entity `after` (by id; `null` starts at the first), `limit`
+ * at most, with their mention counts: the walk the data export takes over every entity. Each call
+ * reads one page by key, so the walk is linear in the number of subjects.
+ */
+export function listSubjectEntitiesAfterOn(store: SubjectStore, after: string | null, limit: number): EntityRecord[] {
+  const page = store.listSubjectsAfter({ kinds: ENTITY_MAPPABLE_SUBJECT_KINDS, after, limit })
+    .map(r => subjectRowToEntityRecord(r))
+    .filter((e): e is EntityRecord => e !== null);
+  const counts = store.getMentionCounts(page.map(e => e.id));
+  for (const e of page) e.mentionCount = counts.get(e.id) ?? 0;
+  return page;
+}
+
+/** Map a Subject row to the stable `EntityRecord` DTO, or null when the kind has no KG equivalent. */
+export function subjectRowToEntityRecord(row: SubjectListRow, mentionCount = 0): EntityRecord | null {
+  const entityType = subjectKindToEntityType(row.kind);
+  if (!entityType) return null;
+  let aliases: string[];
+  try {
+    const parsed: unknown = JSON.parse(row.aliases || '[]');
+    aliases = Array.isArray(parsed) ? parsed.filter((a): a is string => typeof a === 'string') : [];
+  } catch {
+    aliases = [];
+  }
+  return {
+    id: row.id,
+    canonicalName: row.name,
+    entityType,
+    aliases,
+    description: '',
+    scopeType: 'global',
+    scopeId: 'global',
+    mentionCount,
+    firstSeenAt: row.created_at,
+    lastSeenAt: row.updated_at,
+  };
+}
+
+/** Map a relationship row to the stable `RelationRecord` DTO. */
+export function relRowToRelationRecord(r: RelationshipRow): RelationRecord {
+  return {
+    fromEntityId: r.from_subject_id,
+    toEntityId: r.to_subject_id,
+    relationType: r.kind,
+    description: r.description,
+    confidence: r.confidence,
+    sourceMemoryId: r.source_memory_id ?? '',
+    createdAt: r.created_at,
+  };
+}
+
+/** Map a legacy relation row read for the data export to the `RelationRecord` DTO, its retired-source mark kept. */
+export function legacyRelationForExport(r: RelationRow & { source_deleted: 0 | 1 }): RelationRecord & { sourceDeleted: boolean } {
+  return {
+    fromEntityId: r.from_entity_id,
+    toEntityId: r.to_entity_id,
+    relationType: r.relation_type,
+    description: r.description,
+    confidence: r.confidence,
+    sourceMemoryId: r.source_memory_id ?? '',
+    createdAt: r.created_at,
+    sourceDeleted: r.source_deleted === 1,
+  };
 }

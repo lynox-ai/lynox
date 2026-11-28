@@ -430,6 +430,15 @@ describe('migration token', () => {
     expect(verifyMigrationToken(generateMigrationToken(), 'short')).toBe(false);
   });
 
+  it('rejects the token with anything appended, on either side', () => {
+    const token = generateMigrationToken();
+    expect(verifyMigrationToken(token, token)).toBe(true);
+    for (const rest of ['z', ' ', '\n', 'zz', '0']) {
+      expect(verifyMigrationToken(`${token}${rest}`, token)).toBe(false);
+      expect(verifyMigrationToken(token, `${token}${rest}`)).toBe(false);
+    }
+  });
+
   it('rejects empty tokens', () => {
     expect(verifyMigrationToken('', '')).toBe(false);
   });
