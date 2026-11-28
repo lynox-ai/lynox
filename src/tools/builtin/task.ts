@@ -249,8 +249,9 @@ reader?: PausedDoneWorkflowReader | null): string {
 function doneReader(agent: IAgent): PausedDoneWorkflowReader | null {
   const principal = agent.principal;
   const history = agent.toolContext.runHistory;
+  // Asked only at a completed paused workflow plan, as `owner` in taskReaderOf is: the owner may plan on any workflow.
   return pausedDoneReaderOf(history, agent.toolContext.mandateEnds,
-    isOwnerPrincipal(principal) ? undefined : (id) => foreignWorkflowScheduleRefusalKind(principal, id, history));
+    (id) => (isOwnerPrincipal(principal) ? null : foreignWorkflowScheduleRefusalKind(principal, id, history)));
 }
 
 // Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger

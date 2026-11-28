@@ -29,7 +29,7 @@ describe('a paused plan in the Triggers view', () => {
     expect(CORE).toMatch(/export function pausedDoneModelText\(c: PausedDoneWorkflow\): string \{[\s\S]{0,700}?\$\{pausedDoneWorkflowText\(c\)\}/);
     expect(CORE).toMatch(/export function pausedDoneUpdateRefusal\(c: PausedDoneWorkflow\): string \{[\s\S]{0,700}?\$\{pausedDoneWorkflowText\(c\)\}/);
     expect(TOOL).toContain('pausedDoneUpdateRefusal(pausedDoneWorkflow(pausedTarget, doneReader(agent)))');
-    expect(TOOL).toContain('return pausedDoneReaderOf(history, agent.toolContext.mandateEnds,\n    isOwnerPrincipal(principal) ? undefined : (id) => foreignWorkflowScheduleRefusalKind(principal, id, history));');
+    expect(TOOL).toContain('(id) => (isOwnerPrincipal(principal) ? null : foreignWorkflowScheduleRefusalKind(principal, id, history)));');
     expect(ROUTE).toContain('Create a new plan to run it again.${pausedDoneWorkflowText(c)}');
     expect(ROUTE).toContain('...pausedDoneWorkflowField(trigger, doneReader),');
     expect(ROUTE).toContain('const doneReader = pausedDoneReaderFor(history, engine.getMandateEnds(), principal);');
