@@ -1011,6 +1011,26 @@ export class AgentMemoryDb {
   }
 
   /**
+   * How the active rows whose text contains `pattern` came in: `found` is false when no row
+   * matches, `untrusted` is true when any match was written on an untrusted turn or sits at
+   * the `external_unverified` tier. Without a scope it reads every scope of the namespace.
+   * A copy or a replacement of such a row carries this mark on, rather than the mark of the
+   * turn that moves it.
+   */
+  sourceOfPattern(pattern: string, namespace: string, scope?: { type: string; id: string } | undefined): { found: boolean; untrusted: boolean } {
+    const like = `%${escapeLike(pattern)}%`;
+    const row = (scope
+      ? this.db.prepare(
+        "SELECT COUNT(*) AS n, COALESCE(MAX(source_untrusted = 1 OR source_type = 'external_unverified'), 0) AS u FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? AND scope_type = ? AND scope_id = ?",
+      ).get(like, namespace, scope.type, scope.id)
+      : this.db.prepare(
+        "SELECT COUNT(*) AS n, COALESCE(MAX(source_untrusted = 1 OR source_type = 'external_unverified'), 0) AS u FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ?",
+      ).get(like, namespace)
+    ) as { n: number; u: number };
+    return { found: row.n > 0, untrusted: row.u === 1 };
+  }
+
+  /**
    * Name `successorId` as the successor of memories retired without one — they were
    * moved, and the fact lives on in the successor. Only rows still retired without a
    * successor are touched, never the successor itself. Returns the rows changed.

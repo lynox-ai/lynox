@@ -320,25 +320,36 @@ export const PAUSED_DONE_ITS_WORKFLOW_FIRST = 'Its workflow was created or last 
 export type PausedDoneWorkflow =
   | { readonly kind: 'workflow'; readonly workflowId: string; readonly name: string | null }
   | { readonly kind: 'none' }
-  | { readonly kind: 'unknown' };
+  | { readonly kind: 'unknown' }
+  // Read only for a person with access, whose new plan on it would be refused (`scheduleRefusal`):
+  // its mark is another live person's, or its marks cannot be read (U-489).
+  | { readonly kind: 'foreign' | 'unreadable'; readonly workflowId: string; readonly name: string | null };
 
 /** The reads `pausedDoneWorkflow` needs: the workflow as `RunHistory` answers it, and `MandateEnds.isLive`. */
 export interface PausedDoneWorkflowReader {
   getWorkflowExact(id: string): { readonly name?: string | undefined } | undefined;
   getWorkflowAuthorship(id: string): Parameters<typeof planAuthorshipOfWorkflow>[0] | undefined;
   isLive(mandateId: string): boolean;
+  /**
+   * For a reader who is a person with access: why a new plan of theirs on this workflow would be
+   * refused (`foreignWorkflowScheduleRefusalKind`, the rule `task_create` and the routes refuse by),
+   * or null. Absent for the owner, who may plan on any workflow.
+   */
+  scheduleRefusal?: ((workflowId: string) => 'foreign' | 'unreadable' | null) | undefined;
 }
 
 /** The reader from the engine's stores; null when either is missing, so the case reads `unknown`. */
 export function pausedDoneReaderOf(
   history: Pick<PausedDoneWorkflowReader, 'getWorkflowExact' | 'getWorkflowAuthorship'> | null | undefined,
   ends: { isLive(mandateId: string): boolean } | null | undefined,
+  scheduleRefusal?: PausedDoneWorkflowReader['scheduleRefusal'],
 ): PausedDoneWorkflowReader | null {
   if (!history || !ends) return null;
   return {
     getWorkflowExact: (id) => history.getWorkflowExact(id),
     getWorkflowAuthorship: (id) => history.getWorkflowAuthorship(id),
     isLive: (id) => ends.isLive(id),
+    scheduleRefusal,
   };
 }
 
@@ -349,25 +360,60 @@ export function pausedDoneWorkflow(
   if (t.effect !== 'run_workflow' || typeof t.pipeline_id !== 'string' || t.pipeline_id === '') return { kind: 'none' };
   if (!reader) return { kind: 'unknown' };
   const id = t.pipeline_id;
+  // A definition that cannot be read, or has no name, is named "its workflow".
+  const nameOf = (): string | null => {
+    try {
+      const w = reader.getWorkflowExact(id)?.name;
+      return typeof w === 'string' && w !== '' ? w : null;
+    } catch {
+      return null;
+    }
+  };
+  // For a person with access, a case where a new plan of theirs would be refused comes before
+  // "create a new one" (U-489). An ended mark keeps its own case: the owner takes the workflow
+  // over first, and after that the person may plan on it.
+  const refusedOr = (other: PausedDoneWorkflow): PausedDoneWorkflow => {
+    let kind: 'foreign' | 'unreadable' | null;
+    try {
+      kind = reader.scheduleRefusal?.(id) ?? null;
+    } catch {
+      kind = 'unreadable';
+    }
+    return kind === null ? other : { kind, workflowId: id, name: nameOf() };
+  };
   // The marks decide; the definition only names the workflow, so it is read after the decision.
   // Marks that are not there (no row, or no store to read them from) are not known.
-  let ended: boolean;
+  let member: RequestPrincipal | undefined;
   try {
     const authorship = reader.getWorkflowAuthorship(id);
-    if (authorship === undefined) return { kind: 'unknown' };
-    const member = planMandate(planAuthorshipOfWorkflow(authorship))?.principal;
+    if (authorship === undefined) return refusedOr({ kind: 'unknown' });
+    member = planMandate(planAuthorshipOfWorkflow(authorship))?.principal;
+  } catch {
+    return refusedOr({ kind: 'unknown' });
+  }
+  // A store of access ends that cannot be read leaves the case unknown, for her too: a mark that has
+  // ended would need the owner's takeover first, not a new plan the owner sets up.
+  let ended: boolean;
+  try {
     ended = member !== undefined && principalHasEnded(member, (m) => reader.isLive(m));
   } catch {
     return { kind: 'unknown' };
   }
-  if (!ended) return { kind: 'none' };
-  // A definition that cannot be read, or has no name, still needs its takeover: it is named "its workflow".
-  let name: string | null = null;
-  try {
-    const w = reader.getWorkflowExact(id)?.name;
-    if (typeof w === 'string' && w !== '') name = w;
-  } catch { /* named "its workflow" */ }
-  return { kind: 'workflow', workflowId: id, name };
+  if (!ended) return refusedOr({ kind: 'none' });
+  return { kind: 'workflow', workflowId: id, name: nameOf() };
+}
+
+/** The end of the sentence for a person with access whose new plan on the workflow would be refused (U-489). */
+const PAUSED_DONE_FOREIGN_WAY = 'Its workflow was set up or last changed by another person with delegated access, so a new plan on it cannot be scheduled for this user; if it should run again, tell them to ask the owner to set up a new plan, or offer to write a new workflow of their own for this task.';
+const PAUSED_DONE_UNREADABLE_WAY = 'lynox could not read who set up its workflow, so only the owner may schedule a new plan on it; if it should run again, tell them to ask the owner, or offer to write a new workflow of their own for this task.';
+
+/** The API's refusal for those cases: the person reads it themselves (U-489 N). */
+export const PAUSED_DONE_FOREIGN_API = 'completed and paused because an access ended; it cannot be taken over or run again. Its workflow was set up or last changed by another person with access, so you cannot create a new plan on it; to run it again, ask the owner to create one, or have lynox write a workflow of your own for this task in chat.';
+export const PAUSED_DONE_UNREADABLE_API = 'completed and paused because an access ended; it cannot be taken over or run again. lynox cannot read who set up its workflow, so only the owner may create a new plan on it; to run it again, ask them to, or have lynox write a workflow of your own for this task in chat.';
+
+/** That end for a refused case, or null when a new plan is the way (U-489). */
+export function pausedDoneRefusedWay(c: PausedDoneWorkflow): string | null {
+  return c.kind === 'foreign' ? PAUSED_DONE_FOREIGN_WAY : c.kind === 'unreadable' ? PAUSED_DONE_UNREADABLE_WAY : null;
 }
 
 /** What this case adds to a sentence for the model or an API reader, never with the workflow's name. */
@@ -382,11 +428,15 @@ export function pausedDoneWorkflowText(c: PausedDoneWorkflow): string {
  * after the workflow's takeover where it needs one (U-275).
  */
 export function pausedDoneModelText(c: PausedDoneWorkflow): string {
+  const way = pausedDoneRefusedWay(c);
+  if (way !== null) return `completed, and paused because the helper's access ended. It cannot be taken over or run again. ${way}`;
   return `completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan.${pausedDoneWorkflowText(c)}`;
 }
 
 /** `task_update`'s refusal at a completed plan that keeps its pause (U-275). */
 export function pausedDoneUpdateRefusal(c: PausedDoneWorkflow): string {
+  const way = pausedDoneRefusedWay(c);
+  if (way !== null) return `Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again. ${way}`;
   return `Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan.${pausedDoneWorkflowText(c)}`;
 }
 

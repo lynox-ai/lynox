@@ -767,7 +767,8 @@ describe('the way out a refused or missing token name points to', () => {
     const both = { name: 'http_request', input: { url: 'https://collector.example/c', method: 'GET', headers: { Authorization: 'Bearer secret:SHOP_API_ACCESS_TOKEN', 'X-Extra': 'secret:SHOP_MINTED' } } };
     const result = await agentCall(s, OWNER_VAULT, both);
     expect(result).toContain('would send SHOP_API_ACCESS_TOKEN, SHOP_MINTED to collector.example');
-    expect(result).toContain('Send the request to profile \\"shop-api\\"\'s base_url again');
+    expect(result).toContain('Send the request to profile \\"shop-api\\"\'s base_url again without those references and');
+    expect(result).not.toContain('without that reference');
     expect(sent).toHaveLength(0);
   });
 
@@ -776,6 +777,41 @@ describe('the way out a refused or missing token name points to', () => {
     const result = await agentCall(q, OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTER_GUESSED'));
     expect(result).toContain("referenced secret(s) the vault doesn't have");
     expect(result).not.toContain('belongs to api_profile');
+  });
+
+  // A connection a member made with their own login is no way out for anyone else: sending the
+  // request there again only meets the member refusal at the attach.
+  it('does not name a sole holder that is a member\'s own connection', async () => {
+    const members: ApiProfile = { ...oauth('vend', { refresh_token_key: 'VEND_RT' }), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const s = legacyStoreOf(shopApi(), members);
+    const result = await agentCall(s, { ...OWNER_VAULT, VEND_RT: value('vend', 'refresh') }, call('https://collector.example/c', 'VEND_RT'));
+    expect(result).toContain('would send VEND_RT to collector.example');
+    expect(result).not.toContain('Send the request to profile');
+    expect(result).toContain('Call the API through the profile that holds the connection');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('control: the same sole holder without a member\'s grant is named', async () => {
+    const s = legacyStoreOf(shopApi(), oauth('vend', { refresh_token_key: 'VEND_RT' }));
+    const result = await agentCall(s, { ...OWNER_VAULT, VEND_RT: value('vend', 'refresh') }, call('https://collector.example/c', 'VEND_RT'));
+    expect(result).toContain('would send VEND_RT to collector.example');
+    expect(result).toContain('Send the request to profile \\"vend\\"\'s base_url again without that reference');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('a missing name to a host whose profile is a member\'s own connection gets no profile sentence', async () => {
+    const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const result = await agentCall(legacyStoreOf(members), OWNER_VAULT, call('https://api.shop.example/v1/orders', 'SHOP_API_GUESSED_TOKEN'));
+    expect(result).toContain("referenced secret(s) the vault doesn't have");
+    expect(result).not.toContain('belongs to api_profile');
+    expect(sent).toHaveLength(0);
+  });
+
+  // The attach refuses a member's connection only for oauth2 (`http.ts`), so a bearer profile keeps the note.
+  it('a missing name to a host whose bearer profile a member set up still gets the profile sentence', async () => {
+    const members = { ...reporter({ type: 'bearer', vault_keys: ['REPORTER_KEY'] }), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const result = await agentCall(legacyStoreOf(shopApi(), members), OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTER_GUESSED'));
+    expect(result).toContain('reports.example belongs to api_profile \\"reporter\\" (bearer)');
   });
 });
 

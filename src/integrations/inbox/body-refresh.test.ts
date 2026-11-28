@@ -87,7 +87,7 @@ function inboxItem(threadKey = 'imap:<m1@x>'): { id: string; accountId: string; 
     reasonDe: 'r',
     classifiedAt: new Date(),
     classifierVersion: 'v',
-  });
+  }).id;
   return { id, accountId: ACCOUNT.id, threadKey, channel: 'email' };
 }
 
