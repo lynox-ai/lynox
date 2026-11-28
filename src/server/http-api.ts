@@ -266,6 +266,12 @@ function mayStartConnect(principal: RequestPrincipal, profile: ApiProfile | unde
 const free = (why: string): MandateStance => ({ kind: 'free', why });
 /** A GET that only reads. */
 const READS: MandateStance = { kind: 'reads' };
+/**
+ * The fields of a workflow's capability contract that a schedule's consent shows (the library's
+ * schedule dialog lists the tools, and the methods, hosts and paths a run may write to). Listed,
+ * not subtracted: a field a contract gains later reaches no one but the owner until it is named here.
+ */
+const CONSENT_CONTRACT_FIELDS = ['version', 'grantedTools', 'httpMethods', 'hostPatterns', 'pathPatterns'] as const;
 
 interface DynamicRoute {
   method: string;
@@ -9389,6 +9395,8 @@ export class LynoxHTTPApi {
           : (Array.isArray(parsed.steps) ? inferPipelineMode(parsed.steps as import('../types/index.js').InlinePipelineStep[]) : 'autonomous');
         // Read off the full stored steps (their declared tools too), not the card's id + task.
         const fullSteps = Array.isArray(parsed.steps) ? parsed.steps as import('../types/index.js').InlinePipelineStep[] : [];
+        // A mandate learns that a workflow is not its to schedule (UX-058, U-085), never whose it is.
+        const refusal = ownerViews ? null : foreignWorkflowScheduleRefusalKind(viewer, row.id, history);
         workflows.push({
           id: row.id,
           name: typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : row.manifest_name,
@@ -9406,17 +9414,24 @@ export class LynoxHTTPApi {
           schedulable: isSchedulableWorkflow({ mode: mode === 'interactive' || mode === 'autonomous' ? mode : undefined, steps: fullSteps }),
           askingSteps: mode === 'interactive' ? stepsThatAsk(fullSteps) : [],
           ...(typeof parsed.confirmedAt === 'string' ? { confirmedAt: parsed.confirmedAt } : {}),
-          ...(parsed.capabilityContract !== undefined ? { capabilityContract: parsed.capabilityContract } : {}),
+          // The contract, as far as this viewer may read it: the owner reads it all. Anyone else reads
+          // only what a schedule's consent shows (`CONSENT_CONTRACT_FIELDS`), never the allowed values
+          // or bounds (enum, min, max, regex: the run form shows them to the owner only), and nothing
+          // of a workflow it may not schedule.
+          ...(() => {
+            const contract = parsed.capabilityContract;
+            if (contract === undefined) return {};
+            if (ownerViews) return { capabilityContract: contract };
+            if (refusal !== null || contract === null || typeof contract !== 'object' || Array.isArray(contract)) return {};
+            const stored = contract as Record<string, unknown>;
+            return { capabilityContract: Object.fromEntries(CONSENT_CONTRACT_FIELDS.filter((k) => Object.hasOwn(stored, k)).map((k) => [k, stored[k]])) };
+          })(),
           // A workflow a mandate shaped, or whose steps changed after its stamp, runs only after the
           // owner stamped its steps as they are (`workflow-stamp.ts`): the same state the run and
           // the trigger list read, so every surface that points here finds the stamp to give.
           awaitsStamp: history.workflowStampState({ ...(parsed as object), id: row.id } as PlannedPipeline) === 'awaits_owner_stamp',
           ...(() => {
-            if (!ownerViews) {
-              // A mandate learns that a workflow is not its to schedule (UX-058, ux U-085), never whose it is.
-              const refusal = foreignWorkflowScheduleRefusalKind(viewer, row.id, history);
-              return refusal === null ? {} : { schedule_refusal: refusal };
-            }
+            if (!ownerViews) return refusal === null ? {} : { schedule_refusal: refusal };
             const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
             if (runAs.kind !== 'mandate') return {};
             const ended = this._workflowAuthorEnded(runAs);
