@@ -69,6 +69,8 @@ export interface IMemory {
    * ask, and neither does the engine's own upkeep (expiry, garbage collection).
    */
   engineLessRefusal?(reader: 'model' | 'client'): string | null;
+  /** The secret-masking `appendScoped` applies before it writes a line. */
+  maskText?(text: string): string;
 }
 
 // === Knowledge Graph ===
@@ -365,6 +367,12 @@ export interface IKnowledgeLayer {
   /** The texts of the active memories in `namespace` written untrusted. Optional so a test
    *  double need not wire it: a read path without it marks no line. */
   untrustedTextsIn?(namespace: MemoryNamespace): readonly string[];
+  /** Record the keys (`untrustedLineKey`) of flat lines of `namespace` that carry the untrusted mark. */
+  markUntrustedLines?(namespace: MemoryNamespace, keys: readonly string[]): void;
+  /** The keys of the flat lines of `namespace` that carry the untrusted mark. */
+  untrustedLineKeysIn?(namespace: MemoryNamespace): ReadonlySet<string>;
+  /** Drop the marks of erased lines; without `namespace`, in every namespace. */
+  forgetUntrustedLines?(namespace: MemoryNamespace | undefined, keys: readonly string[]): number;
   eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   updateMemoryText(
     oldText: string,

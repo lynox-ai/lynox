@@ -233,7 +233,8 @@ function seedOldLegacy(path: string): void {
   db.close();
   const raw = new Database(path);
   raw.prepare('DELETE FROM schema_version WHERE version >= 8').run();
-  raw.exec('DROP INDEX IF EXISTS idx_relations_origin; ALTER TABLE relations DROP COLUMN origin_memory_id;');
+  // Back to v7: undo what v8 and every later step added.
+  raw.exec('DROP INDEX IF EXISTS idx_relations_origin; ALTER TABLE relations DROP COLUMN origin_memory_id; DROP TABLE untrusted_lines;');
   // Name the memories by letter so the assertions can read them.
   for (const [k, id] of Object.entries(ids)) {
     raw.prepare('UPDATE relations SET source_memory_id = ? WHERE source_memory_id = ?').run(`m-${k}`, id);
