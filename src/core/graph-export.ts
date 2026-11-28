@@ -94,8 +94,16 @@ export function maskGraphForExport(
   mask: (text: string) => string,
 ): { entities: EntityRecord[]; relationships: ExportRelation[] } {
   // A field is masked where it holds text, as `readMemoryTextsForExport` masks its rows: a record
-  // read from an older or partial row passes through with what it has.
-  const text = <T>(v: T): T => (typeof v === 'string' ? mask(v) as T : v);
+  // read from an older or partial row passes through with what it has. Types, empty descriptions
+  // and relation kinds repeat across a graph, and the mask costs the same for each, so each
+  // distinct text is masked once per call.
+  const seen = new Map<string, string>();
+  const once = (v: string): string => {
+    let out = seen.get(v);
+    if (out === undefined) { out = mask(v); seen.set(v, out); }
+    return out;
+  };
+  const text = <T>(v: T): T => (typeof v === 'string' ? once(v) as T : v);
   return {
     entities: graph.entities.map(e => ({
       ...e,
