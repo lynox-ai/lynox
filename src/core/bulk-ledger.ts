@@ -803,6 +803,13 @@ export interface PreviewTarget {
    *  The same targets {@link BulkLedger.countUndoOpenTargets} counts, taken out or not. Set only
    *  where it holds. */
   undoOpen?: true | undefined;
+  /** Beside an error on a target that is not `invalid` only: the target is recorded as applied
+   *  (`applied_at`). Its error is then one a loop that lost its claim left, not this target's. */
+  applied?: boolean | undefined;
+  /** Beside an error on a target that is not `invalid` only: a send to it has no clear answer
+   *  (`unknown_sends > 0`), so the change may have arrived. A refusal takes its send back; a
+   *  redirect, a server error or no answer does not. */
+  sendUnclear?: boolean | undefined;
 }
 
 interface RunRow {
@@ -1784,13 +1791,13 @@ export class BulkLedger {
       // settled it: the run may have changed it, and a rollback that left it must mark it.
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (((applied_at IS NOT NULL AND found_unsent = 0) OR (applied_at IS NULL AND write_sent = 1 AND undone_at IS NULL)) AND ${WRITING_SQL}) AS written,
-         undone_at IS NOT NULL AS undone,
+         undone_at IS NOT NULL AS undone, applied_at IS NOT NULL AS applied, unknown_sends > 0 AS send_unclear,
          shop_added_markup, host_rewrote, context_secret_field, link_domain, target_title, refusal_detail
        FROM bulk_targets WHERE run_id = ?${opts.changed === true ? " AND change != 'unchanged' ORDER BY written DESC, seq" : ' ORDER BY seq'} LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
-      deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
+      deselected_at: string | null; written: number; undone: number; applied: number; send_unclear: number; shop_added_markup: number; host_rewrote: number;
       context_secret_field: number | null; link_domain: string | null; target_title: string | null; refusal_detail: string | null;
     }[];
     const run = this.runRow(runId);
@@ -1854,6 +1861,8 @@ export class BulkLedger {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
         error: r.error, deselected: r.deselected_at !== null, written: r.written === 1, undone: r.undone === 1,
+        // Only beside an error a target still to write can carry: what the page says about it.
+        ...(r.error !== null && r.change !== 'invalid' ? { applied: r.applied === 1, sendUnclear: r.send_unclear === 1 } : {}),
         ...(r.shop_added_markup === 1 ? { shopAddedMarkup: true as const } : {}),
         ...(r.host_rewrote === 1 ? { hostRewrote: true as const } : {}),
         ...(r.error === 'secret_in_context' && r.context_secret_field !== null && contextNames[r.context_secret_field] !== undefined
