@@ -11018,6 +11018,7 @@ export class LynoxHTTPApi {
       const { rows, before, complete } = readTrailPage(engineDb.getDb(), { limit, beforeId });
       const entries = buildTrail(rows, trailSources(trailSourceDeps({
         historyDb: engine.getRunHistory()?.getDb() ?? null,
+        engineDb: engineDb.getDb(),
         worker: engine.getWorkerLoop(),
         ledger: engine.getBulkLedger(),
         approvals: engine.getApprovalStore(),

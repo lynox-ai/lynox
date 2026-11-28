@@ -30,6 +30,7 @@ const quiet: TrailSources = {
   planRunRunning: () => false,
   bulkRunOpen: () => false,
   approvalOf: () => undefined,
+  knowledgeStatus: () => undefined,
 };
 
 interface Row {

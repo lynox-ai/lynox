@@ -34,6 +34,7 @@ export function isSessionExpired(): boolean {
 }
 
 export function markSessionExpired(): void {
+	if (_accessEnded) return;
 	if (Date.now() < _dismissedUntil) return;
 	if (_redirectPending) return;
 	_sessionExpired = true;
@@ -67,3 +68,19 @@ export function mandateMemoryBlocked(): 'off' | 'missing' | null {
 export function markMandateMemoryBlocked(reason: 'off' | 'missing'): void {
 	_mandateMemoryBlocked = reason;
 }
+
+// A delegated access that has ended: revoked, or past its end (engine 403 `mandate_revoked`, or
+// `mandate_ended`). Its own screen, not the expired banner: signing in again does not bring it
+// back, so there is no button, only who to ask (U-306 B2). Not dismissable; it holds until the
+// page is left.
+let _accessEnded = $state(false);
+
+export function isAccessEnded(): boolean {
+	return _accessEnded;
+}
+
+export function markAccessEnded(): void {
+	_accessEnded = true;
+	_sessionExpired = false;
+}
+

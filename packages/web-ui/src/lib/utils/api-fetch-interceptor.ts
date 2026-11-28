@@ -11,7 +11,7 @@
 // stack a new wrapper on top of the already-wrapped fetch on every
 // change. The sentinel lives on `window` and survives HMR.
 
-import { markMandateMemoryBlocked, markSessionExpired } from '../stores/session.svelte.js';
+import { markAccessEnded, markMandateMemoryBlocked, markSessionExpired } from '../stores/session.svelte.js';
 
 // Routes that legitimately 401 while the session is fine — wrong creds
 // during login, unauth check before login, etc. Triggering the
@@ -42,7 +42,7 @@ export function installApiFetchInterceptor(): void {
 					markSessionExpired();
 				} else {
 					const code = await refusalCode(response);
-					if (code === 'mandate_revoked') markSessionExpired();
+					if (code === 'mandate_revoked' || code === 'mandate_ended') markAccessEnded();
 					else if (code === 'mandate_memory_off') markMandateMemoryBlocked('off');
 					else if (code === 'mandate_memory_missing') markMandateMemoryBlocked('missing');
 				}
@@ -53,8 +53,8 @@ export function installApiFetchInterceptor(): void {
 }
 
 /**
- * The code of a 403 that is about the session, not the view: `mandate_revoked` (a delegated
- * access that has ended) and `mandate_memory_off`/`_missing` (a delegated access this instance
+ * The code of a 403 that is about the session, not the view: `mandate_revoked` and
+ * `mandate_ended` (a delegated access that has ended, revoked or past its end) and `mandate_memory_off`/`_missing` (a delegated access this instance
  * cannot let in while it runs without durable knowledge). Every other 403 is a state of the
  * view that got it (a managed instance, an owner-only action) and stays the view's to show.
  * Reads a clone, so the caller still gets the whole body.

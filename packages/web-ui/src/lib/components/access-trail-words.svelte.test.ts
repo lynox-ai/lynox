@@ -1,0 +1,196 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { setLocale, getLocale } from '../i18n.svelte.js';
+
+// The owner's view says what a person with delegated access read in words, with the route once
+// and muted next to it as the proof (U-306 B1); the same read made again is one line with a
+// count (C); a memory entry waiting for review is said as such (B4); and the page a helper may not
+// read says nothing about whose entries it holds (B5).
+
+const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
+type SvelteClient = {
+	mount: (c: unknown, o: { target: Element }) => Record<string, unknown>;
+	unmount: (c: Record<string, unknown>) => void;
+	flushSync: () => void;
+	tick: () => Promise<void>;
+};
+const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
+
+let target: HTMLElement;
+let component: Record<string, unknown> | undefined;
+let answer: { status: number; body: unknown } = { status: 200, body: { entries: [], before: null } };
+let locale: string;
+
+const IDA = { email: 'ida@example.invalid', display: 'IDA', mandateId: 'M-1' };
+const NOW = Date.now();
+const at = (minutesAgo: number): string => new Date(NOW - minutesAgo * 60_000).toISOString();
+
+beforeEach(() => {
+	locale = getLocale();
+	setLocale('de');
+	vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(answer.body), { status: answer.status, headers: { 'Content-Type': 'application/json' } })));
+	target = document.createElement('div');
+	document.body.appendChild(target);
+});
+
+afterEach(() => {
+	if (component) unmount(component);
+	component = undefined;
+	target.remove();
+	vi.unstubAllGlobals();
+	setLocale(locale as 'de' | 'en');
+});
+
+async function settle(): Promise<void> {
+	for (let i = 0; i < 10; i++) {
+		await new Promise((r) => setTimeout(r, 0));
+		await tick();
+		flushSync();
+	}
+}
+
+let nextId = 0;
+const read = (action: string, target: string | null, minutesAgo = 1, phase = 'read'): Record<string, unknown> =>
+	({ kind: 'event', id: `ev${String(nextId++)}`, action, target, phase, at: at(minutesAgo), person: IDA });
+
+async function render(entries: unknown[]): Promise<void> {
+	answer = { status: 200, body: { entries, before: null, complete: true } };
+	const { default: AccessTrailView } = await import('./AccessTrailView.svelte');
+	component = mount(AccessTrailView, { target });
+	await settle();
+}
+
+const items = (): HTMLElement[] => [...target.querySelectorAll<HTMLElement>('ul > li[data-entry-kind]')];
+const text = (el: Element | null | undefined): string => el?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+
+describe('a read in words, the route once (U-306 B1)', () => {
+	it('says what was read, then the route once, muted, without a second copy of the path', async () => {
+		await render([read('GET /api/threads/:id/messages', '/api/threads/t-1/messages')]);
+		const [li] = items();
+		expect(text(li?.querySelector('[data-word]'))).toBe('Nachrichten eines Chats');
+		expect(text(li?.querySelector('[data-route]'))).toBe('GET /api/threads/t-1/messages');
+		expect(text(li)).not.toContain('·');
+		expect(text(li).match(/\/api\/threads/g)).toHaveLength(1);
+		expect(text(li)).toContain('Lesezugriff');
+	});
+
+	it('breaks the route only after a slash or a query sign, never inside a name', async () => {
+		await render([read('GET /api/files/read', '/api/files/read?path=notes.md')]);
+		const route = items()[0]?.querySelector('[data-route]');
+		expect(route?.querySelectorAll('wbr').length).toBe(6);
+		const pieces = [...(route?.childNodes ?? [])].filter((n) => n.nodeType === 3 && n.textContent !== '').map((n) => n.textContent);
+		expect(pieces).toEqual(['GET /', 'api/', 'files/', 'read?', 'path=', 'notes.md']);
+	});
+
+	it('shows only the route for a route without a word', async () => {
+		await render([read('GET /api/not-worded', '/api/not-worded')]);
+		const [li] = items();
+		expect(li?.querySelector('[data-word]')).toBeNull();
+		expect(text(li?.querySelector('[data-route]'))).toBe('GET /api/not-worded');
+	});
+
+	it('keeps an action that is not a route with its target after it', async () => {
+		await render([read('http_request:read', 'GET example.invalid/')]);
+		expect(text(items()[0]?.querySelector('[data-route]'))).toBe('http_request:read · GET example.invalid/');
+	});
+
+	it('names a settings page by the name the settings index shows it under', async () => {
+		await render([read('GET /api/backups', '/api/backups')]);
+		expect(text(items()[0]?.querySelector('[data-word]'))).toBe('Einstellungen: Backups');
+	});
+
+	it('says a refused read with its word, and keeps the two reveal forms', async () => {
+		await render([
+			read('GET /api/threads/:id/messages', '/api/threads/t-1/messages', 1, 'refused'),
+			read('GET /api/not-worded', '/api/not-worded', 2, 'refused'),
+			read('GET /api/vault/key', '/api/vault/key?reveal=true', 3, 'refused'),
+		]);
+		const [a, b, c] = items();
+		expect(text(a)).toContain('Versuch: Nachrichten eines Chats (verweigert)');
+		// The word stands in the refusal, not again after it.
+		expect(a?.querySelector('[data-word]')).toBeNull();
+		expect(text(b)).toContain('Versuch (verweigert)');
+		expect(text(c)).toContain('Versuch, den Tresorschlüssel anzuzeigen (verweigert)');
+	});
+
+	it('in English too', async () => {
+		setLocale('en');
+		await render([read('GET /api/inbox/items/:id/full', '/api/inbox/items/i-1/full'), read('GET /api/backups', '/api/backups', 2)]);
+		const [a, b] = items();
+		expect(text(a?.querySelector('[data-word]'))).toBe('An email, in full');
+		expect(text(b?.querySelector('[data-word]'))).toBe('Settings: Backups');
+	});
+});
+
+describe('the same read again, one line (U-306 C)', () => {
+	it('folds three reads of the same run into one line with the count, the span and the route', async () => {
+		await render([
+			read('GET /api/bulk/runs/:id', '/api/bulk/runs/b-1', 1),
+			read('GET /api/bulk/runs/:id', '/api/bulk/runs/b-1', 2),
+			read('GET /api/bulk/runs/:id', '/api/bulk/runs/b-1', 3),
+			read('GET /api/bulk/runs/:id', '/api/bulk/runs/b-2', 4),
+		]);
+		const list = items();
+		expect(list.map((li) => li.dataset['entryKind'])).toEqual(['repeat', 'event']);
+		const summary = text(list[0]?.querySelector('[data-repeat-summary]'));
+		expect(summary).toMatch(/^Lesezugriff Stand eines Massenlaufs \(3×, .+–.+\) GET \/api\/bulk\/runs\/b-1$/);
+		// Opening it shows each read.
+		expect(list[0]?.querySelectorAll('details [data-entry-kind="event"]')).toHaveLength(3);
+	});
+});
+
+describe('a memory entry saved for review (U-306 B4)', () => {
+	it('says "Zur Prüfung gespeichert", not "Beendet"', async () => {
+		await render([{ kind: 'step', id: 's-1', action: 'instance:remember#create:create', target: 'knowledge', at: at(1), person: IDA, status: 'review' }]);
+		expect(text(items()[0]?.querySelector('[data-status]'))).toBe('Zur Prüfung gespeichert');
+		setLocale('en');
+		flushSync();
+		expect(text(items()[0]?.querySelector('[data-status]'))).toBe('Saved for review');
+	});
+});
+
+describe('the page a helper may not read (U-306 B5)', () => {
+	it('drops the line about whose entries it holds', async () => {
+		answer = { status: 403, body: { error: 'owner only' } };
+		const { default: AccessTrailView } = await import('./AccessTrailView.svelte');
+		component = mount(AccessTrailView, { target });
+		await settle();
+		expect(target.querySelector('[data-state="owner-only"]')).not.toBeNull();
+		expect(text(target)).not.toContain('Einträge von Personen, denen du Zugang gegeben hast.');
+	});
+
+	it('keeps it for the owner', async () => {
+		await render([read('GET /api/backups', '/api/backups')]);
+		expect(text(target)).toContain('Einträge von Personen, denen du Zugang gegeben hast.');
+	});
+});
+
+describe('the screen of an ended access (U-306 B2)', () => {
+	it('says the access has ended and whom to ask, with no button and no link, in both languages', async () => {
+		const { default: AccessEndedNotice } = await import('./AccessEndedNotice.svelte');
+		component = mount(AccessEndedNotice, { target });
+		flushSync();
+		expect(text(target)).toBe('Zugang beendet Dein Zugang zu dieser Instanz ist beendet. Brauchst du ihn wieder, wende dich an den Inhaber.');
+		expect(target.querySelectorAll('button, a')).toHaveLength(0);
+		setLocale('en');
+		flushSync();
+		expect(text(target)).toBe('Access ended Your access to this instance has ended. If you need it again, contact the owner.');
+	});
+});
+
+describe('the shell shows the ended access in its session banner (U-306 B2)', () => {
+	// The shell is too large to mount here; its banner is read from the source: the ended access
+	// comes first, as an alert, and its branch holds neither the dismiss nor the sign-in control.
+	const SHELL = readFileSync(join(__dirname, 'AppShell.svelte'), 'utf8');
+	it('takes the ended access before the memory lock and the expired session, with no control in its branch', () => {
+		const open = SHELL.indexOf('{#if isAccessEnded() || mandateMemoryBlocked() !== null || isSessionExpired()}');
+		expect(open).toBeGreaterThan(0);
+		const branch = SHELL.slice(SHELL.indexOf('{#if isAccessEnded()}', open), SHELL.indexOf('{:else if mandateMemoryBlocked() !== null}', open));
+		expect(branch).toContain('<AccessEndedNotice />');
+		expect(branch).not.toMatch(/<button|<a /);
+		expect(SHELL.slice(open, open + 400)).toContain("role={isAccessEnded() || mandateMemoryBlocked() !== null ? 'alert' : undefined}");
+	});
+});
+

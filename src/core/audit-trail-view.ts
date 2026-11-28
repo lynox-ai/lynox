@@ -43,11 +43,13 @@ export interface TrailRow {
 }
 
 /**
- * The seven states an entry can be in. `ended` is not `done`: a run the owner stopped, a run
+ * The eight states an entry can be in. `ended` is not `done`: a run the owner stopped, a run
  * whose access ended, and a tool call that returned a result all end without saying the act
- * happened (a tool that asks before it sends returns one when the answer was no).
+ * happened (a tool that asks before it sends returns one when the answer was no). `review`: a
+ * memory entry the step created is stored and waits for the owner's review, read from the
+ * knowledge store (`knowledgeStatus`), never from the row.
  */
-export type TrailStatus = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted';
+export type TrailStatus = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted' | 'review';
 
 /** Who the entry is about, as the row names them; the row, not the mandate, so an ended access still reads. */
 export interface TrailPerson {
@@ -138,8 +140,31 @@ export const INTERFACE_POLLS: ReadonlySet<string> = new Set([
 
 /** Whether a row is a read on a route the web UI polls by itself. Writes and steps never are. */
 export function isInterfacePoll(row: Pick<TrailRow, 'phase' | 'action'>): boolean {
-  return row.phase === 'read' && INTERFACE_POLLS.has(row.action);
+  return row.phase === 'read' && (INTERFACE_POLLS.has(row.action) || INTERFACE_READS.has(row.action));
 }
+
+/**
+ * Reads the web UI makes by itself that are not a timer of the status bar or the nav, so they are
+ * not in `INTERFACE_POLLS` (which a test holds to the pollers exactly): what the shell reads when it
+ * loads (configuration, whether secrets are set, the chat list, the inbox and approval counts), and
+ * three loops that run while a view is open or a sign-in runs (the inbox's own loading, the plan
+ * list, Google's sign-in status). The view groups them with the polls (U-306 B1(b) and C).
+ *
+ * None of them takes a path parameter, and none answers with a session's messages: the chat list
+ * carries the chats' titles, the plan list its plans' names. Grouping changes no row and hides
+ * nothing: opening the group shows each read, like `GET /api/tasks` (decided 2026-11-28). After
+ * 30 days they stay single rows; only `FOLDED_POLLS` (audit-retention.ts) folds into a day.
+ */
+export const INTERFACE_READS: ReadonlySet<string> = new Set([
+  'GET /api/config',
+  'GET /api/secrets/status',
+  'GET /api/threads',
+  'GET /api/inbox/counts',
+  'GET /api/approvals/count',
+  'GET /api/inbox/cold-start',
+  'GET /api/triggers',
+  'GET /api/google/status',
+]);
 
 /** Targets a run wrote and failed: summed over its windows, a lower bound when one did not say. */
 export interface TrailTargets {
@@ -206,6 +231,8 @@ export interface TrailSources {
   bulkRunOpen(runId: string): boolean;
   /** An approval entry's state and who decided it; undefined when there is no such entry. */
   approvalOf(id: string): { readonly status: string; readonly decidedBy: string | null } | undefined;
+  /** A memory entry's `status` in the knowledge store; undefined when there is no such entry or no store. */
+  knowledgeStatus(id: string): string | undefined;
 }
 
 /** The send rows an approval writes (approval-executor.ts): `approval <id>: …`. */
@@ -223,6 +250,19 @@ function approvalOfFiling(r: TrailRow): string | undefined {
 }
 
 const BULK_ACTIONS: ReadonlySet<string> = new Set(['bulk:apply', 'bulk:undo']);
+/** The step of `remember` that creates a memory entry (knowledge.ts, `instanceAction`). */
+const REMEMBER_CREATE = 'instance:remember#create:create';
+
+/**
+ * A `remember` step that returned and created an entry the store holds for review: `review`, not
+ * `ended` (U-306 B4). The entry's id is the end row's `created=`, which the row carries only
+ * when the step proved the write. Any other status of the entry, or none, leaves the step as is.
+ */
+function reviewOf(attempt: TrailRow, end: TrailRow, src: TrailSources): TrailStatus | undefined {
+  if (attempt.action !== REMEMBER_CREATE || end.phase !== 'returned') return undefined;
+  const id = targetPairs(end.target).get('created');
+  return id !== undefined && src.knowledgeStatus(id) === 'pending_review' ? 'review' : undefined;
+}
 /** The rows of a run's own start and end: a plan's, or a workflow run's from a chat (660b). */
 const RUN_ACTIONS: ReadonlySet<string> = new Set(['plan:run', 'workflow:run']);
 
@@ -364,7 +404,7 @@ function stepsOf(rows: readonly TrailRow[], src: TrailSources, sends: ReadonlyMa
         for (const row of send ?? []) claimed.add(row.id);
         judged = filedStepStatus(approval, send, src);
       } else {
-        judged = end !== undefined ? { status: stepOutcomeStatus(end.phase) } : openStepStatus(r, src);
+        judged = end !== undefined ? { status: reviewOf(r, end, src) ?? stepOutcomeStatus(end.phase) } : openStepStatus(r, src);
       }
       out.push({
         kind: 'step', id: `step:${r.correlation_id}`, action: r.action, target: r.target, at: r.ts, person: personOf(r), status: judged.status,
@@ -556,6 +596,8 @@ export function readTrailPage(db: Database.Database, opts: { limit: number; befo
 export interface TrailSourceDeps {
   /** run-history.db, or null when the engine runs without one: then no run says anything. */
   readonly historyDb: Database.Database | null;
+  /** The engine database (`knowledge_entries`), or null: then no entry is said to wait for review. */
+  readonly engineDb: Database.Database | null;
   /** The trail key of the plan run of a trigger in flight now (worker-loop.ts `runningPlanRun`). */
   readonly runningPlanRun: (triggerId: string) => string | undefined;
   /** A bulk run's phase and halt in the ledger; undefined when the ledger has no such run. */
@@ -566,6 +608,7 @@ export interface TrailSourceDeps {
 /** The engine stores {@link trailSourceDeps} reads, each possibly absent. */
 export interface TrailStores {
   readonly historyDb: Database.Database | null;
+  readonly engineDb: Database.Database | null;
   readonly worker: { runningPlanRun(taskId: string): string | undefined } | null;
   readonly ledger: { getStatus(runId: string): { readonly phase: string; readonly haltReason: string | null } | null } | null;
   readonly approvals: { get(id: string): { readonly status: string; readonly decidedBy: string | null } | undefined | null } | null;
@@ -575,6 +618,7 @@ export interface TrailStores {
 export function trailSourceDeps(stores: TrailStores): TrailSourceDeps {
   return {
     historyDb: stores.historyDb,
+    engineDb: stores.engineDb,
     runningPlanRun: (id) => stores.worker?.runningPlanRun(id),
     bulkState: (id) => {
       const status = stores.ledger?.getStatus(id);
@@ -612,6 +656,9 @@ export function trailSources(deps: TrailSourceDeps): TrailSources {
                           AND later.rowid > me.rowid AND later.created_at <= p.created_at)
       LIMIT 1`,
   );
+  // The table comes with the engine database's schema; should it be missing, no entry waits for review.
+  let knowledge: Database.Statement | undefined;
+  try { knowledge = deps.engineDb?.prepare('SELECT status FROM knowledge_entries WHERE id = ?'); } catch { knowledge = undefined; }
   const sessionQuestion = deps.historyDb?.prepare(
     `SELECT 1 FROM pending_prompts p JOIN runs me ON me.id = ? AND p.session_id = me.session_id WHERE ${openSince} LIMIT 1`,
   );
@@ -625,5 +672,6 @@ export function trailSources(deps: TrailSourceDeps): TrailSources {
       return state !== undefined && !BULK_CLOSED.has(state.phase) && !(state.phase === 'writing' && state.haltReason !== null);
     },
     approvalOf: deps.approval,
+    knowledgeStatus: (id) => (knowledge?.get(id) as { status: string } | undefined)?.status,
   };
 }

@@ -27,6 +27,7 @@ const quiet: TrailSources = {
   planRunRunning: () => false,
   bulkRunOpen: () => false,
   approvalOf: () => undefined,
+  knowledgeStatus: () => undefined,
 };
 
 describe('a bulk run: one entry over its windows', () => {
@@ -231,6 +232,34 @@ describe('a step and its status', () => {
     // reads as over, while an answer could still let the act happen.
     expect(judged(src('failed', false, true))).toEqual([null, 'question-open']);
     expect(judged(src('running', false, true)), 'a running run is running').toEqual(['running', null]);
+  });
+
+  describe('a memory entry saved for review (U-306 B4)', () => {
+    const REMEMBER = 'instance:remember#create:create';
+    const step = (action: string, phase: string, target: string, status: string | undefined): TrailStep => {
+      const a = row({ action, phase: 'attempt', correlation_id: newCorrelationId(), target: 'knowledge' });
+      const asked: string[] = [];
+      const src: TrailSources = { ...quiet, knowledgeStatus: (id) => { asked.push(id); return status; } };
+      const st = buildTrail([a, row({ action, phase, correlation_id: a.correlation_id, target })], src)[0] as TrailStep;
+      if (status !== undefined && st.status === 'review') expect(asked).toEqual(['k-1']);
+      return st;
+    };
+
+    it('says review for a remember step whose created entry waits for review, and ended for one that does not', () => {
+      expect(step(REMEMBER, 'returned', 'knowledge wrote=all created=k-1', 'pending_review').status).toBe('review');
+      expect(step(REMEMBER, 'returned', 'knowledge wrote=all created=k-1', 'active').status).toBe('ended');
+      // The entry is gone, or the store is not there: the row says nothing more than it did.
+      expect(step(REMEMBER, 'returned', 'knowledge wrote=all created=k-1', undefined).status).toBe('ended');
+    });
+
+    it('reads review only from a returned remember step that names the entry it created', () => {
+      // Nothing proven written: no `created=`, nothing to ask.
+      expect(step(REMEMBER, 'returned', 'knowledge', 'pending_review').status).toBe('ended');
+      // A step that threw is failed, whatever the store holds.
+      expect(step(REMEMBER, 'failed', 'knowledge wrote=all created=k-1', 'pending_review').status).toBe('failed');
+      // Another tool's created entry is not a memory entry of remember.
+      expect(step('instance:artifact#create:create', 'returned', 'artifacts wrote=all created=k-1', 'pending_review').status).toBe('ended');
+    });
   });
 });
 
@@ -570,7 +599,7 @@ describe('readTrailPage: the rows the view shows, a page at a time', () => {
 
 describe('trailSources over run history', () => {
   const sources = (db: import('better-sqlite3').Database | null, over: Partial<Parameters<typeof trailSources>[0]> = {}): TrailSources =>
-    trailSources({ historyDb: db, runningPlanRun: () => undefined, bulkState: () => undefined, approval: () => undefined, ...over });
+    trailSources({ historyDb: db, engineDb: null, runningPlanRun: () => undefined, bulkState: () => undefined, approval: () => undefined, ...over });
   const withHistory = (fn: (db: import('better-sqlite3').Database) => void): void => {
     const dir = mkdtempSync(join(tmpdir(), 'trail-sources-'));
     const history = new RunHistory(join(dir, 'history.db'));
@@ -674,6 +703,7 @@ describe('trailSources over run history', () => {
   it('builds its lookups over the engine\'s stores: the worker by run, the ledger with its halt, the entry as it is', () => {
     const deps = trailSourceDeps({
       historyDb: null,
+      engineDb: null,
       worker: { runningPlanRun: (t) => (t === 'po-1' ? 'k1' : undefined) },
       ledger: { getStatus: (id) => (id === 'b4' ? { phase: 'writing', haltReason: 'stopped by the owner' } : null) },
       approvals: { get: (id) => (id === 'a1' ? { status: 'rejected', decidedBy: 'owner' } : undefined) },
@@ -682,8 +712,22 @@ describe('trailSources over run history', () => {
     expect([deps.bulkState('b4'), deps.bulkState('b9')]).toEqual([{ phase: 'writing', haltReason: 'stopped by the owner' }, undefined]);
     expect([deps.approval('a1'), deps.approval('a9')]).toEqual([{ status: 'rejected', decidedBy: 'owner' }, undefined]);
     // Without the stores (an engine without automation) nothing says anything.
-    const none = trailSourceDeps({ historyDb: null, worker: null, ledger: null, approvals: null });
+    const none = trailSourceDeps({ historyDb: null, engineDb: null, worker: null, ledger: null, approvals: null });
     expect([none.runningPlanRun('po-1'), none.bulkState('b4'), none.approval('a1')]).toEqual([undefined, undefined, undefined]);
+  });
+
+  it('reads a memory entry\'s status from the engine database, and nothing without it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'trail-knowledge-'));
+    const db = new EngineDb(join(dir, 'engine.db'), '');
+    try {
+      db.getDb().prepare("INSERT INTO knowledge_entries (id, text, status) VALUES ('k-1', 'x', 'pending_review'), ('k-2', 'x', 'active')").run();
+      const src = sources(null, { engineDb: db.getDb() });
+      expect(['k-1', 'k-2', 'k-9'].map((id) => src.knowledgeStatus(id))).toEqual(['pending_review', 'active', undefined]);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(sources(null).knowledgeStatus('k-1'), 'no engine database').toBeUndefined();
   });
 
   it('asks the worker by run, and the ledger by phase and halt', () => {
