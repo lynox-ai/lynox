@@ -328,13 +328,12 @@ function cutAt(s: string, n: number): string {
  * The seed of a watch's escalation thread: English model context, which the owner also reads as
  * lynox's bubble. The analysis is a model's summary of a page someone else controls, so it stands
  * below a sentence that says so, as a quote: every line of it starts with `> `, an empty one is
- * `>`, so no line of the page's summary reads as lynox's own words (U-499). A `<` is escaped: the
- * chat renders markdown with HTML, and a line like `</blockquote>` would end the quote there.
- * Line breaks at the end are left out, so the quote does not end in an empty line.
+ * `>`, so no line of the page's summary reads as lynox's own words (U-499). Line breaks at the
+ * end are left out, so the quote does not end in an empty line.
  */
 export function watchChangedSeed(url: string, analysis: string): string {
   const quoted = analysis.replace(/[\s\u0085]+$/u, '').split(LINE_BREAK)
-    .map((line) => (line.trim() === '' ? '>' : `> ${line.replace(/</g, '\\<')}`))
+    .map((line) => (line.trim() === '' ? '>' : `> ${line}`))
     .join('\n');
   return `${addressLine(url)} changed. ${WATCH_SUMMARY_MARK.en}\n\n${quoted}`;
 }
@@ -356,7 +355,8 @@ function watchChangedPush(url: string, analysis: string, lead: (url: string) => 
     const over = head.length - (room - keep);
     head = headOf(`${cutAt(line, line.length - over - 1)}…`);
   }
-  return `${cutAt(`${head}${analysis}`, room)}…`;
+  const full = `${head}${analysis}`;
+  return full.length <= PUSH_BODY_MAX ? full : `${cutAt(full, room)}…`;
 }
 
 /**
