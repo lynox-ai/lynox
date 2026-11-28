@@ -167,6 +167,29 @@ const WAIT_EXPIRED_RESULT = 'The run asked a question and the wait ran out befor
 /** What a scheduled workflow run records when its question was withdrawn with the deleted chat it was asked in. */
 export const THREAD_DELETED_RESULT = 'Workflow ended without an answer: the conversation its question was asked in was deleted, and that was the only place to answer it';
 const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access, and that access ended before the run could continue.';
+/**
+ * Whether a parked trigger is due on its own schedule at `now`: a cron or a watch whose next run
+ * has come. A one-shot is not: its one run is the one that asked. A next run that cannot be read
+ * counts as due, so such a row runs as it did before. A shutdown that keeps a waiting run's
+ * question for the next process normally records the run's end, and with it the schedule's next
+ * time (`recordTaskRun` withholds only the status of a parked row; a run started by hand keeps
+ * the time it had), but only when the run unwinds before the stores close: `Engine.shutdown`
+ * does not wait for it. A run that does not get there, or a crash, leaves the time that started
+ * the run: a cron or a watch then reads as due here and runs as before, without the answer.
+ */
+export function dueOnItsOwn(trigger: Pick<TriggerRecord, 'schedule_cron' | 'watch_config' | 'next_run_at'>, now: number): boolean {
+  if (!trigger.schedule_cron && !trigger.watch_config) return false;
+  if (trigger.next_run_at === null || trigger.next_run_at === undefined) return true;
+  const at = Date.parse(trigger.next_run_at);
+  return Number.isNaN(at) || at <= now;
+}
+
+/** What a run records that only an answer from another chat made due, and that does not take it (U-484). */
+export const FOREIGN_ANSWER_RESULT = 'The run did not continue: its question had been asked in another chat, and this task now runs under a delegated access, so it does not take an answer from there.';
+/** Said after {@link FOREIGN_ANSWER_RESULT} for a trigger with a schedule of its own (a cron or a watch). */
+export const FOREIGN_ANSWER_NEXT_RUN = 'The next scheduled run asks again if it needs to.';
+/** Said after {@link FOREIGN_ANSWER_RESULT} for a one-shot, which ends with this run (U-484 N2). */
+export const FOREIGN_ANSWER_ONE_SHOT = 'It does not run again on its own. Starting it again runs it from the beginning, including the steps before the question; check first what it already did.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 
@@ -541,6 +564,13 @@ export interface ActiveTask {
    */
   questionKept?: boolean | undefined;
   /**
+   * Only an answered question made this run due: the tick's re-arm set its next run to now, the
+   * row was not due on its own schedule, and nobody started it by hand ({@link isStartedByHand}).
+   * Read by `executeStandard` when it does not take that answer: the run then has nothing to do
+   * and is recorded stopped with its schedule's own next run, instead of starting from scratch.
+   */
+  dueOnlyByAnswer?: true | undefined;
+  /**
    * This run's handler polls `controller.signal` itself, so for it the controller IS a
    * stop handle.
    *
@@ -721,6 +751,13 @@ export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
   private readonly activeTasks = new Map<string, ActiveTask>();
+  /**
+   * Triggers the tick's re-arm made due only because their question was answered: not due on a
+   * schedule of their own (a one-shot, or a cron or watch whose next run is still ahead). The next
+   * run of each takes its entry (`ActiveTask.dueOnlyByAnswer`). In this process only: after a
+   * restart between the re-arm and the run, the run reads as due on its schedule, as before.
+   */
+  readonly #dueOnlyByAnswer = new Set<string>();
   /** Per schedule, the steps' digest it last told the owner it waits on (`#tellAwaitsStampOnce`). */
   readonly #awaitsStampTold = new Map<string, string>();
   /** The one-time door for a mandate's hand run. Private: its minter goes out once. */
@@ -1429,7 +1466,14 @@ export class WorkerLoop {
             // The question records whether a run by hand asked it: after a restart the row may
             // have been stamped since the test, and only the question still knows.
             if (!mandateNeedsOwnerStamp(parked) && answered.hand_run !== 1) {
+              // Read before the write below moves it: whether the row was due on its own schedule.
+              // A one-shot has none left (its run is the one that asked); a cron or a watch is due
+              // on its own once its next run has come. A webhook's runs come from its events, never
+              // from this, so it is not marked. Marked only once the write went through.
+              const onlyByAnswer = parked.source !== 'webhook' && !dueOnItsOwn(parked, Date.now());
               this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
+              if (onlyByAnswer) this.#dueOnlyByAnswer.add(parked.id);
+              else this.#dueOnlyByAnswer.delete(parked.id);
             }
             process.stderr.write(
               `[lynox:worker] "${parked.title}" (${parked.id}) got its answer — due again\n`,
@@ -2100,6 +2144,11 @@ export class WorkerLoop {
       planMembers: planMembers(planMandate(planAuthorshipOf(task)), undefined).members, event,
     };
     this.activeTasks.set(task.id, entry);
+    // Taken by whichever run comes next, so it never outlives that run. A run started by hand is
+    // the starter's, not the answer's, and runs. A webhook's runs are never marked (the re-arm
+    // skips them), and a run of an event never reads the mark: events run only workflows
+    // (`findAcceptingWebhook`), and the mark is read in `executeStandard` alone.
+    if (this.#dueOnlyByAnswer.delete(task.id) && !isStartedByHand(task.id)) entry.dueOnlyByAnswer = true;
     // A renewal fails for two reasons, and only one is another process: the row can also
     // be gone, because the schedule was deleted while the run went on. That is said once,
     // since every later interval would only repeat it.
@@ -2890,6 +2939,7 @@ export class WorkerLoop {
     // without it, and a run that only the answer started is not made in the mandate's name;
     // it is recorded as failed, with no retry, like any run a mandate started.
     const asker = answered !== undefined && isMandateTag(answered.created_by) ? principalOfPrompt(answered) : undefined;
+    let askerStarts = true;
     if (answered !== undefined && asker?.kind === 'mandate'
       && !(asker.mandateId !== undefined && (this.engine.getMandateEnds()?.isLive(asker.mandateId) ?? false))) {
       this.engine.getPromptStore()?.releaseTrigger(answered.id);
@@ -2899,19 +2949,25 @@ export class WorkerLoop {
         this.#recordRun(this.engine.getTaskManager(), task.id, PLAN_ENDED_RESULT, 'stopped', { starter: asker }, { keepSchedule: true });
         return;
       }
-      if (handStarter === undefined) {
+      // Started by hand is read from the run's scope, not from `handStarter`: the owner's "Run now"
+      // carries no starter, and it runs, without the answer, as a mandate's run by hand does. (An
+      // asker who is a member of the plan paused it above, for the owner's "Run now" too.)
+      if (!isStartedByHand(task.id)) {
         this.#recordRun(this.engine.getTaskManager(), task.id, MANDATE_ENDED_RESULT, 'failed', { starter: asker });
         process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was answered under an access that has since ended — not run\n`);
         return;
       }
+      // Without the answer, the run is not the asker's either: the owner's "Run now" would
+      // otherwise be built for the ended access and stop at once.
       answered = undefined;
+      askerStarts = false;
     }
     // And the run is that mandate's from here on: it may stop it, and it is not retried.
     // Except in a mandate's plan (`planOf`): its questions carry the plan's mandate because the
     // plan asked, not because anyone started the run by hand, so the asker is no starter there.
     // The run is built for the plan either way, and the schedule may retry it.
     const running = this.#runSlotOf(task.id);
-    const starter = handStarter ?? (running?.planOf !== undefined ? undefined : asker);
+    const starter = handStarter ?? (running?.planOf !== undefined || !askerStarts ? undefined : asker);
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
     const runAs = this.#runAs(task.id, starter);
     const triggerTier = admittedTriggerTier(task.model_tier);
@@ -2924,6 +2980,17 @@ export class WorkerLoop {
     const threads = answered !== undefined ? this.engine.getThreadStore() : null;
     if (answered !== undefined && !isOwnerPrincipal(runAs) && !ownedBy(threads?.getThread(answered.session_id), runAs)) {
       this.engine.getPromptStore()?.releaseTrigger(answered.id);
+      // A run that only this answer made due has nothing left to do without it: started over, it
+      // would repeat what it did before its question, with its effects, and ask again. It is
+      // recorded stopped, without keeping the schedule, so a cron or a watch goes to its own next
+      // run and a one-shot ends (`recordTaskRun`). A run due on its own schedule, or started by
+      // hand, runs as before, without the answer.
+      if (this.activeTasks.get(task.id)?.dueOnlyByAnswer === true) {
+        const ownSchedule = Boolean(task.schedule_cron) || Boolean(task.watch_config);
+        this.#recordRun(this.engine.getTaskManager(), task.id, `${FOREIGN_ANSWER_RESULT} ${ownSchedule ? FOREIGN_ANSWER_NEXT_RUN : FOREIGN_ANSWER_ONE_SHOT}`, 'stopped');
+        process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was made due only by an answer from another chat, which it does not take — not run\n`);
+        return;
+      }
       answered = undefined;
     }
     // Same thread, so the run's own history shows the exchange it continues — unless the owner
