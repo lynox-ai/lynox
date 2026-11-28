@@ -1764,6 +1764,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     return r.found ? r.untrusted : null;
   }
 
+  /** The texts of the active memories in `namespace` written untrusted (or at the
+   *  `external_unverified` tier), for a read path that marks the lines found in them. */
+  untrustedTextsIn(namespace: MemoryNamespace): string[] {
+    return this.db.untrustedTexts(namespace);
+  }
+
   /**
    * Retire the original of a move (`memory_promote`): the memories matching `pattern`
    * in `scope` are deactivated now, like {@link deactivateByPattern}, and their ids

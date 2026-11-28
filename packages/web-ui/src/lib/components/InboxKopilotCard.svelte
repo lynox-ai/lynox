@@ -8,7 +8,7 @@
 		getSnoozedCount,
 		type InboxItem,
 	} from '../stores/inbox.svelte.js';
-	import { inboxHeadline } from '../utils/inbox-headline.js';
+	import { rowHeadline, rowSender } from '../utils/inbox-shown.js';
 	import { isTouchPrimary } from '../utils/touch-detect.js';
 
 	interface Props {
@@ -61,8 +61,9 @@
 		return t(key).replace('{count}', String(needsCount));
 	});
 
+	/** As the list row names it: for a delivery failure notice's item, the mail shown in its place. */
 	function senderLabel(item: InboxItem): string {
-		return item.fromName || item.fromAddress || '—';
+		return rowSender(item).label || '—';
 	}
 </script>
 
@@ -120,7 +121,7 @@
 									<span class="text-[11px] text-text-subtle truncate">{senderLabel(item)}</span>
 									<span class="shrink-0 text-text-subtle group-hover:text-text-muted text-[11px]" aria-hidden="true">→</span>
 								</div>
-								<p class="text-sm text-text leading-snug truncate">{inboxHeadline(item)}</p>
+								<p class="text-sm text-text leading-snug truncate">{rowHeadline(item, t)}</p>
 							</button>
 						</li>
 					{/each}
