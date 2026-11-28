@@ -80,7 +80,11 @@ beforeEach(() => {
 			const ts = targetStatuses.shift() ?? 200;
 			if (ts !== 200) return new Response('{}', { status: ts, headers: { 'Content-Type': 'application/json', ...(retryAfter !== null ? { 'Retry-After': retryAfter } : {}) } });
 			const off = Number(/offset=(\d+)/.exec(u)?.[1]);
-			return reply({ targets: allTargets.slice(off, off + targetLimits.at(-1)!) });
+			// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+			const list = /&changed=1$/.test(u)
+				? allTargets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq)
+				: allTargets;
+			return reply({ targets: list.slice(off, off + targetLimits.at(-1)!) });
 		}
 		runAsks++;
 		const status = nextStatuses.shift() ?? runStatus;
@@ -269,16 +273,27 @@ describe('the step to check the targets with an error', () => {
 		expect(target.textContent).toContain('/products/11');
 	});
 
+	it('loads every target of an approved run halted on its failures, so a marked one past the first page counts', async () => {
+		run = halted(1, 0, { phase: 'approved', total: 12, changes: UPDATES(12), heads: { ...NONE, failed: 1, open: 11 } });
+		allTargets = [...Array.from({ length: 10 }, (_, i) => field(i)), unread(10, 'write_failed'), field(11)];
+		await render();
+		expect(shown()).toContain(t('bulk.halt.failures_before_write'));
+		expect(target.textContent).toContain('/products/11');
+	});
+
 	for (const haltKey of ['failureRate', 'consecutiveFailures'] as const) {
 		it(`does not load an aborted run halted on ${haltKey} whole, and opens it on the targets it wrote first`, async () => {
 			run = halted(1, 0, { phase: 'aborted', haltKey, total: 12, changes: UPDATES(12), applied: 3, heads: { ...NONE, written: 3, failed: 1, open: 8 } });
-			allTargets = [...Array.from({ length: 10 }, (_, i) => field(i)), unread(10, 'write_failed'), field(11)];
+			const wrote = new Set([7, 8, 11]);
+			allTargets = [...Array.from({ length: 10 }, (_, i) => ({ ...field(i), written: wrote.has(i) })), unread(10, 'write_failed'), { ...field(11), written: true }];
 			await render();
+			const keys = [...target.querySelectorAll('tbody tr, [role="row"]')].map((row) => /\/products\/(\d+)/.exec(row.textContent ?? '')?.[1]).filter((k) => k !== undefined);
+			expect(keys.slice(0, 3)).toEqual(['7', '8', '11']);
 			const asked = vi.mocked(fetch).mock.calls.map(([u]) => String(u)).filter((u) => /\/targets\?/.test(u));
 			// One first page of the changed targets, the written ones first; never the whole run.
 			expect(asked).toHaveLength(1);
 			expect(asked[0]).toMatch(/\/bulk\/runs\/r1\/targets\?offset=0&limit=6&changed=1$/);
-			expect(target.textContent).not.toContain('/products/11');
+			expect(target.textContent).not.toContain('/products/9');
 			// An ended run offers no step to check its failed targets.
 			expect(shown()).not.toContain(t('bulk.halt.failures_before_write'));
 		});
