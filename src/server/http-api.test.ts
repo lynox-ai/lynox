@@ -12989,7 +12989,7 @@ describe('LynoxHTTPApi', () => {
         const res = await fetch(`${baseUrl}/api/triggers`, { headers: { cookie: `lynox_session=${mandate}` } });
         expect(res.status).toBe(200);
         const asMandate = (await res.json()) as Flags;
-        expect(asMandate.triggers[0]!['last_run_result']).toBe(WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates);
+        expect(asMandate.triggers[0]!['last_run_result']).toBe(WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates('ended'));
         expect(JSON.stringify(asMandate)).not.toContain('jo@kanzlei.example');
         expect(JSON.stringify(asMandate)).not.toContain('shop-jo');
       });

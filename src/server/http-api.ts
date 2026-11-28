@@ -117,7 +117,7 @@ import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orch
 import { runAsPlanOf } from '../core/plan-run-context.js';
 import { MEMBER_CONNECTION_PREFIX, lastRunResultFor } from '../core/member-connection-notes.js';
 import { noticeLanguage } from '../core/notice-language.js';
-import { WORKER_NOTICES } from '../core/worker-notices.js';
+import { WORKER_NOTICES, memberEndOfStatus } from '../core/worker-notices.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
@@ -495,7 +495,7 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
   // result, anyone else a fixed sentence in place of a result that has them (`lastRunResultFor`).
   const owner = isOwnerPrincipal(principal);
   const lastRunResult = memberNotes === undefined || memberNotes.length === 0 ? shaped.last_run_result
-    : lastRunResultFor(trigger, owner, WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates);
+    : lastRunResultFor(trigger, owner, WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates(memberEndOfStatus(trigger.last_run_status)));
   const stored = { ...shaped, last_run_result: lastRunResult };
   // Whether a wakeup reached the owner, why it did not, the step to take then (their push
   // subscription) and the chat it points to are the owner's: a mandate reading them would be

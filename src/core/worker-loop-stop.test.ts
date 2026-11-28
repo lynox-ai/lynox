@@ -35,6 +35,8 @@ import type { ActiveTask } from './worker-loop.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { getPipelineStore } from '../tools/builtin/pipeline.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
+import { noteMemberConnection } from './member-connection-notes.js';
+import { WORKER_NOTICES } from './worker-notices.js';
 
 /**
  * The saved-workflow runner, gated — the one collaborator a `run_workflow` test has to
@@ -138,6 +140,8 @@ function makeHarness(opts?: {
   dispatch?: boolean; retriable?: boolean; park?: boolean; abortThrows?: boolean; withChannels?: boolean; watch?: boolean; abortMisses?: boolean;
   /** What `getLastRunStop` reports for the run — a cap with pending work is the ceiling exit. */
   lastRunStop?: { cause: string; pendingToolCount: number } | undefined;
+  /** A member-connection line the run notes before it parks, as a refused connection would. */
+  memberLine?: string | undefined;
   /** A run that loops in the past and is now short: the execution deadline, in ms. */
   taskTimeoutMs?: number | undefined;
   /** Whether the run's container reads as contained (a store pass was minted in it). */
@@ -231,6 +235,7 @@ function makeHarness(opts?: {
       // A PARKED run: it asks its question through the loop's own `promptUser` wiring,
       // so `pendingPromptId` is set by the real code path and `waitForSettled` awaits
       // the real controller signal. Nothing here simulates the park.
+      if (opts?.memberLine !== undefined) noteMemberConnection(opts.memberLine);
       if (opts?.park === true) {
         const answer = await session.promptUser!('ready to continue?');
         resumed = true;
@@ -1096,6 +1101,20 @@ describe('the recorded word for a run that returns rather than throws', () => {
     expect(note.body, 'the ceiling is still reported').toContain('cost ceiling');
   });
 
+  it('stopped while parked AND on its ceiling with a member\'s connection: every grant reads that it was stopped, not by whom', async () => {
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const h = makeHarness({ park: true, withChannels: true, lastRunStop: { cause: 'budget_cap', pendingToolCount: 2 }, memberLine: LINE });
+    await h.parked;
+    h.loop.stopTask('trg-stop');
+    await waitUntil('the stop to be recorded', () => lastStatus(h) !== null);
+    expect(lastStatus(h)).toBe('stopped');
+    await waitUntil('every grant to be told', () => h.notifications().some((n) => (n as { audience?: string }).audience === 'all_mandates'));
+    const grant = h.notifications().find((n) => (n as { audience?: string }).audience === 'all_mandates')!;
+    expect(grant.title.startsWith('\u23f9')).toBe(true);
+    expect(grant.body).toBe(WORKER_NOTICES.en.memberEndForMandates('stopped'));
+    expect(grant.body).toMatch(/^The run was stopped\. /);
+  });
+
   it('stopped while parked in a CONTAINED run: the stop is told, and the run\'s text is not', async () => {
     const { CONTAINED_RESULT_PUSH } = await import('./worker-loop.js');
     const h = makeHarness({ park: true, withChannels: true, contained: true });
@@ -1208,6 +1227,20 @@ describe('a run whose starter\'s grant has ended', () => {
       () => h.history.getTrigger('trg-stop')?.last_run_status != null,
     );
     expect(h.history.getTrigger('trg-stop')!.last_run_status).toBe('stopped');
+  });
+
+  // The sweep stops through `stopTask`, as the owner does: the grant's sentence names no one.
+  it('parked with a member\'s connection and stopped because its starter\'s grant ended: every grant reads it was stopped, not that the owner stopped it', async () => {
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const h = makeHarness({ park: true, withChannels: true, memberLine: LINE });
+    await h.parked;
+    entryOf(h).starter = EVA;
+    expect(h.loop.stopEndedStarters(() => false)).toEqual(['trg-stop']);
+    await waitUntil('every grant to be told', () => h.notifications().some((n) => (n as { audience?: string }).audience === 'all_mandates'));
+    expect(h.history.getTrigger('trg-stop')!.last_run_status).toBe('stopped');
+    const grant = h.notifications().find((n) => (n as { audience?: string }).audience === 'all_mandates')!;
+    expect(grant.body).toMatch(/^The run was stopped\. /);
+    expect(grant.body).not.toContain('owner stopped');
   });
 
   it('leaves a run the schedule fired, which is the owner\'s', async () => {
