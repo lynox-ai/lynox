@@ -4801,7 +4801,7 @@ export class Agent implements IAgent {
             ? String(only.id) : undefined;
         } catch { holder = undefined; }
         const wayOut = holder !== undefined
-          ? `Send the request to profile "${holder}"'s base_url again without that reference and without an Authorization header of your own: the engine attaches the profile's token and renews it when it can, so no token request is needed either.`
+          ? `Send the request to profile "${holder}"'s base_url again without ${offGrant.length === 1 ? 'that reference' : 'those references'} and without an Authorization header of your own: the engine attaches the profile's token and renews it when it can, so no token request is needed either.`
           : 'Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.';
         return refused(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. ${wayOut}`, offGrant);
       }
