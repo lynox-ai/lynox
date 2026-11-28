@@ -45,16 +45,20 @@ describe('api fetch interceptor', () => {
 		expect(markSessionExpired).not.toHaveBeenCalled();
 	});
 
-	it('does not end the access on another origin\'s 403, whatever its body says', async () => {
+	it.each([
+		['mandate_revoked', () => markAccessEnded],
+		['mandate_memory_off', () => markMandateMemoryBlocked],
+		['mandate_memory_missing', () => markMandateMemoryBlocked],
+	] as const)('sets no session notice on another origin\'s 403 with %s, and does on its own', async (code, mark) => {
 		vi.stubGlobal('window', {
 			location: { href: 'https://instance.example.invalid/app', origin: 'https://instance.example.invalid' },
-			fetch: async () => new Response(REVOKED, { status: 403, headers: { 'Content-Type': 'application/json' } }),
+			fetch: async () => new Response(JSON.stringify({ error: 'x', code }), { status: 403, headers: { 'Content-Type': 'application/json' } }),
 		});
 		installApiFetchInterceptor();
 		await window.fetch('https://elsewhere.example.invalid/api/thing');
-		expect(markAccessEnded).not.toHaveBeenCalled();
+		expect(mark()).not.toHaveBeenCalled();
 		await window.fetch('/api/threads');
-		expect(markAccessEnded).toHaveBeenCalledTimes(1);
+		expect(mark()).toHaveBeenCalledTimes(1);
 	});
 
 	it('leaves every other 403 to the view that got it', async () => {

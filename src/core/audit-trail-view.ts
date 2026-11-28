@@ -153,8 +153,9 @@ export function isInterfacePoll(row: Pick<TrailRow, 'phase' | 'action'>): boolea
  * Reads the web UI makes by itself that are not a timer of the status bar or the nav, so they are
  * not in `INTERFACE_POLLS` (which a test holds to the pollers exactly): whether secrets are set,
  * the inbox and approval counts, and the inbox's own loading loop. The view groups them with the
- * polls (U-306 B1(b) and C). Each answers with a count or a state, never a name or a text, so a
- * read the person made on purpose that lands here tells nothing it hides.
+ * polls (U-306 B1(b) and C). Each answers with counts or states (secrets status also with the
+ * configured endpoint and model id), never a name of the person's objects or their text, so a read
+ * the person made on purpose that lands here hides nothing of theirs.
  *
  * Left out on purpose, although the interface also reads them by itself: the chat list (it carries
  * each chat's title and summary, and `limit`/`includeArchived` are not recorded, so a read of every

@@ -176,7 +176,7 @@ describe('the texts, as decided (U-047, U-440, U-306)', () => {
 		try {
 			setLocale('de');
 			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one'), t('access_trail.poll_day'), t('access_trail.poll_day_one')]).toEqual([
-				'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) und Zähler (Posteingang, Freigaben, eingerichtete Schlüssel, Nachladen der Inbox) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln. Nach 30 Tagen bleibt von laufender Arbeit und Anbietern eine Zeile je Tag.',
+				'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) und Zähler (Posteingang, Freigaben, eingerichtete Schlüssel, Nachladen des Posteingangs) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln. Nach 30 Tagen bleibt von laufender Arbeit und Anbietern eine Zeile je Tag.',
 				'{n} Statusabfragen ({span})',
 				'Eine Statusabfrage ({time})',
 				'{n} Abfragen, die letzte am {time}',
