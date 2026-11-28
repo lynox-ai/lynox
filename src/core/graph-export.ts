@@ -319,7 +319,7 @@ export function readMemoryTextsForExport(opts: {
         // migrated) holds no marked lines, so nothing is missing. A current file without it is
         // read anyway, and fails as unreadable.
         const older = agentMemoryVersionOn(legacy) < AGENT_MEMORY_SCHEMA_VERSION;
-        const hasMarks = legacy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'untrusted_lines'").get() !== undefined;
+        const hasMarks = legacy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'untrusted_lines' COLLATE NOCASE").get() !== undefined;
         legacyHalf.untrusted_lines = older && !hasMarks ? [] : read(legacy, 'untrusted_lines', '', 't.created_at, t.namespace, t.key', 'agent-memory.db untrusted_lines');
         if (opts.subjectGraph === true) {
           legacyHalf.entities = read(legacy, 'entities', '', 't.first_seen_at, t.id', 'agent-memory.db entities')

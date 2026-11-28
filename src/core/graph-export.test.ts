@@ -318,6 +318,20 @@ describe('readMemoryTextsForExport', () => {
     expect(read.mayBeIncomplete).toBe(false);
   });
 
+  it('reads the fingerprints of an older file that already has the table', () => {
+    const db = new AgentMemoryDb(file);
+    db.addUntrustedLineKeys('knowledge', ['k-1']);
+    db.close();
+    // Older than this build, with the table: the state of the newest file once a later
+    // migration exists.
+    const raw = new Database(file);
+    raw.prepare('DELETE FROM schema_version WHERE version = (SELECT MAX(version) FROM schema_version)').run();
+    raw.close();
+    const read = readMemoryTextsForExport({ agentMemoryFile: file, engineDb, mask });
+    expect(read['agent-memory.db'].untrusted_lines.map((r) => r['key'])).toEqual(['k-1']);
+    expect(read.mayBeIncomplete).toBe(false);
+  });
+
   it('a current file without that table is read as incomplete', () => {
     new AgentMemoryDb(file).close();
     const raw = new Database(file);
