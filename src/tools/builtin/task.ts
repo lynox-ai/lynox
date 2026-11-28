@@ -7,6 +7,7 @@ import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted
 import { logErrorChain } from '../../core/utils.js';
 import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
 import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, isPaused, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
+import { foreignWorkflowScheduleRefusalKind } from '../../core/plan-stamp.js';
 import { lastRunResultFor } from '../../core/member-connection-notes.js';
 import { noticeLanguage } from '../../core/notice-language.js';
 import { WORKER_NOTICES } from '../../core/worker-notices.js';
@@ -240,9 +241,17 @@ reader?: PausedDoneWorkflowReader | null): string {
   return parts.length === 0 ? '' : `\n    ↳ ${parts.join(FIELD_SEPARATOR)}`;
 }
 
-/** What a completed paused plan's line reads its workflow's case with (`pausedDoneWorkflow`). */
+/**
+ * What a completed paused plan's line reads its workflow's case with (`pausedDoneWorkflow`). For a
+ * person with access it also asks whether a new plan of theirs on that workflow would be refused,
+ * by the rule `task_create` refuses by (U-489).
+ */
 function doneReader(agent: IAgent): PausedDoneWorkflowReader | null {
-  return pausedDoneReaderOf(agent.toolContext.runHistory, agent.toolContext.mandateEnds);
+  const principal = agent.principal;
+  const history = agent.toolContext.runHistory;
+  // Asked only at a completed paused workflow plan, as `owner` in taskReaderOf is: the owner may plan on any workflow.
+  return pausedDoneReaderOf(history, agent.toolContext.mandateEnds,
+    (id) => (isOwnerPrincipal(principal) ? null : foreignWorkflowScheduleRefusalKind(principal, id, history)));
 }
 
 // Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger

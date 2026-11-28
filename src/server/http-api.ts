@@ -40,7 +40,7 @@ import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planAsks, planOfTrigger, stampEntriesFor, workflowAsks, workflowAsksOnSchedule, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
+import { foreignWorkflowScheduleRefusalKind, planAsks, planOfTrigger, stampEntriesFor, workflowAsks, workflowAsksOnSchedule, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -76,7 +76,7 @@ import { shopifyBulkReadEnabled, shopifyConsentBlock } from '../core/bulk-shopif
 import { containedThreadStates, containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
-import type { RunRecord } from '../core/run-history.js';
+import type { RunHistory, RunRecord } from '../core/run-history.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
@@ -161,7 +161,7 @@ import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './webhook-receiver.js';
 import { requestLogUrl } from './request-log-url.js';
-import { isPaused, pausedDoneReaderOf, pausedDoneWorkflow, pausedDoneWorkflowText, pausedForOf, planPauseOn, type PausedDoneWorkflowReader } from '../core/plan-pause.js';
+import { PAUSED_DONE_FOREIGN_API, PAUSED_DONE_UNREADABLE_API, isPaused, pausedDoneReaderOf, pausedDoneWorkflow, pausedDoneWorkflowText, pausedForOf, planPauseOn, type PausedDoneWorkflowReader } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
@@ -512,13 +512,29 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
 /**
  * The trigger list's `paused_done_workflow` for a completed plan that keeps its pause (U-275 N6):
  * `{ name }` when its workflow's takeover comes first (`name` null when its definition names none),
- * `null` when no workflow needs one. Absent for
+ * `null` when no workflow needs one. `{ name, refused }` only for a person with access whose new plan
+ * on that workflow would be refused (`foreign`: another live person's; `unreadable`: its marks cannot
+ * be read), whatever a takeover would say (U-489). Absent for
  * any other plan, with the pause off, and when the case could not be read.
  */
-export function pausedDoneWorkflowField(trigger: TriggerRecord, reader: PausedDoneWorkflowReader | null | undefined): { paused_done_workflow?: { name: string | null } | null } {
+export function pausedDoneWorkflowField(trigger: TriggerRecord, reader: PausedDoneWorkflowReader | null | undefined): { paused_done_workflow?: { name: string | null; refused?: 'foreign' | 'unreadable' } | null } {
   if (trigger.status !== 'completed' || !isPaused(trigger)) return {};
   const c = pausedDoneWorkflow(trigger, reader);
+  // `refused`: for a person with access, a new plan of theirs on that workflow would be refused (U-489).
+  if (c.kind === 'foreign' || c.kind === 'unreadable') return { paused_done_workflow: { name: c.name, refused: c.kind } };
   return c.kind === 'workflow' ? { paused_done_workflow: { name: c.name } } : c.kind === 'none' ? { paused_done_workflow: null } : {};
+}
+
+/**
+ * The reader for a completed paused plan's case, as `principal` reads it: for a person with access
+ * it also asks whether a new plan of theirs on its workflow would be refused (U-489).
+ */
+export function pausedDoneReaderFor(
+  history: RunHistory | null | undefined,
+  ends: { isLive(mandateId: string): boolean } | null | undefined,
+  principal: RequestPrincipal,
+): PausedDoneWorkflowReader | null {
+  return pausedDoneReaderOf(history, ends, isOwnerPrincipal(principal) ? undefined : (id) => foreignWorkflowScheduleRefusalKind(principal, id, history));
 }
 
 /** A trigger's setup marks from its stored columns, as an approval card and the trigger list read them. */
@@ -2113,10 +2129,15 @@ const PAUSED_REFUSAL = 'paused because an access ended; it needs to be taken ove
  * The refusal for this paused plan: its own sentence once it is completed, where nothing takes it
  * over or reopens it, with its workflow's takeover first when its workflow needs one (U-275 N6).
  */
-const pausedRefusal = (t: TriggerRecord | undefined, reader: PausedDoneWorkflowReader | null | undefined): string =>
-  t?.status === 'completed'
-    ? `completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.${pausedDoneWorkflowText(pausedDoneWorkflow(t, reader))}`
-    : PAUSED_REFUSAL;
+const pausedRefusal = (t: TriggerRecord | undefined, reader: PausedDoneWorkflowReader | null | undefined): string => {
+  if (t?.status !== 'completed') return PAUSED_REFUSAL;
+  const c = pausedDoneWorkflow(t, reader);
+  // A person with access whose new plan on its workflow would be refused reads that way instead, as
+  // the reader of the answer (U-489 N).
+  if (c.kind === 'foreign') return PAUSED_DONE_FOREIGN_API;
+  if (c.kind === 'unreadable') return PAUSED_DONE_UNREADABLE_API;
+  return `completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.${pausedDoneWorkflowText(c)}`;
+};
 /**
  * How long `DELETE /api/data` waits for the chat runs it stopped to release their
  * slots. Stopping is the same `takeover` the stale-run reclaim uses: a run parked on
@@ -3504,7 +3525,7 @@ export class LynoxHTTPApi {
     if (trigger === undefined || !isPaused(trigger)) return false;
     const ownerMay = action === 'enable' || action === 'complete' || action === 'delete';
     if (isOwnerPrincipal(this._principalOf(req)) && ownerMay) return false;
-    errorResponse(res, 409, pausedRefusal(trigger, pausedDoneReaderOf(this.engine?.getRunHistory(), this.engine?.getMandateEnds())), 'paused');
+    errorResponse(res, 409, pausedRefusal(trigger, pausedDoneReaderFor(this.engine?.getRunHistory(), this.engine?.getMandateEnds(), this._principalOf(req))), 'paused');
     return true;
   }
 
@@ -9951,7 +9972,7 @@ export class LynoxHTTPApi {
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
       const history = engine.getRunHistory();
-      const doneReader = pausedDoneReaderOf(history, engine.getMandateEnds());
+      const doneReader = pausedDoneReaderFor(history, engine.getMandateEnds(), principal);
       // `paused` is no status value: it reads `paused_at` (`plan-pause.ts`).
       const pausedFilter = (status as string | undefined) === 'paused';
       const rows = pausedFilter
@@ -10287,7 +10308,7 @@ export class LynoxHTTPApi {
         // would always miss, dropping the response to the {id, enabled} stub.
         const updated = engine.getRunHistory()?.getTrigger(params['id']!);
         // Switching a paused plan on starts nothing until it is taken over, and the answer says so.
-        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: pausedRefusal(updated, pausedDoneReaderOf(engine.getRunHistory(), engine.getMandateEnds())) } : {};
+        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: pausedRefusal(updated, pausedDoneReaderFor(engine.getRunHistory(), engine.getMandateEnds(), this._principalOf(_req))) } : {};
         jsonResponse(res, 200, { ...(updated !== undefined ? triggerForRoute(updated, this._principalOf(_req)) : { id: params['id'], enabled: b['enabled'] ? 1 : 0 }), ...pausedNote });
         return;
       }
@@ -10710,7 +10731,7 @@ export class LynoxHTTPApi {
           return;
         }
         if (outcome.reason === 'paused') {
-          errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!), pausedDoneReaderOf(engine.getRunHistory(), engine.getMandateEnds())), 'paused');
+          errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!), pausedDoneReaderFor(engine.getRunHistory(), engine.getMandateEnds(), principal)), 'paused');
           return;
         }
         errorResponse(res, 404, 'Trigger not found'); return;
