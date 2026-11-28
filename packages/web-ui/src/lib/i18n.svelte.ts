@@ -1774,6 +1774,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.note.approval_unknown': { de: 'Beim Senden der Mail, die du freigegeben hast, ist etwas schiefgelaufen. Ob sie rausging, zeigt der Gesendet-Ordner nicht sicher; frag im Zweifel beim Empfänger nach, bevor du sie noch einmal schickst.', en: 'Something went wrong while sending the mail you approved. The Sent folder does not reliably show whether it went out; if in doubt, ask the recipient before you send it again.' },
 	'chat.note.input_required.title': { de: 'Wartet auf eine Antwort, die hier niemand geben kann', en: 'Needs an answer nobody here can give' },
 	'chat.note.input_required': { de: 'Der Agent hatte eine Frage, aber dieser Lauf hat keinen Weg, eine Person zu erreichen. Er hat deshalb aufgehört, statt ohne Antwort weiterzumachen.', en: 'The agent had a question, but this run has no way to reach a person, so it stopped rather than carry on without an answer.' },
+	// A message the content check did not send: the body is the engine's own sentence (the note's
+	// detail), the words the chat showed when the run ended; this line only stands in when it is missing.
+	'chat.note.content_refused.title': { de: 'Inhaltsprüfung', en: 'Content check' },
+	'chat.note.content_refused': { de: 'Diese Nachricht ging nicht an das KI-Modell.', en: 'This message was not sent to the AI model.' },
 	'chat.note.context_compacted.title': { de: 'Unterhaltung zusammengefasst', en: 'Conversation summarized' },
 	'chat.note.context_compacted': { de: 'Der Verlauf wurde hier gekürzt, um Kontext freizugeben. Frühere Nachrichten bleiben in deiner Historie, aber der Agent arbeitet ab hier mit einer Zusammenfassung. Fehlt etwas Wichtiges, erinnere ihn kurz daran.', en: 'The history was summarized here to free up context. Earlier messages stay in your history, but the agent now works from a summary. If something important is missing, just remind it.' },
 	'chat.run_blocked': { de: 'Anfrage blockiert', en: 'Request blocked' },
