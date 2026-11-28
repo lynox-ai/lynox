@@ -4637,8 +4637,9 @@ export class Agent implements IAgent {
       const profile = this.toolContext.apiStore?.getByHostname(host);
       const type = profile?.auth?.type;
       if (profile === undefined || (type !== 'bearer' && type !== 'header' && type !== 'oauth2')) return '';
-      // A member's own connection is no way out for this reader: the attach refuses it with its own text.
-      if (memberRefusalCase(profile, this.principal, this.toolContext.mandateEnds ?? null) !== null) return '';
+      // A member's own oauth2 connection is no way out for this reader: the attach refuses it with its
+      // own text. Only oauth2: a bearer or header profile is attached whoever made it.
+      if (type === 'oauth2' && memberRefusalCase(profile, this.principal, this.toolContext.mandateEnds ?? null) !== null) return '';
       // A missing name that IS the profile's own credential is missing for the attach too: then
       // collecting it (or minting it) is the way out, and this note would say the opposite.
       // Only the names the attach READS for this profile: `collectVaultKeys` is wider (it keeps the
