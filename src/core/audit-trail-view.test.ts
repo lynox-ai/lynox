@@ -6,7 +6,7 @@ import { EngineDb } from './engine-db.js';
 import { RunHistory } from './run-history.js';
 import { AuditLog, newCorrelationId } from './audit-log.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
-import { buildTrail, readTrailPage, TRAIL_PAGE_MAX_ROWS, targetPairs, trailSourceDeps, trailSources, type TrailRow, type TrailSources, type TrailPlanRun, type TrailBulkRun, type TrailStep } from './audit-trail-view.js';
+import { buildTrail, nameReads, readTrailPage, TRAIL_NAME_MAX, TRAIL_PAGE_MAX_ROWS, targetPairs, trailSourceDeps, trailSources, type TrailRow, type TrailSources, type TrailPlanRun, type TrailBulkRun, type TrailStep, type TrailEvent, type TrailNames } from './audit-trail-view.js';
 
 const EVA = { email: 'eva@kanzlei.example', display: 'Eva Muster', mandateId: 'TEST-GRANT-EVA' };
 
@@ -740,3 +740,73 @@ describe('trailSources over run history', () => {
     expect(['b1', 'b2', 'b3', 'b4', 'b5'].map((id) => src.bulkRunOpen(id))).toEqual([true, false, false, false, true]);
   });
 });
+
+describe('nameReads: what a read was about, by name, resolved when the view is read', () => {
+  const names: TrailNames = {
+    thread: (id) => ({ 't-1': 'Angebot Testfirma' } as Record<string, string>)[id],
+    mail: (id) => ({ 'i-1': 'Rechnung November' } as Record<string, string>)[id],
+    workflow: (id) => ({ 'w-1': 'Wochenbericht' } as Record<string, string>)[id],
+  };
+  const event = (action: string, target: string | null, phase = 'read'): TrailEvent =>
+    ({ kind: 'event', id: `event:${action}:${String(target)}:${phase}`, action, target, phase, at: '2026-11-28T10:00:00.000Z', person: { email: null, display: null, mandateId: null } });
+  const nameOf = (e: TrailEvent, n: TrailNames = names): string | undefined => (nameReads([e], n)[0] as TrailEvent).name;
+
+  it('names a chat by its title, on each of its reads', () => {
+    expect(nameOf(event('GET /api/threads/:id', '/api/threads/t-1'))).toBe('Angebot Testfirma');
+    expect(nameOf(event('GET /api/threads/:id/messages', '/api/threads/t-1/messages'))).toBe('Angebot Testfirma');
+    expect(nameOf(event('GET /api/threads/:id/debug-export', '/api/threads/t-1/debug-export'))).toBe('Angebot Testfirma');
+  });
+
+  it('names a mail by its subject', () => {
+    for (const leaf of ['full', 'thread', 'context']) expect(nameOf(event(`GET /api/inbox/items/:id/${leaf}`, `/api/inbox/items/i-1/${leaf}`)), leaf).toBe('Rechnung November');
+  });
+
+  it('names a workflow by its name', () => {
+    expect(nameOf(event('GET /api/workflows/:id', '/api/workflows/w-1'))).toBe('Wochenbericht');
+    expect(nameOf(event('GET /api/workflows/:id/steps', '/api/workflows/w-1/steps'))).toBe('Wochenbericht');
+  });
+
+  it('names a contact by the name in its route, and a file by its path, without a lookup', () => {
+    const none: TrailNames = { thread: () => { throw new Error('asked'); }, mail: () => { throw new Error('asked'); }, workflow: () => { throw new Error('asked'); } };
+    expect(nameOf(event('GET /api/crm/contacts/:name/deals', '/api/crm/contacts/Anna%20Muster/deals'), none)).toBe('Anna Muster');
+    expect(nameOf(event('GET /api/crm/contacts/:name/interactions', '/api/crm/contacts/Anna%20Muster/interactions'), none)).toBe('Anna Muster');
+    expect(nameOf(event('GET /api/files/read', '/api/files/read?path=docs%2Fangebot.md'), none)).toBe('docs/angebot.md');
+    expect(nameOf(event('GET /api/files/download', '/api/files/download?path=a.pdf'), none)).toBe('a.pdf');
+    // A masked address is not a name.
+    expect(nameOf(event('GET /api/crm/contacts/:name/deals', '/api/crm/contacts/<address>/deals'), none)).toBeUndefined();
+    expect(nameOf(event('GET /api/files/read', '/api/files/read'), none)).toBeUndefined();
+  });
+
+  it('gives no name for an object that is gone, a store that throws, or a route that names none', () => {
+    expect(nameOf(event('GET /api/threads/:id', '/api/threads/t-gone'))).toBeUndefined();
+    expect(nameOf(event('GET /api/threads/:id', '/api/threads/t-1'), { ...names, thread: () => { throw new Error('store closed'); } })).toBeUndefined();
+    expect(nameOf(event('GET /api/threads', '/api/threads'))).toBeUndefined();
+    expect(nameOf(event('GET /api/threads/:id', null))).toBeUndefined();
+  });
+
+  it('names a refused read too, and never a write or a step', () => {
+    expect(nameOf(event('GET /api/threads/:id', '/api/threads/t-1', 'refused'))).toBe('Angebot Testfirma');
+    expect(nameOf(event('GET /api/threads/:id', '/api/threads/t-1', 'attempt'))).toBeUndefined();
+    const step: TrailStep = { kind: 'step', id: 's', action: 'GET /api/threads/:id', target: '/api/threads/t-1', at: '2026-11-28T10:00:00.000Z', person: { email: null, display: null, mandateId: null }, status: 'done' };
+    expect(nameReads([step], names)[0]).toBe(step);
+  });
+
+  it('names the reads under a run, and leaves a bulk run as it is', () => {
+    const plan: TrailPlanRun = {
+      kind: 'plan', run: 'plan', id: 'plan:k', key: 'k', trigger: null, startedBy: null, at: '2026-11-28T10:00:00.000Z',
+      person: { email: null, display: null, mandateId: null }, status: 'done', writeSteps: 0, entries: [event('GET /api/threads/:id', '/api/threads/t-1')],
+    };
+    const [out] = nameReads([plan], names) as TrailPlanRun[];
+    expect((out!.entries[0] as TrailEvent).name).toBe('Angebot Testfirma');
+  });
+
+  it('shows a name on one line, without control or format characters, and cuts a long one', () => {
+    const odd: TrailNames = { ...names, thread: (id) => (id === 'a' ? 'Zeile\neins\u202Ezwei\u0007' : 'x'.repeat(200)) };
+    expect(nameOf(event('GET /api/threads/:id', '/api/threads/a'), odd)).toBe('Zeile eins zwei');
+    const long = nameOf(event('GET /api/threads/:id', '/api/threads/b'), odd)!;
+    expect([...long]).toHaveLength(TRAIL_NAME_MAX);
+    expect(long.endsWith('…')).toBe(true);
+    expect(nameOf(event('GET /api/threads/:id', '/api/threads/c'), { ...names, thread: () => '  ' })).toBeUndefined();
+  });
+});
+

@@ -124,6 +124,37 @@ describe('a read in words, the route once (U-306 B1)', () => {
 	});
 });
 
+describe('the name of what was read', () => {
+	it('stands muted after the word, the route with its id after it', async () => {
+		await render([{ ...read('GET /api/threads/:id/messages', '/api/threads/t-1/messages'), name: 'Angebot Testfirma' }]);
+		const [li] = items();
+		expect(text(li?.querySelector('[data-word]'))).toBe('Nachrichten eines Chats');
+		expect(text(li?.querySelector('[data-name]'))).toBe('Angebot Testfirma');
+		expect(li?.querySelector('[data-name]')?.className).toContain('text-text-muted');
+		expect(text(li)).toMatch(/Nachrichten eines Chats Angebot Testfirma GET \/api\/threads\/t-1\/messages$/);
+	});
+
+	it('is absent for an object that is gone: the route with its id is all', async () => {
+		await render([read('GET /api/threads/:id/messages', '/api/threads/t-gone/messages')]);
+		const [li] = items();
+		expect(li?.querySelector('[data-name]')).toBeNull();
+		expect(text(li?.querySelector('[data-route]'))).toBe('GET /api/threads/t-gone/messages');
+	});
+
+	it('stands on a refused read and on a repeat line too, as text, never as markup', async () => {
+		await render([
+			{ ...read('GET /api/inbox/items/:id/full', '/api/inbox/items/i-1/full', 1, 'refused'), name: '<b>Rechnung</b>' },
+			{ ...read('GET /api/workflows/:id', '/api/workflows/w-1', 2), name: 'Wochenbericht' },
+			{ ...read('GET /api/workflows/:id', '/api/workflows/w-1', 3), name: 'Wochenbericht' },
+		]);
+		const [refused, repeat] = items();
+		expect(text(refused?.querySelector('[data-name]'))).toBe('<b>Rechnung</b>');
+		expect(refused?.querySelector('b')).toBeNull();
+		expect(repeat?.dataset['entryKind']).toBe('repeat');
+		expect(text(repeat?.querySelector('[data-repeat-summary] [data-name]'))).toBe('Wochenbericht');
+	});
+});
+
 describe('the same read again, one line (U-306 C)', () => {
 	it('folds three reads of the same run into one line with the count, the span and the route', async () => {
 		await render([

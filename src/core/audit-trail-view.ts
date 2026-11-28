@@ -20,7 +20,7 @@
  * a read a plan made after that person's access had ended.
  */
 import type Database from 'better-sqlite3';
-import { TRAIL_FORM } from './audit-log.js';
+import { ADDRESS_PLACEHOLDER, TRAIL_FORM } from './audit-log.js';
 
 /** One row as the view reads it. */
 export interface TrailRow {
@@ -105,6 +105,12 @@ export interface TrailEvent {
    */
   readonly count?: number | undefined;
   readonly until?: string | undefined;
+  /**
+   * The name of what a read or a refused read was about (a chat's title, a mail's subject, a
+   * workflow's name, a contact, a file), resolved when the view is read, never stored in the row
+   * (`nameReads`). Absent when the object is gone or the route names none: then the route's id is all.
+   */
+  readonly name?: string | undefined;
 }
 
 /**
@@ -674,4 +680,94 @@ export function trailSources(deps: TrailSourceDeps): TrailSources {
     approvalOf: deps.approval,
     knowledgeStatus: (id) => (knowledge?.get(id) as { status: string } | undefined)?.status,
   };
+}
+
+/** What {@link nameReads} asks for a name; undefined when the store has no such object, or no store. */
+export interface TrailNames {
+  /** A chat's title. */
+  thread(id: string): string | undefined;
+  /** A mail's subject in the inbox. */
+  mail(id: string): string | undefined;
+  /** A workflow run's name. */
+  workflow(id: string): string | undefined;
+}
+
+/**
+ * The routes whose read names one object, by the action the row carries, and where its id or name
+ * sits in the row's target: a path segment (counted from the leading slash), or a query value.
+ * A contact and a file are named in the target itself; the others are looked up.
+ */
+type NamedRead = { readonly kind: 'thread' | 'mail' | 'workflow' | 'contact'; readonly segment: number } | { readonly kind: 'file'; readonly query: string };
+const NAMED_READS: ReadonlyMap<string, NamedRead> = new Map<string, NamedRead>([
+  ['GET /api/threads/:id', { kind: 'thread', segment: 3 }],
+  ['GET /api/threads/:id/messages', { kind: 'thread', segment: 3 }],
+  ['GET /api/threads/:id/debug-export', { kind: 'thread', segment: 3 }],
+  ['GET /api/inbox/items/:id/full', { kind: 'mail', segment: 4 }],
+  ['GET /api/inbox/items/:id/thread', { kind: 'mail', segment: 4 }],
+  ['GET /api/inbox/items/:id/context', { kind: 'mail', segment: 4 }],
+  ['GET /api/workflows/:id', { kind: 'workflow', segment: 3 }],
+  ['GET /api/workflows/:id/steps', { kind: 'workflow', segment: 3 }],
+  ['GET /api/crm/contacts/:name/interactions', { kind: 'contact', segment: 4 }],
+  ['GET /api/crm/contacts/:name/deals', { kind: 'contact', segment: 4 }],
+  ['GET /api/files/read', { kind: 'file', query: 'path' }],
+  ['GET /api/files/download', { kind: 'file', query: 'path' }],
+]);
+
+/** The longest name shown; a longer one is cut, so one subject cannot fill the line. */
+export const TRAIL_NAME_MAX = 80;
+
+/** A name as the view shows it: one line, no control or format characters, at most {@link TRAIL_NAME_MAX}. */
+function shownName(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const one = raw.replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (one === '' || one === ADDRESS_PLACEHOLDER) return undefined;
+  const chars = [...one];
+  return chars.length <= TRAIL_NAME_MAX ? one : `${chars.slice(0, TRAIL_NAME_MAX - 1).join('')}…`;
+}
+
+const decoded = (s: string): string | undefined => {
+  try { return decodeURIComponent(s); } catch { return undefined; }
+};
+
+/** The name of what one read was about, or undefined. */
+function nameOf(action: string, target: string | null, names: TrailNames): string | undefined {
+  const named = NAMED_READS.get(action);
+  if (named === undefined || target === null) return undefined;
+  const q = target.indexOf('?');
+  if (named.kind === 'file') {
+    if (q < 0) return undefined;
+    for (const pair of target.slice(q + 1).split('&')) {
+      const eq = pair.indexOf('=');
+      if (eq > 0 && pair.slice(0, eq) === named.query) return shownName(decoded(pair.slice(eq + 1)));
+    }
+    return undefined;
+  }
+  const piece = (q < 0 ? target : target.slice(0, q)).split('/')[named.segment];
+  const key = piece === undefined || piece === '' ? undefined : decoded(piece);
+  if (key === undefined) return undefined;
+  switch (named.kind) {
+    case 'contact': return shownName(key);
+    case 'thread': return shownName(names.thread(key));
+    case 'mail': return shownName(names.mail(key));
+    case 'workflow': return shownName(names.workflow(key));
+  }
+}
+
+/**
+ * The entries with the name of what each read or refused read was about: looked up now, on the
+ * owner's request, never written into a row, so a renamed object shows its name of
+ * today and a deleted one none. A lookup that throws names nothing. Runs' steps are named too.
+ */
+export function nameReads(entries: readonly TrailEntry[], names: TrailNames): TrailEntry[] {
+  const safe: TrailNames = {
+    thread: (id) => { try { return names.thread(id); } catch { return undefined; } },
+    mail: (id) => { try { return names.mail(id); } catch { return undefined; } },
+    workflow: (id) => { try { return names.workflow(id); } catch { return undefined; } },
+  };
+  const named = <E extends TrailStep | TrailEvent>(e: E): E => {
+    if (e.kind !== 'event' || (e.phase !== 'read' && e.phase !== 'refused')) return e;
+    const name = nameOf(e.action, e.target, safe);
+    return name === undefined ? e : { ...e, name };
+  };
+  return entries.map((e) => (e.kind === 'plan' ? { ...e, entries: e.entries.map(named) } : e.kind === 'bulk' ? e : named(e)));
 }

@@ -18,7 +18,8 @@
 	interface Targets { written: number; failed: number; atLeast: boolean }
 	interface Step { kind: 'step'; id: string; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
 	/** `auto`: a read on a route the person's web UI polls by itself, marked by the engine (row 1034). */
-	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true; count?: number; until?: string }
+	/** `name`: what the read was about (a chat's title, a mail's subject …), resolved by the engine when this page was read. */
+	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true; count?: number; until?: string; name?: string }
 	interface PlanRun { kind: 'plan'; run?: 'plan' | 'workflow'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
 	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; store?: 'files' | 'data_store' | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
 	type Entry = PlanRun | BulkRun | Step | Event;
@@ -198,6 +199,7 @@
 		<span class="text-xs text-text-subtle tabular-nums">{when(e.at)}</span>
 		<span class="text-text-muted">{kindText(e)}</span>
 		{#if word !== null}<span data-word>{word}</span>{/if}
+		{#if e.kind === 'event' && e.name !== undefined}<span class="text-text-muted min-w-0 [overflow-wrap:anywhere]" data-name>{e.name}</span>{/if}
 		{#if !isRevoke(e)}{@render route(e)}{/if}
 		{#if e.kind === 'event' && e.count !== undefined}<span class="text-xs text-text-muted" data-poll-day>{e.count === 1 ? tf('access_trail.poll_day_one', { time: when(e.at) }) : tf('access_trail.poll_day', { n: String(e.count), time: when(e.until ?? e.at) })}</span>{/if}
 		{#if e.kind === 'step'}
@@ -269,6 +271,7 @@
 							<summary class="text-sm cursor-pointer" data-repeat-summary>
 								<span class="text-text-muted">{kindText(first)}</span>
 								<span class="ml-2">{tf('access_trail.repeat', { word: word ?? routeText(first.action, first.target), n: String(item.entries.length), span: span(item.from, item.to) })}</span>
+								{#if first.name !== undefined}<span class="ml-2 text-text-muted" data-name>{first.name}</span>{/if}
 								{#if word !== null}<span class="ml-2">{@render route(first)}</span>{/if}
 							</summary>
 							<div class="space-y-1 pt-1 pl-4">

@@ -118,7 +118,7 @@ import { MEMBER_CONNECTION_PREFIX, lastRunResultFor } from '../core/member-conne
 import { noticeLanguage } from '../core/notice-language.js';
 import { WORKER_NOTICES } from '../core/worker-notices.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
-import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
+import { buildTrail, nameReads, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
@@ -11023,8 +11023,15 @@ export class LynoxHTTPApi {
         ledger: engine.getBulkLedger(),
         approvals: engine.getApprovalStore(),
       })), { complete });
+      // What each read was about, by name, looked up for this answer only (never stored in a row).
+      const history = engine.getRunHistory();
+      const named = nameReads(entries, {
+        thread: (id) => engine.getThreadStore()?.getThread(id)?.title,
+        mail: (id) => engine.getInboxRuntime()?.state.getItem(id)?.subject,
+        workflow: (id) => history?.getPipelineRun(id)?.manifest_name,
+      });
       // A page holds its entries whole (readTrailPage); the next one starts below its oldest row.
-      jsonResponse(res, 200, { entries, before, complete });
+      jsonResponse(res, 200, { entries: named, before, complete });
     }, ownerOnly('read the access log')));
 
     // The approval queue: the owner sends or discards a mail
