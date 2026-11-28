@@ -88,10 +88,7 @@ export type ContentBlock =
 	| { type: 'tool_call'; index: number }
 	/** A delegation, placed where it happened so the sub-agent panel renders in
 	 *  chronological order instead of being pinned to a tool row. */
-	| { type: 'spawn'; spawnId: string }
-	/** Text the person typed into the chat as the answer to one of the engine's confirmations,
-	 *  shown where the question stood. Client-only: a chat loaded from the server has none. */
-	| { type: 'answer'; text: string };
+	| { type: 'spawn'; spawnId: string };
 
 /**
  * The slice of a chat message this module owns.

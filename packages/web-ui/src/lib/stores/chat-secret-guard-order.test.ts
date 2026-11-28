@@ -14,7 +14,7 @@ describe('ChatView checks typed text for a credential before it answers a prompt
 		expect(end, 'end of handleSend found').toBeGreaterThan(start);
 		const body = SRC.slice(start, end);
 		const check = body.indexOf('if (looksLikeSecret(task)) {');
-		const answer = body.indexOf('answerPrompt(task, undefined, true);');
+		const answer = body.indexOf('answerPrompt(task);');
 		expect(check, 'handleSend checks').toBeGreaterThan(-1);
 		expect(answer, 'and answers').toBeGreaterThan(-1);
 		expect(check, 'checks before it answers').toBeLessThan(answer);

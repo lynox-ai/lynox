@@ -47,14 +47,11 @@ export function markCall(state: AttemptState): CallMark {
 export function trimToMark(state: AttemptState, mark: CallMark): void {
 	state.content = state.content.slice(0, mark.contentLength);
 	if (state.blocks) {
-		// A typed answer is not the call's output: it stays when a retried call is taken out.
-		const answers = state.blocks.slice(mark.blockCount).filter((b) => b.type === 'answer');
 		state.blocks.length = Math.min(state.blocks.length, mark.blockCount);
 		const last = state.blocks[state.blocks.length - 1];
 		if (last && mark.lastBlockTextLength !== undefined && (last.type === 'text' || last.type === 'thinking')) {
 			last.text = last.text.slice(0, mark.lastBlockTextLength);
 		}
-		state.blocks.push(...answers);
 	}
 	if (state.toolCalls) state.toolCalls.length = Math.min(state.toolCalls.length, mark.toolCallCount);
 	if (state.thinking !== undefined) state.thinking = state.thinking.slice(0, mark.thinkingLength);
