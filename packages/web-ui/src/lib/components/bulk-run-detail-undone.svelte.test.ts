@@ -237,6 +237,9 @@ describe('an undone run’s page', () => {
 		await render();
 		expect(target.textContent).toContain('Bei den Zielen mit der Marke ‚nicht zurückgenommen‘ hat lynox die Änderung nicht zurückgenommen.');
 		expect(target.textContent).not.toContain('Bei den markierten Zielen');
+		// It names the mark by the label the mark itself carries, and that mark stands on the page.
+		expect(target.textContent).toContain(`‚${t('bulk.target.not_taken_back')}‘`);
+		expect(target.querySelector('[data-testid="bulk-rollback-left"]')?.textContent?.trim()).toBe(t('bulk.target.not_taken_back'));
 		expect(takenBackMarks()).toEqual([undefined, 'zurückgenommen']);
 	});
 
