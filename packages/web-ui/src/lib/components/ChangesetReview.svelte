@@ -38,14 +38,14 @@
 	let {
 		files,
 		onReview,
-		messageWaiting = false,
+		messagesWaiting = 0,
 		rollbackStopped = null,
 	}: {
 		files: ChangesetFileInfo[];
 		onReview: (action: 'accept' | 'rollback' | 'partial', rolledBackFiles?: string[]) => void;
-		/** A message of this chat waits for this review: the card says so, since the waiting bubble
-		 *  can sit far above it. */
-		messageWaiting?: boolean;
+		/** How many messages of this chat wait for this review: the card says so, since the waiting
+		 *  bubbles can sit far above it. */
+		messagesWaiting?: number;
 		/** A rollback of this review stopped partway: the files it has not restored yet. The card
 		 *  says so, and why it is still open, until it is decided. */
 		rollbackStopped?: string[] | null;
@@ -125,8 +125,8 @@
 				{/if}
 			</div>
 		</div>
-		{#if messageWaiting}
-			<p class="mt-1 text-xs text-text-muted" data-testid="changeset-message-waiting">{t('changeset.message_waiting')}</p>
+		{#if messagesWaiting > 0}
+			<p class="mt-1 text-xs text-text-muted" data-testid="changeset-message-waiting">{t(messagesWaiting === 1 ? 'changeset.message_waiting' : 'changeset.messages_waiting')}</p>
 		{/if}
 		{#if rollbackStopped && rollbackStopped.length > 0}
 			<p class="mt-1 text-xs text-warning" role="alert" data-testid="changeset-rollback-stopped">{stoppedParts[0] ?? ''}{#each rollbackStopped.slice(0, STOPPED_SHOWN) as name, i (i)}{i > 0 ? ', ' : ''}<span class="inline-block max-w-full break-all font-mono">{name}</span>{/each}{stoppedMore}{stoppedParts[1] ?? ''}</p>
