@@ -1,7 +1,8 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
-import { isStepIdShape, stepIdRefusal, stepRunIds } from './step-id.js';
+import { isReservedStepId, isStepIdShape, readsAsContextKey, reservedStepIdRefusal, stepIdRefusal, stepRunIds } from './step-id.js';
 import { fieldReferencing } from './template-refs.js';
+import { replacePlaceholders, splitLeadingSpace } from './placeholders.js';
 
 /**
  * A single step-level edit to a workflow's step list. The vocabulary is shared
@@ -25,11 +26,12 @@ export interface StepModification {
   after?: string | undefined;
 }
 
-/** Why `id` cannot be a new step's id, or null: an id outside the shape (`step-id.ts`). The shape
+/** Why `id` cannot be a new step's id, or null: an id outside the shape, or a reserved one (`step-id.ts`). The shape
  *  also keeps out what a reference could not name: a dot or a brace (`{{<id>.result}}` is cut at each
  *  dot and ends at `}`) and a leading `#`, which names a step by its position. */
 function newIdProblem(id: string, action: 'add_step' | 'rename_step'): string | null {
-  return isStepIdShape(id) ? null : `Error: ${action}: ${stepIdRefusal('the new id', { refs: false })}`;
+  if (!isStepIdShape(id)) return `Error: ${action}: ${stepIdRefusal('the new id', { refs: false })}`;
+  return isReservedStepId(id) ? `Error: ${action}: ${reservedStepIdRefusal('the new id', { refs: false })}` : null;
 }
 
 /** A step id as a refusal quotes it: as it reads, escaped, and short. */
@@ -116,7 +118,8 @@ function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: s
 
 /** `text` with every `{{<from>…}}` reference to a step's output pointed at `to`. */
 function renamedRefs(text: string, from: string, to: string): string {
-  return text.replace(/\{\{(\s*)([^}]+)\}\}/g, (match: string, ws: string, path: string) => {
+  return replacePlaceholders(text, (match: string, inner: string) => {
+    const [ws, path] = splitLeadingSpace(inner);
     // As `resolveTaskTemplate` reads a path: trimmed, the step id up to the first dot.
     if (path.trimEnd() !== from && !path.startsWith(`${from}.`)) return match;
     return `{{${ws}${to}${path.slice(from.length)}}}`;
@@ -259,6 +262,10 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
             + `which the new id would turn into a reference to ${renamed}. Choose another id.`;
         }
       }
+      // A stored id that reads as another step's id plus a context key (`a.result` beside `a`)
+      // takes no placeholder when a run names it, so a rename moves none either: `{{a.result}}`
+      // keeps reading step a. Its input_from entries still move.
+      const keepsPlaceholders = readsAsContextKey(from, new Set(steps.filter((_, i) => i !== idx).map(s => s.id)));
       steps[idx]!.id = to;
       for (const s of steps) {
         // A `{{<from>.…}}` is a reference only in a step that lists `from` in its input_from: the
@@ -266,7 +273,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
         // text, such as a placeholder a tool hands on to the system it writes to, and stays as written.
         const reads = s.input_from?.includes(from) === true;
         if (s.input_from) s.input_from = s.input_from.map(dep => (dep === from ? to : dep));
-        if (!reads) continue;
+        if (!reads || keepsPlaceholders) continue;
         s.task = renamedRefs(s.task, from, to);
         if (s.input_template) s.input_template = renamedInTemplate(s.input_template, from, to) as Record<string, unknown>;
       }
