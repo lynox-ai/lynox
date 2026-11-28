@@ -4637,6 +4637,8 @@ export class Agent implements IAgent {
       const profile = this.toolContext.apiStore?.getByHostname(host);
       const type = profile?.auth?.type;
       if (profile === undefined || (type !== 'bearer' && type !== 'header' && type !== 'oauth2')) return '';
+      // A member's own connection is no way out for this reader: the attach refuses it with its own text.
+      if (memberRefusalCase(profile, this.principal, this.toolContext.mandateEnds ?? null) !== null) return '';
       // A missing name that IS the profile's own credential is missing for the attach too: then
       // collecting it (or minting it) is the way out, and this note would say the opposite.
       // Only the names the attach READS for this profile: `collectVaultKeys` is wider (it keeps the
@@ -4796,7 +4798,9 @@ export class Agent implements IAgent {
           // Only an oauth2 holder: its access token is the one its own request gets. Any other profile
           // can hold a recorded name too, and its derived name is free, which `slotMayReach` allows
           // anywhere. `slotMayReach` is false for a held-back owner too (`profile-secret-view.ts`).
+          // A member's own connection is no way out either: sending there again meets the member refusal.
           holder = only !== undefined && only.auth?.type === 'oauth2'
+            && memberRefusalCase(only, this.principal, this.toolContext.mandateEnds ?? null) === null
             && slotMayReach(apiStore!, accessTokenKey(only.id), 'request', only.base_url, undefined, bindCtx)
             ? String(only.id) : undefined;
         } catch { holder = undefined; }
