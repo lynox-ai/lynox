@@ -241,7 +241,7 @@ const PROFILE_SAVES: Readonly<Record<string, string>> = {
 };
 /** Each removal of the author, with what must stand in the lines before it. */
 const AUTHOR_REMOVALS: ReadonlyArray<{ file: string; line: string; check: RegExp }> = [
-  { file: 'tools/builtin/api-setup.ts', line: 'delete profile.created_by;', check: /isMandateConnection\(storedForSave\)\s*&& !connectionWaits\(/ },
+  { file: 'tools/builtin/api-setup.ts', line: 'delete profile.created_by;', check: /ownerSaveHeldByMemberConnection\(storedForSave,/ },
   { file: 'tools/builtin/api-setup.ts', line: 'delete next.created_by;', check: /if \(!connectionWaits\(current, ends\)\)/ },
 ];
 
@@ -276,6 +276,8 @@ describe('saves that change a profile\'s author (A7)', () => {
   });
 
   it('each removal of the author stands behind its check', () => {
+    // The owner-save check is the shared helper; it must still hold the connection condition.
+    expect(files.get('core/profile-secret-view.ts')).toContain('return isMandateConnection(profile) && !connectionWaits(profile, ends);');
     const found = authorRemovals(files);
     expect(found).toHaveLength(AUTHOR_REMOVALS.length);
     expect(found.filter((r) => !r.checked)).toEqual([]);
@@ -283,7 +285,7 @@ describe('saves that change a profile\'s author (A7)', () => {
 
   it('mutant: the owner-save check taken out leaves its removal unchecked', () => {
     const mutated = new Map(files);
-    mutated.set('tools/builtin/api-setup.ts', files.get('tools/builtin/api-setup.ts')!.replace('isMandateConnection(storedForSave)', 'false'));
+    mutated.set('tools/builtin/api-setup.ts', files.get('tools/builtin/api-setup.ts')!.replace('ownerSaveHeldByMemberConnection(storedForSave,', 'false && (storedForSave,'));
     expect(authorRemovals(mutated).filter((r) => !r.checked)).toHaveLength(1);
   });
 
