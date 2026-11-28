@@ -20,6 +20,7 @@ import type { ShownMandate } from './request-principal.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON } from '../server/webhook-receiver.js';
+import { PUSH_BODY_MAX } from './escalation.js';
 
 /** An event whose run did not complete, in English; the worker also compares a sentence to it. */
 export const EVENT_RUN_FAILED_EN = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual. If it should have changed something, check whether that change is missing and make it by hand or ask lynox in a chat.';
@@ -331,7 +332,11 @@ export interface WorkerNotices {
   unknownEffect(effect: string): string;
   /** A resumed run whose new chat could not be contained (W14). */
   resumedRunNotContained(provisioned: boolean): string;
-  /** A watched page that changed, with the analysis (E15): the push only, the thread's seed stays English. */
+  /**
+   * A watched page that changed, with the analysis (E15): the push only, the thread's seed stays
+   * English (`watchChangedSeed`). The analysis is marked as the page's summary that lynox did not
+   * check (U-499), and the push is cut in the analysis, never in that sentence.
+   */
   watchChanged(url: string, analysis: string): string;
   /** A watched page that could not be read, with the cause in lynox's own words: the run's failed result and its notice. */
   watchFetchFailed(url: string, cause: WatchFetchCause): string;
@@ -339,6 +344,60 @@ export interface WorkerNotices {
   watchFetchReason(cause: WatchFetchCause): string;
   /** A watch the network policy keeps from its page, at the poll: why, and what the owner or the operator can do. */
   watchPolicyRefused(reason: WatchPolicyReason, alsoHttps: boolean): string;
+}
+
+/** The sentence that marks a watch's analysis as the page's, unchecked (U-499). */
+const WATCH_SUMMARY_MARK = { en: 'Summary of the page, not checked by lynox:', de: 'Zusammenfassung der Seite, nicht von lynox geprüft:' } as const;
+
+/** Every character Unicode counts as a line break: CR, LF, VT, FF, NEL, U+2028 and U+2029. */
+const LINE_BREAK = /\r\n|[\r\n\v\f\u0085\u2028\u2029]/;
+const LINE_BREAKS = /[\r\n\v\f\u0085\u2028\u2029]+/g;
+
+/** A watch's address on one line: a stored address can carry a line break, which `new URL()` drops. */
+function addressLine(url: string): string {
+  return url.replace(LINE_BREAKS, ' ');
+}
+
+/** The first `n` UTF-16 units of `s`, without leaving half of a character that takes two. */
+function cutAt(s: string, n: number): string {
+  const cut = s.slice(0, Math.max(0, n));
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
+/**
+ * The seed of a watch's escalation thread: English model context, which the owner also reads as
+ * lynox's bubble. The analysis is a model's summary of a page someone else controls, so it stands
+ * below a sentence that says so, as a quote: every line of it starts with `> `, an empty one is
+ * `>`, so no line of the page's summary reads as lynox's own words (U-499). Line breaks at the
+ * end are left out, so the quote does not end in an empty line.
+ */
+export function watchChangedSeed(url: string, analysis: string): string {
+  const quoted = analysis.replace(/[\s\u0085]+$/u, '').split(LINE_BREAK)
+    .map((line) => (line.trim() === '' ? '>' : `> ${line}`))
+    .join('\n');
+  return `${addressLine(url)} changed. ${WATCH_SUMMARY_MARK.en}\n\n${quoted}`;
+}
+
+/**
+ * A watch's push: the lead and the marking sentence whole, then as much of the analysis as fits
+ * the push (`PUSH_BODY_MAX`). Only when the whole does not fit is anything cut: first an address
+ * too long to leave the analysis a few characters, then the analysis; never the sentence.
+ */
+function watchChangedPush(url: string, analysis: string, lead: (url: string) => string, mark: string): string {
+  const headOf = (u: string): string => `${lead(u)} ${mark}\n\n`;
+  const line = addressLine(url);
+  let head = headOf(line);
+  if (head.length + analysis.length <= PUSH_BODY_MAX) return `${head}${analysis}`;
+  const room = PUSH_BODY_MAX - 1;
+  // Leave the analysis at least a few characters: a push that is only the lead says nothing new.
+  const keep = 20;
+  if (head.length > room - keep) {
+    const over = head.length - (room - keep);
+    head = headOf(`${cutAt(line, line.length - over - 1)}…`);
+  }
+  const full = `${head}${analysis}`;
+  return full.length <= PUSH_BODY_MAX ? full : `${cutAt(full, room)}…`;
 }
 
 /**
@@ -456,7 +515,7 @@ const EN: WorkerNotices = Object.freeze({
   resumedRunNotContained: (provisioned: boolean) => provisioned
     ? `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`
     : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`,
-  watchChanged: (url: string, analysis: string) => `${url} changed.\n\n${analysis}`,
+  watchChanged: (url: string, analysis: string) => watchChangedPush(url, analysis, (u) => `${u} changed.`, WATCH_SUMMARY_MARK.en),
   watchFetchFailed: (url: string, cause: WatchFetchCause) => `The watched page ${url} could not be read: ${watchFetchReasonEn(cause)}`,
   watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonEn(cause),
   watchPolicyRefused: (reason: WatchPolicyReason, alsoHttps: boolean) => withWayOut('The watched page was not read:', watchPolicyWordsEn(reason, alsoHttps)),
@@ -611,7 +670,7 @@ const DE: WorkerNotices = Object.freeze({
   resumedRunNotContained: (provisioned: boolean) => provisioned
     ? `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, schreib an support@lynox.ai.`
     : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das Instanz-Protokoll den Grund.`,
-  watchChanged: (url: string, analysis: string) => `${url} hat sich geändert.\n\n${analysis}`,
+  watchChanged: (url: string, analysis: string) => watchChangedPush(url, analysis, (u) => `${u} hat sich geändert.`, WATCH_SUMMARY_MARK.de),
   watchFetchFailed: (url: string, cause: WatchFetchCause) => `Die beobachtete Seite ${url} liess sich nicht lesen: ${watchFetchReasonDe(cause)}`,
   watchFetchReason: (cause: WatchFetchCause) => watchFetchReasonDe(cause),
   watchPolicyRefused: (reason: WatchPolicyReason, alsoHttps: boolean) => withWayOut('Die beobachtete Seite wurde nicht gelesen:', watchPolicyWordsDe(reason, alsoHttps)),

@@ -82,3 +82,36 @@ describe('ThreadStore: the record of outside reads', () => {
     expect(store.ownerTypedTexts('th')).toEqual(['an anna@firma.ch']);
   });
 });
+
+describe('migration v75: escalation threads from before the record', () => {
+  it('marks every escalation thread, and no other, and runs again without effect', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-read-outside-v75-'));
+    dirs.push(dir);
+    const path = join(dir, 'history.db');
+    const history = new RunHistory(path);
+    const store = new ThreadStore(history.getDb());
+    for (const id of ['escalation-watch-1', 'escalation-watch-1-2', 'escalation-run-7', 'chat-owner', 'run-9c2e01', 'my-escalation-notes']) {
+      store.createThread(id);
+      store.appendMessages(id, [{ role: 'user', content: 'hello' }], 0);
+    }
+    // Back to v74: no record yet, as on a store written before the escalation kept one.
+    history.getDb().exec('DELETE FROM thread_read_outside; DELETE FROM schema_version WHERE version >= 75;');
+    history.close();
+
+    const upgraded = new RunHistory(path);
+    histories.push(upgraded);
+    expect((upgraded.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(75);
+    const marked = (): string[] => (upgraded.getDb().prepare('SELECT thread_id FROM thread_read_outside ORDER BY thread_id').all() as Array<{ thread_id: string }>).map((r) => r.thread_id);
+    expect(marked()).toEqual(['escalation-run-7', 'escalation-watch-1', 'escalation-watch-1-2']);
+    const reopened = new ThreadStore(upgraded.getDb());
+    expect(reopened.readOutside('chat-owner')).toBe(false);
+    expect(reopened.readOutside('escalation-watch-1')).toBe(true);
+
+    // Again on a store that has it: no error, nothing added.
+    upgraded.getDb().exec('DELETE FROM schema_version WHERE version >= 75;');
+    upgraded.close();
+    const again = new RunHistory(path);
+    histories.push(again);
+    expect((again.getDb().prepare('SELECT COUNT(*) AS n FROM thread_read_outside').get() as { n: number }).n).toBe(3);
+  });
+});
