@@ -908,6 +908,13 @@ describe('a watch change, marked as the page\'s summary that lynox did not check
     expect(push.length).toBeLessThanOrEqual(PUSH_BODY_MAX);
   });
 
+  it('a long address with a summary that fills the push exactly is not cut', () => {
+    const url = `https://shop.example/${'p'.repeat(110)}`;
+    const head = `${url} changed. ${EN_MARK}\n\n`;
+    const fills = 'y'.repeat(PUSH_BODY_MAX - head.length);
+    expect(WORKER_NOTICES.en.watchChanged(url, fills)).toBe(`${head}${fills}`);
+  });
+
   it('an address that fits is not cut, even with a long summary', () => {
     const url = `https://shop.example/${'p'.repeat(90)}`;
     expect(WORKER_NOTICES.en.watchChanged(url, 'x'.repeat(500))).toContain(`${url} changed. ${EN_MARK}`);
