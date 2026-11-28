@@ -21,6 +21,7 @@ import { WatchFetchFailure, WatchHttpStatusError, watchFetchCause } from './watc
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
+  MANDATE_ENDED_RESULT, WAIT_EXPIRED_RESULT, WATCH_READ_UNRECORDED_RESULT, WATCH_URL_MISSING_RESULT,
   WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, memberEndOfStatus, type MemberEnd, type WorkerNotices,
 } from './worker-notices.js';
 import { BULK_NOTICES, bulkHaltForReaders, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
@@ -161,12 +162,8 @@ export function reminderTitle(title: string): string {
   return `${out}\u2026`;
 }
 
-/** What a swept run's result reads as. It is a RESULT, not a status: the status
- *  the sweep writes is `failed`, and this is the line a human sees next to it. */
-const WAIT_EXPIRED_RESULT = 'The run asked a question and the wait ran out before an answer arrived.';
 /** What a scheduled workflow run records when its question was withdrawn with the deleted chat it was asked in. */
 export const THREAD_DELETED_RESULT = 'Workflow ended without an answer: the conversation its question was asked in was deleted, and that was the only place to answer it';
-const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access, and that access ended before the run could continue.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 
@@ -4254,7 +4251,7 @@ export class WorkerLoop {
     if (!config.url) {
       const taskManager = this.engine.getTaskManager();
       if (taskManager) {
-        this.#recordRun(taskManager, task.id, 'Watch task missing URL in config', 'failed');
+        this.#recordRun(taskManager, task.id, WATCH_URL_MISSING_RESULT, 'failed');
       }
       return;
     }
@@ -4293,7 +4290,7 @@ export class WorkerLoop {
       } catch (err) {
         if (!(err instanceof OutwardReadUnrecorded)) throw err;
         const taskManager = this.engine.getTaskManager();
-        if (taskManager) this.#recordRun(taskManager, task.id, 'The watched page was not read: the read cannot be recorded in the instance\'s log right now.', 'failed');
+        if (taskManager) this.#recordRun(taskManager, task.id, WATCH_READ_UNRECORDED_RESULT, 'failed');
         return;
       }
     }

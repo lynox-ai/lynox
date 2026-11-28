@@ -43,6 +43,15 @@ export const PLAN_RUN_UNRECORDED_RESULT = 'Not run: this plan acts for someone y
  * could not be contained (ux U-089). The way on depends on who runs the instance.
  */
 export const RESUMED_RUN_NOT_CONTAINED = 'This run\'s chat was marked as holding data from a connected shop and was deleted before your answer came. lynox could not mark the new chat the same way, so the run did not continue and your answer was not used. Run the task again.';
+/** What a swept run's result reads as. It is a RESULT, not a status: the status
+ *  the sweep writes is `failed`, and this is the line a human sees next to it. */
+export const WAIT_EXPIRED_RESULT = 'The run asked a question and the wait ran out before an answer arrived.';
+/** A run whose question was asked under a delegated access that ended before the answer. */
+export const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access, and that access ended before the run could continue.';
+/** A watch whose stored config names no page. */
+export const WATCH_URL_MISSING_RESULT = 'Watch task missing URL in config';
+/** A watch read on someone's behalf that could not be recorded first. */
+export const WATCH_READ_UNRECORDED_RESULT = 'The watched page was not read: the read cannot be recorded in the instance\'s log right now.';
 /** What a dropped event with no stored reason is told with. */
 export const NO_REASON_RECORDED = 'no reason recorded';
 
