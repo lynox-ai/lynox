@@ -335,6 +335,18 @@ const MIGRATIONS: string[] = [
    UPDATE relations SET origin_memory_id = source_memory_id WHERE origin_memory_id IS NULL;
    ${repointToChainEndSql('relations')}
    CREATE INDEX IF NOT EXISTS idx_relations_origin ON relations(origin_memory_id);`,
+
+  // v9: the flat memory lines that carry the untrusted mark, by namespace. A writer of the flat
+  // file records each line it writes on an untrusted turn (or derives from a marked line), and
+  // the read paths mark a line whose key is here — whatever later happens to the knowledge rows.
+  // `key` is a SHA-256 of the line's normalized body (`untrustedLineKey`), never the text.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (9);
+   CREATE TABLE untrusted_lines (
+     namespace TEXT NOT NULL,
+     key TEXT NOT NULL,
+     created_at TEXT NOT NULL,
+     PRIMARY KEY (namespace, key)
+   );`,
 ];
 
 /** The migration index (0-based) of v8, which moves relations to the end of their chain. */
@@ -1028,6 +1040,40 @@ export class AgentMemoryDb {
       ).get(like, namespace)
     ) as { n: number; u: number };
     return { found: row.n > 0, untrusted: row.u === 1 };
+  }
+
+  /**
+   * The texts of the active memories in `namespace` that were written untrusted (or at the
+   * `external_unverified` tier). A read path marks the flat lines found in them, so text that
+   * came in untrusted reaches the model marked as such.
+   */
+  untrustedTexts(namespace: string): string[] {
+    return (this.db.prepare(
+      "SELECT text FROM memories WHERE is_active = 1 AND namespace = ? AND (source_untrusted = 1 OR source_type = 'external_unverified')",
+    ).all(namespace) as Array<{ text: string }>).map(r => r.text);
+  }
+
+  /** Record `keys` (from `untrustedLineKey`) as marked flat lines of `namespace`. */
+  addUntrustedLineKeys(namespace: string, keys: readonly string[]): void {
+    if (keys.length === 0) return;
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare('INSERT OR IGNORE INTO untrusted_lines (namespace, key, created_at) VALUES (?, ?, ?)');
+    this.transaction(() => { for (const k of keys) stmt.run(namespace, k, now); });
+  }
+
+  /** The keys of the marked flat lines of `namespace`. */
+  untrustedLineKeys(namespace: string): Set<string> {
+    return new Set((this.db.prepare('SELECT key FROM untrusted_lines WHERE namespace = ?')
+      .all(namespace) as Array<{ key: string }>).map(r => r.key));
+  }
+
+  /** Drop `keys` — an erasure removed those lines. Without `namespace`, from every namespace. */
+  removeUntrustedLineKeys(namespace: string | undefined, keys: readonly string[]): number {
+    if (keys.length === 0) return 0;
+    const stmt = namespace
+      ? this.db.prepare('DELETE FROM untrusted_lines WHERE namespace = ? AND key = ?')
+      : this.db.prepare('DELETE FROM untrusted_lines WHERE key = ?');
+    return this.transaction(() => keys.reduce((n, k) => n + (namespace ? stmt.run(namespace, k) : stmt.run(k)).changes, 0));
   }
 
   /**

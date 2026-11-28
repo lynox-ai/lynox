@@ -37,9 +37,9 @@ import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '..
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
 import type { StorePass } from '../core/store-pass.js';
 import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
-import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
+import { accessTokenKey, isMandateAuthored, lapsedSlots, mayConnectAs, ownerConnectionCarries, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { connectionShown, mandateMayConnect, mayServeAsClientId, ownerSaveHeldByMemberConnection, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { foreignWorkflowScheduleRefusalKind, pipelineReader, planAsks, planAsksWith, planOfTrigger, stampEntriesFor, workflowAsks, workflowAsksOnSchedule, workflowAsksTag, workflowAsksWith, workflowStampExpect, workflowStampExpected, stampExpect, type PipelineReader, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
@@ -117,7 +117,7 @@ import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orch
 import { runAsPlanOf } from '../core/plan-run-context.js';
 import { MEMBER_CONNECTION_PREFIX, lastRunResultFor } from '../core/member-connection-notes.js';
 import { noticeLanguage } from '../core/notice-language.js';
-import { WORKER_NOTICES } from '../core/worker-notices.js';
+import { WORKER_NOTICES, memberEndOfStatus } from '../core/worker-notices.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
@@ -257,10 +257,12 @@ const CONNECT_CONFIRM_PATH = /^\/api\/oauth\/connect\/[^/]+$/;
  * profile it set up itself, and nothing else (PRD §3.13): the consent is recorded as its own, and
  * an account the owner, or another mandate, prepared is theirs to connect. The connect start
  * refuses on it, and the profile list tells the page, so the page offers the link only where the
- * start goes through.
+ * start goes through. The owner, the other way round, connects every profile but one a person with
+ * access set up, where the connection would carry nothing (`ownerConnectionCarries`). For an id
+ * that names no profile the answer stays yes, so the start answers the same for every unknown id.
  */
 function mayStartConnect(principal: RequestPrincipal, profile: ApiProfile | undefined): boolean {
-  if (principal.kind !== 'mandate') return true;
+  if (principal.kind !== 'mandate') return profile === undefined || mayConnectAs(principal, profile);
   return profile !== undefined && profile.created_by === principalTag(principal) && principal.mandateId !== undefined;
 }
 /** A mandate may, for this reason. */
@@ -504,7 +506,7 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
   // result, anyone else a fixed sentence in place of a result that has them (`lastRunResultFor`).
   const owner = isOwnerPrincipal(principal);
   const lastRunResult = memberNotes === undefined || memberNotes.length === 0 ? shaped.last_run_result
-    : lastRunResultFor(trigger, owner, WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates);
+    : lastRunResultFor(trigger, owner, WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates(memberEndOfStatus(trigger.last_run_status)));
   const stored = { ...shaped, last_run_result: lastRunResult };
   // Whether a wakeup reached the owner, why it did not, the step to take then (their push
   // subscription) and the chat it points to are the owner's: a mandate reading them would be
@@ -1427,8 +1429,13 @@ function refuseContainedSource(res: ServerResponse, body: unknown, containment: 
 export const CONTAINED_THREAD_READ_REFUSAL = 'This chat was marked as holding data from a connected shop, so only the owner of this instance and the person who started it can read it. To work on the task yourself, start a new chat.';
 /** The `code` beside {@link CONTAINED_THREAD_READ_REFUSAL}, which the Web UI shows in its own language (ux U-091). */
 export const CONTAINED_THREAD_CODE = 'contained_thread';
-/** Why a live run that names no chat is not streamed to anyone but the owner: its chat cannot be checked (ux U-091). */
-export const RUN_CHAT_UNKNOWN_REFUSAL = 'lynox could not read which chat this run belongs to, so only the owner of this instance can follow it live. If the run belongs to a chat of yours, open that chat from the chat list.';
+/**
+ * The one answer a helper gets for a live run it may not follow: an id the run registry does not
+ * hold, a run that names no chat, a run in a contained chat of another. No reason, so it does not
+ * tell which (U-492).
+ */
+export const RUN_CHAT_UNKNOWN_REFUSAL = 'You cannot follow this run live. If it belongs to a chat of yours, open that chat from the chat list.';
+/** The `code` beside {@link RUN_CHAT_UNKNOWN_REFUSAL}, for all three cases despite its name: the Web UI keys its text on it. */
 export const RUN_CHAT_UNKNOWN_CODE = 'run_chat_unknown';
 
 /** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
@@ -3342,7 +3349,9 @@ export class LynoxHTTPApi {
    * owner and to whoever started the chat (`ownedBy`; the owner owns every row). A chat whose row
    * is missing is no one's, so anyone else is refused on a contained id even then. A live run that
    * names no chat cannot be checked and is refused; a recorded run that names none answers as not
-   * found. `null` when the read may go on.
+   * found. A live run is refused with one answer whether its id is unknown or names a contained chat
+   * of another, so the answer does not tell whether such a run is going on. `null` when the read
+   * may go on.
    */
   private _containedReadRefusal(principal: RequestPrincipal, named: ThreadNamed): { status: number; error: string; code?: string } | null {
     if (named === null || isOwnerPrincipal(principal)) return null;
@@ -3368,6 +3377,7 @@ export class LynoxHTTPApi {
     threadId = this._chatsOf([threadId]).get(threadId) ?? threadId;
     if (ownedBy(engine?.getThreadStore()?.getThread(threadId) ?? undefined, principal)) return null;
     if (!threadIsContained(engine?.getToolContext().containment ?? null, threadId)) return null;
+    if ('liveRun' in named) return { status: 403, error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE };
     return { status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE };
   }
 
@@ -6369,7 +6379,8 @@ export class LynoxHTTPApi {
           if (csm?.hasChanges()) {
             res.write(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: csm.size, runId: csm.runId })}\n\n`);
           }
-          res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined })}\n\n`);
+          // `notice`: the result is lynox's own sentence, not the model's (set by the engine only).
+          res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined, notice: session.getLastRunNotice() })}\n\n`);
           res.end();
         }
       } catch (err: unknown) {
@@ -6448,8 +6459,11 @@ export class LynoxHTTPApi {
     // from a pending prompt rather than tracked as a separate write, keeping the
     // registry a simple liveness mirror with a single source of truth for
     // "blocked on the user". Whole-tenant (single-tenant engine, no per-user
-    // scoping — see PRD-RUN-RESILIENCE N5).
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/active', async (_req, res) => {
+    // scoping — see PRD-RUN-RESILIENCE N5), except that a helper is not shown
+    // the runs and questions of a contained chat of another, nor a run that
+    // names no chat (`_unreadableChats`): it cannot follow them, and the list
+    // would hand it their run ids and which of them wait on a question.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/active', async (req, res) => {
       const registry = this.engine?.getRunRegistry();
       if (!registry) { jsonResponse(res, 200, { runs: [] }); return; }
       const promptStoreForRuns = this.engine?.getPromptStore();
@@ -6493,7 +6507,8 @@ export class LynoxHTTPApi {
           attachable: false,
         });
       }
-      jsonResponse(res, 200, { runs });
+      const unreadable = this._unreadableChats(this._principalOf(req), runs.map((r) => r.threadId));
+      jsonResponse(res, 200, { runs: runs.filter((r) => !unreadable.has(r.threadId)) });
     }, READS));
 
     // DELETE /runs/:runId — abort a live run by id (AC10). Works from any
@@ -6534,6 +6549,9 @@ export class LynoxHTTPApi {
     // Ownership (S3, D-S3): an unknown / not-live runId returns 404 — never 403
     // (no existence oracle). The buffer is the liveness source of truth: it
     // exists only while the run is live, so a completed/never-existed run 404s.
+    // A helper is refused before this handler, with one 403 for an id the
+    // registry does not hold and for a run it may not follow
+    // (`_containedReadRefusal`), so it reaches the 404 only for a chat it may read.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/:runId/stream', async (req, res, params) => {
       const runId = params['runId'] ?? '';
       const buffer = this.engine?.getRunBufferManager()?.get(runId);
@@ -10102,8 +10120,8 @@ export class LynoxHTTPApi {
       // A mandate is shown the flags only for a run it may stop — its own hand run — the
       // same line the stop route (one 403) and a delete (`not_stopped`) draw. This keeps
       // the controls consistent; it is NOT a confidentiality boundary: the `READS` routes
-      // are tenant-wide for a mandate (`GET /api/runs/active` lists every run). Who
-      // started a run is not added to the row either way.
+      // are tenant-wide for a mandate (`GET /api/runs/active` lists every run in a chat it
+      // may read). Who started a run is not added to the row either way.
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
       const history = engine.getRunHistory();
@@ -13307,7 +13325,8 @@ export class LynoxHTTPApi {
       }
       const profile = engine.getApiStore()?.get(id);
       if (!mayStartConnect(principal, profile)) {
-        sendOAuthHtml(res, 403, OAUTH_RESULT_TEXTS.ownProfileOnly, 'app');
+        // A refusal of the owner names only a profile that exists, which the owner may list anyway.
+        sendOAuthHtml(res, 403, principal.kind === 'mandate' ? OAUTH_RESULT_TEXTS.ownProfileOnly : OAUTH_RESULT_TEXTS.setUpByMember, principal.kind === 'mandate' ? 'app' : 'apis');
         return;
       }
 
@@ -13574,7 +13593,9 @@ export class LynoxHTTPApi {
       // tokens are stored, because the exchange is an await and the profile, the mandate and
       // the names around them can all change while it runs.
       const mayStillConnect = (current: typeof profile): boolean => {
-        if (by.tag === 'owner') return true;
+        // The owner's consent lands only where it carries: a person with access may have set the
+        // profile up again while the provider's page was open.
+        if (by.tag === 'owner') return ownerConnectionCarries(current);
         const store = engine.getSecretStore();
         return current.created_by === by.tag
           && by.mandateId !== undefined
@@ -13583,7 +13604,7 @@ export class LynoxHTTPApi {
           && mandateMayConnect(store, apiStore, by.tag, current, readCtx);
       };
       if (!mayStillConnect(profile)) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.otherSessionChanged, 'apis');
+        sendOAuthHtml(res, 409, by.tag === 'owner' ? OAUTH_RESULT_TEXTS.setUpByMember : OAUTH_RESULT_TEXTS.otherSessionChanged, 'apis');
         return;
       }
 
@@ -13749,8 +13770,9 @@ export class LynoxHTTPApi {
       // the profile the check reads is the one that gets stamped.
       const { getLynoxDir } = await import('../core/config.js');
       const current = apiStore.get(signed.profileId);
-      if (by.tag !== 'owner' && (current === undefined || !mayStillConnect(current))) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.otherSessionStored, 'apis');
+      // A profile gone in between stays the owner's case as before; one that is there is asked again.
+      if (current === undefined ? by.tag !== 'owner' : !mayStillConnect(current)) {
+        sendOAuthHtml(res, 409, by.tag === 'owner' ? OAUTH_RESULT_TEXTS.setUpByMember : OAUTH_RESULT_TEXTS.otherSessionStored, 'apis');
         return;
       }
       // The profile can be re-pointed while the exchange runs: a token minted for one store is
@@ -14868,14 +14890,31 @@ export class LynoxHTTPApi {
       // `built_in_provider`: the display name of the built-in provider the profile signs in through
       // (`builtInPresetOf`), or null. The stored `preset_id` is only checked for its form, so an id
       // this engine does not know must not be shown as a provider sign-in.
+      // `reader_client_withheld`: only to the person who set an oauth2 profile up, whether the
+      // profile's view withholds its client pair from them (the owner has not released it), so
+      // the page offers the first connect only where the start can read the client id. Nobody else
+      // gets the field, nor the reason a release is refused.
+      // `owner_may_take_over`: only to the owner, on a profile a person with access set up, whether
+      // the owner's save would take it over (`ownerSaveHeldByMemberConnection`, the condition the
+      // save asks), so the page offers the way only where it goes through.
       const reader = this._principalOf(req);
       const now = Date.now();
+      const vault = engine.getSecretStore();
+      const readCtx = { principal: reader, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() };
+      const clientWithheld = (p: ApiProfile): boolean | undefined => {
+        if (reader.kind !== 'mandate' || p.created_by !== principalTag(reader) || p.auth?.type !== 'oauth2') return undefined;
+        const pair = [p.auth.oauth?.client_id_key, p.auth.oauth?.client_secret_key].filter((n): n is string => typeof n === 'string');
+        return vault === null || vault === undefined || withheldFrom(vault, p, store, pair, readCtx).length > 0;
+      };
       jsonResponse(res, 200, {
         profiles: store.getAll().map((p) => {
           const end = storeAccessEnd(p, now);
+          const withheld = clientWithheld(p);
           return {
             ...profileForReader(p, reader),
             reader_may_connect: mayStartConnect(reader, p),
+            ...(withheld === undefined ? {} : { reader_client_withheld: withheld }),
+            ...(reader.kind === 'owner' && isMandateAuthored(p) ? { owner_may_take_over: !ownerSaveHeldByMemberConnection(p, readCtx.ends) } : {}),
             built_in_provider: builtInPresetOf(p)?.label ?? null,
             ...(end === null ? {} : { store_access_ends: { host: end.host, ended: end.ended, ...(end.until === null ? {} : { at: new Date(end.until).toISOString() }) } }),
           };
@@ -15286,9 +15325,9 @@ export class LynoxHTTPApi {
       // text could not be decrypted. `enabled` is the setting, as on the durable knowledge block:
       // whether the graph is switched on in the config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
-      // The remembered texts both stores hold, read the same way on either path and masked as the
-      // durable knowledge block is; read before the graph, so a graph read that fails does not
-      // take them with it.
+      // The remembered texts both stores hold, read the same way on either path and masked with the
+      // graph block's mask below; read before the graph, so a graph read that fails does not take
+      // them with it.
       // With the subject graph on, the older store's entities and relations are carried here too.
       // Graph rows no block carries (subjects the graph block does not list) are counted, and any
       // marks the block too: the export says "complete" only when nothing stored is left out.
@@ -15299,16 +15338,22 @@ export class LynoxHTTPApi {
       const exportLayer = engine.getKnowledgeLayer();
       const subjectGraph = (exportLayer ? exportLayer.readsSubjectGraph === true && !exportLayer.subjectGraphUnavailable : engine.getUserConfig().subject_graph_enabled === true)
         && engine.getEngineDb() !== null;
+      // One mask for the whole block, the remembered texts and the graph's entities and relations
+      // alike: the vault's values in every form the export looks for (escaped inside a JSON text
+      // as well as written as is) and the secret shapes. Built once; the values stay inside it.
+      const graphExportSecrets = engine.getSecretStore();
+      const graphExportMask: (text: string) => string = graphExportSecrets
+        ? graphExportSecrets.exportGuard().mask
+        : (t: string) => maskSecretPatterns(t);
       let memoryTexts: { block: Record<string, unknown>; mayBeIncomplete: boolean };
       try {
         const { graphHoldsRowsNotExported, readMemoryTextsForExport } = await import('../core/graph-export.js');
-        const exportSecrets = engine.getSecretStore();
         const agentMemoryFile = join(getLynoxDir(), 'agent-memory.db');
         // What this block and the count read must agree with what the graph block lists.
         const read = readMemoryTextsForExport({
           agentMemoryFile,
           engineDb: engine.getEngineDb(),
-          mask: (t: string) => maskSecretPatterns(exportSecrets ? exportSecrets.maskSecrets(t) : t),
+          mask: graphExportMask,
           subjectGraph,
         });
         const notExported = graphHoldsRowsNotExported({
@@ -15325,8 +15370,10 @@ export class LynoxHTTPApi {
       if (kg) {
         const fallbacksBefore = kg.readFallbackCount;
         try {
-          const { EXPORT_RELATIONSHIPS_NOTE, collectGraphForExport } = await import('../core/graph-export.js');
-          const { entities, relationships, truncated, relationCapHit } = await collectGraphForExport(kg);
+          const { EXPORT_RELATIONSHIPS_NOTE, collectGraphForExport, maskGraphForExport } = await import('../core/graph-export.js');
+          const collected = await collectGraphForExport(kg);
+          const { truncated, relationCapHit } = collected;
+          const { entities, relationships } = maskGraphForExport(collected, graphExportMask);
           const stats = await kg.stats();
           exportData['knowledge_graph'] = {
             entities,
@@ -15353,15 +15400,16 @@ export class LynoxHTTPApi {
         // here from its stores, the way the layer reads them, without opening a layer.
         if (graphEnabled) process.stderr.write('⚠ /api/export: knowledge graph layer unavailable — read from its stores\n');
         try {
-          const { EXPORT_RELATIONSHIPS_NOTE, readHeldGraph } = await import('../core/graph-export.js');
+          const { EXPORT_RELATIONSHIPS_NOTE, maskGraphForExport, readHeldGraph } = await import('../core/graph-export.js');
           const held = await readHeldGraph({
             agentMemoryFile: join(getLynoxDir(), 'agent-memory.db'),
             engineDb: engine.getEngineDb(),
             subjectGraph: engine.getUserConfig().subject_graph_enabled === true,
           });
+          const masked = maskGraphForExport(held, graphExportMask);
           exportData['knowledge_graph'] = {
-            entities: held.entities,
-            relationships: held.relationships,
+            entities: masked.entities,
+            relationships: masked.relationships,
             relationships_note: EXPORT_RELATIONSHIPS_NOTE,
             stats: held.stats,
             memories: memoryTexts.block,

@@ -269,6 +269,11 @@ export function persistRefusedTurn(
 /** The note code of a message the content check refused. */
 export const CONTENT_REFUSED_NOTE = 'content_refused';
 
+/** A run that ended with a sentence of lynox's own rather than a model reply, by why: the content
+ *  check refused the request, or the budget or a run hook blocked it before the model. Sent as
+ *  `done.notice`; the chat shows the sentence as a lynox note, not as the AI model's words. */
+export type EngineNoticeCode = typeof CONTENT_REFUSED_NOTE | 'run_blocked';
+
 /** What `Agent.getLastStop()` reports, narrowed to what the note decision needs. */
 export interface CapStopLike {
   readonly cause: SendStopCause;

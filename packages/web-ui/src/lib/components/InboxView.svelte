@@ -47,7 +47,7 @@
 	} from '../stores/inbox.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { accountShortLabel } from '../utils/account-label.js';
-	import { inboxHeadline } from '../utils/inbox-headline.js';
+	import { rowHeadline, rowLabel, rowOwnDate, rowSender, shownIsSensitive, shownReplyFraming } from '../utils/inbox-shown.js';
 	import { keyToInboxAction, shouldIgnoreShortcut } from '../utils/inbox-shortcuts.js';
 	import { isTouchPrimary } from '../utils/touch-detect.js';
 	import Checkbox from '../primitives/Checkbox.svelte';
@@ -320,7 +320,9 @@
 	// mail_reply), or a blank compose chat for a brand-new mail.
 	function replyInChat(item: InboxItem): void {
 		newChat();
-		const framing = `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
+		// A row that shows another mail than the item's own names none of its values here: the
+		// server's context for the item carries them (see shownReplyFraming).
+		const framing = shownReplyFraming(item, t) ?? `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
 		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
 		void goto('/app');
 	}
@@ -435,11 +437,12 @@
 			: d.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
 	}
 
-	/** The row's time: that of the newest message where the row announces one, else the item's mail. */
+	/** The row's time: that of the newest message where the row announces one, else the mail the
+	 *  row shows (the item's own, or the one shown in place of a delivery failure notice). */
 	function rowTime(item: InboxItem): string {
 		const latest = item.followUps?.latestAt;
 		if (latest !== undefined && followUpLine(item, t, tf) !== undefined) return latest;
-		return item.mailDate ?? item.classifiedAt;
+		return rowOwnDate(item);
 	}
 
 	function channelLabel(_c: InboxItem['channel']): string {
@@ -731,6 +734,7 @@
 							<ul class="space-y-0.5" role="list">
 								{#each items as item (item.id)}
 									{@const isActiveSelection = (zone === 'requires_user' && selectedItemId === item.id) || (readingOpen && getSelectedItemId() === item.id)}
+									{@const sender = rowSender(item)}
 									<li
 										role="listitem"
 										data-inbox-item-id={item.id}
@@ -746,7 +750,7 @@
 													<Checkbox
 														checked={isSelectedForBulk(item.id)}
 														onclick={(e) => toggleBulkSelection(item.id, visibleIds, e.shiftKey)}
-														ariaLabel={tf('inbox.select_item', { label: withFollowUpLine(item, item.subject?.trim() || item.reasonDe, t, tf) })}
+														ariaLabel={tf('inbox.select_item', { label: withFollowUpLine(item, rowLabel(item, t), t, tf) })}
 													/>
 												</div>
 											{/if}
@@ -757,16 +761,16 @@
 													selectedItemId = item.id;
 													void openItem(item.id);
 												}}
-												aria-label={`${t('inbox.reading_open')}: ${withFollowUpLine(item, item.subject?.trim() || item.reasonDe, t, tf)}`}
+												aria-label={`${t('inbox.reading_open')}: ${withFollowUpLine(item, rowLabel(item, t), t, tf)}`}
 											>
 												<div class="flex items-baseline justify-between gap-2 mb-0.5">
-													<p class="text-sm font-medium text-text leading-snug truncate flex items-center gap-1.5" title={item.subject?.trim() ? item.subject : withFollowUpLine(item, item.reasonDe, t, tf)}>
+													<p class="text-sm font-medium text-text leading-snug truncate flex items-center gap-1.5" title={item.shown !== undefined ? rowHeadline(item, t) : item.subject?.trim() ? item.subject : withFollowUpLine(item, item.reasonDe, t, tf)}>
 														{#if zone === 'snoozed' && item.notifyOnUnsnooze === true}
 															<!-- Reminder badge — distinguishes "remind me at X" from silent
 															     snooze in the same Snoozed zone. -->
 															<span class="shrink-0 inline-block w-1.5 h-1.5 rounded-full bg-accent-text" aria-label={t('inbox.reminder_badge_label')} title={t('inbox.reminder_badge_label')}></span>
 														{/if}
-														<span class="truncate">{inboxHeadline(item)}</span>
+														<span class="truncate">{rowHeadline(item, t)}</span>
 													</p>
 													<span class="shrink-0 text-[11px] text-text-subtle tabular-nums">
 														{zone === 'snoozed' && item.snoozeUntil
@@ -775,12 +779,12 @@
 													</span>
 												</div>
 												<div class="flex items-center gap-1.5 text-[11px] text-text-subtle min-w-0">
-													<span class="truncate" title={item.fromAddress || item.accountId}>
-														{item.fromName || item.fromAddress || accountShortLabel(item.accountId)}
+													<span class="truncate" title={sender.address || item.accountId}>
+														{sender.label || accountShortLabel(item.accountId)}
 													</span>
 													<span aria-hidden="true">·</span>
 													<span class="shrink-0">{channelLabel(item.channel)}</span>
-													{#if item.classifierVersion === 'sensitive-prefilter' || isRaisedOpen(item)}
+													{#if item.classifierVersion === 'sensitive-prefilter' || isRaisedOpen(item) || shownIsSensitive(item)}
 														<span aria-hidden="true">·</span>
 														<span class="shrink-0 text-warning" role="img" aria-label={t('inbox.sensitive_mark')}>⚠</span>
 													{/if}

@@ -267,20 +267,20 @@ describe('DataStore source stamp', () => {
 
     it('an update keeps the row\'s grants and adds unknown', async () => {
       ds.insertRecords({ collection: 'leads', records: [{ email: 'a@x', note: 'n' }], stamp: stamp(['g-a'], 'run-1') });
-      const writer = dataStoreWriter(ds, 'leads')!;
+      const writer = dataStoreWriter(ds, 'leads', false, false)!;
       await writer.write('a@x', { absent: false, value: { email: 'a@x', note: 'bulk' } });
       expect(grantsOf('leads')).toEqual([['g-a', UNKNOWN_GRANT]]);
     });
 
     it('a row it creates, or restores on undo, reads unknown only', async () => {
-      const writer = dataStoreWriter(ds, 'leads')!;
+      const writer = dataStoreWriter(ds, 'leads', false, false)!;
       await writer.write('new@x', { absent: false, value: { email: 'new@x', note: 'bulk' } });
       expect(grantsOf('leads')).toEqual(Array.of([UNKNOWN_GRANT]));
     });
 
     it('its before-image carries no source column, so a restore cannot write one', async () => {
       ds.insertRecords({ collection: 'leads', records: [{ email: 'a@x', note: 'n' }], stamp: stamp(['g-a']) });
-      const before = await dataStoreWriter(ds, 'leads')!.read('a@x', null);
+      const before = await dataStoreWriter(ds, 'leads', false, false)!.read('a@x', null);
       expect(before).toEqual({ absent: false, value: { email: 'a@x', note: 'n' } });
     });
   });

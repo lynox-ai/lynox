@@ -532,6 +532,11 @@ function staleBefore(now: number): string {
   return new Date(now - BULK_CLAIM_STALE_MS).toISOString();
 }
 
+/** The bound argument of a `claimed_at = ?` fence: none without a holder's time. */
+function claimArg(held: number | null): string[] {
+  return held === null ? [] : [new Date(held).toISOString()];
+}
+
 // A target the run found already holding its planned value with no send of its own that may have
 // landed ({@link BulkLedger.recordApplied}, `already`): never sent to (`found_unsent = 1`), or, on
 // an external run, every send refused by the host before the find (`found_unsent = 2`). It counts
@@ -598,10 +603,19 @@ export interface ActualImage { value: unknown; estimated: boolean }
 
 /** Per target, the unit of a run's time budget and of its approval window. */
 export const BULK_TARGET_BUDGET_MS = 5_000;
-/** A claim older than this is stale: a second loop may take its target. Longer than one
- *  target's budget, but not than every request a slow target can make (a request may take as
- *  long, a Retry-After wait twice as long), so a live loop can still hold a stale claim. */
-export const BULK_CLAIM_STALE_MS = 30_000;
+/** One external request's own deadline (`bulk-external.ts`). Defined here, where the claim bound
+ *  is derived from it, and re-exported there. */
+export const BULK_REQUEST_TIMEOUT_MS = 30_000;
+/** A claim older than this is taken to belong to a loop that stopped: two request deadlines plus
+ *  slack. A live loop renews its claim on a heartbeat ({@link BULK_CLAIM_HEARTBEAT_MS}) however
+ *  long its requests and waits take, so it loses the claim only when it did not run, or its
+ *  renewals failed, for this long. One that lost it sends no further write to that target and
+ *  records nothing on it ({@link BulkLedger.renewClaim}); a write it had already sent, or a read
+ *  under way, may still go out, and between targets it goes on as any loop does. */
+export const BULK_CLAIM_STALE_MS = 2 * BULK_REQUEST_TIMEOUT_MS + 15_000;
+/** How often a loop renews the claim on the target it is writing: four beats to the bound, so
+ *  one missed beat does not lose it. */
+export const BULK_CLAIM_HEARTBEAT_MS = BULK_CLAIM_STALE_MS / 4;
 /** The approval window: N targets × the per-target budget, plus this, capped at a day. */
 export const BULK_APPROVAL_SLACK_MS = 15 * 60_000;
 export const BULK_APPROVAL_MAX_MS = 24 * 60 * 60_000;
@@ -830,7 +844,7 @@ interface RunRow {
   list_last_id: number;
   cost_usd: number; cost_cap_usd: number | null;
   judge_rule: string | null; judge_rule_hash: string | null; judge_started_at: string | null;
-  start_domains: string | null; planner_grants: string | null;
+  start_domains: string | null; planner_grants: string | null; planner_untrusted: number | null;
 }
 
 /** Where the read of a run's list stands: `pending` while it is read, `done` once its targets
@@ -1092,6 +1106,12 @@ export interface BulkRunForApply {
    *  the source rows' own stamps, or `unknown` for a file (`bulk_plan`). Null is unknown, and so
    *  is every undo's — the owner plans it with no conversation; its targets carry their own. */
   plannerGrants: string[] | null;
+  /** Whether the run's data-store writes are marked as written from outside content
+   *  (`_written_untrusted`), since the worker holds no turn: the planning turn had read outside
+   *  content, or the source carries the mark (a file always does). A run that does not record it,
+   *  as one planned before the record existed, counts as marked. An undo keeps its source's, and
+   *  marks each row it re-creates. */
+  plannerUntrusted: boolean;
 }
 
 /** One target as the effect loop writes it: the state it must find, the state it writes. */
@@ -1307,6 +1327,9 @@ export class BulkLedger {
      *  (`ConversationGrants.members()`) together with its source's — the source rows' own stamps,
      *  or `unknown` for a file. The caller forms the union. Null or absent: unknown. */
     plannerGrants?: readonly string[] | null | undefined;
+    /** Whether the run's data-store writes carry the outside-content mark: the planning turn's
+     *  (`deriveTurnUntrusted`) or its source's, which the caller ORs. Absent: marked. */
+    plannerUntrusted?: boolean | undefined;
   }): BulkRunStatus {
     if (params.judge !== undefined && params.targetSystem !== 'data_store') {
       // A workspace target is text, not fields: a verdict over F has nothing to replace in it.
@@ -1328,8 +1351,8 @@ export class BulkLedger {
     const judged = params.judge !== undefined;
     const insertRun = db.prepare(
       `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, target_collection,
-         principal, mandate_id, halt_reason, judge_rule, judge_rule_hash, planner_grants)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         principal, mandate_id, halt_reason, judge_rule, judge_rule_hash, planner_grants, planner_untrusted)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertTarget = db.prepare(
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error, before_grants)
@@ -1351,6 +1374,7 @@ export class BulkLedger {
         judged ? BULK_HALT_REASONS.awaitingStart : null,
         ...this.judgeColumns(params.judge),
         grantsCell(params.plannerGrants),
+        params.plannerUntrusted === false ? 0 : 1,
       );
       params.targets.forEach((t, seq) => {
         const key = this.engineDb.enc(t.key);
@@ -3094,11 +3118,14 @@ export class BulkLedger {
       // The undo writes the same host and paths as its source, under the same contract.
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, kind,
-           source_run_id, target_collection, contract_json, principal, mandate_id)
-         VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, 'undo', ?, ?, ?, ?, ?)`,
+           source_run_id, target_collection, contract_json, principal, mandate_id, planner_untrusted)
+         VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, 'undo', ?, ?, ?, ?, ?, ?)`,
       ).run(id, params.createdBy ?? null, this.engineDb.keyedHash(hashParts()), src.target_system, runUndo,
         // Only the owner's route plans an undo (§3.13 E6), so the undo is the owner's.
-        planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json, ...planner(OWNER_PRINCIPAL));
+        planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json, ...planner(OWNER_PRINCIPAL),
+        // It writes back what its source found, into rows that keep any mark they hold: it keeps
+        // the source's mark. A row it re-creates is marked by the writer (`dataStoreWriter`).
+        src.planner_untrusted === 0 ? 0 : 1);
       planned.forEach((t, seq) => {
         if (t.tainted) {
           insertInvalid.run(id, seq, this.engineDb.enc(t.key), t.sourceSeq, 'shop_added_markup' satisfies BulkInvalidReason, t.title);
@@ -3888,6 +3915,7 @@ export class BulkLedger {
       expiresAt: r.expires_at, applied: r.targets_applied, failed: r.targets_failed, haltReason: r.halt_reason,
       sourceRunId: r.source_run_id, contractJson: r.contract_json, delegatedPlanner: delegatedPlannerOf(r),
       plannerGrants: grantsOfCell(r.planner_grants),
+      plannerUntrusted: r.planner_untrusted !== 0,
     };
   }
 
@@ -4001,17 +4029,20 @@ export class BulkLedger {
     shopAddedMarkup = false,
     /** The host stored an HTML field otherwise than sent, within what the run may write: counted. */
     hostRewrote = false,
-  ): void {
+    /** The time the writing loop claimed or last renewed its claim at: recorded only while the
+     *  claim is still that loop's, false when another loop holds the target ({@link renewClaim}). */
+    held: number | null = null,
+  ): boolean {
     const db = this.engineDb.getDb();
     const at = new Date(now).toISOString();
-    db.transaction(() => {
+    return db.transaction((): boolean => {
       // `result` through enc() too: for an external target it is the host's own answer
       // class, and nothing about a target is stored in clear.
       const res = db.prepare(
         `UPDATE bulk_targets SET applied_at = ?, result = ?, after_actual = ?, claimed_at = NULL, shop_added_markup = ?, host_rewrote = ?
-           WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
-      ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), shopAddedMarkup ? 1 : 0, hostRewrote ? 1 : 0, run.id, seq);
-      if (res.changes !== 1) return;
+           WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}`,
+      ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), shopAddedMarkup ? 1 : 0, hostRewrote ? 1 : 0, run.id, seq, ...claimArg(held));
+      if (res.changes !== 1) return false;
       this.noteConnection(run.id, seq, 'write', via);
       // Found as planned with no send of this run that may have landed — never sent to, or on an
       // external run every send refused by the host ({@link markRefused}): someone else set the
@@ -4028,6 +4059,7 @@ export class BulkLedger {
       }
       db.prepare('UPDATE bulk_runs SET targets_applied = targets_applied + 1 WHERE id = ?').run(run.id);
       if (run.kind === 'undo' && run.sourceRunId !== null) this.flipChain(run.id, seq, at, true);
+      return true;
     })();
   }
 
@@ -4038,9 +4070,18 @@ export class BulkLedger {
    * recorded with the mark (`write_*`), so a loop that dies before the target is recorded still
    * leaves whose credential reached the host.
    */
-  markSent(runId: string, seq: number, via: AttachedConnection | null = null): void {
+  markSent(
+    runId: string, seq: number, via: AttachedConnection | null = null,
+    /** The claim this loop holds (the time it claimed or last renewed at), renewed to `now` in
+     *  the same step. When the claim is no longer this loop's, nothing is marked and this
+     *  returns false: the caller must not send. */
+    held: { since: number; now: number } | null = null,
+  ): boolean {
     const db = this.engineDb.getDb();
-    db.transaction(() => {
+    return db.transaction((): boolean => {
+      if (held !== null) {
+        if (!this.renewClaim(runId, seq, held.since, held.now)) return false;
+      }
       // Noted first: `noteConnection` reads a target already marked sent with no write recorded as
       // one sent before v43, and this mark is not that.
       this.noteConnection(runId, seq, 'write', via);
@@ -4048,6 +4089,7 @@ export class BulkLedger {
       // refusal takes it back ({@link markRefused}), so no later answer can make an earlier
       // unclear one known.
       db.prepare('UPDATE bulk_targets SET write_sent = 1, unknown_sends = unknown_sends + 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
+      return true;
     })();
   }
 
@@ -4059,10 +4101,22 @@ export class BulkLedger {
       .run(runId, seq);
   }
 
-  /** Give a claimed target back unwritten, for a loop that stops before writing it. */
-  releaseClaim(runId: string, seq: number): void {
-    this.engineDb.getDb().prepare('UPDATE bulk_targets SET claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL')
-      .run(runId, seq);
+  /** Give a claimed target back unwritten, for a loop that stops before writing it. With `held`
+   *  (the time the loop claimed or last renewed at), only while the claim is still that loop's;
+   *  false when it is not. */
+  releaseClaim(runId: string, seq: number, held: number | null = null): boolean {
+    return this.engineDb.getDb().prepare(`UPDATE bulk_targets SET claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}`)
+      .run(runId, seq, ...claimArg(held)).changes === 1;
+  }
+
+  /**
+   * Renew a loop's claim on the target it is writing: from `since` (the time it claimed or last
+   * renewed at) to `now`. False when the claim is no longer that loop's — another loop took it
+   * over, or it was given back — and the loop must then send and record nothing more there.
+   */
+  renewClaim(runId: string, seq: number, since: number, now: number): boolean {
+    return this.engineDb.getDb().prepare('UPDATE bulk_targets SET claimed_at = ? WHERE run_id = ? AND seq = ? AND claimed_at = ? AND applied_at IS NULL')
+      .run(new Date(now).toISOString(), runId, seq, new Date(since).toISOString()).changes === 1;
   }
 
   /** Record a target that was not written. A conflict is not counted as a failure: the
@@ -4072,21 +4126,23 @@ export class BulkLedger {
     runId: string, seq: number, error: BulkTargetError,
     /** The connection of what the target's write stage sent, if anything ({@link noteConnection}). */
     via: AttachedConnection | null = null,
-  ): void {
+    /** As {@link recordApplied}: only while the claim is still that loop's. */
+    held: number | null = null,
+  ): boolean {
     const db = this.engineDb.getDb();
     const counted = !(NOT_FAILURES as readonly BulkTargetError[]).includes(error);
-    db.transaction(() => {
+    return db.transaction((): boolean => {
       const res = db.prepare(
         // `failed_once` stays NULL on a run approved before it was recorded: one known failure
         // does not make its earlier passes known.
         `UPDATE bulk_targets SET error = ?, claimed_at = NULL,
            failed_once = CASE WHEN ? = 0 OR failed_once IS NULL THEN failed_once ELSE 1 END
-         WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
-      ).run(error, counted ? 1 : 0, runId, seq);
-      if (res.changes === 1) this.noteConnection(runId, seq, 'write', via);
-      if (res.changes === 1 && counted) {
-        db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
-      }
+         WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}`,
+      ).run(error, counted ? 1 : 0, runId, seq, ...claimArg(held));
+      if (res.changes !== 1) return false;
+      this.noteConnection(runId, seq, 'write', via);
+      if (counted) db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
+      return true;
     })();
   }
 
@@ -4157,6 +4213,13 @@ export class BulkLedger {
     // when the owner discarded it, or a later plan superseded it, must not write its own halt over
     // that end — the end decides how the run is shown, pruned and swept.
     this.engineDb.getDb().prepare(`UPDATE bulk_runs SET halt_reason = ? WHERE id = ? AND phase <> 'aborted'`).run(reason, runId);
+  }
+
+  /** Halt a run only while it still writes and nothing halted it yet: for a loop whose target
+   *  another loop took over, which must not overwrite the end that loop gave the run. */
+  haltIfWriting(runId: string, reason: BulkHaltReason): boolean {
+    return this.engineDb.getDb().prepare(`UPDATE bulk_runs SET halt_reason = ? WHERE id = ? AND phase = 'writing' AND halt_reason IS NULL`)
+      .run(reason, runId).changes === 1;
   }
 
   /**
