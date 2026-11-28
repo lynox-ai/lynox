@@ -77,7 +77,7 @@ describe('bootstrapInbox — wiring', () => {
     const id = runtime.state.insertItem({
       accountId: 'acct-1', channel: 'email', threadKey: 't-r', bucket: 'requires_user', confidence: 0.5,
       reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', subject: 'Vertrag prüfen',
-    });
+    }).id;
     runtime.state.setSnooze(id, new Date(Date.now() - 5000), null, true, true);
     await vi.waitFor(() => expect(titles).toEqual(['Erinnerung']));
     await runtime.shutdown();
@@ -95,7 +95,7 @@ describe('bootstrapInbox — wiring', () => {
         { accountId: 'acct-1', channel: 'email', threadKey, bucket: 'requires_user', confidence: 0, reasonDe: 'r',
           classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', subject },
         { action: 'classified', actor: 'rule_engine', payloadJson: JSON.stringify(sensitive ? { sensitive_categories: ['otp'] } : {}) },
-      );
+      ).id;
       runtime.state.setSnooze(id, new Date(Date.now() - 5000), null, true, true);
       return id;
     };
@@ -126,7 +126,7 @@ describe('bootstrapInbox — wiring', () => {
     const id = runtime.state.insertItem({
       accountId: 'acct-1', channel: 'email', threadKey: 't-l', bucket: 'draft_ready', confidence: 0.9,
       reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', messageId: '<label@x>',
-    });
+    }).id;
     const before = runtime.inboxLabelOf('acct-1', 't-l');
     expect(before?.bucket).toBe('draft_ready');
     expect(before?.userAction).toBeUndefined();
@@ -143,7 +143,7 @@ describe('bootstrapInbox — wiring', () => {
     const id = runtime.state.insertItem({
       accountId: 'acct-1', channel: 'email', threadKey: 'imap:t1', bucket: 'requires_user', confidence: 0.9,
       reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', messageId: '<m1@x>',
-    });
+    }).id;
     runtime.state.updateUserAction(id, 'replied');
     const later = new Date(Date.now() + 60_000);
     mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'support@acme.example', isDefault: false });
