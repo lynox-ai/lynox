@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import type { InboxThreadResponse } from '../stores/inbox.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
@@ -7,9 +8,11 @@
 		thread: InboxThreadResponse;
 		/** Highlight the message that matches the selected item (currently rendered above). */
 		currentMessageId?: string | undefined;
+		/** Bring this message into view, open it and move the focus to it; `seq` repeats the jump. */
+		focusRequest?: { id: string; seq: number } | undefined;
 	}
 
-	const { thread, currentMessageId }: Props = $props();
+	const { thread, currentMessageId, focusRequest }: Props = $props();
 
 	// Track which thread message is expanded. Per-id state so multiple
 	// can be open simultaneously when the user is comparing replies.
@@ -18,6 +21,41 @@
 	function toggle(id: string): void {
 		expanded[id] = !expanded[id];
 	}
+
+	let messageEls = $state<Record<string, HTMLElement | undefined>>({});
+
+	// The message the last jump went to. It carries the focus mark also after a mouse click, which
+	// shows no focus ring of its own, until the next click anywhere or the focus leaves it.
+	let jumpedTo = $state<string | undefined>(undefined);
+
+	// A jump from the reading pane's notice: open the message, then scroll to it and give it the
+	// focus, so keyboard and screen reader land on the new mail too.
+	$effect(() => {
+		const req = focusRequest;
+		if (req === undefined) return;
+		if (thread.messages.some((m) => m.id === req.id && Boolean(m.bodyMd || m.snippet))) expanded[req.id] = true;
+		void tick().then(() => {
+			const el = messageEls[req.id];
+			if (el === undefined) return;
+			if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
+			el.focus({ preventScroll: true });
+			jumpedTo = req.id;
+		});
+	});
+
+	// The mark goes with the next mouse or pen click. Listened to from the jump on, so the click
+	// that made the jump (already handled when the listener is added) does not clear it. A touch
+	// does not clear it: on a phone the first touch is often the scroll toward the message; a tap
+	// elsewhere moves the focus and so clears it on blur.
+	$effect(() => {
+		if (jumpedTo === undefined || typeof document === 'undefined') return;
+		const clear = (e: PointerEvent): void => {
+			if (e.pointerType === 'touch') return;
+			jumpedTo = undefined;
+		};
+		document.addEventListener('pointerdown', clear, { capture: true });
+		return () => document.removeEventListener('pointerdown', clear, { capture: true });
+	});
 
 	function dateFormat(iso: string | undefined): string {
 		if (!iso) return '';
@@ -54,7 +92,12 @@
 				{@const isOpen = expanded[msg.id] === true}
 				<li
 					role="listitem"
-					class="rounded-[var(--radius-sm)] border bg-bg-subtle text-sm {currentMessageId !== undefined && msg.messageId === currentMessageId ? 'border-accent' : 'border-border'}"
+					tabindex="-1"
+					bind:this={messageEls[msg.id]}
+					data-thread-message-id={msg.id}
+					data-jump-target={jumpedTo === msg.id ? 'true' : undefined}
+					onblur={() => { if (jumpedTo === msg.id) jumpedTo = undefined; }}
+					class="rounded-[var(--radius-sm)] border bg-bg-subtle text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent {jumpedTo === msg.id ? 'ring-2 ring-accent' : ''} {currentMessageId !== undefined && msg.messageId === currentMessageId ? 'border-accent' : 'border-border'}"
 				>
 					<!-- Header is a button when there's body/snippet content to reveal,
 						a plain div otherwise. Touch-sized; aria-expanded reflects state. -->
@@ -80,6 +123,8 @@
 							{/if}
 							{#if !isOpen && msg.snippet}
 								<p class="mt-1 line-clamp-2 text-[11px] text-text-subtle">{msg.snippet}</p>
+							{:else if !isExpandable && msg.confidential === true}
+								<p class="mt-1 text-[11px] text-text-subtle" data-testid="inbox-thread-message-withheld">{t('inbox.thread_message_confidential')}</p>
 							{/if}
 						</div>
 					</button>

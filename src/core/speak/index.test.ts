@@ -211,6 +211,21 @@ describe('speak facade — text-prep pipeline', () => {
       expect(voices.find(v => v.id === 'en_paul_neutral')).toBeDefined();
     });
 
+    // Read from the live catalog on 2026-11-18 (66 voices): each fallback id is a
+    // slug Mistral has, under the name Mistral gives it. An earlier list offered
+    // four ids the catalog does not have (`en_alex_neutral` and others) — voices the
+    // picker showed and synthesis could not speak.
+    it('the fallback catalog holds only slugs the live catalog has, under its names', async () => {
+      stubMistralKey(false);
+      const voices = await facade.listMistralVoices();
+      expect(voices).toEqual([
+        { id: 'en_paul_neutral', language: 'en', description: 'Paul - Neutral' },
+        { id: 'gb_oliver_neutral', language: 'en', description: 'Oliver - Neutral' },
+        { id: 'gb_jane_neutral', language: 'en', description: 'Jane - Neutral' },
+        { id: 'fr_marie_neutral', language: 'fr', description: 'Marie - Neutral' },
+      ]);
+    });
+
     it('parses Mistral live shape across paginated responses', async () => {
       stubMistralKey(true);
       // ⚠⚠ This case USED TO PIN THE BUG, and the way it managed to is the lesson.

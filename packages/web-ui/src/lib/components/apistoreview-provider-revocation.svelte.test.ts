@@ -12,6 +12,7 @@ type SvelteClient = {
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+const { setLocale } = await import('../i18n.svelte.js');
 
 // After a provider revoked a profile's grant, the API page says when, offers "Reconnect" (a link
 // to the engine's connect route, loaded as a full page), and while an erasure is pending shows
@@ -24,7 +25,8 @@ const DAY = 24 * 3600 * 1000;
 const revokedAtIso = new Date(Date.now() - DAY).toISOString();
 const holdIso = new Date(Date.now() + 13 * DAY).toISOString();
 const deadlineIso = new Date(Date.now() + 29 * DAY).toISOString();
-const day = (iso: string): string => new Date(iso).toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric' });
+// The month by name, held on one line by no-break spaces (U-391): `20.\u00a0November\u00a02026`.
+const day = (iso: string): string => new Date(iso).toLocaleDateString('de-CH', { day: 'numeric', month: 'long', year: 'numeric' }).replace(/ /g, '\u00a0');
 
 /** A notice as the engine sends it: one pending erasure of `crm`, refused a day ago. */
 const n = (recordId: number): Record<string, unknown> => ({ recordId, connectionId: 'crm', revokedAt: revokedAtIso, holdUntil: holdIso, deadline: deadlineIso, reconnected: false });
@@ -83,6 +85,28 @@ const APPROVED: Record<'revoked' | 'connectedAgain' | 'reconnected', { de: strin
 		parts: ['apis.erasure_reconnected_notice', 'apis.erasure_reconnected_avert'],
 	},
 };
+
+describe('a store connection whose refresh ended (refresh-dead)', () => {
+	const ended = { id: 'shop', name: 'Shop', base_url: 'https://acme.myshopify.com', description: '', auth: { type: 'oauth2' }, oauth_grant: { state: 'refresh-dead' } };
+
+	it('says lynox could not renew the access, offers the button, and names no revocation or erasure', async () => {
+		serve([ended], { status: 200, body: { notices: [] } });
+		await render();
+		expect(q('api-access-ended')?.textContent).toBe('lynox konnte den Zugang zu diesem Shop nicht erneuern.');
+		expect(q('api-revoked')?.textContent).not.toContain('widerrufen');
+		const link = q('api-reconnect') as HTMLAnchorElement | null;
+		expect(link?.textContent).toBe('Erneut verbinden');
+		expect(link?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+		expect(q('api-erasure-window')).toBeNull();
+	});
+
+	it('a connected store shows none of it', async () => {
+		serve([{ ...ended, oauth_grant: { state: 'connected' } }], { status: 200, body: { notices: [] } });
+		await render();
+		expect(q('api-access-ended')).toBeNull();
+		expect(q('api-reconnect')).toBeNull();
+	});
+});
 
 describe('a profile its provider revoked', () => {
 	it('the owner with a pending erasure: revoked on, the window, the notice, and the button to the engine\'s connect route', async () => {
@@ -423,5 +447,26 @@ describe('the layout: the dates and the way out first, the long text closed belo
 		await render();
 		expect(q('api-erasure-avert')).toBeNull();
 		expect(target.textContent).not.toMatch(/Wählst du innerhalb von 14 Tagen/);
+	});
+});
+
+describe('the dates on the row, with the month by name (U-391)', () => {
+	// Fixed days at noon UTC: the same local day in every time zone a test box runs in.
+	const fixed = { recordId: 7, connectionId: 'crm', revokedAt: '2099-11-19T12:00:00.000Z', holdUntil: '2099-12-03T12:00:00.000Z', deadline: '2099-12-19T12:00:00.000Z', reconnected: false };
+	const NB = (x: string): string => x.replace(/ /g, '\u00a0');
+	afterEach(() => setLocale('de'));
+
+	it.each([
+		['de', 'Vom Anbieter widerrufen am 19. November 2099', 'Löschung frühestens am 3. Dezember 2099, spätestens am 19. Dezember 2099', 'Wir löschen frühestens am 3. Dezember 2099 und spätestens am 19. Dezember 2099.'],
+		['en', 'Revoked by the provider on November 19, 2099', 'Deletion on December 3, 2099 at the earliest, by December 19, 2099 at the latest', 'We delete no earlier than December 3, 2099 and no later than December 19, 2099.'],
+	] as const)('%s: the revocation, the window and the notice name the month, never day/month digits', async (locale, revoked, window, notice) => {
+		setLocale(locale);
+		serve([{ ...revokedProfile, oauth_grant: { state: 'revoked', revoked_at: fixed.revokedAt } }], { status: 200, body: { notices: [fixed] } });
+		await render();
+		const dated = [revoked, window, notice].map((x) => x.replace(/(\d+\.? \w+ \d{4}|\w+ \d+, \d{4})/g, NB));
+		expect(q('api-revoked')?.textContent).toContain(dated[0]);
+		expect(q('api-erasure-window')?.textContent).toBe(dated[1]);
+		expect(q('api-erasure-notice')?.textContent).toContain(dated[2]);
+		expect(q('api-revoked')?.textContent).not.toMatch(/\d{2}[./]\d{2}[./]\d{4}/);
 	});
 });

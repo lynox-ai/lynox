@@ -29,7 +29,7 @@ import { processUmask } from './workspace-rel.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
-import { shopifyConsentBlock } from './bulk-shopify.js';
+import { shopifyConsentBlock, shopifyProductWriteAccess } from './bulk-shopify.js';
 import { isShopifyStoreHostName } from './shopify-graphql.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
@@ -132,6 +132,9 @@ export interface BulkEffectOutcome {
   planned?: true;
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
+  /** Set where the push says the same shorter than `summary`, so that it fits the web-push cut;
+   *  the run result keeps `summary`, the way included. */
+  pushSummary?: string;
 }
 
 /** A run left `pending` is tried again after this. */
@@ -307,7 +310,22 @@ async function applyRunEffect(
   const source = run.kind === 'undo' && run.sourceRunId !== null ? ledger.getRunForApply(run.sourceRunId) : null;
   const restoresOnly = source !== null && source.kind !== 'undo';
   if (!restoresOnly) {
-    const blocked = apply === null ? [] : shopifyConsentBlock(apply, host === null ? undefined : deps.shopifyGrantOf?.(host));
+    const grant = host === null ? undefined : deps.shopifyGrantOf?.(host);
+    // The product form writes only through a connection that asked for `write_products` and was
+    // granted it (`shopifyProductWriteAccess`), read on every call like the grant below.
+    if (apply !== null && apply.form === 'shopify_product') {
+      const access = shopifyProductWriteAccess(grant);
+      if (access !== 'writable') {
+        ledger.halt(runId, BULK_HALT_REASONS.productWriteNotAsked);
+        const nothingYet = run.applied === 0 && ledger.sentCount(runId) === 0;
+        return {
+          status: 'refused',
+          summary: summarize(ledger, runId, say.productWriteNotAsked(access, nothingYet), say),
+          pushSummary: summarize(ledger, runId, say.productWriteNotAskedPush(access, nothingYet), say),
+        };
+      }
+    }
+    const blocked = apply === null ? [] : shopifyConsentBlock(apply, grant);
     if (blocked.length > 0) {
       ledger.halt(runId, BULK_HALT_REASONS.consentOutdated);
       const nothingYet = run.applied === 0 && ledger.sentCount(runId) === 0;
@@ -530,9 +548,10 @@ async function applyRunEffect(
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
       if (cur !== 'foreign' && (sameImage(cur, t.after, htmlFields) || (savedForm && sameInSavedForm(cur, t.after, htmlFields)))) {
-        // Found as planned: either a loop of this run wrote it and died before recording it
-        // (the target is marked sent), or someone else set the value, and the run sends
-        // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
+        // Found as planned: a send of this run may have written it (one still unclear, or on a
+        // local run a writer that threw after its write), or someone else set the value; the run
+        // sends nothing to it, and the ledger tells the two apart ({@link
+        // BulkLedger.recordApplied}, `found_unsent`). What is there is
         // also what an undo must expect.
         // Found only under the HTML comparison is not counted as a rewrite: the comparison explains
         // the store's form of the planned description, as for a read-back.
@@ -574,7 +593,8 @@ async function applyRunEffect(
     } catch (err: unknown) {
       // A local writer that throws has answered: its outcome is known, so its send is booked as
       // answered, as an external writer's refusal is (`onRefused`). Only the send of this pass,
-      // never one a loop that died left before it.
+      // never one a loop that died left before it. No count reads a local run's open sends today;
+      // this keeps the column true for whatever reads it next.
       if (localSent) ledger.markRefused(runId, t.seq);
       if (err instanceof BulkClaimLost) return { kind: 'lost' };
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };

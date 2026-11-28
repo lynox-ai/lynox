@@ -46,6 +46,12 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
 
 export interface CostGuardConfig {
   maxBudgetUSD?: number | undefined;
+  /**
+   * The admission's reservation against the daily and monthly caps that holds this run's whole
+   * budget, when one does. Only an object `reservePersistentBudget` issued counts, and only while
+   * it is held (see `isHeldReservation`); a copy or a look-alike is ignored.
+   */
+  heldAgainstCaps?: PersistentBudgetReservation | undefined;
   warnAtUSD?: number | undefined;
   maxIterations?: number | undefined;
 }
@@ -70,6 +76,14 @@ export interface PersistentBudgetReservation {
   /** Amount actually held (0 when blocked or when no enforcement is active). */
   reservedUSD: number;
   reason?: string | undefined;
+  /**
+   * On a refusal against a cap: what that cap still leaves, after recorded spend and what is
+   * held in flight, and which cap it is (the tighter one when both are set). Absent when the
+   * spend could not be checked.
+   */
+  headroomUSD?: number | undefined;
+  cap?: 'daily' | 'monthly' | undefined;
+  capUSD?: number | undefined;
 }
 
 export interface CostSnapshot {

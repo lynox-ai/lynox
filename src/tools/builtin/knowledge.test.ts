@@ -55,7 +55,7 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
         : undefined,
       promptUser: opts.promptAnswer === null
         ? undefined
-        : async () => opts.promptAnswer ?? 'Apply',
+        : async () => opts.promptAnswer ?? 'apply',
     } as unknown as IAgent;
     return { agent, ks };
   }
@@ -415,17 +415,41 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
   });
 
   it('memory_block_edit applies on a trusted turn after confirmation', async () => {
-    const { agent, ks } = make({ promptAnswer: 'Apply' });
+    const { agent, ks } = make({ promptAnswer: 'apply' });
     const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'Firm: Acme Agency' }, agent);
     expect(out).toContain('Updated');
     expect(ks.getBlock('profile')?.content).toContain('Acme Agency');
   });
 
   it('memory_block_edit cancels when the user declines', async () => {
-    const { agent, ks } = make({ promptAnswer: 'Cancel' });
+    const { agent, ks } = make({ promptAnswer: 'cancel' });
     const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'x' }, agent);
     expect(out).toMatch(/cancel/i);
     expect(ks.getBlock('profile')).toBeNull();
+  });
+
+  it('memory_block_edit applies on the `apply` key only: a label or typed word changes nothing, and says so', async () => {
+    for (const answer of ['Apply', 'Übernehmen', 'yes', 'ja', 'y', '1', 'ok', 'APPLY', ' apply']) {
+      const { agent, ks } = make({ promptAnswer: answer });
+      const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'x' }, agent);
+      expect(out, answer).toMatch(/^Cancelled — the profile block is unchanged\. The answer was not one of the offered choices/);
+      expect(ks.getBlock('profile'), answer).toBeNull();
+    }
+    for (const answer of ['cancel', '', '__dismissed__']) {
+      const { agent } = make({ promptAnswer: answer });
+      const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'x' }, agent);
+      expect(out, JSON.stringify(answer)).toBe('Cancelled — the profile block is unchanged.');
+    }
+  }, 30_000);
+
+  it('memory_block_edit offers the apply keys and asks in German on a German instance', async () => {
+    const { agent } = make({ promptAnswer: 'cancel' });
+    const seen: unknown[][] = [];
+    Object.assign(agent as object, { dialogLanguage: 'de', promptUser: async (...args: unknown[]) => { seen.push(args); return 'cancel'; } });
+    await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'Firma: Acme' }, agent);
+    expect(seen[0]![1]).toEqual(['apply', 'cancel']);
+    expect(seen[0]![2]).toMatchObject({ consent: 'apply' });
+    expect(flattenPrompt(seen[0]![0] as PromptText)).toBe('Den Block profile ändern (append: „Firma: Acme“)? Dieser Block wird in jeden künftigen Schritt geladen. Du kannst ihn später wieder ändern.');
   });
 
   // ── security-review regression fixes ──
@@ -440,7 +464,7 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
   });
 
   it('memory_block_edit rejects secret-shaped new_text (S1 write-path scan)', async () => {
-    const { agent, ks } = make({ promptAnswer: 'Apply' });
+    const { agent, ks } = make({ promptAnswer: 'apply' });
     const out = await memoryBlockEditTool.handler({ block: 'playbook', mode: 'append', new_text: 'API key: Bearer abcdefghij1234567890abcd' }, agent);
     expect(out).toMatch(/secret|credential/i);
     expect(ks.getBlock('playbook')).toBeNull();
@@ -495,7 +519,7 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
       sawExternalContentTool: opts.sawExternalContentTool ?? false,
       conversationSawUntrusted: opts.conversationSawUntrusted ?? false,
       autonomy: opts.autonomy ?? 'supervised',
-      promptUser: opts.promptAnswer === null ? undefined : async () => opts.promptAnswer ?? 'Retire',
+      promptUser: opts.promptAnswer === null ? undefined : async () => opts.promptAnswer ?? 'retire',
     } as unknown as IAgent;
     return { agent, ks };
   }
@@ -532,15 +556,39 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
   });
 
   it('memory_retire retires after confirmation via the recall id prefix', async () => {
-    const { agent, ks } = make({ promptAnswer: 'Retire' });
+    const { agent, ks } = make({ promptAnswer: 'retire' });
     const id = activeFact(ks);
     const out = await memoryRetireTool.handler({ id: id.slice(0, 8), reason: 'portal migrated' }, agent);
     expect(out).toMatch(/retired/i);
     expect(ks.getEntry(id)?.status).toBe('superseded');
   });
 
+  it('memory_retire retires on the `retire` key only: a label or typed word retires nothing, and says so', async () => {
+    for (const answer of ['Retire', 'Zurückziehen', 'yes', 'ja', 'y', '1', 'ok', 'RETIRE', ' retire']) {
+      const { agent, ks } = make({ promptAnswer: answer });
+      const id = activeFact(ks);
+      const out = await memoryRetireTool.handler({ id }, agent);
+      expect(out, answer).toMatch(/^Cancelled — the entry stays active\. The answer was not one of the offered choices/);
+      expect(ks.getEntry(id)?.status, answer).toBe('active');
+    }
+    for (const answer of ['cancel', '', '__dismissed__']) {
+      const { agent, ks } = make({ promptAnswer: answer });
+      const out = await memoryRetireTool.handler({ id: activeFact(ks) }, agent);
+      expect(out, JSON.stringify(answer)).toBe('Cancelled — the entry stays active.');
+    }
+  }, 30_000);
+
+  it('memory_retire offers the retire keys, marked as the engine\'s own', async () => {
+    const { agent, ks } = make();
+    const seen: unknown[][] = [];
+    Object.assign(agent as object, { promptUser: async (...args: unknown[]) => { seen.push(args); return 'cancel'; } });
+    await memoryRetireTool.handler({ id: activeFact(ks) }, agent);
+    expect(seen[0]![1]).toEqual(['retire', 'cancel']);
+    expect(seen[0]![2]).toMatchObject({ consent: 'retire' });
+  });
+
   it('memory_retire surfaces the canSupersede refusal for user_asserted facts', async () => {
-    const { agent, ks } = make({ promptAnswer: 'Retire' });
+    const { agent, ks } = make({ promptAnswer: 'retire' });
     const id = ks.write({ text: 'User-confirmed terms', sourceChannel: 'ui', sourceUntrusted: false }).id;
     const out = await memoryRetireTool.handler({ id }, agent);
     expect(out).toMatch(/user_asserted|Refused/);
@@ -564,7 +612,7 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
       principal: OWNER_PRINCIPAL, toolContext: ctx,
       sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false,
       autonomy: 'supervised',
-      promptUser: async (): Promise<string> => { prompts++; return 'Retire'; },
+      promptUser: async (): Promise<string> => { prompts++; return 'retire'; },
     } as unknown as IAgent;
 
     const id = ks.write({ text: 'User-confirmed terms', sourceChannel: 'ui', sourceUntrusted: false }).id;
@@ -581,7 +629,7 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
   });
 
   it('memory_retire cancels cleanly', async () => {
-    const { agent, ks } = make({ promptAnswer: 'Cancel' });
+    const { agent, ks } = make({ promptAnswer: 'cancel' });
     const id = activeFact(ks);
     const out = await memoryRetireTool.handler({ id }, agent);
     expect(out).toMatch(/cancel/i);
@@ -678,7 +726,7 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
   it('B6: memory_block_edit replace-mode preview shows the NEW standing rule (old→new), not just old_text', async () => {
     const { agent, ks } = make();
     const seen: string[] = [];
-    (agent as unknown as { promptUser: (q: string | PromptText) => Promise<string> }).promptUser = async (q: string | PromptText) => { seen.push(flattenPrompt(q)); return 'Apply'; };
+    (agent as unknown as { promptUser: (q: string | PromptText) => Promise<string> }).promptUser = async (q: string | PromptText) => { seen.push(flattenPrompt(q)); return 'apply'; };
     // seed the block so the replace has an old_text to match
     await memoryBlockEditTool.handler({ block: 'playbook', mode: 'append', new_text: 'ask before sending invoices' }, agent);
     expect(ks.getBlock('playbook')?.content).toContain('ask before sending invoices');

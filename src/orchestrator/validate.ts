@@ -233,6 +233,23 @@ export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: Pip
 }
 
 /**
+ * A tool name as a save refusal may quote it: a name of ASCII letters, digits, `_` and `-` (at most
+ * 64, as a provider takes it). Any other is counted, never quoted: a stored step's declared tools
+ * are text, and one written before this check may hold a sentence a prior turn brought in.
+ */
+const TOOL_NAME_SHAPE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function unknownToolsInWords(unknown: readonly string[]): string {
+  const shown = unknown.filter((n) => TOOL_NAME_SHAPE.test(n));
+  const hidden = unknown.length - shown.length;
+  if (hidden === 0) return `unknown tool(s): ${shown.join(', ')}`;
+  if (shown.length === 0) {
+    return hidden === 1 ? '1 unknown tool (lynox does not show its name)' : `${String(hidden)} unknown tools (lynox does not show their names)`;
+  }
+  return `${String(unknown.length)} unknown tools: ${shown.join(', ')}, and ${String(hidden)} whose name${hidden === 1 ? '' : 's'} lynox does not show`;
+}
+
+/**
  * Save-time gate (F2/D2): a declared tool name that is not in the inline pool
  * is a generator bug — fail LOUD at save, not silently at dispatch ("Tool not
  * available" mid-run is how four unexplainable approval dialogs reached a
@@ -255,11 +272,15 @@ function declaredToolIssue(step: { id: string; tools?: string[] | undefined; too
   if (!step.tools) return undefined;
   const unknown = step.tools.filter(name => !INLINE_CORE_TOOLS.has(name) && !INLINE_NAMED_ONLY_TOOLS.has(name));
   if (unknown.length > 0) {
-    return `Step "${step.id}" declares unknown tool(s): ${unknown.join(', ')}. ` +
+    return `Step "${step.id}" declares ${unknownToolsInWords(unknown)}. ` +
       `Declarable tools: ${[...INLINE_CORE_TOOLS, ...INLINE_NAMED_ONLY_TOOLS].join(', ')}.`;
   }
   if (step.tool !== undefined && !step.tools.includes(step.tool)) {
-    return `Step "${step.id}" replays tool "${step.tool}" but its declared tools (${step.tools.join(', ') || 'none'}) exclude it.`;
+    // The declared tools are all known names here; the replayed one is the step's own text.
+    const declared = step.tools.join(', ') || 'none';
+    return TOOL_NAME_SHAPE.test(step.tool)
+      ? `Step "${step.id}" replays tool "${step.tool}" but its declared tools (${declared}) exclude it.`
+      : `Step "${step.id}" replays a tool (lynox does not show its name) that its declared tools (${declared}) do not include.`;
   }
   return undefined;
 }

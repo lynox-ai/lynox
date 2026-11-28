@@ -24,7 +24,7 @@ import { reportAbortedCall } from './aborted-call.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, callForStructuredJson, extractionSpendOf,
-  type ExtractSchema,
+  type ExtractSchema, type SchemaRefusal,
 } from './llm-helper.js';
 import { getPricing } from './pricing.js';
 import { refuseExternalAfter } from './bulk-external.js';
@@ -37,7 +37,7 @@ import { BULK_MAX_TARGET_BYTES, mapToColumns, type dataStoreColumns } from './bu
 import { judgeCallSchema, judgeFields, judgeMaxOutputTokens, judgedTargets, type JudgeRule } from './bulk-judge-rule.js';
 import {
   BULK_HALT_REASONS, canonicalJson, externalHostOf,
-  type BulkHaltReason, type BulkInvalidReason, type BulkJudgeRun, type BulkLedger,
+  type BulkHaltReason, type BulkInvalidReason, type BulkJudgeRun, type BulkLedger, type BulkRefusalDetail,
 } from './bulk-ledger.js';
 import type { BulkPreviewOutcome } from './bulk-preview.js';
 import { shopifyNoneLeftSentence } from './bulk-shopify.js';
@@ -74,8 +74,9 @@ export interface BulkJudgeDeps {
   readTargets?: (() => Promise<BulkPreviewOutcome>) | undefined;
   /** The run's tier to a model the operator allows, or null when there is none. */
   resolveModel: (tier: ModelTier) => JudgeModel | null;
-  /** The managed gate, per call (`fireBeforeRunGate`). */
-  gate: (tier: ModelTier) => Promise<MeteredGateResult>;
+  /** The managed gate, per call (`fireBeforeRunGate`), told the call's worst case in cents
+   *  (undefined when it is no finite amount: the gate's default then holds). */
+  gate: (tier: ModelTier, maxCostCents: number | undefined) => Promise<MeteredGateResult>;
   /** The managed debit, per answered call, under its gate's run id (`reportMeteredCost`). */
   report: (gateRunId: string, costUsd: number, tier: ModelTier) => void;
   /** The day's spend in history.db (`RunHistory.recordBulkJudgeCost`): a call's provisional row,
@@ -477,12 +478,39 @@ export function classifyCallFailure(err: unknown, aborted: boolean): CallFailure
   return { kind: 'halt', reason: BULK_HALT_REASONS.unavailable, report: true };
 }
 
+/** The schema refusal an unusable answer carries, if its class names one (path, rule, bound). */
+function schemaRefusalOf(err: unknown): SchemaRefusal | undefined {
+  return err instanceof SchemaValueError || err instanceof ExtractShapeError ? err.refusal : undefined;
+}
+
+/**
+ * Which field of the run's rule an unusable verdict broke and by which rule, as the target keeps
+ * it: the field by its name in the rule (an envelope's `after.` taken off), the rule's kind and
+ * its bound. Only a field the rule names is kept; a refusal elsewhere (the envelope's `keep`, the
+ * verdict's own shape) keeps none, and the page says the sentence without a field.
+ */
+export function judgeRefusalDetail(err: unknown, rule: Pick<JudgeRule, 'schema' | 'verdict'>): BulkRefusalDetail | undefined {
+  const refusal = schemaRefusalOf(err);
+  if (refusal === undefined) return undefined;
+  const path = rule.verdict === 'envelope'
+    ? (refusal.path.startsWith('after.') ? refusal.path.slice('after.'.length) : null)
+    : refusal.path;
+  if (path === null) return undefined;
+  const field = /^[^.[]+/.exec(path)?.[0];
+  if (field === undefined || !Object.hasOwn(rule.schema.properties, field)) return undefined;
+  const limit = refusal.limit;
+  return { field, kind: refusal.kind, ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}) };
+}
+
 /** An error as the tracker may see it: class, status, and for a schema refusal its path and
  *  rule — never a value, a message or a response body (PRD bulk-loop §3.1, error classes). */
 export function judgeErrorForTracker(err: unknown, what = 'bulk_judge call'): Error {
   const name = err instanceof Error ? err.name.replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || 'Error' : typeof err;
   const status = providerStatus(err);
-  const where = err instanceof SchemaValueError ? ` at ${err.path.replace(/[^A-Za-z0-9_.[\]]/g, '').slice(0, 80)}` : '';
+  const refusal = schemaRefusalOf(err);
+  const path = refusal?.path ?? (err instanceof SchemaValueError ? err.path : undefined);
+  const rule = refusal === undefined ? '' : ` (${refusal.kind}${refusal.limit !== undefined && Number.isFinite(refusal.limit) ? ` ${String(refusal.limit)}` : ''})`;
+  const where = path !== undefined ? ` at ${path.replace(/[^A-Za-z0-9_.[\]]/g, '').slice(0, 80)}${rule}` : '';
   const e = new Error(`${what} failed: ${name}${status !== null ? ` (HTTP ${String(status)})` : ''}${where}`);
   e.name = 'BulkJudgeCallError';
   return e;
@@ -668,6 +696,8 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (!external && cols === null) return halt(BULK_HALT_REASONS.unavailable);
 
   let bookingFailed = false;
+  // The refusals this pass told the tracker, by path and rule: one event each, not one per target.
+  const told = new Set<string>();
   for (const seq of ledger.listUnjudged(runId)) {
     if (bookingFailed) return halt(BULK_HALT_REASONS.unavailable);
     if (deps.signal?.aborted) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge paused.');
@@ -682,7 +712,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     if (!target) continue;
     const token = newToken();
     if (!ledger.claimJudge(runId, seq, token, now(), JUDGE_CLAIM_STALE_MS)) continue;
-    const record = (verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown>; contextField?: number; linkDomain?: string | undefined }): void => {
+    const record = (verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown>; contextField?: number; linkDomain?: string | undefined; refusal?: BulkRefusalDetail | undefined }): void => {
       ledger.recordJudgement(runId, seq, token, verdict, now());
     };
     if (target.before.absent) {
@@ -725,7 +755,9 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       ledger.releaseJudgeClaim(runId, seq, token);
       return halt(BULK_HALT_REASONS.spendLimit);
     }
-    const gate = await deps.gate(model.tier);
+    // The gate is told this call's own worst case, in cents rounded up; without a finite amount
+    // above zero it is told nothing and keeps its default.
+    const gate = await deps.gate(model.tier, Number.isFinite(worst) && worst > 0 ? Math.ceil(worst * 100) : undefined);
     if (gate.blockedReason !== null) {
       // Both causes of a blocked gate — no credit, or a control plane out of reach — are one
       // fixed reason: the hook tells them apart only as text.
@@ -819,7 +851,17 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       else if (failure.kind === 'invalid' || status === 429 || status === 529) book(0, 0, 0);
       else reportAbortedCall('bulk_judge.unanswered', model.modelId, { upperBoundUsd: provisional, estimateUsd: provisional, fromSnapshot: false });
       if (failure.kind === 'invalid') {
-        if (!afterPaid(() => { record({ invalid: failure.reason }); })) return halt(BULK_HALT_REASONS.unavailable);
+        // An answer the rule refused keeps which field broke which rule, and the tracker sees the
+        // same (path and rule, never the value), so a refusal can be told from a provider fault.
+        const refusal = failure.reason === 'verdict_invalid' ? judgeRefusalDetail(err, run.rule) : undefined;
+        if (!afterPaid(() => { record({ invalid: failure.reason, ...(refusal !== undefined ? { refusal } : {}) }); })) return halt(BULK_HALT_REASONS.unavailable);
+        if (failure.reason === 'verdict_invalid') {
+          const shown = judgeErrorForTracker(err, 'bulk_judge verdict');
+          if (!told.has(shown.message)) {
+            told.add(shown.message);
+            deps.captureError?.(shown);
+          }
+        }
         continue;
       }
       ledger.releaseJudgeClaim(runId, seq, token);

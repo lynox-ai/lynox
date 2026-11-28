@@ -634,6 +634,20 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
     });
   });
 
+  it('edit_file: the refusal names the placeholder and does not claim a saved artifact', async () => {
+    await withDataDir(async (d) => {
+      clearTenantWorkspace();
+      const p = join(d, 'artifacts', 'abcdef12.html');
+      writeFileSync(p, '# Pitch\n\nThree budget options.', 'utf-8');
+      const [, placeholder] = evictionPlaceholders()[0]!;
+      const err = await editFileTool.handler({ path: p, old_string: 'Three budget options.', new_string: placeholder }, makeAgent())
+        .then(() => null, (e: unknown) => e as Error);
+      expect(err?.message).toContain("refused: the text contains the engine's placeholder (");
+      expect(err?.message).toContain('in place of text it took out of an earlier call; a copy of it is not content.');
+      expect(err?.message).not.toMatch(/already saved|a saved artifact/);
+    });
+  });
+
   it('edit_file: an artifact that already holds a placeholder can still be edited, elsewhere and on the placeholder', async () => {
     await withDataDir(async (d) => {
       clearTenantWorkspace();

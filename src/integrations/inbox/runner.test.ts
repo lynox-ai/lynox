@@ -6,6 +6,7 @@ import { InboxCostBudget } from './cost-budget.js';
 import type { LLMCaller } from './classifier/index.js';
 import type { MailAccountConfig } from '../mail/provider.js';
 import { configurePersistentBudget, resetPersistentBudget } from '../../core/session-budget.js';
+import { SINGLE_CALL_WORST_CASE_CENTS } from '../../core/run-admission.js';
 
 const ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
@@ -208,6 +209,20 @@ describe('buildInboxRunner — fail-closed dead-letter', () => {
     expect(payloadJson['dead_letter']).toBe(true);
     expect(payloadJson['error_message']).toBe('rate_limited');
   });
+
+  it('the dead-letter item records the prefilter rule its mail met', async () => {
+    const llm: LLMCaller = vi.fn(async () => { throw new Error('rate_limited'); });
+    const queue = buildInboxRunner({ state: inbox, llm, policy: { retryOnce: false } });
+    queue.enqueue(payload({
+      envelope: {
+        fromAddress: 'noreply@billing.example', fromName: undefined, subject: 'Rechnung', mailDate: undefined,
+        snippet: undefined, messageId: undefined, inReplyTo: undefined, prefilterRule: 'automated_sender',
+      },
+    }));
+    await waitFor(() => inbox.listItems().length === 1);
+    await queue.drain();
+    expect(mail.getConnection().prepare('SELECT prefilter_rule AS r FROM inbox_items').get()).toEqual({ r: 'automated_sender' });
+  });
 });
 
 describe('scrubErrorMessage', () => {
@@ -329,6 +344,9 @@ describe('buildInboxRunner — managed credit gate', () => {
     expect(onBeforeRun).toHaveBeenCalledOnce();
     expect(llm).toHaveBeenCalledTimes(1);
     expect(inbox.listItems()[0]?.bucket).toBe('auto_handled');
+    // One admission covers the description-rule check and the classifier: two calls' worst case.
+    // Kills: the single-call default on a gate that admits two calls.
+    expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(2 * SINGLE_CALL_WORST_CASE_CENTS);
   });
 });
 

@@ -154,7 +154,7 @@ const callTool = (store: ApiStore, input: Record<string, unknown>, vault = handl
   apiSetupTool.handler(input as never, handlerAgent(store, vault)) as Promise<string>;
 /** The owner's delete, agreed to: deleting an unreadable entry is asked. */
 const deleteAgreed = (store: ApiStore, id: string): Promise<string> =>
-  apiSetupTool.handler({ action: 'delete', id } as never, handlerAgent(store, handlerVault(OWNER_VAULT), async () => 'Allow')) as Promise<string>;
+  apiSetupTool.handler({ action: 'delete', id } as never, handlerAgent(store, handlerVault(OWNER_VAULT), async () => 'allow')) as Promise<string>;
 
 const reasonOf = (r: ReturnType<ApiStore['save']>): string => (r.ok ? '' : r.reason);
 
