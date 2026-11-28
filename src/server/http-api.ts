@@ -11028,7 +11028,10 @@ export class LynoxHTTPApi {
       const named = nameReads(entries, {
         thread: (id) => engine.getThreadStore()?.getThread(id)?.title,
         mail: (id) => engine.getInboxRuntime()?.state.getItem(id)?.subject,
-        workflow: (id) => history?.getPipelineRun(id)?.manifest_name,
+        workflow: (id) => {
+          const run = history?.getPipelineRun(id);
+          return run === undefined ? undefined : { id: run.id, name: run.manifest_name };
+        },
       });
       // A page holds its entries whole (readTrailPage); the next one starts below its oldest row.
       jsonResponse(res, 200, { entries: named, before, complete });

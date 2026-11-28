@@ -1033,7 +1033,7 @@
 				PWA cookie eviction; the engine itself is fine). A delegated access this instance
 				refuses while it runs without durable knowledge (engine 403 `mandate_memory_off` /
 				`_missing`) takes its place: signing in again changes nothing there. -->
-			<!-- A delegated access that has ended (engine 403 `mandate_revoked` / `mandate_ended`):
+			<!-- A delegated access that has ended (engine 403 `mandate_revoked`):
 				signing in again does not bring it back, so no button, only who to ask (U-306 B2). -->
 			{#if isAccessEnded() || mandateMemoryBlocked() !== null || isSessionExpired()}
 				<div role={isAccessEnded() || mandateMemoryBlocked() !== null ? 'alert' : undefined} class="border-b border-warning bg-warning-subtle px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">

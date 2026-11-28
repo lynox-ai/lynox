@@ -745,7 +745,7 @@ describe('nameReads: what a read was about, by name, resolved when the view is r
   const names: TrailNames = {
     thread: (id) => ({ 't-1': 'Angebot Testfirma' } as Record<string, string>)[id],
     mail: (id) => ({ 'i-1': 'Rechnung November' } as Record<string, string>)[id],
-    workflow: (id) => ({ 'w-1': 'Wochenbericht' } as Record<string, string>)[id],
+    workflow: (id) => (id === 'w-1' || id === 'w' ? { id: 'w-1', name: 'Wochenbericht' } : undefined),
   };
   const event = (action: string, target: string | null, phase = 'read'): TrailEvent =>
     ({ kind: 'event', id: `event:${action}:${String(target)}:${phase}`, action, target, phase, at: '2026-11-28T10:00:00.000Z', person: { email: null, display: null, mandateId: null } });
@@ -758,12 +758,17 @@ describe('nameReads: what a read was about, by name, resolved when the view is r
   });
 
   it('names a mail by its subject', () => {
-    for (const leaf of ['full', 'thread', 'context']) expect(nameOf(event(`GET /api/inbox/items/:id/${leaf}`, `/api/inbox/items/i-1/${leaf}`)), leaf).toBe('Rechnung November');
+    expect(nameOf(event('GET /api/inbox/items/:id', '/api/inbox/items/i-1'))).toBe('Rechnung November');
+    for (const leaf of ['full', 'thread', 'context', 'audit']) expect(nameOf(event(`GET /api/inbox/items/:id/${leaf}`, `/api/inbox/items/i-1/${leaf}`)), leaf).toBe('Rechnung November');
   });
 
   it('names a workflow by its name', () => {
     expect(nameOf(event('GET /api/workflows/:id', '/api/workflows/w-1'))).toBe('Wochenbericht');
     expect(nameOf(event('GET /api/workflows/:id/steps', '/api/workflows/w-1/steps'))).toBe('Wochenbericht');
+    // The run route takes the start of an id and reads the run it finds: named so. The steps route
+    // reads by the exact id only, so a run whose id merely starts so was not read: no name.
+    expect(nameOf(event('GET /api/workflows/:id', '/api/workflows/w'))).toBe('Wochenbericht');
+    expect(nameOf(event('GET /api/workflows/:id/steps', '/api/workflows/w/steps'))).toBeUndefined();
   });
 
   it('names a contact by the name in its route, and a file by its path, without a lookup', () => {

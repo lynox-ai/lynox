@@ -36,11 +36,25 @@ describe('api fetch interceptor', () => {
 		expect(await res.json()).toEqual({ error: 'This access has ended.', code: 'mandate_revoked' });
 	});
 
-	it('shows the ended access for mandate_ended too, the code of an access past its end', async () => {
+	// Defensive: the engine sends `mandate_revoked` for a revoked access and for one past its end;
+	// should a 403 ever carry `mandate_ended`, it means the same.
+	it('shows the ended access for a 403 mandate_ended too, should the engine ever send it', async () => {
 		installOver(403, JSON.stringify({ error: 'This access has ended.', code: 'mandate_ended' }));
 		await window.fetch('/api/threads');
 		expect(markAccessEnded).toHaveBeenCalledTimes(1);
 		expect(markSessionExpired).not.toHaveBeenCalled();
+	});
+
+	it('does not end the access on another origin\'s 403, whatever its body says', async () => {
+		vi.stubGlobal('window', {
+			location: { href: 'https://instance.example.invalid/app', origin: 'https://instance.example.invalid' },
+			fetch: async () => new Response(REVOKED, { status: 403, headers: { 'Content-Type': 'application/json' } }),
+		});
+		installApiFetchInterceptor();
+		await window.fetch('https://elsewhere.example.invalid/api/thing');
+		expect(markAccessEnded).not.toHaveBeenCalled();
+		await window.fetch('/api/threads');
+		expect(markAccessEnded).toHaveBeenCalledTimes(1);
 	});
 
 	it('leaves every other 403 to the view that got it', async () => {

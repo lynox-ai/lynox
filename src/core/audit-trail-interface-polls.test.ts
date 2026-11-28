@@ -45,11 +45,11 @@ const POLLERS: Record<string, Poller> = {
   },
   'lib/components/TriggersView.svelte': {
     reads: [],
-    excepted: [{ path: '/triggers', action: 'GET /api/triggers', why: 'polled every 15 s while the triggers view is open and visible; not a status-bar poll, so it is grouped by `INTERFACE_READS`, like the Tasks view' }],
+    excepted: [{ path: '/triggers', action: 'GET /api/triggers', why: 'polled every 15 s while the triggers view is open and visible; the person opened it, and it stays ungrouped (noise, nothing hidden)' }],
   },
   'lib/stores/integrations/google.svelte.ts': {
     reads: [],
-    excepted: [{ path: '/google/status', action: 'GET /api/google/status', why: 'read only during a Google sign-in the person started; grouped by `INTERFACE_READS`, it carries no content' }],
+    excepted: [{ path: '/google/status', action: 'GET /api/google/status', why: 'read only during a Google sign-in the person started' }],
   },
   'lib/components/ApiStoreView.svelte': { readsNothing: 'a clock for the "expires in" texts' },
   'lib/components/StoreAccessBanner.svelte': { readsNothing: 'a clock that turns a store\'s end into "ended" while the page is open' },
@@ -120,6 +120,7 @@ describe('the reads the web UI makes by itself besides its polls (U-306 B1(b), C
   const HTTP_API = readFileSync(join(__dirname, '..', 'server', 'http-api.ts'), 'utf-8');
 
   it('holds only GET routes without a path parameter, none of them a poll of the status bar or the nav', () => {
+    expect(INTERFACE_READS.size).toBeGreaterThan(0);
     for (const action of INTERFACE_READS) {
       expect(action, action).toMatch(/^GET \/api\/[a-z/-]+$/);
       expect(INTERFACE_POLLS.has(action), action).toBe(false);
@@ -130,6 +131,15 @@ describe('the reads the web UI makes by itself besides its polls (U-306 B1(b), C
     for (const action of INTERFACE_READS) {
       // A static route (`addStatic(scope, 'GET /api/…'`), as all of them are today.
       expect(new RegExp(`addStatic\\('[a-z]+', '${action}'`).test(HTTP_API), action).toBe(true);
+    }
+  });
+
+  it('leaves out the reads that name things or are a view the person opens', () => {
+    // The chat list carries titles and summaries; the configuration, the plan list and Google's
+    // status are also the first load of a view the person opens (decided 2026-11-28).
+    for (const action of ['GET /api/threads', 'GET /api/config', 'GET /api/triggers', 'GET /api/google/status']) {
+      expect(INTERFACE_READS.has(action), action).toBe(false);
+      expect(INTERFACE_POLLS.has(action), action).toBe(false);
     }
   });
 

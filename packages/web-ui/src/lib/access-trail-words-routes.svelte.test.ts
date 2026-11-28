@@ -9,9 +9,12 @@ import { t, setLocale, getLocale } from './i18n.svelte.js';
 // would show its route only, unnoticed. This holds every worded action to the engine's routes.
 const HTTP_API = readFileSync(join(__dirname, '../../../../src/server/http-api.ts'), 'utf8');
 
-function registered(action: string): boolean {
+const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** As the engine registers a route: `addStatic(scope, 'GET /api/…'` or `parseDynamicRoute(scope, 'GET', '/api/…'`. */
+function registered(action: string, source: string = HTTP_API): boolean {
 	const path = action.slice('GET '.length);
-	return HTTP_API.includes(`'${action}'`) || HTTP_API.includes(`'GET', '${path}'`);
+	return new RegExp(`addStatic\\('[a-z]+', '${escape(action)}'`).test(source)
+		|| new RegExp(`parseDynamicRoute\\('[a-z]+', 'GET', '${escape(path)}'`).test(source);
 }
 
 describe('the words of the reads (U-306 B1(c))', () => {
@@ -23,6 +26,10 @@ describe('the words of the reads (U-306 B1(c))', () => {
 
 	it('the check finds a route the engine does not have (control)', () => {
 		expect(registered('GET /api/no-such-route')).toBe(false);
+		// A route only quoted (a table key, a comment) is not registered.
+		expect(registered('GET /api/x', "['GET /api/x', ['path']] // GET /api/x")).toBe(false);
+		expect(registered('GET /api/x', "this.addStatic('user', 'GET /api/x', h)")).toBe(true);
+		expect(registered('GET /api/x/:id', "parseDynamicRoute('user', 'GET', '/api/x/:id', h)")).toBe(true);
 		expect(registered('GET /api/threads/:id/messages')).toBe(true);
 	});
 

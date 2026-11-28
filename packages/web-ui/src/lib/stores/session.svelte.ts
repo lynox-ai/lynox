@@ -69,8 +69,8 @@ export function markMandateMemoryBlocked(reason: 'off' | 'missing'): void {
 	_mandateMemoryBlocked = reason;
 }
 
-// A delegated access that has ended: revoked, or past its end (engine 403 `mandate_revoked`, or
-// `mandate_ended`). Its own screen, not the expired banner: signing in again does not bring it
+// A delegated access that has ended: revoked, or past its end (engine 403 `mandate_revoked`, sent
+// for both). Its own screen, not the expired banner: signing in again does not bring it
 // back, so there is no button, only who to ask (U-306 B2). Not dismissable; it holds until the
 // page is left.
 let _accessEnded = $state(false);

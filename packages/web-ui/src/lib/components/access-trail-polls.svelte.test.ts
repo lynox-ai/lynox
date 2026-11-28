@@ -176,7 +176,7 @@ describe('the texts, as decided (U-047, U-440, U-306)', () => {
 		try {
 			setLocale('de');
 			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one'), t('access_trail.poll_day'), t('access_trail.poll_day_one')]).toEqual([
-				'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) und was die Oberfläche beim Öffnen liest (Einstellungen, Chatliste, Zähler, Pläne) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln. Nach 30 Tagen bleibt von laufender Arbeit und Anbietern eine Zeile je Tag.',
+				'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) und Zähler (Posteingang, Freigaben, eingerichtete Schlüssel, Nachladen der Inbox) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln. Nach 30 Tagen bleibt von laufender Arbeit und Anbietern eine Zeile je Tag.',
 				'{n} Statusabfragen ({span})',
 				'Eine Statusabfrage ({time})',
 				'{n} Abfragen, die letzte am {time}',
@@ -184,7 +184,7 @@ describe('the texts, as decided (U-047, U-440, U-306)', () => {
 			]);
 			setLocale('en');
 			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one'), t('access_trail.poll_day'), t('access_trail.poll_day_one')]).toEqual([
-				'Status requests (running work, tasks, costs, providers) and what the interface reads when it opens (settings, chat list, counts, plans) are grouped. The interface makes most of them by itself. Expand to see each one. After 30 days, running work and providers keep one line per day.',
+				'Status requests (running work, tasks, costs, providers) and counts (inbox, approvals, keys that are set, inbox loading) are grouped. The interface makes most of them by itself. Expand to see each one. After 30 days, running work and providers keep one line per day.',
 				'{n} status requests ({span})',
 				'One status request ({time})',
 				'{n} requests, the last on {time}',

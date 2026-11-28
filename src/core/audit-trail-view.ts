@@ -151,25 +151,24 @@ export function isInterfacePoll(row: Pick<TrailRow, 'phase' | 'action'>): boolea
 
 /**
  * Reads the web UI makes by itself that are not a timer of the status bar or the nav, so they are
- * not in `INTERFACE_POLLS` (which a test holds to the pollers exactly): what the shell reads when it
- * loads (configuration, whether secrets are set, the chat list, the inbox and approval counts), and
- * three loops that run while a view is open or a sign-in runs (the inbox's own loading, the plan
- * list, Google's sign-in status). The view groups them with the polls (U-306 B1(b) and C).
+ * not in `INTERFACE_POLLS` (which a test holds to the pollers exactly): whether secrets are set,
+ * the inbox and approval counts, and the inbox's own loading loop. The view groups them with the
+ * polls (U-306 B1(b) and C). Each answers with a count or a state, never a name or a text, so a
+ * read the person made on purpose that lands here tells nothing it hides.
  *
- * None of them takes a path parameter, and none answers with a session's messages: the chat list
- * carries the chats' titles, the plan list its plans' names. Grouping changes no row and hides
- * nothing: opening the group shows each read, like `GET /api/tasks` (decided 2026-11-28). After
- * 30 days they stay single rows; only `FOLDED_POLLS` (audit-retention.ts) folds into a day.
+ * Left out on purpose, although the interface also reads them by itself: the chat list (it carries
+ * each chat's title and summary, and `limit`/`includeArchived` are not recorded, so a read of every
+ * chat could not be told from the shell's load), the configuration, the plan list and Google's
+ * status (each is also the first load of a view the person opens, and the configuration and the
+ * plan list name things). They stay single lines. Grouping changes no row and hides nothing:
+ * opening the group shows each read. After 30 days these stay single rows; only `FOLDED_POLLS`
+ * (audit-retention.ts) folds into a day.
  */
 export const INTERFACE_READS: ReadonlySet<string> = new Set([
-  'GET /api/config',
   'GET /api/secrets/status',
-  'GET /api/threads',
   'GET /api/inbox/counts',
   'GET /api/approvals/count',
   'GET /api/inbox/cold-start',
-  'GET /api/triggers',
-  'GET /api/google/status',
 ]);
 
 /** Targets a run wrote and failed: summed over its windows, a lower bound when one did not say. */
@@ -688,8 +687,8 @@ export interface TrailNames {
   thread(id: string): string | undefined;
   /** A mail's subject in the inbox. */
   mail(id: string): string | undefined;
-  /** A workflow run's name. */
-  workflow(id: string): string | undefined;
+  /** A workflow run, by its id or the start of it, with its full id and its name. */
+  workflow(id: string): { readonly id: string; readonly name: string } | undefined;
 }
 
 /**
@@ -697,16 +696,21 @@ export interface TrailNames {
  * sits in the row's target: a path segment (counted from the leading slash), or a query value.
  * A contact and a file are named in the target itself; the others are looked up.
  */
-type NamedRead = { readonly kind: 'thread' | 'mail' | 'workflow' | 'contact'; readonly segment: number } | { readonly kind: 'file'; readonly query: string };
+type NamedRead =
+  | { readonly kind: 'thread' | 'mail' | 'workflow' | 'contact'; readonly segment: number; readonly exact?: true }
+  | { readonly kind: 'file'; readonly query: string };
 const NAMED_READS: ReadonlyMap<string, NamedRead> = new Map<string, NamedRead>([
   ['GET /api/threads/:id', { kind: 'thread', segment: 3 }],
   ['GET /api/threads/:id/messages', { kind: 'thread', segment: 3 }],
   ['GET /api/threads/:id/debug-export', { kind: 'thread', segment: 3 }],
+  ['GET /api/inbox/items/:id', { kind: 'mail', segment: 4 }],
+  ['GET /api/inbox/items/:id/audit', { kind: 'mail', segment: 4 }],
   ['GET /api/inbox/items/:id/full', { kind: 'mail', segment: 4 }],
   ['GET /api/inbox/items/:id/thread', { kind: 'mail', segment: 4 }],
   ['GET /api/inbox/items/:id/context', { kind: 'mail', segment: 4 }],
   ['GET /api/workflows/:id', { kind: 'workflow', segment: 3 }],
-  ['GET /api/workflows/:id/steps', { kind: 'workflow', segment: 3 }],
+  // The steps route reads by the exact id (a run whose id only starts so is not read): named only then.
+  ['GET /api/workflows/:id/steps', { kind: 'workflow', segment: 3, exact: true }],
   ['GET /api/crm/contacts/:name/interactions', { kind: 'contact', segment: 4 }],
   ['GET /api/crm/contacts/:name/deals', { kind: 'contact', segment: 4 }],
   ['GET /api/files/read', { kind: 'file', query: 'path' }],
@@ -749,14 +753,18 @@ function nameOf(action: string, target: string | null, names: TrailNames): strin
     case 'contact': return shownName(key);
     case 'thread': return shownName(names.thread(key));
     case 'mail': return shownName(names.mail(key));
-    case 'workflow': return shownName(names.workflow(key));
+    case 'workflow': {
+      const run = names.workflow(key);
+      return run === undefined || (named.exact === true && run.id !== key) ? undefined : shownName(run.name);
+    }
   }
 }
 
 /**
  * The entries with the name of what each read or refused read was about: looked up now, on the
  * owner's request, never written into a row, so a renamed object shows its name of
- * today and a deleted one none. A lookup that throws names nothing. Runs' steps are named too.
+ * today and a deleted one none. A lookup that throws names nothing. The reads under a run are
+ * named too; a step (a write) never is.
  */
 export function nameReads(entries: readonly TrailEntry[], names: TrailNames): TrailEntry[] {
   const safe: TrailNames = {

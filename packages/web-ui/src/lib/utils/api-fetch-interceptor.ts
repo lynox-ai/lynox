@@ -42,7 +42,9 @@ export function installApiFetchInterceptor(): void {
 					markSessionExpired();
 				} else {
 					const code = await refusalCode(response);
-					if (code === 'mandate_revoked' || code === 'mandate_ended') markAccessEnded();
+					// Only this instance's own answer ends the access for the page: the notice stays and
+					// holds back the expired banner, so another origin's body must not set it.
+					if (code === 'mandate_revoked' || code === 'mandate_ended') { if (sameOrigin(url)) markAccessEnded(); }
 					else if (code === 'mandate_memory_off') markMandateMemoryBlocked('off');
 					else if (code === 'mandate_memory_missing') markMandateMemoryBlocked('missing');
 				}
@@ -53,12 +55,19 @@ export function installApiFetchInterceptor(): void {
 }
 
 /**
- * The code of a 403 that is about the session, not the view: `mandate_revoked` and
- * `mandate_ended` (a delegated access that has ended, revoked or past its end) and `mandate_memory_off`/`_missing` (a delegated access this instance
+ * The code of a 403 that is about the session, not the view: `mandate_revoked` (a delegated
+ * access that has ended, revoked or past its end; the engine sends this code for both) and `mandate_memory_off`/`_missing` (a delegated access this instance
  * cannot let in while it runs without durable knowledge). Every other 403 is a state of the
  * view that got it (a managed instance, an owner-only action) and stays the view's to show.
  * Reads a clone, so the caller still gets the whole body.
  */
+/** Whether a URL is this page's own origin; a relative one is. Without a location (tests), it counts as own. */
+function sameOrigin(url: string): boolean {
+	const here = typeof window !== 'undefined' ? window.location : undefined;
+	if (here === undefined) return true;
+	try { return new URL(url, here.href).origin === here.origin; } catch { return false; }
+}
+
 async function refusalCode(response: Response): Promise<string | null> {
 	try {
 		const body: unknown = await response.clone().json();
