@@ -18949,9 +18949,8 @@ describe('LynoxHTTPApi', () => {
   describe('rate limiting', () => {
     it('loopback gets higher rate limit (spoofed X-Forwarded-For ignored for limit tier)', async () => {
       // Security: rate limiter uses socket IP (not X-Forwarded-For) for loopback detection.
-      // Loopback gets RATE_MAX_LOOPBACK (600), so 127 requests should all succeed. The whole
-      // file shares one per-IP window; this count pays back the three requests the
-      // prompt-withdraw tests above add (it was 130).
+      // Loopback gets RATE_MAX_LOOPBACK (600), so 127 requests should all succeed. With the
+      // proxy trusted they count in the window of the address they name, not in 127.0.0.1's.
       const fakeIp = '203.0.113.42';
       const promises = Array.from({ length: 127 }, () =>
         fetch(`${baseUrl}/api/secrets`, {
@@ -19052,7 +19051,7 @@ describe('LynoxHTTPApi', () => {
           const second = windows.get(key)!;
           expect(second, 'the case: a new window opened after the snapshot').not.toBe(first);
           // And a client the snapshot did not know yet. Its own window needs the proxy trusted,
-          // which the file's beforeAll stubs before this instance starts.
+          // which the file keeps stubbed (beforeAll, and again after each test that clears it).
           const other = await fetch(`http://127.0.0.1:${portOf(own)}/api/secrets`, { headers: { ...authHeaders(), 'X-Forwarded-For': '203.0.113.77' } });
           await other.text();
           const newcomer = windows.get('203.0.113.77');
