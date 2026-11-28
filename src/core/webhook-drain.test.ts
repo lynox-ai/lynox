@@ -614,6 +614,21 @@ describe('the webhook drain', () => {
     expect(seen[0]).not.toBeNull();
   });
 
+  // The worker reads a run's mark that only an answer made it due in `executeStandard`, which only
+  // agent triggers reach; that an event never starts one is what lets the frame leave events out
+  // of that mark. Pinned here, at the drain's own filter.
+  it.each([
+    ['an agent trigger', "UPDATE triggers SET effect = 'run_agent' WHERE id = ?"],
+    ['a trigger that is no longer a webhook', "UPDATE triggers SET source = 'cron' WHERE id = ?"],
+  ])('does not start an event of %s: only a webhook\'s workflow runs from events', async (_what, sql) => {
+    const t = sharedTrigger();
+    const id = deliver(t);
+    engineDb.getDb().prepare(sql).run(t);
+    await loop.tick();
+    expect(runner.run, 'no workflow ran').not.toHaveBeenCalled();
+    expect(eventOf(t, id), 'the event was dropped, not run').toMatchObject({ state: 'dropped', reason: EVENT_TRIGGER_NOT_LIVE });
+  });
+
   it('drops the oldest event of a trigger that no longer accepts one, and reports it once', async () => {
     const t = sharedTrigger();
     const id = deliver(t);
