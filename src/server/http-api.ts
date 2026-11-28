@@ -99,6 +99,7 @@ import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, c
 import { CONSENT_UNRECOGNISED } from '../contract/prompt.js';
 import { decideConsent } from '../core/consent-ask.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
+import { withoutForeignMarks } from '../core/foreign-marks.js';
 import { approvalCard, approvalScopeOf, listScopeOf, mandateNamer, setupLines, type DisplayNameOf, type SetupMarks } from '../core/approval-view.js';
 import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
@@ -502,7 +503,7 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
   const rest = isOwnerPrincipal(principal)
     // Whether it was a question or an alert stays with the notice when its chat is gone.
     ? { ...stored, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_escalation_case: escalationCase, last_escalation_chat: chat, last_escalation_kind: escalationChat?.kind }
-    : { ...stored, last_escalation_at: undefined, last_escalation_outcome: undefined, last_escalation_case: undefined, last_escalation_chat: undefined, last_escalation_kind: undefined };
+    : { ...withoutForeignMarks(stored, principal), last_escalation_at: undefined, last_escalation_outcome: undefined, last_escalation_case: undefined, last_escalation_chat: undefined, last_escalation_kind: undefined };
   if (!planPauseOn()) return rest;
   const paused = isPaused(trigger);
   if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
@@ -9874,6 +9875,12 @@ export class LynoxHTTPApi {
       const { getPipeline } = await import('../tools/builtin/pipeline.js');
       const planned = getPipeline(params['id']!, history);
       if (!planned || planned.template !== true) { errorResponse(res, 404, 'Workflow not found'); return; }
+      // The preview answers what a schedule would bind, so it is refused where the schedule is
+      // (`POST /api/tasks`): a mandate does not get another mandate's workflow bound for it.
+      const { foreignWorkflowScheduleRefusalKind, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL } = await import('../core/plan-stamp.js');
+      const refusalKind = foreignWorkflowScheduleRefusalKind(this._principalOf(_req), planned.id, history);
+      if (refusalKind === 'foreign') { errorResponse(res, 403, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, 'foreign_workflow'); return; }
+      if (refusalKind === 'unreadable') { errorResponse(res, 403, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL, 'unreadable_workflow'); return; }
       if (!isSchedulableWorkflow(planned)) { errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled.`); return; }
       const prepared = prepareWorkflowGrant(planned, {
         method: b['method'], host: b['host'], paths: b['paths'], params: b['params'], cron: scheduleCron, afterUntrusted: b['afterUntrusted'],

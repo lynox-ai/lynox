@@ -11,6 +11,7 @@ import { foreignWorkflowScheduleRefusalKind } from '../../core/plan-stamp.js';
 import { lastRunResultFor } from '../../core/member-connection-notes.js';
 import { noticeLanguage } from '../../core/notice-language.js';
 import { WORKER_NOTICES } from '../../core/worker-notices.js';
+import { withoutForeignMarks } from '../../core/foreign-marks.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type BeforeTriggerWrite } from '../../core/task-manager.js';
@@ -811,7 +812,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (input.status === 'completed') {
           const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal, mark), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
-          return `Task completed: ${formatTaskLine(task, taskReaderOf(agent), '', doneReader(agent))}`;
+          return `Task completed: ${formatTaskLine(withoutForeignMarks(task, agent.principal), taskReaderOf(agent), '', doneReader(agent))}`;
         }
 
         const task = w.run('apply', () => managerRef.update(input.task_id, {
@@ -846,7 +847,8 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         // An edit can re-open consent: changing what a trigger RUNS clears the stamp
         // (`trigger-store.ts`), so the row just edited may be held back again — and
         // this report is the only place that says so.
-        return `Task updated: ${formatTaskLine(task, taskReaderOf(agent), `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
+        // A mandate may change another mandate's schedule; the report reads it as the trigger list does.
+        return `Task updated: ${formatTaskLine(withoutForeignMarks(task, agent.principal), taskReaderOf(agent), `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);
@@ -941,7 +943,8 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     // with ≥20 TODOs truncate every trigger off the default-20 slice below;
     // putting them first guarantees they're never starved by the limit. Any
     // overflowing TODOs are still accounted for by the "... and N more" line.
-    const tasks = [...triggers, ...todos];
+    // A mandate's chat reads another mandate's schedules as the trigger list does (`withoutForeignMarks`).
+    const tasks = [...triggers.map((t) => withoutForeignMarks(t, agent.principal)), ...todos];
 
     const limited = tasks.slice(0, input.limit ?? 20);
     if (limited.length === 0) return 'No tasks found.';

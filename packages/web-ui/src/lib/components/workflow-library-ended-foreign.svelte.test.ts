@@ -199,3 +199,42 @@ describe('a schedule refused after it was sent, in the reader\'s language (ux U-
 		expect(await sendSchedule({ error: 'engine sentence' })).toContain('engine sentence');
 	});
 });
+
+describe('a grant preview refused, in the reader\'s language like the schedule (U-085, U-372)', () => {
+	async function preview(body: unknown, status = 403): Promise<string> {
+		vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+			const path = new URL(String(input), 'http://localhost').pathname.replace(/^\/api/, '');
+			const method = init?.method ?? 'GET';
+			if (method === 'GET' && path === '/workflows/library') return new Response(JSON.stringify({ workflows: [base('wf-m', 'Mine')], viewer: 'mandate', grantEnabled: true }), { status: 200 });
+			if (method === 'POST' && path === '/workflows/wf-m/grant-preview') return new Response(JSON.stringify(body), { status });
+			return new Response('{}', { status: 404 });
+		}));
+		const { default: WorkflowLibraryView } = await import('./WorkflowLibraryView.svelte');
+		component = mount(WorkflowLibraryView, { target });
+		await settle();
+		button(card('Mine'), 'workflow_library.schedule')!.click();
+		await settle();
+		const toggle = [...target.querySelectorAll<HTMLLabelElement>('label')].find((l) => l.textContent?.trim() === t('workflow_library.grant_toggle'))?.querySelector('input');
+		expect(toggle, 'the grant toggle').toBeDefined();
+		toggle!.click();
+		await settle();
+		const go = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === t('workflow_library.grant_preview'));
+		expect(go, 'the preview button').toBeDefined();
+		go!.click();
+		await settle();
+		return target.querySelector('[data-schedule-error]')?.textContent?.trim() ?? '';
+	}
+
+	it('names another person\'s workflow and an unreadable one by their code, not the engine\'s English', async () => {
+		expect(await preview({ error: 'Not scheduled: engine sentence', code: 'foreign_workflow' })).toBe(`Nicht geplant: ${FOREIGN}`);
+		if (component) unmount(component);
+		component = undefined;
+		const unreadable = await preview({ error: 'engine sentence', code: 'unreadable_workflow' });
+		expect(unreadable).toContain('Nicht geplant: lynox konnte nicht lesen, wer diesen Workflow angelegt hat.');
+		expect(unreadable).not.toContain('engine sentence');
+	});
+
+	it('CONTROL: a refusal without a known code still shows the engine\'s sentence', async () => {
+		expect(await preview({ error: 'engine sentence' }, 400)).toBe('engine sentence');
+	});
+});
