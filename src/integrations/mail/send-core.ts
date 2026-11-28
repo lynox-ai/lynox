@@ -20,6 +20,7 @@
 // provider.send; the inbox-reply HTTP handler treats the explicit user
 // click as the confirmation and skips the prompt.
 
+import { mailTargets, UnknownSendTargetError, type SendTarget } from '../../core/send-target.js';
 import {
   MailError,
   isReceiveOnlyType,
@@ -96,7 +97,8 @@ import {
   checkRecipientDedup,
   recordMailSend,
 } from './tools/rate-limit.js';
-import { pv, singleLine } from '../../core/prompt-value.js';
+import { joinPrompts, pv, singleLine } from '../../core/prompt-value.js';
+import { MAIL_DIALOG, type DialogLanguage } from '../../tools/dialog-text.js';
 import type { PromptText } from '../../types/index.js';
 
 /**
@@ -433,9 +435,10 @@ const BODY_PREVIEW_CHARS = 4000;
  * for *credential*-shaped content, not for bulk data). So when the body does
  * not fit, say how large it really is and that the remainder is unseen.
  */
-export function buildBodyBlock(body: string): PromptText {
+export function buildBodyBlock(body: string, language: DialogLanguage = 'en'): PromptText {
+  const said = MAIL_DIALOG[language];
   const flat = body.replace(/\s+/g, ' ').trim();
-  if (flat.length === 0) return pv`> _(empty body)_`;
+  if (flat.length === 0) return said.emptyBody;
   if (flat.length <= BODY_PREVIEW_CHARS) return pv`> ${flat}`;
   const shown = truncate(flat, BODY_PREVIEW_CHARS);
   // Count from the rendered string (minus the ellipsis truncate appends) rather
@@ -444,7 +447,7 @@ export function buildBodyBlock(body: string): PromptText {
   // the raw `body.length` would overstate the hidden volume for any normal
   // multi-line mail, since collapsing only ever shortens.
   const shownChars = shown.length - 1;
-  return pv`> ${shown}\n\n⚠ **Body is ${String(flat.length)} chars — only the first ${String(shownChars)} are shown above.**`;
+  return said.bodyCut(shown, String(flat.length), String(shownChars));
 }
 
 // Two mechanisms, and they cover DIFFERENT surfaces — this is the rule, not a
@@ -466,10 +469,11 @@ export function buildBodyBlock(body: string): PromptText {
 /**
  * Render an address list for a preview: one line, each address flattened.
  *
- * `mail_send` gets its recipients from `parseAddressList`, which already drops
- * any segment containing CR/LF. `mail_reply` does NOT: its default recipient is
- * `original.envelope.replyTo[0] ?? original.envelope.from[0]` and its Cc comes
- * from `original.envelope.to`/`.cc` — parsed IMAP values that never pass
+ * `mail_send`, and `mail_reply`'s `to`/`cc` overrides, get their recipients from
+ * `parseAddressList`, which already drops any segment containing CR/LF.
+ * `mail_reply`'s default recipient does NOT: it is
+ * `original.envelope.replyTo[0] ?? original.envelope.from[0]`, and reply_all's Cc
+ * comes from `original.envelope.to`/`.cc` — parsed IMAP values that never pass
  * through `parseAddress`. The guarantee is therefore not uniform across
  * callers, so the preview does not depend on it.
  */
@@ -529,38 +533,52 @@ export function previewSendingAccount(provider: MailProvider, sendingAddress: st
  * user. Kept in send-core so the inbox-pane (if it ever surfaces a
  * preview elsewhere) can render the same shape.
  */
-export function buildSendPreview(ctx: SendCoreBeforeSendCtx): PromptText {
-  const personaLine = ctx.accountConfig
-    ? `\n  Persona: ${truncate(personaFor(ctx.accountConfig), 160)}`
-    : '';
-  const bodyPreview = buildBodyBlock(ctx.body);
+export function buildSendPreview(ctx: SendCoreBeforeSendCtx, language: DialogLanguage = 'en'): PromptText {
+  const said = MAIL_DIALOG[language];
+  const persona = ctx.accountConfig ? said.persona(truncate(personaFor(ctx.accountConfig), 120)) : pv``;
+  const bodyPreview = buildBodyBlock(ctx.body, language);
+  const from = previewSendingAccount(ctx.provider, ctx.sendingAddress);
   if (ctx.isMassSend) {
-    return pv`⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients
-
-**Account:** ${previewSendingAccount(ctx.provider, ctx.sendingAddress)}${personaLine ? pv`
-**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}
-**Recipients:**
-${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${singleLine(a.address)}`).join('\n')}
-**Subject:** ${singleLine(ctx.subject)}
-
-${bodyPreview}`;
+    const recipients = [...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${singleLine(a.address)}`).join('\n');
+    return said.massSend(String(ctx.uniqueRecipientCount), from, persona, recipients, singleLine(ctx.subject), bodyPreview);
   }
-  return pv`**Send email?**
-
-**To:** ${previewAddressList(ctx.to)}${ctx.cc.length > 0 ? pv`
-**Cc:** ${previewAddressList(ctx.cc)}` : ''}${ctx.bcc.length > 0 ? pv`
-**Bcc:** ${previewAddressList(ctx.bcc)}` : ''}
-**Subject:** ${singleLine(ctx.subject)}
-**From:** ${previewSendingAccount(ctx.provider, ctx.sendingAddress)}${personaLine ? pv`
-**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}
-
-${bodyPreview}`;
+  const copies = joinPrompts([
+    ctx.cc.length > 0 ? said.cc(previewAddressList(ctx.cc)) : pv``,
+    ctx.bcc.length > 0 ? said.bcc(previewAddressList(ctx.bcc)) : pv``,
+  ], '');
+  return said.send(previewAddressList(ctx.to), copies, singleLine(ctx.subject), from, persona, bodyPreview);
 }
 
 /**
  * Parse a comma-separated recipient list into MailAddress objects.
  * Accepts `Name <addr@host>`, `"Name" <addr@host>`, or bare `addr@host`.
  */
+/**
+ * The send targets of a call's recipient fields, parsed as the send parses them. A field that is
+ * set but yields no address (only text that does not parse, or a value that is not text) makes the
+ * whole call's targets unreadable: the check before a send then refuses it.
+ *
+ * `requireOne`: a send whose recipients are only these fields (no default recipient) with none
+ * set at all is unreadable too. An empty list never means "nothing to check, so send".
+ */
+export function recipientFieldTargets(
+  fields: readonly unknown[],
+  parse: (raw: string) => MailAddress[] = parseAddressList,
+  requireOne = false,
+): SendTarget[] {
+  const addresses: string[] = [];
+  for (const field of fields) {
+    if (field === undefined || field === null) continue;
+    if (typeof field !== 'string') throw new UnknownSendTargetError('recipient field');
+    if (field.trim() === '') continue;
+    const parsed = parse(field);
+    if (parsed.length === 0) throw new UnknownSendTargetError('recipient field');
+    addresses.push(...parsed.map((a) => a.address));
+  }
+  if (requireOne && addresses.length === 0) throw new UnknownSendTargetError('recipient field');
+  return mailTargets(addresses);
+}
+
 export function parseAddressList(raw: string | undefined): MailAddress[] {
   if (!raw) return [];
   return raw

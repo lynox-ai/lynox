@@ -76,7 +76,7 @@ function chat(thread: string | undefined): IAgent {
   toolContext.containment = containment;
   toolContext.runHistory = history;
   toolContext.threadStore = threads.store as never;
-  return { toolContext, principal: OWNER_PRINCIPAL, currentThreadId: thread, getAvailableTools: () => tools } as unknown as IAgent;
+  return { toolContext, principal: OWNER_PRINCIPAL, currentThreadId: thread, getAvailableTools: () => tools, hasRunCostCeiling: () => false } as unknown as IAgent;
 }
 
 const ID = 'wf-retry';

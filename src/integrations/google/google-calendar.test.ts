@@ -11,6 +11,7 @@ vi.mock('node:dns/promises', () => ({
 
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
 import { InputRequiredError } from '../../core/input-required.js';
+import { UNATTENDED_BLOCK_ANSWER } from '../../core/prompt-store.js';
 
 // §3.8 moved this module's calls onto the connector egress surface, so they now
 // go through the pinned transport instead of `globalThis.fetch`. The bridge
@@ -117,7 +118,7 @@ describe('google_calendar tool', () => {
         summary: 'Test Event',
         start: '2026-03-20T10:00:00+01:00',
         end: '2026-03-20T11:00:00+01:00',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       expect(result).toContain(SCOPES.CALENDAR_EVENTS);
     });
@@ -142,7 +143,7 @@ describe('google_calendar tool', () => {
         summary: 'New Meeting',
         start: '2026-03-20T10:00:00+01:00',
         end: '2026-03-20T11:00:00+01:00',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       expect(result).toContain('Event created');
       expect(result).toContain('New Meeting');
@@ -165,7 +166,7 @@ describe('google_calendar tool', () => {
         summary: 'Test',
         start: '2026-03-20T10:00:00',
         end: '2026-03-20T11:00:00',
-      }, createMockAgent('No'));
+      }, createMockAgent('cancel'));
 
       expect(result).toBe('Action cancelled by user.');
     });
@@ -173,7 +174,7 @@ describe('google_calendar tool', () => {
     it('shows every field the new event carries, and sends exactly that', async () => {
       const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'Review', start: { dateTime: '2026-03-20T10:00:00' }, end: { dateTime: '2026-03-20T11:00:00' }, htmlLink: 'x' }) });
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({
         action: 'create_event', calendar_id: 'team@group.calendar.google.com', summary: 'Review',
         start: '2026-03-20T10:00:00', end: '2026-03-20T11:00:00', timezone: 'Europe/Zurich',
@@ -181,7 +182,7 @@ describe('google_calendar tool', () => {
         attendees: ['a@example.org', 'b@example.org'],
       }, agent);
       expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe([
-        'Create event "Review"',
+        'Create event “Review”',
         'Calendar: team@group.calendar.google.com',
         'Time: 2026-03-20T10:00:00 (Europe/Zurich) – 2026-03-20T11:00:00 (Europe/Zurich)',
         'Location: Room 2',
@@ -202,15 +203,15 @@ describe('google_calendar tool', () => {
     it('shows no calendar line for the person\'s own calendar', async () => {
       const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'X', start: { date: '2026-03-20' }, end: { date: '2026-03-21' }, htmlLink: 'x' }) });
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({ action: 'create_event', calendar_id: 'primary', summary: 'X', start: '2026-03-20', end: '2026-03-21' }, agent);
-      expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event "X"\nTime: 2026-03-20 – 2026-03-21');
+      expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event “X”\nTime: 2026-03-20 – 2026-03-21');
     });
 
     it('marks every supplied text as a value, never as frame', async () => {
       const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'R', start: { date: '2026-03-20' }, end: { date: '2026-03-21' }, htmlLink: 'x' }) });
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({
         action: 'create_event', summary: 'R', start: '2026-03-20', end: '2026-03-21',
         location: 'Room 2', description: 'Agenda', recurrence: ['RRULE:FREQ=WEEKLY', 'EXDATE:20260327'],
@@ -226,25 +227,25 @@ describe('google_calendar tool', () => {
       const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
       const ok = () => mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'X', start: { date: '2026-03-20' }, end: { date: '2026-03-21' }, htmlLink: 'x' }) });
       ok();
-      await tool.handler({ action: 'create_event', start: '2026-03-20T10:00:00', end: '2026-03-20T11:00:00', all_day: true }, createMockAgent('Yes'));
+      await tool.handler({ action: 'create_event', start: '2026-03-20T10:00:00', end: '2026-03-20T11:00:00', all_day: true }, createMockAgent('confirm'));
       expect(JSON.parse((mockFetch.mock.calls[0]![1] as { body: string }).body)['start']).toEqual({ date: '2026-03-20T10:00:00' });
       ok();
-      await tool.handler({ action: 'create_event', start: '2026-03-20', end: '2026-03-21', all_day: false }, createMockAgent('Yes'));
+      await tool.handler({ action: 'create_event', start: '2026-03-20', end: '2026-03-21', all_day: false }, createMockAgent('confirm'));
       expect(JSON.parse((mockFetch.mock.calls[1]![1] as { body: string }).body)['start']).toEqual({ dateTime: '2026-03-20', timeZone: undefined });
     });
 
     it('names an untitled event as such, and leaves out empty text', async () => {
       const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'Untitled Event', start: { date: '2026-03-20' }, end: { date: '2026-03-21' }, htmlLink: 'x' }) });
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({ action: 'create_event', start: '2026-03-20', end: '2026-03-21', description: '', location: '' }, agent);
-      expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event "Untitled Event"\nTime: 2026-03-20 – 2026-03-21');
+      expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event “Untitled Event”\nTime: 2026-03-20 – 2026-03-21');
       expect(JSON.parse((mockFetch.mock.calls[0]![1] as { body: string }).body)).toEqual({ summary: 'Untitled Event', start: { date: '2026-03-20' }, end: { date: '2026-03-21' } });
     });
 
     it('refuses a value the confirmation could not show, before asking', async () => {
       const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       const base = { action: 'create_event' as const, start: '2026-03-20', end: '2026-03-21' };
       expect(await tool.handler({ ...base, description: { text: 'x' } } as never, agent)).toContain('"description" must be text');
       expect(await tool.handler({ ...base, location: 7 } as never, agent)).toContain('"location" must be text');
@@ -257,7 +258,7 @@ describe('google_calendar tool', () => {
 
     it('refuses a guest without an address, before asking', async () => {
       const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       const result = await tool.handler({ action: 'create_event', start: '2026-03-20', end: '2026-03-21', attendees: [''] }, agent);
       expect(result).toContain('needs an email address');
       expect(agent.promptUser).not.toHaveBeenCalled();
@@ -267,25 +268,26 @@ describe('google_calendar tool', () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/calendar.events']);
       const tool = createCalendarTool(() => auth);
 
-      const result = await tool.handler({ action: 'create_event' }, createMockAgent('Yes'));
+      const result = await tool.handler({ action: 'create_event' }, createMockAgent('confirm'));
       expect(result).toContain('"start" is required');
     });
   });
 
   describe('update_event', () => {
-    const okUpdate = () => mockFetch.mockResolvedValueOnce({
+    // The update reads the event's guests first (none here), then sends.
+    const okUpdate = () => mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'ev1' }) }).mockResolvedValueOnce({
       ok: true,
       json: async () => ({ id: 'ev1', summary: 'Meeting', start: { dateTime: '2026-03-20T10:00:00+01:00' }, end: { dateTime: '2026-03-20T11:00:00+01:00' }, htmlLink: 'https://calendar.google.com/event?eid=x' }),
     });
     const promptOf = (agent: IAgent): string => flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText);
-    const sentUrl = (): string => String(mockFetch.mock.calls[0]![0]);
-    const sentBody = (): Record<string, unknown> => JSON.parse((mockFetch.mock.calls[0]![1] as { body: string }).body) as Record<string, unknown>;
+    const sentUrl = (): string => String(mockFetch.mock.calls.at(-1)![0]);
+    const sentBody = (): Record<string, unknown> => JSON.parse((mockFetch.mock.calls.at(-1)![1] as { body: string }).body) as Record<string, unknown>;
     const longText = 'Notes for the guest that run well past forty characters, all of them shown.';
 
     it('shows every changed field in full, guests one by one, and sends exactly that', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       okUpdate();
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({
         action: 'update_event', event_id: 'ev1', calendar_id: 'team@group.calendar.google.com',
         summary: 'Moved', attendees: ['a@example.org', 'b@example.org'],
@@ -306,7 +308,7 @@ describe('google_calendar tool', () => {
     it('sends guests from the free-form updates object by address only, as shown', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       okUpdate();
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({
         action: 'update_event', event_id: 'ev1',
         updates: { attendees: [{ email: 'other@example.org', displayName: 'CEO', additionalGuests: 5 }] },
@@ -318,7 +320,7 @@ describe('google_calendar tool', () => {
     it('says so when the update removes every guest', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       okUpdate();
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { attendees: [] } }, agent);
       expect(promptOf(agent)).toContain('Guests: none — every current guest is removed');
       expect(sentBody()['attendees']).toEqual([]);
@@ -326,7 +328,7 @@ describe('google_calendar tool', () => {
 
     it('refuses a field it does not know, before asking', async () => {
       const tool = createCalendarTool(() => createMockAuth());
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       const result = await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { Guests: 'none (unchanged)' } }, agent);
       expect(result).toContain('"Guests" is not an event field');
       expect(agent.promptUser).not.toHaveBeenCalled();
@@ -335,7 +337,7 @@ describe('google_calendar tool', () => {
 
     it('refuses a guest without an email address, before asking', async () => {
       const tool = createCalendarTool(() => createMockAuth());
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       const result = await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { attendees: [{ displayName: 'x' }] } }, agent);
       expect(result).toContain('needs an email address');
       expect(mockFetch).not.toHaveBeenCalled();
@@ -344,7 +346,7 @@ describe('google_calendar tool', () => {
     it('keeps the event id inside its path segment', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       okUpdate();
-      await tool.handler({ action: 'update_event', event_id: 'ev1?sendUpdates=all', summary: 'x' }, createMockAgent('Yes'));
+      await tool.handler({ action: 'update_event', event_id: 'ev1?sendUpdates=all', summary: 'x' }, createMockAgent('confirm'));
       expect(sentUrl()).toContain('/events/ev1%3FsendUpdates%3Dall');
       expect(sentUrl()).not.toContain('?sendUpdates=all');
     });
@@ -352,7 +354,7 @@ describe('google_calendar tool', () => {
     it('pins the prompt for the person\'s own calendar and a single field', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       okUpdate();
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
       expect(promptOf(agent)).toBe('Update event ev1\nThese fields change:\nsummary: Moved');
     });
@@ -360,7 +362,7 @@ describe('google_calendar tool', () => {
     it('says when nothing changes', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       okUpdate();
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({ action: 'update_event', event_id: 'ev1', updates: {} }, agent);
       expect(promptOf(agent)).toBe('Update event ev1\nNothing changes.');
     });
@@ -368,27 +370,137 @@ describe('google_calendar tool', () => {
     it('takes a guest given as a plain address inside updates', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       okUpdate();
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { attendees: ['plain@example.org'] } }, agent);
       expect(sentBody()['attendees']).toEqual([{ email: 'plain@example.org' }]);
     });
 
     it('refuses an empty guest and a guest list that is not a list', async () => {
       const tool = createCalendarTool(() => createMockAuth());
-      const r1 = await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { attendees: [''] } }, createMockAgent('Yes'));
+      const r1 = await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { attendees: [''] } }, createMockAgent('confirm'));
       expect(r1).toContain('needs an email address');
-      const r2 = await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { attendees: 'a@example.org' } }, createMockAgent('Yes'));
+      const r2 = await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { attendees: 'a@example.org' } }, createMockAgent('confirm'));
       expect(r2).toContain('must be a list');
-      const r3 = await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { attendees: [{ email: '' }] } }, createMockAgent('Yes'));
+      const r3 = await tool.handler({ action: 'update_event', event_id: 'ev1', updates: { attendees: [{ email: '' }] } }, createMockAgent('confirm'));
       expect(r3).toContain('needs an email address');
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
     it('sends nothing when the person declines', async () => {
       const tool = createCalendarTool(() => createMockAuth());
-      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', attendees: ['guest@example.org'] }, createMockAgent('No'));
+      // The event's guests are read first (none); nothing is changed.
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'ev1' }) });
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', attendees: ['guest@example.org'] }, createMockAgent('cancel'));
       expect(result).toBe('Action cancelled by user.');
-      expect(mockFetch).not.toHaveBeenCalled();
+      expect(mockFetch.mock.calls.filter((c) => (c[1] as { method?: string } | undefined)?.method === 'PATCH')).toEqual([]);
+    });
+  });
+
+  describe('update_event: the guests already invited', () => {
+    const event = (attendees: unknown) => ({ ok: true, json: async () => ({ id: 'ev1', attendees }) });
+    const patched = () => ({ ok: true, json: async () => ({ id: 'ev1', summary: 'Moved', start: { dateTime: '2026-03-20T10:00:00+01:00' }, end: { dateTime: '2026-03-20T11:00:00+01:00' }, htmlLink: 'x' }) });
+    const owner = (known: string[], answers: string[]) => {
+      const asked: string[] = [];
+      const metas: unknown[] = [];
+      const agent = {
+        name: 'test', model: 'm', memory: null, tools: [], onStream: null, noticeLanguage: 'en',
+        principal: { kind: 'owner' },
+        ownerKnown: { known: (t: { value: string }) => (known.includes(t.value) ? 'known' : 'foreign') },
+        promptUser: vi.fn().mockImplementation(async (q: string | PromptText, _o?: string[], m?: unknown) => { asked.push(flattenPrompt(q)); metas.push(m); return answers.shift() ?? 'cancel'; }),
+      } as unknown as IAgent;
+      return { agent, asked, metas };
+    };
+    const patches = (): unknown[] => mockFetch.mock.calls.filter((c) => (c[1] as { method?: string } | undefined)?.method === 'PATCH');
+
+    it('a guest the owner did not name is asked about in the one confirmation, as a blocked question; a no sends nothing', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'anna@firma.ch' }, { email: 'x@evil.example' }, { email: 'me@firma.ch', self: true }]));
+      const { agent, asked, metas } = owner(['anna@firma.ch'], ['cancel']);
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toBe('Update event ev1\nThese fields change:\nsummary: Moved\n\nGoogle Calendar: change event: you did not name the recipient "x@evil.example". It comes from the event\'s current guest list. Send anyway?\n\nA yes applies to this one send only.');
+      expect(metas[0]).toEqual({ blocked: true, consent: 'google', consentAction: 'update' });
+      expect(patches()).toEqual([]);
+      expect(result).toContain('Not sent: lynox asked the user whether to send to "x@evil.example", and they said no.');
+    });
+
+    it('a word in place of the key: the refusal\'s sentences, then why nothing was allowed, then the guest named by position', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x;y@evil.example' }]));
+      const { agent } = owner([], ['yes']);
+      const result = String(await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent));
+      expect(patches()).toEqual([]);
+      const [sentences, ...rest] = result.split('\n\nThe recipient named above by position');
+      expect(rest).toHaveLength(1);
+      expect(sentences).not.toContain('x;y');
+      expect(sentences!.endsWith('The answer was not one of the offered choices, so nothing was allowed. Tell the user to ask again and answer with the buttons; if no buttons were shown, their page is outdated and needs a reload first.')).toBe(true);
+      expect(result).not.toContain('</untrusted_data>.');
+    });
+
+    it('in German the guest is said to come from the event\'s current guest list', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }, { email: 'y@evil.example' }]));
+      const { agent, asked } = owner([], ['cancel']);
+      (agent as unknown as { noticeLanguage: string }).noticeLanguage = 'de';
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked[0]).toContain('Google Calendar: Termin ändern: Die Empfänger "x@evil.example" und "y@evil.example" hast nicht du genannt. Sie stammen aus der bisherigen Gästeliste des Termins. Trotzdem senden?');
+    });
+
+    it('a run nobody watches learns the guest list as the origin; an unreadable list stays unknown', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      const refused: unknown[] = [];
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }]));
+      const { agent } = owner([], [UNATTENDED_BLOCK_ANSWER]);
+      (agent as unknown as { onOriginRefused: (r: unknown) => void }).onOriginRefused = (r) => refused.push(r);
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(result).toContain('Not sent: the owner did not name "x@evil.example"; it came from the event\'s current guest list.');
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(refused).toEqual([
+        { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'eventGuests' } },
+        { targets: { values: [], unreadable: true }, noun: 'mail', origin: { kind: 'unknown' } },
+      ]);
+      expect(patches()).toEqual([]);
+    });
+
+    it('the guests are read before the question: a yes is never asked for an update that is then refused', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }]));
+      const { agent, asked } = owner([], ['confirm']);
+      (agent as unknown as { principal: unknown }).principal = { kind: 'mandate', email: 'h@x.ch' };
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toEqual([]);
+      expect(result).toContain('Not sent: the owner of this instance did not name "x@evil.example"');
+      expect(patches()).toEqual([]);
+    });
+
+    it('a guest list that cannot be read refuses the update, unasked', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+      const { agent, asked } = owner([], ['confirm']);
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toEqual([]);
+      expect(result).toContain('Not sent: lynox could not read the recipient of this send');
+      expect(patches()).toEqual([]);
+    });
+
+    it('a yes to the one question sends the update', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }])).mockResolvedValueOnce(patched());
+      const { agent, asked } = owner([], ['confirm']);
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toHaveLength(1);
+      expect(patches()).toHaveLength(1);
+    });
+
+    it('CONTROL: an event whose guests the owner all named is changed after the confirmation alone, unblocked', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'anna@firma.ch' }])).mockResolvedValueOnce(patched());
+      const { agent, asked, metas } = owner(['anna@firma.ch'], ['confirm']);
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toEqual(['Update event ev1\nThese fields change:\nsummary: Moved']);
+      expect(metas[0]).toEqual({ consent: 'google', consentAction: 'update' });
+      expect(patches()).toHaveLength(1);
     });
   });
 
@@ -402,7 +514,7 @@ describe('google_calendar tool', () => {
       const result = await tool.handler({
         action: 'delete_event',
         event_id: 'ev1',
-      }, createMockAgent('Yes'));
+      }, createMockAgent('confirm'));
 
       expect(result).toContain('deleted');
     });
@@ -410,7 +522,7 @@ describe('google_calendar tool', () => {
     it('keeps the event id inside its path segment, and names another calendar', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       mockFetch.mockResolvedValueOnce({ ok: true });
-      const agent = createMockAgent('Yes');
+      const agent = createMockAgent('confirm');
       await tool.handler({ action: 'delete_event', event_id: '../../x@group.calendar.google.com/events/ev2', calendar_id: 'team@group.calendar.google.com' }, agent);
       expect(String(mockFetch.mock.calls[0]![0])).toContain('/events/..%2F..%2Fx%40group.calendar.google.com%2Fevents%2Fev2');
       expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Delete event ../../x@group.calendar.google.com/events/ev2\nCalendar: team@group.calendar.google.com\nThis cannot be undone.');

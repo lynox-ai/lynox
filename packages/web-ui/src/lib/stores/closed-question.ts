@@ -1,3 +1,4 @@
+import { isConsentKind, type ConsentKind } from '../contract/prompt.js';
 // === An answer that reached a closed question (UX-064, UX-068, ux U-113) ===
 //
 // The server answers such an answer with 410 and, where it knows, why the question was closed
@@ -62,12 +63,13 @@ export function closedDraftAllowed(code: ClosedCode | null, reader: ClosedReader
 }
 
 /**
- * Whether the question was a consent card (Allow/Deny, or the deep-model consent): its answer
- * is a click on the card, and the word typed into the chat would approve nothing.
+ * Whether the question is one of the engine's own confirmations: its answer is a click on the
+ * card, and the word typed into the chat would approve nothing. Read from the engine's marker
+ * alone, never from the option texts — a question the model writes may offer "Allow" and
+ * "Deny" too, and is still an ordinary question.
  */
-export function isConsentCard(options: readonly string[] | undefined): boolean {
-	const opts = options ?? [];
-	return (opts.includes('Allow') && opts.includes('Deny')) || opts.includes('Run on balanced');
+export function isConsentCard(consent: unknown): consent is ConsentKind {
+	return isConsentKind(consent);
 }
 
 /**

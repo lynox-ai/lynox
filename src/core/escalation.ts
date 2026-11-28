@@ -1,7 +1,7 @@
 import type { ThreadStore } from './thread-store.js';
 import { isMandateTag } from './request-principal.js';
 import { stripHidden } from './hidden-text.js';
-import { summarizeDelivery, type DeliverySummary, type NotificationMessage, type NotificationRouter } from './notification-router.js';
+import { deliveryCase, summarizeDelivery, type DeliveryDetail, type DeliverySummary, type NotificationMessage, type NotificationRouter } from './notification-router.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
 export interface EscalateOpts {
@@ -27,15 +27,19 @@ export interface EscalateOpts {
    * Called once the wakeup's channels have answered, with whether anyone was told. The
    * consumer records it on the case, so "escalated" can be told apart from "escalated and
    * reached nobody". It runs after this function has returned; a throw inside it is logged
-   * and dropped, because the escalation itself has already happened.
+   * and dropped, because the escalation itself has already happened. `detail` says why a
+   * `not_delivered` one reached nobody, and names the alert's chat when there is one.
    */
-  onReported?: ((delivery: DeliverySummary) => void) | undefined;
+  onReported?: ((delivery: DeliverySummary, detail?: DeliveryDetail) => void) | undefined;
 }
 
 /** Sends the wakeup and hands its delivery to `onReported`. Never rejects. */
-function sendWakeup(router: NotificationRouter, msg: NotificationMessage, onReported: EscalateOpts['onReported']): void {
+function sendWakeup(router: NotificationRouter, msg: NotificationMessage, onReported: EscalateOpts['onReported'], threadId?: string): void {
   void router.notify(msg).then((report) => {
-    onReported?.(summarizeDelivery(report));
+    onReported?.(summarizeDelivery(report), {
+      case: deliveryCase(report),
+      ...(threadId !== undefined ? { chat: { threadId, kind: 'alert' } } : {}),
+    });
   }).catch((err: unknown) => {
     const detail = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[escalation] recording the delivery failed: ${detail}\n`);
@@ -125,6 +129,6 @@ export function escalateToUser(
     body: pushed.length > 200 ? pushed.slice(0, 197) + '…' : pushed,
     priority: 'high',
     data: { ...(opts.data ?? {}), threadId },
-  }, opts.onReported);
+  }, opts.onReported, threadId);
   return { threadId };
 }

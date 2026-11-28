@@ -110,6 +110,9 @@
 			from: card.replyToElsewhere.from.map((a) => visibleText(a, ADDRESS)).join(', '),
 		})}</p>
 	{/if}
+	{#if card.targetOrigin}
+		<p class="text-xs text-text" data-note="target-origin">{visibleText(getLocale() === 'de' ? card.targetOrigin.de : card.targetOrigin.en)}</p>
+	{/if}
 	{#if card.afterUntrusted}
 		<p class="text-xs text-text-muted" data-note="after-untrusted">{t(card.afterUntrustedBy === 'instruction' ? 'approvals.after_untrusted_instruction' : card.afterUntrustedBy === 'both' ? 'approvals.after_untrusted_both' : 'approvals.after_untrusted')}</p>
 	{/if}

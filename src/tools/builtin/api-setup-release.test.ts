@@ -15,9 +15,11 @@ import { ApiStore, type ApiProfile } from '../../core/api-store.js';
 import { ConnectionStore } from '../../core/connection-store.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { SecretReleases } from '../../core/secret-releases.js';
-import { releaseBinding } from '../../core/profile-secret-view.js';
-import { flattenPrompt } from '../../core/prompt-value.js';
-import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
+import { bindingOf, releaseBinding, settingsVersion } from '../../core/profile-secret-view.js';
+import { flattenPrompt, pv } from '../../core/prompt-value.js';
+import { API_SETUP_DIALOG } from '../dialog-text.js';
+import { OWNER_PRINCIPAL, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import type { SendOrigin } from '../../core/origin-notices.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
@@ -60,8 +62,14 @@ function vault(seed: Record<string, string>, env: readonly string[] = []): Recor
 }
 
 function apis(profiles: ApiProfile[]): ApiStore {
-  const s = new ApiStore(join(dir, 'apis'), new ConnectionStore(edb));
-  for (const p of profiles) s.register(p);
+  const conns = new ConnectionStore(edb);
+  const s = new ApiStore();
+  s.setConnectionStore(conns);
+  for (const p of profiles) {
+    // A profile in use has its row, and the row its opaque id, which the release question names.
+    const saved = s.save(p, join(dir, 'apis'), { trailId: s.newTrailId() });
+    if (!saved.ok) throw new Error(`fixture save refused: ${saved.reason}`);
+  }
   return s;
 }
 
@@ -73,13 +81,19 @@ const bearer = (over: Partial<ApiProfile> = {}): ApiProfile => ({
 });
 
 function agentOf(apiStore: ApiStore, v: unknown, opts: {
-  principal?: RequestPrincipal; promptUser?: (q: unknown) => Promise<string>; autonomy?: 'autonomous' | 'guided';
+  principal?: RequestPrincipal; promptUser?: (q: unknown) => Promise<string>; autonomy?: 'autonomous' | 'guided'; userTimezone?: string;
+  writeAuthor?: string | null; sendOrigin?: SendOrigin; dialogLanguage?: 'de' | 'en';
 } = {}): never {
   return {
     principal: opts.principal ?? OWNER_PRINCIPAL,
+    // A session sets the author of its own turns to its principal's tag; a run sets its run tag.
+    writeAuthor: 'writeAuthor' in opts ? opts.writeAuthor : principalTag(opts.principal ?? OWNER_PRINCIPAL),
+    sendOrigin: opts.sendOrigin,
     sessionCounters: { httpRequests: 0 },
     secretStore: v,
     autonomy: opts.autonomy,
+    userTimezone: opts.userTimezone,
+    ...(opts.dialogLanguage === undefined ? {} : { dialogLanguage: opts.dialogLanguage }),
     getAvailableTools: () => [{ definition: { name: 'api_setup' } }, { definition: { name: 'http_request' } }],
     promptUser: opts.promptUser,
     toolContext: {
@@ -99,23 +113,23 @@ const ask = (p: ApiProfile, name = 'CRM_KEY', mandateId = 'M-1'): void => {
 describe('a mandate\'s save asks the owner', () => {
   it('records what the profile reads of the owner\'s, and tells the mandate it was asked', async () => {
     const apiStore = apis([]);
-    const out = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apiStore, vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const out = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apiStore, vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(out).toContain('"CRM_KEY"');
     expect(out).toContain('The owner sees what the profile asks for');
     expect(releases.pendingReleases().map((r) => [r.profileId, r.profileAuthor, r.name, r.mandateId])).toEqual([['crm-api', M, 'CRM_KEY', 'M-1']]);
   });
 
   it('asks the same whether the vault holds the name or not', async () => {
-    const out = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({}), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const out = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({}), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(out).toContain('The owner sees what the profile asks for');
     expect(releases.pendingReleases()).toHaveLength(1);
   });
 
   it('tells the mandate the same whether or not the name can be asked for: a value from the environment', async () => {
-    const asked = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const asked = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'allow' }));
     releases.forgetProfile('crm-api');
     rmSync(join(dir, 'apis'), { recursive: true, force: true });
-    const env = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }, ['CRM_KEY']), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const env = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }, ['CRM_KEY']), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(env).toContain('"CRM_KEY"');
     expect(env).toBe(asked);
     // Only what can be released is put before the owner.
@@ -124,13 +138,13 @@ describe('a mandate\'s save asks the owner', () => {
 
   it('asks nothing for a mandate without a grant id: there is no grant a release could be for', async () => {
     const noId: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
-    await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: noId, promptUser: async () => 'Allow' }));
+    await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: noId, promptUser: async () => 'allow' }));
     expect(releases.pendingReleases()).toEqual([]);
   });
 
   it('asks nothing for a profile on plain http, and tells the mandate the same as on https', async () => {
     const plain = bearer({ base_url: 'http://api.crm.example/v1' });
-    const out = await apiSetupTool.handler({ action: 'create', profile: plain } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const out = await apiSetupTool.handler({ action: 'create', profile: plain } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(out).toContain('"CRM_KEY"');
     expect(out).toContain('The owner sees what the profile asks for');
     expect(releases.pendingReleases()).toEqual([]);
@@ -138,7 +152,7 @@ describe('a mandate\'s save asks the owner', () => {
 
   it('asks nothing for a name that cannot be released: a query parameter', async () => {
     const q = bearer({ auth: { type: 'query', query_param: 'key', vault_keys: ['CRM_KEY'] } });
-    await apiSetupTool.handler({ action: 'create', profile: q } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    await apiSetupTool.handler({ action: 'create', profile: q } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(releases.pendingReleases()).toEqual([]);
   });
 
@@ -166,9 +180,9 @@ describe('release_secret: the owner answers in person', () => {
     const apiStore = apis([p]);
     ask(p);
     let question = '';
-    const out = await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'allow'; } });
     expect(out).toContain('Released "CRM_KEY"');
-    for (const part of ['"CRM_KEY"', 'crm-api', M, 'api.crm.example']) expect(question).toContain(part);
+    for (const part of ['"CRM_KEY"', apiStore.trailIdOf('crm-api')!, M, 'api.crm.example']) expect(question).toContain(part);
     expect(releases.releaseOf('crm-api', M, 'CRM_KEY')).toEqual({ binding: releaseBinding(p, 'CRM_KEY'), mandateId: 'M-1' });
     expect(releases.pendingReleases()).toEqual([]);
   });
@@ -177,7 +191,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    expect(await release(apiStore, { promptUser: async () => 'Deny' })).toContain('user declined');
+    expect(await release(apiStore, { promptUser: async () => 'deny' })).toContain('user declined');
     expect(releases.activeReleases()).toEqual([]);
   });
 
@@ -185,7 +199,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     expect(await release(apiStore, { promptUser, autonomy: 'autonomous' })).toContain('Blocked');
     expect(promptUser).not.toHaveBeenCalled();
     expect(releases.activeReleases()).toEqual([]);
@@ -203,7 +217,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    expect(await release(apiStore, { principal: MANDATE, promptUser: async () => 'Allow' })).toContain('only the owner');
+    expect(await release(apiStore, { principal: MANDATE, promptUser: async () => 'allow' })).toContain('only the owner');
     expect(releases.activeReleases()).toEqual([]);
   });
 
@@ -211,7 +225,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ base_url: 'https://elsewhere.example/v1' }), 'load'); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ base_url: 'https://elsewhere.example/v1' }), 'load'); return 'allow'; } });
     expect(out).toContain('changed while the question was open');
     expect(releases.activeReleases()).toEqual([]);
   });
@@ -220,7 +234,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ oauth_grant: { state: 'connected' } }), 'load'); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ oauth_grant: { state: 'connected' } }), 'load'); return 'allow'; } });
     expect(out).toContain('Released');
   });
 
@@ -229,7 +243,7 @@ describe('release_secret: the owner answers in person', () => {
     const apiStore = apis([p]);
     ask(p);
     live.clear();
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     expect(await release(apiStore, { promptUser })).toContain('no longer active');
     expect(promptUser).not.toHaveBeenCalled();
   });
@@ -238,7 +252,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     ask(p);
     const apiStore = apis([bearer({ base_url: 'https://elsewhere.example/v1' })]);
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     expect(await release(apiStore, { promptUser })).toContain('changed since it asked');
     expect(promptUser).not.toHaveBeenCalled();
     expect(releases.activeReleases()).toEqual([]);
@@ -249,7 +263,7 @@ describe('release_secret: the owner answers in person', () => {
     ask(p);
     const other = bearer({ id: 'erp-api', base_url: 'https://api.erp.example', created_by: 'mandate:other@example.org' });
     const apiStore = apis([p, other]);
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     expect(await release(apiStore, { promptUser })).toContain('cannot be released');
     expect(promptUser).not.toHaveBeenCalled();
   });
@@ -258,7 +272,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ created_by: 'mandate:other@example.org' }), 'load'); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ created_by: 'mandate:other@example.org' }), 'load'); return 'allow'; } });
     expect(out).toContain('changed while the question was open');
     expect(releases.activeReleases()).toEqual([]);
   });
@@ -267,41 +281,32 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const out = await release(apiStore, { promptUser: async () => { live.clear(); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async () => { live.clear(); return 'allow'; } });
     expect(out).toContain('ended while the question was open');
     expect(releases.activeReleases()).toEqual([]);
   });
 
-  it('names every field whose change ends the release, and says whose runs send it', async () => {
+  it('counts every field whose change ends the release, and says whose runs send it', async () => {
     const p = bearer({ auth: { type: 'header', header_name: 'X-Api-Key', vault_keys: ['CRM_KEY'] } });
     const apiStore = apis([p]);
     ask(p);
     let question = '';
-    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
-    expect(question).toContain('auth.type "header"');
-    expect(question).toContain('auth.header_name "X-Api-Key"');
-    expect(question).toContain('the user\'s own and bulk runs included, until that mandate ends or the user withdraws it');
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'deny'; } });
+    expect(question).not.toContain('X-Api-Key');
+    expect(question).toMatch(/ 2 more settings of this connection \(such as its auth type, scopes, path or query\) are part of the release too; a change to any of them ends it\./);
+    expect(question).toContain('your own and bulk runs included, until that mandate ends or you withdraw the release');
     expect(question).not.toContain('while that mandate is active');
   });
 
-  it('names the token endpoint with its path and query, and marks a value it cuts', async () => {
-    const p = bearer({ auth: { type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: { token_url: 'https://auth.crm.example/oauth/token?tenant=t1', client_secret_key: 'CRM_KEY', grant_type: 'client_credentials', scope: 's'.repeat(250) } } });
+  it('names the token endpoint by its host only', async () => {
+    const p = bearer({ auth: { type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: { token_url: 'https://auth.crm.example/oauth/token?tenant=t1', client_secret_key: 'CRM_KEY', grant_type: 'client_credentials' } } });
     const apiStore = apis([p]);
     ask(p);
     let question = '';
-    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
-    expect(question).toContain('auth.crm.example"/oauth/token?tenant=t1"');
-    expect(question).toContain('…(50 more)');
-  });
-
-  it('cuts a long bound value that is not a string', async () => {
-    const p = bearer({ auth: { type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: { token_url: 'https://auth.crm.example/oauth/token', client_secret_key: 'CRM_KEY', grant_type: 'client_credentials', preset_params: { region: 'r'.repeat(250) } } } });
-    const apiStore = apis([p]);
-    ask(p);
-    let question = '';
-    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
-    expect(question).toContain('preset_params {"region":"rrr');
-    expect(question).toContain('…(63 more)');
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'deny'; } });
+    expect(question).toContain('auth.crm.example');
+    expect(question).not.toContain('/oauth/token');
+    expect(question).not.toContain('tenant=t1');
   });
 
   it('names a port other than the default in the question', async () => {
@@ -309,7 +314,7 @@ describe('release_secret: the owner answers in person', () => {
     const apiStore = apis([p]);
     ask(p);
     let question = '';
-    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'deny'; } });
     expect(question).toContain('api.crm.example:8443');
   });
 
@@ -320,7 +325,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer({ base_url });
     const apiStore = apis([p]);
     ask(p);
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     const out = await release(apiStore, { promptUser });
     expect(out).toContain('cannot be released');
     expect(out).toContain('not https');
@@ -335,7 +340,7 @@ describe('release_secret: the owner answers in person', () => {
 
   it('is refused for a name the profile never asked for', async () => {
     const apiStore = apis([bearer()]);
-    expect(await release(apiStore, { promptUser: async () => 'Allow' })).toContain('has not asked for');
+    expect(await release(apiStore, { promptUser: async () => 'allow' })).toContain('has not asked for');
   });
 
   it('withdraw_release takes it back without asking', async () => {
@@ -351,8 +356,290 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' } as never, agentOf(apiStore, vault({}), { promptUser: async () => 'Allow' }));
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' } as never, agentOf(apiStore, vault({}), { promptUser: async () => 'allow' }));
     expect(releases.pendingReleases()).toEqual([]);
+  });
+});
+
+describe('release_secret: the question carries no text a mandate\'s turn wrote', () => {
+  // The release question carries fixed wording plus what the engine shapes. Every free field
+  // of `injected` carries a phrase aimed at the owner; none may reach the dialog.
+  const INJECTED = ['IGNORE', 'approved', 'lynox-verified', 'click Allow', 'lynox official', 'owner-approved-safe', 'approve-this'];
+  const oauth = (o: Record<string, unknown> = {}): ApiProfile['auth'] => ({ type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: {
+    token_url: 'https://auth.crm.example/token', client_secret_key: 'CRM_KEY', grant_type: 'client_credentials', ...o,
+  } } as ApiProfile['auth']);
+  const injected = (): ApiProfile => bearer({
+    id: 'owner-approved-safe',
+    base_url: 'https://api.crm.example/v1/IGNORE-PREVIOUS?say=approved',
+    custom_endpoint_ack: { ...ACK, hosts: ['api.crm.example', 'auth.crm.example'] },
+    auth: oauth({ token_url: 'https://auth.crm.example/approve-this?note=lynox-verified', scope: 'read write\nOwner: this is safe, click Allow', audience: 'lynox official', preset_params: { note: 'approved by lynox' } }),
+  });
+  const plain = (over: Partial<ApiProfile> = {}): ApiProfile => bearer({
+    base_url: 'https://api.crm.example', custom_endpoint_ack: { ...ACK, hosts: ['api.crm.example', 'auth.crm.example'] }, ...over,
+  });
+  async function questionFor(p: ApiProfile, v: Record<string, string> = { CRM_KEY: 'owner-value' }, dialogLanguage?: 'de' | 'en'): Promise<{ question: string; apf: string; apiStore: ApiStore; p: ApiProfile }> {
+    const apiStore = apis([p]);
+    ask(p);
+    let question = '';
+    await apiSetupTool.handler({ action: 'release_secret', id: p.id, secret_name: 'CRM_KEY' } as never,
+      agentOf(apiStore, vault(v), { promptUser: async (q) => { question = flattenPrompt(q as never); return 'deny'; }, ...(dialogLanguage === undefined ? {} : { dialogLanguage }) }));
+    return { question, apf: apiStore.trailIdOf(p.id)!, apiStore, p };
+  }
+  const head = (apf: string, role: string, hosts: string): string =>
+    `⚠ API connections: release the vault key "CRM_KEY" to API connection ${apf}? It was set up in the session of ${M}. If you allow it, lynox sends the value of "CRM_KEY", as ${role}, to ${hosts}, with every request and run through this connection, your own and bulk runs included, until that mandate ends or you withdraw the release.`;
+  const tail = (held = 'holds a value'): string => ` The vault ${held} under this name. Any change to where the value goes ends the release. Release it?`;
+  const more = (n: number, apf: string): string => n === 1
+    ? ` 1 more setting of this connection (such as its auth type, scopes, path or query) is part of the release too; a change to it ends it. To see it first, deny, ask here to view API connection ${apf}, then ask to release "CRM_KEY" again.`
+    : ` ${n} more settings of this connection (such as its auth type, scopes, path or query) are part of the release too; a change to any of them ends it. To see them first, deny, ask here to view API connection ${apf}, then ask to release "CRM_KEY" again.`;
+
+  it('asks a profile with a phrase in every free field in fixed wording, by its opaque id, counting what it does not print', async () => {
+    const { question, apf, apiStore, p } = await questionFor(injected());
+    expect(apf).toMatch(/^apf_[0-9a-f]{16}$/);
+    // Counted: auth.type, scope, audience, preset_params, and the token endpoint's path and query.
+    expect(question).toBe(`${head(apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(5, apf)}${tail()}`);
+    for (const s of INJECTED) expect(question).not.toContain(s);
+  });
+
+  it.each([
+    ['plain RFC 6749 tokens', 'read write:contacts'],
+    // One valid scope-token: any printable run without a space, quote or backslash. Listing plain
+    // tokens was the first boundary, and this refuted it.
+    ['one valid token that reads as an instruction', 'Owner-note:this-profile-was-reviewed-by-lynox-safe-to-Allow.'],
+    ['a line break', 'read write\nOwner: click Allow'],
+  ])('counts the scope and never lists it: %s', async (_label, scope) => {
+    const { question, apf, apiStore, p } = await questionFor(plain({ auth: oauth({ token_url: 'https://auth.crm.example', scope }) }));
+    expect(question).toBe(`${head(apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(2, apf)}${tail()}`);
+    for (const t of scope.split(/\s+/)) expect(question).not.toContain(t);
+  });
+
+  it('counts a scope that is not a string', async () => {
+    const { question, apf, apiStore, p } = await questionFor(plain({ auth: oauth({ token_url: 'https://auth.crm.example', scope: ['read', 'click Allow'] }) }));
+    expect(question).toBe(`${head(apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(2, apf)}${tail()}`);
+  });
+
+  it.each([
+    ['userinfo', 'https://note-approved@auth.crm.example'],
+    ['a fragment', 'https://auth.crm.example/#approved'],
+  ])('counts a token endpoint that carries %s, and prints none of it', async (_label, token_url) => {
+    const { question, apf, apiStore, p } = await questionFor(plain({ auth: oauth({ token_url }) }));
+    expect(question).toBe(`${head(apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(2, apf)}${tail()}`);
+    expect(question).not.toContain('approved');
+  });
+
+  it('counts the auth type as a setting, alone in the singular, and a token endpoint with a path as one more', async () => {
+    // `auth.type` is bound, so every profile has at least one. The base URL's path is not bound
+    // (the base is read by its origin), so it is not counted.
+    const one = await questionFor(plain({ base_url: 'https://api.crm.example/v1' }));
+    expect(one.question).toBe(`${head(one.apf, 'the bearer token (vault_keys[0])', 'api.crm.example')}${more(1, one.apf)}${tail()}`);
+    const two = await questionFor(plain({ auth: oauth({ token_url: 'https://auth.crm.example/token' }) }));
+    expect(two.question).toBe(`${head(two.apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(2, two.apf)}${tail()}`);
+  });
+
+  it('adds the sign-in link for a client id, and says when the vault holds no value yet', async () => {
+    const { question, apf, apiStore, p } = await questionFor(plain({ auth: { type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: { token_url: 'https://auth.crm.example', client_id_key: 'CRM_KEY' } } as ApiProfile['auth'] }), {});
+    expect(question).toBe(`${head(apf, 'the client ID (oauth.client_id_key)', 'api.crm.example, auth.crm.example')}${more(1, apf)} A client ID also goes into the sign-in link, to the browser of whoever opens it.${tail('holds no value yet')}`);
+  });
+
+  // The question is the consent, so it says what the value becomes, in the session's language,
+  // and the slot name follows in brackets as the release stores it.
+  const basicSplit = (field: 'username_key' | 'password_key'): ApiProfile['auth'] => ({
+    type: 'basic', basic_format: 'user_pass_split', vault_keys: ['CRM_USER', 'CRM_PASS'],
+    username_key: field === 'username_key' ? 'CRM_KEY' : 'CRM_USER', password_key: field === 'password_key' ? 'CRM_KEY' : 'CRM_PASS',
+  } as ApiProfile['auth']);
+  const oauthAuth = (keys: { client_id_key?: string; client_secret_key?: string }): ApiProfile['auth'] =>
+    ({ type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: { token_url: 'https://auth.crm.example', grant_type: 'client_credentials', ...keys } } as ApiProfile['auth']);
+  it.each([
+    ['a bearer key', undefined, 'the bearer token (vault_keys[0])', 'Bearer-Token (vault_keys[0])'],
+    ['a header key', { type: 'header', vault_keys: ['CRM_KEY'] }, 'the API key in a request header (vault_keys[0])', 'API-Schlüssel in einem Request-Header (vault_keys[0])'],
+    ['an OAuth client id', oauthAuth({ client_id_key: 'CRM_KEY' }), 'the client ID (oauth.client_id_key)', 'Client-ID (oauth.client_id_key)'],
+    ['an OAuth client secret', oauthAuth({ client_secret_key: 'CRM_KEY' }), 'the client secret (oauth.client_secret_key)', 'Client-Secret (oauth.client_secret_key)'],
+    ['one name as client id and secret', oauthAuth({ client_id_key: 'CRM_KEY', client_secret_key: 'CRM_KEY' }),
+      'the client ID and the client secret (oauth.client_id_key+oauth.client_secret_key)', 'Client-ID und Client-Secret (oauth.client_id_key+oauth.client_secret_key)'],
+    ['a Basic user name', basicSplit('username_key'), 'the user name for the Basic sign-in (basic.username)', 'Benutzername für die Basic-Anmeldung (basic.username)'],
+    ['a Basic password', basicSplit('password_key'), 'the password for the Basic sign-in (basic.password)', 'Passwort für die Basic-Anmeldung (basic.password)'],
+    ['a Basic password read from the second vault key', { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['CRM_USER', 'CRM_KEY'] },
+      'the password for the Basic sign-in (basic.password)', 'Passwort für die Basic-Anmeldung (basic.password)'],
+  ] as const)('names the role of %s in words, in English and German', async (_label, auth, en, de) => {
+    const profile = (): ApiProfile => plain(auth === undefined ? {} : { auth: auth as ApiProfile['auth'] });
+    const english = await questionFor(profile(), { CRM_KEY: 'owner-value' }, 'en');
+    expect(english.question).toContain(`lynox sends the value of "CRM_KEY", as ${en}, to `);
+    releases.forgetProfile('crm-api');
+    rmSync(join(dir, 'apis'), { recursive: true, force: true });
+    const german = await questionFor(profile(), { CRM_KEY: 'owner-value' }, 'de');
+    expect(german.question).toContain(`sendet lynox den Wert von "CRM_KEY" als ${de} an `);
+    expect(german.question).not.toContain(en);
+  });
+
+  it.each([
+    [{ slot: 'oauth.client_id_key', kind: 'client-id' }, 'the client ID (oauth.client_id_key)', 'Client-ID (oauth.client_id_key)'],
+    [{ slot: 'oauth.client_secret_key', kind: 'client-secret' }, 'the client secret (oauth.client_secret_key)', 'Client-Secret (oauth.client_secret_key)'],
+    [{ slot: 'basic.username', kind: 'basic-username' }, 'the user name for the Basic sign-in (basic.username)', 'Benutzername für die Basic-Anmeldung (basic.username)'],
+    [{ slot: 'basic.password', kind: 'basic-password' }, 'the password for the Basic sign-in (basic.password)', 'Passwort für die Basic-Anmeldung (basic.password)'],
+    [{ slot: 'vault_keys[0]', kind: 'bearer-token' }, 'the bearer token (vault_keys[0])', 'Bearer-Token (vault_keys[0])'],
+    [{ slot: 'vault_keys[0]', kind: 'header-key' }, 'the API key in a request header (vault_keys[0])', 'API-Schlüssel in einem Request-Header (vault_keys[0])'],
+  ] as const)('keeps the role %o one value in both languages, words and slot name together', (slot, en, de) => {
+    for (const [lang, role] of [['en', en], ['de', de]] as const) {
+      const q = API_SETUP_DIALOG[lang].release(pv`API profiles`, {
+        name: 'K', trailId: 'apf_0', author: 'm', slots: [slot], hosts: ['h.example'],
+        more: 0, viewed: undefined, version: 'v', clientId: false, held: true,
+      });
+      expect(q.segments.filter((s) => s.kind === 'value').map((s) => s.text)).toContain(role);
+      expect(q.segments.filter((s) => s.kind === 'frame').map((s) => s.text).join('')).not.toContain(slot.slot);
+    }
+  });
+
+  it('stores the slot names in the release binding as before, joined in their order', () => {
+    const both = plain({ auth: oauthAuth({ client_id_key: 'CRM_KEY', client_secret_key: 'CRM_KEY' }) });
+    expect((JSON.parse(releaseBinding(both, 'CRM_KEY')!) as { role: string }).role).toBe('oauth.client_id_key+oauth.client_secret_key');
+    expect((JSON.parse(releaseBinding(plain({ auth: { type: 'header', vault_keys: ['CRM_KEY'] } as ApiProfile['auth'] }), 'CRM_KEY')!) as { role: string }).role).toBe('vault_keys[0]');
+  });
+
+  it('leaves the request standing on a deny, so the owner can view the profile and be asked again', async () => {
+    const p = plain({ base_url: 'https://api.crm.example/v1' });
+    const { apf, apiStore } = await questionFor(p);
+    expect(releases.requestOf(p.id, 'CRM_KEY')).toBeDefined();
+    const viewed = await apiSetupTool.handler({ action: 'view', id: apf } as never, agentOf(apiStore, vault({})));
+    expect(viewed).toContain('https://api.crm.example/v1');
+    // The owner asks again by the id the question named.
+    const again = await apiSetupTool.handler({ action: 'release_secret', id: apf, secret_name: 'CRM_KEY' } as never,
+      agentOf(apiStore, vault({ CRM_KEY: 'owner-value' }), { promptUser: async () => 'allow' }));
+    expect(again).toContain('Released "CRM_KEY"');
+    expect(releases.releaseOf(p.id, M, 'CRM_KEY')).toBeDefined();
+    const back = await apiSetupTool.handler({ action: 'withdraw_release', id: apf, secret_name: 'CRM_KEY' } as never, agentOf(apiStore, vault({})));
+    expect(back).toContain('was taken back');
+    expect(releases.activeReleases()).toEqual([]);
+  });
+
+  describe('the owner\'s view and the next question', () => {
+    beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-11-09T13:05:00Z')); });
+    afterEach(() => { vi.useRealTimers(); });
+    const asked = async (apiStore: ApiStore, id: string, opts: { userTimezone?: string } = {}): Promise<string> => {
+      let q = '';
+      await apiSetupTool.handler({ action: 'release_secret', id, secret_name: 'CRM_KEY' } as never,
+        agentOf(apiStore, vault({ CRM_KEY: 'owner-value' }), { promptUser: async (x) => { q = flattenPrompt(x as never); return 'deny'; }, ...opts }));
+      return q;
+    };
+    const viewAs = (apiStore: ApiStore, id: string, principal: RequestPrincipal = OWNER_PRINCIPAL): Promise<string> =>
+      apiSetupTool.handler({ action: 'view', id } as never, agentOf(apiStore, vault({}), { principal, promptUser: async () => 'deny' })) as Promise<string>;
+
+    it('says nothing of a view the owner has not made, and view names the version', async () => {
+      const p = plain({ auth: oauth({ token_url: 'https://auth.crm.example', scope: 'read' }) });
+      const { question, apf, apiStore } = await questionFor(p);
+      expect(question).not.toContain('last read');
+      expect(await viewAs(apiStore, apf)).toContain(`Release settings of API profile ${apf}: version ${settingsVersion(p)}.`);
+    });
+
+    it('says the settings have not changed since the owner viewed them, at the owner\'s time', async () => {
+      const p = plain({ auth: oauth({ token_url: 'https://auth.crm.example', scope: 'read' }) });
+      const { apf, apiStore } = await questionFor(p);
+      await viewAs(apiStore, apf);
+      vi.setSystemTime(new Date('2026-11-09T13:20:00Z'));
+      expect(await asked(apiStore, apf)).toContain(` These settings were last read in one of your chats at 13:05 UTC and have not changed since (version ${settingsVersion(p)}).`);
+      expect(await asked(apiStore, apf, { userTimezone: 'Europe/Zurich' })).toContain(' These settings were last read in one of your chats at 14:05 and have not changed since');
+    });
+
+    it('says the settings changed when a mandate saved the profile again after the owner\'s view, though the words are the same', async () => {
+      const p = plain({ auth: oauth({ token_url: 'https://auth.crm.example', scope: 'read' }) });
+      const { apf, apiStore } = await questionFor(p);
+      await viewAs(apiStore, apf);
+      const before = await asked(apiStore, apf);
+      const changed = plain({ auth: oauth({ token_url: 'https://auth.crm.example', scope: 'read write' }) });
+      apiStore.register(changed, 'load');
+      ask(changed);
+      const after = await asked(apiStore, apf);
+      expect(after).toContain(` These settings changed after they were last read in one of your chats at 13:05 UTC; deny and view the connection again before you allow it (version ${settingsVersion(changed)}).`);
+      expect(before).not.toContain('changed after');
+      // Apart from that sentence, the two questions read the same.
+      const strip = (q: string): string => q.replace(/ These settings (were last read|changed after)[^()]*\(version [0-9a-f]{8}\)\./, '');
+      expect(strip(after)).toBe(strip(before));
+    });
+
+    it('compares the whole digest, not the version it shows', async () => {
+      // A mandate writes both settings and could match an 8-digit prefix by trying; the engine
+      // compares all of it. A view whose digest shares only the prefix counts as a change.
+      const p = plain();
+      const { apf, apiStore } = await questionFor(p);
+      const full = bindingOf(p);
+      apiStore.noteOwnerView(p.id, `${full.slice(0, 8)}${full.slice(8).replace(/./g, (c) => (c === '0' ? '1' : '0'))}`, new Date());
+      expect(await asked(apiStore, apf)).toContain(' These settings changed after they were last read in one of your chats at 13:05 UTC;');
+    });
+
+    it.each([
+      ['a workflow or worker run, with no one to prompt', { promptUser: undefined }],
+      // A prompt channel present, so only the autonomy decides.
+      ['an autonomous turn', { autonomy: 'autonomous' as const, promptUser: async () => 'deny' }],
+      // A sub-agent forwards its parent's prompt and runs under the owner's principal.
+      ['a sub-agent, which forwards the owner\'s prompt', { sendOrigin: { kind: 'childAgent' } as SendOrigin, promptUser: async () => 'deny' }],
+      // The owner's own turn in a thread a helper started: the model showing the profile read the helper's content.
+      ['the owner\'s turn in a thread a helper started', { sendOrigin: { kind: 'helperThread', helper: 'helper@example.org' } as SendOrigin, promptUser: async () => 'deny' }],
+      // The principal decides, whatever author the turn carries.
+      ['a mandate\'s turn that carries the owner\'s author tag', { principal: MANDATE, writeAuthor: principalTag(OWNER_PRINCIPAL), promptUser: async () => 'deny' }],
+      // A trigger's, workflow's or task's run carries its run tag as author, not the owner's.
+      ['a run that is not the owner\'s chat, with a prompt channel', { writeAuthor: 'workflow:run-1', promptUser: async () => 'deny' }],
+    ])('does not count the owner\'s view from %s as a read', async (_label, opts) => {
+      const p = plain();
+      const { apf, apiStore } = await questionFor(p);
+      expect(await apiSetupTool.handler({ action: 'view', id: apf } as never, agentOf(apiStore, vault({}), opts))).toContain(`Release settings of API profile ${apf}:`);
+      expect(apiStore.ownerViewOf(p.id)).toBeUndefined();
+      expect(await asked(apiStore, apf)).not.toContain('last read');
+    });
+
+    it('does not count a mandate\'s view as the owner\'s', async () => {
+      const p = plain();
+      const { apf, apiStore } = await questionFor(p);
+      // The mandate's view goes through and names the version; it just is not the owner's.
+      expect(await viewAs(apiStore, apf, MANDATE)).toContain(`Release settings of API profile ${apf}:`);
+      expect(await asked(apiStore, apf)).not.toContain('last read');
+    });
+  });
+
+  it('view of the owner\'s own profile names no release version', async () => {
+    const apiStore = apis([plain({ created_by: undefined })]);
+    const viewed = await apiSetupTool.handler({ action: 'view', id: 'crm-api' } as never, agentOf(apiStore, vault({})));
+    expect(viewed).not.toContain('Release settings');
+  });
+
+  it('refuses a new profile id shaped like an opaque id, and still loads a stored one', () => {
+    const apiStore = apis([]);
+    const shaped = plain({ id: 'apf_0123456789abcdef' });
+    const saved = apiStore.save(shaped, join(dir, 'apis'), { trailId: apiStore.newTrailId() });
+    expect(saved.ok).toBe(false);
+    expect(saved.ok ? '' : saved.reason).toContain('reserved');
+    expect(apiStore.register(shaped, 'load')).toBe(true);
+  });
+
+  it.each(['view', 'release_secret', 'withdraw_release'] as const)('%s reaches the profile the question named, even when a stored profile\'s id is spelled like its opaque id', async (action) => {
+    const p = plain();
+    const apiStore = apis([p]);
+    const apf = apiStore.trailIdOf('crm-api')!;
+    apiStore.register(plain({ id: apf, name: 'Lookalike', base_url: 'https://api.lookalike.example' }), 'load');
+    ask(p);
+    if (action === 'withdraw_release') releases.release({ kind: 'owner' }, { profileId: 'crm-api', profileAuthor: M, name: 'CRM_KEY', binding: releaseBinding(p, 'CRM_KEY')!, mandateId: 'M-1' });
+    let question = '';
+    const out = await apiSetupTool.handler({ action, id: apf, secret_name: 'CRM_KEY' } as never,
+      agentOf(apiStore, vault({ CRM_KEY: 'v' }), { promptUser: async (q) => { question = flattenPrompt(q as never); return 'deny'; } }));
+    if (action === 'view') { expect(out).toContain('api.crm.example'); expect(out).not.toContain('api.lookalike.example'); }
+    if (action === 'release_secret') { expect(question).toContain('to api.crm.example,'); expect(question).not.toContain('lookalike'); }
+    if (action === 'withdraw_release') { expect(out).toContain('was taken back'); expect(releases.activeReleases()).toEqual([]); }
+  });
+
+  it('view takes the opaque id, and an unknown one is not found', async () => {
+    const apiStore = apis([plain()]);
+    const apf = apiStore.trailIdOf('crm-api')!;
+    expect(await apiSetupTool.handler({ action: 'view', id: apf } as never, agentOf(apiStore, vault({})))).toContain('crm-api');
+    expect(await apiSetupTool.handler({ action: 'view', id: 'apf_0000000000000000' } as never, agentOf(apiStore, vault({})))).toContain('not found');
+  });
+
+  it('asks nothing for a profile with no opaque id to name it by', async () => {
+    const p = plain();
+    const apiStore = new ApiStore();
+    apiStore.register(p);
+    ask(p);
+    const promptUser = vi.fn(async () => 'allow');
+    const out = await apiSetupTool.handler({ action: 'release_secret', id: p.id, secret_name: 'CRM_KEY' } as never, agentOf(apiStore, vault({ CRM_KEY: 'v' }), { promptUser }));
+    expect(String(out).split('\n')[0]).toBe('"CRM_KEY" cannot be released to this API profile yet: it has no opaque id to name it by in the question. lynox assigns one when it starts; after that, the release can be asked for again. Nothing was changed.');
+    expect(promptUser).not.toHaveBeenCalled();
+    expect(releases.activeReleases()).toEqual([]);
   });
 });
 

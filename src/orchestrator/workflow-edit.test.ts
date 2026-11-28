@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { applyModifications, type StepModification } from './workflow-edit.js';
+import { runStepIds } from './step-id.js';
+import { templateRefIssue } from './template-refs.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
 
 function steps(): InlinePipelineStep[] {
@@ -11,6 +13,49 @@ function steps(): InlinePipelineStep[] {
 }
 
 describe('applyModifications (shared workflow-step mutation)', () => {
+  it('renaming a stored step a.result beside a step a leaves {{a.result}} on step a, as a run reads it', () => {
+    const s: InlinePipelineStep[] = [
+      { id: 'a', task: 'A' },
+      { id: 'a.result', task: 'R' },
+      { id: 'send', task: 'Send {{a.result}}', input_from: ['a', 'a.result'], input_template: { body: '{{a.result}}' } },
+    ];
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: '#2', value: 'x' }])).toBeNull();
+    expect(s.map(st => st.id)).toEqual(['a', 'x', 'send']);
+    expect(s[2]!.input_from).toEqual(['a', 'x']);
+    expect(s[2]!.task).toBe('Send {{a.result}}');
+    expect(s[2]!.input_template).toEqual({ body: '{{a.result}}' });
+    // As a run reads the stored plan before the rename: still step a.
+    const before = runStepIds([{ id: 'a', task: 'A' }, { id: 'a.result', task: 'R' }, { id: 'send', task: 'Send {{a.result}}', input_from: ['a', 'a.result'] }]);
+    expect(runStepIds(s)[2]!.task).toBe(before[2]!.task);
+    expect(runStepIds(s)[2]!.task).toBe('Send {{a.result}}');
+  });
+
+  it('renaming a stored step foo.result where no step foo exists moves {{foo.result}} with it, so the plan still saves', () => {
+    const s: InlinePipelineStep[] = [
+      { id: 'foo.result', task: 'R' },
+      { id: 'send', task: 'Send {{foo.result}}', input_from: ['foo.result'] },
+    ];
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: '#1', value: 'fetch' }])).toBeNull();
+    expect(s.map(st => st.id)).toEqual(['fetch', 'send']);
+    expect(s[1]!.input_from).toEqual(['fetch']);
+    // The placeholder names the step whole, as a run of the stored plan reads it (`step-id.test.ts`).
+    expect(s[1]!.task).toBe('Send {{fetch}}');
+    // The placeholder check a save runs finds nothing to refuse (every id here has the shape, so the
+    // plan as a run names it is the plan as stored).
+    expect(templateRefIssue(runStepIds(s))).toBeNull();
+  });
+
+  it('renaming step a beside a stored a.result still moves {{a.result}} with a (CONTROL)', () => {
+    const s: InlinePipelineStep[] = [
+      { id: 'a', task: 'A' },
+      { id: 'a.result', task: 'R' },
+      { id: 'send', task: 'Send {{a.result}}', input_from: ['a', 'a.result'] },
+    ];
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: 'a', value: 'b' }])).toBeNull();
+    expect(s[2]!.task).toBe('Send {{b.result}}');
+    expect(s[2]!.input_from).toEqual(['b', 'a.result']);
+  });
+
   it('applies an ordered batch — add then remove the same id is valid', () => {
     const s = steps();
     const mods: StepModification[] = [

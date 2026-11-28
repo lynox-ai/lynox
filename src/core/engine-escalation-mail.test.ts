@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Engine, type LynoxHooks } from './engine.js';
 import { reloadConfig } from './config.js';
-import type { DeliverySummary, NotificationChannel } from './notification-router.js';
+import type { DeliveryDetail, DeliverySummary, NotificationChannel } from './notification-router.js';
 import type { LynoxConfig, LynoxUserConfig } from '../types/index.js';
 
 /**
@@ -170,5 +170,43 @@ describe('Engine.escalateToUser — the hooks hear of the delivery', () => {
     engine.escalateToUser({ key: 'k', title: 't', opener: 'What happened?', body: 'b' });
     await flush();
     expect(heard).toEqual(['not_delivered']);
+  });
+});
+
+describe('Engine.escalationReporter — the kind goes to the hooks', () => {
+  function engineWith(config: Partial<LynoxUserConfig> = {}): { engine: Engine; heard: Array<[DeliverySummary, string]> } {
+    const engine = new Engine({ model: 'fast' } as unknown as LynoxConfig);
+    (engine as unknown as { userConfig: LynoxUserConfig }).userConfig = { ...engine.getUserConfig(), ...config };
+    engine.getNotificationRouter().register(deadChannel);
+    const heard: Array<[DeliverySummary, string]> = [];
+    engine.registerHooks({ onEscalationReported: (d, kind) => { heard.push([d, kind]); } });
+    return { engine, heard };
+  }
+
+  it('an escalation is an escalation, and a run\'s question says it is one', async () => {
+    const { engine, heard } = engineWith();
+    engine.escalateToUser({ key: 'k', title: 't', body: 'b' });
+    await flush();
+    engine.escalationReporter(undefined, 'question')('not_delivered');
+    expect(heard).toEqual([['not_delivered', 'escalation'], ['not_delivered', 'question']]);
+  });
+
+  it('the owner\'s switch holds back a question too, and the caller still gets its record', () => {
+    // The setting says the mail covers a waiting run: switched off, it must hold that back as well.
+    const { engine, heard } = engineWith({ escalation_mail: false });
+    const recorded: DeliverySummary[] = [];
+    engine.escalationReporter((d) => { recorded.push(d); }, 'question')('not_delivered');
+    expect(heard).toEqual([]);
+    expect(recorded).toEqual(['not_delivered']);
+  });
+  it('hands the caller the delivery detail and the hooks the kind, for a question and by default', () => {
+    // Both halves of the reporter: the caller's own record keeps the detail, the hooks hear the kind.
+    const { engine, heard } = engineWith();
+    const recorded: Array<[DeliverySummary, DeliveryDetail | undefined]> = [];
+    const detail: DeliveryDetail = { chat: { threadId: 'thread-1', kind: 'question' } };
+    engine.escalationReporter((d, x) => { recorded.push([d, x]); }, 'question')('not_delivered', detail);
+    engine.escalationReporter((d, x) => { recorded.push([d, x]); })('not_delivered', detail);
+    expect(recorded).toEqual([['not_delivered', detail], ['not_delivered', detail]]);
+    expect(heard).toEqual([['not_delivered', 'question'], ['not_delivered', 'escalation']]);
   });
 });

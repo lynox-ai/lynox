@@ -34,11 +34,16 @@ describe('deleted-chat guard', () => {
   it('a migration that fails on open leaves the triggers as they were', () => {
     const first = open();
     const before = triggersOf(first.history);
-    // The last migration runs again and fails: its column is already there.
-    const last = (first.history.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v;
-    first.history.getDb().prepare('DELETE FROM schema_version WHERE version = ?').run(last);
+    // v73 runs again and fails: it adds `thread_messages.author`, which is already there. v73 and
+    // not the newest migration, because a newer one may be written to run again without harm
+    // (v74 creates its tables only if they are missing), and then nothing would fail. Should v73
+    // ever stop failing on a second run, the error asserted below no longer comes and this test
+    // goes red instead of passing without a failed migration.
+    const db = first.history.getDb();
+    expect((db.prepare('PRAGMA table_info(thread_messages)').all() as Array<{ name: string }>).map((c) => c.name), 'positive control: v73 added the column').toContain('author');
+    db.prepare('DELETE FROM schema_version WHERE version >= 73').run();
     first.history.close();
-    expect(() => new RunHistory(join(first.dir, 'history.db'))).toThrow();
+    expect(() => new RunHistory(join(first.dir, 'history.db'))).toThrow(/duplicate column name: author/);
     const raw = new BetterSqlite3(join(first.dir, 'history.db'));
     try {
       const names = (raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'deleted_chat_%' ORDER BY name`).all() as Array<{ name: string }>).map((r) => r.name);

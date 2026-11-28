@@ -11,7 +11,7 @@ import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scru
 import type { CallApiCost, CallContract, CallFiled, GrantLift } from './call-connection.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier, PlannedPipeline } from '../types/index.js';
 import { workflowStampState, type WorkflowStampState } from './workflow-stamp.js';
-import type { DeliverySummary } from './notification-router.js';
+import type { DeliveryDetail, DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
@@ -1652,6 +1652,30 @@ const MIGRATIONS: string[] = [
   // NULL means unknown: it is never read as the owner's. No backfill.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (73);
    ALTER TABLE thread_messages ADD COLUMN author TEXT;`,
+  // v74: two facts about a thread that a check before a send reads.
+  // `thread_typed_text`: the words a person typed into a turn, apart from what the route put
+  // around them in the same message (a loaded mail or run as context, an uploaded file). Keyed
+  // by the message's seq, written in the transaction that writes the message; only a route that
+  // knows where the typed words end writes one. A turn without a row has no typed words anyone
+  // can rely on, and reads as none. `principal` is the author tag of the run that wrote them;
+  // only rows whose principal is the owner are read as the owner's words.
+  // `thread_read_outside`: the thread's conversation has taken in content from outside (the
+  // agent's sticky latch). Only ever inserted, never deleted except with its thread, and
+  // written in the transaction of the message that carries what was read, so a resume after a
+  // compaction that summarized the read away still knows it. Tables, not columns: the
+  // statements can run again on a database that has them.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (74);
+   CREATE TABLE IF NOT EXISTS thread_typed_text (
+     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+     seq INTEGER NOT NULL,
+     text TEXT NOT NULL,
+     principal TEXT,
+     PRIMARY KEY (thread_id, seq)
+   );
+   CREATE TABLE IF NOT EXISTS thread_read_outside (
+     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+     at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -3470,7 +3494,7 @@ export class RunHistory {
       parameters: (planned as { parameters?: unknown }).parameters,
     }) ?? planned.steps.reduce<ReturnType<typeof findHiddenInName>>(
       (hit, s, i) => hit ?? (typeof s.id === 'string' ? findHiddenInName(s.id, `steps[${i}].id`) : null), null);
-    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
+    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden, { steps: true }));
     // A step's id has a limited shape (`step-id.ts`): it reaches the model next to lynox's own words.
     // Every producer saves here, so no new plan carries a free-form id; one stored before the limit
     // is shown by its position, and `update_workflow_steps` names the rename it needs first.
@@ -3617,6 +3641,16 @@ export class RunHistory {
    *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */
   markTriggerEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
     return this._requireTriggerStore().markEditedBy(id, editor, clearStamp);
+  }
+
+  /** See `TriggerStore.confirmOwnerCreator`. */
+  confirmTriggerRecipients(id: string, expect: string): import('./recipient-confirm.js').RecipientConfirmOutcome {
+    return this._requireTriggerStore().confirmOwnerCreator(id, expect);
+  }
+
+  /** See `TriggerStore.markEditedByRun`. */
+  markTriggerEditedByRun(id: string, runTag: string): boolean {
+    return this._requireTriggerStore().markEditedByRun(id, runTag);
   }
 
 
@@ -3783,14 +3817,14 @@ export class RunHistory {
 
   /** Mark that an escalation of a trigger started — see {@link TriggerStore.startEscalation}.
    *  False without a trigger store. */
-  startEscalation(id: string, at: string, onlyIfLater = false): boolean {
-    return this._triggerStore?.startEscalation(id, at, onlyIfLater) ?? false;
+  startEscalation(id: string, at: string, onlyIfLater = false, chat?: DeliveryDetail['chat']): boolean {
+    return this._triggerStore?.startEscalation(id, at, onlyIfLater, chat) ?? false;
   }
 
   /** Record whether the escalation that started at `startedAt` reached anyone — see
    *  {@link TriggerStore.recordEscalationOutcome}. False without a trigger store. */
-  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string): boolean {
-    return this._triggerStore?.recordEscalationOutcome(id, outcome, startedAt) ?? false;
+  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string, detail?: DeliveryDetail): boolean {
+    return this._triggerStore?.recordEscalationOutcome(id, outcome, startedAt, detail) ?? false;
   }
 
   /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The
@@ -3875,6 +3909,11 @@ export class RunHistory {
     return this._triggerStore?.getDue() ?? [];
   }
 
+  /** Every plan of a workflow that may still run, switched off ones included (`getPlansOfWorkflow`). */
+  getPlansOfWorkflow(workflowId: string): TriggerRecord[] {
+    return this._triggerStore?.getPlansOfWorkflow(workflowId) ?? [];
+  }
+
   /** Triggers that actively reference a saved workflow (Slice C destructive-edit
    *  guard): enabled + not-completed rows whose `pipeline_id` matches. */
   getTriggersByPipelineId(pipelineId: string): TriggerRecord[] {
@@ -3885,6 +3924,9 @@ export class RunHistory {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
+    /** The cause of a failed run (`RunCause`, as JSON), or null: written on every run end. */
+    lastRunCause: string | null;
+    lastRunMemberNotes?: readonly string[] | undefined;
     // `undefined` leaves next_run_at unchanged; `null` clears it.
     // Clearing is required after a one-shot trigger reaches a terminal
     // state, otherwise getDueTriggers would re-select it forever.

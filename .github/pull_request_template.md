@@ -38,7 +38,7 @@ gates the diff OWES, derived from the real file list, so leaving out a required
 - `head` — this PR's **current** head, which is also the SHA the gates ran against:
   `git rev-parse --short HEAD`. Update it after every push.
 - `gates` — which ran, from: `code-review`, `delta`, `security`, `prd`, `staging-walk`, `legal`.
-  `legal` is required for `SUBPROCESSORS.md`, the one binding text `LEGAL_PATHS` covers, and
+  `legal` is required for `SUBPROCESSORS.md`, the one legal text `LEGAL_PATHS` covers, and
   then the record also needs `approved: <who> <YYYY-MM-DD>`, naming who signed off on the
   WORDING: <who> is one of `LEGAL_APPROVERS` in `scripts/guard-patterns/legal-sign-off.mjs`, the date follows
   directly, free text may come after it. While the sign-off does not exist, `approved: PENDING — <why>` is the true line,
@@ -83,8 +83,8 @@ gates the diff OWES, derived from the real file list, so leaving out a required
   means no test covers that line and fails the check.
 
 A documentation-only diff needs none of this — delete the block. (A binding text is
-NOT documentation for this purpose: `SUBPROCESSORS.md` is markdown, and it is the
-document the managed DPA points customers at, so it needs the `legal` gate and an
+NOT documentation for this purpose: `SUBPROCESSORS.md` is markdown, but it is a legal
+text published in this repository, so it needs the `legal` gate and an
 `approved:` line naming who signed off on the wording and when. `delta` and `mutations`
 are dropped for a markdown-only legal change: there is no delta round to report, and a
 fabricated line is worse than none.)
@@ -93,7 +93,7 @@ fabricated line is worse than none.)
 head: <short SHA>
 gates: <which gates ran>
 review: <n> <model> <round|rounds>, <result>
-security: <origin>, <result>
+security: <origin> (<model>), <result>
 delta: clean on <from>..<to = head>
 mutations: <n> killed, <n> survived
 closes: <none — the only answer in this repo>
@@ -123,17 +123,35 @@ held to it; rebasing onto main brings it under the rule.
 
 No private path in it: this record is public.
 
+**`agent-awareness:` is asked for when the diff adds a tool, a route or a UI page**: a
+new `definition: { name: … }` under `src/`, a new route in `src/server/`, or a new
+`+page.svelte` in the web UI. It says whether the agent was told about the new
+capability:
+- `agent-awareness: updated <briefing|catalog|tool-text>` (more than one: `briefing, tool-text`);
+- `agent-awareness: not needed: <reason>`. Telling the agent widens what an injected
+  instruction can reach, so "not needed" is a real answer, with its reason.
+
+Add it as one more line in the block above, only on such a diff. For now a missing or
+malformed line is a warning, not a failure.
+
 **`security:` is only due when the diff touches the security path map**, and its
 first half says WHERE the round came from, not what it asked. Three origins,
 and the third is a full answer rather than an admission:
 
-- `security: own round, no findings`
-- `security: leaning on the v1/v2 parity run, no findings` — a round run for
+- `security: own round (opus), no findings`
+- `security: leaning on the v1/v2 parity run (opus), no findings` — a round run for
   another question, which is a different claim and should read as one
-- `security: origin unclear, findings filed privately` — **use this when you do
+- `security: origin unclear (opus), findings filed privately` — **use this when you do
   not know whether the round was yours.** Writing `own round` instead is the lie
   the field exists to prevent; one PR on record carried the gate on a parity
   run whose brief was behavioural equality, and only a question caught it.
+
+**The model in parentheses is required under every origin, and it is `opus` or
+`fable`.** A security round runs on Opus, on Fable when Opus answers 429, never
+on Sonnet; the check refuses `sonnet`, any other name and a missing one. If you
+do not know which model ran the round, run your own on Opus. A branch whose
+merge base predates the model is not held to it; merging main into it brings it
+under the rule.
 
 A `leaning on …` reference carries no comma: the comma separates origin from
 result. The result half is the same grammar as `review:`.
