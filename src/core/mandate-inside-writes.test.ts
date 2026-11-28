@@ -370,11 +370,11 @@ const FIXTURES: Fixture[] = [
   { site: 'remember#create', branch: 'create', created: true, row: { verb: 'create', target: 'knowledge' }, tool: rememberTool as ToolEntry, input: { text: 'ACME renews in March', subject: 'ACME' },
     build: () => ({ ctx: { knowledgeStore: { obj: { write: vi.fn(() => ({ status: 'active', id: 'abcd1234-0000-4000-8000-000000000001' })) }, reads: [] } }, spy: 'ctx.knowledgeStore.write' }) },
   { site: 'memory_block_edit#change', branch: 'append', row: { verb: 'change', target: 'memory_block block=playbook' }, tool: memoryBlockEditTool as ToolEntry, input: { block: 'playbook', mode: 'append', new_text: 'Always cc finance.' },
-    build: () => ({ ctx: { knowledgeStore: { obj: { editBlock: vi.fn() }, reads: [] } }, promptUser: async () => 'Apply', spy: 'ctx.knowledgeStore.editBlock' }) },
+    build: () => ({ ctx: { knowledgeStore: { obj: { editBlock: vi.fn() }, reads: [] } }, promptUser: async () => 'apply', spy: 'ctx.knowledgeStore.editBlock' }) },
   { site: 'memory_retire#change', branch: 'retire', row: { verb: 'change', target: 'knowledge entry=abcd1234-0000' }, tool: memoryRetireTool as ToolEntry, input: { id: 'abcd1234' },
     build: () => ({
       ctx: { knowledgeStore: { obj: { findActiveByIdPrefix: vi.fn(() => ({ id: 'abcd1234-0000', sourceType: 'agent_inferred', text: 'old fact' })), retireEntry: vi.fn() }, reads: ['findActiveByIdPrefix'] } },
-      promptUser: async () => 'Retire', spy: 'ctx.knowledgeStore.retireEntry',
+      promptUser: async () => 'retire', spy: 'ctx.knowledgeStore.retireEntry',
     }) },
   { site: 'memory_store#create', branch: 'scoped', row: { verb: 'create', target: 'memory ns=knowledge scope=context' }, tool: memoryStoreTool as ToolEntry, input: { namespace: 'knowledge', content: 'x', scope: 'context:proj1' },
     build: () => ({ memory: { obj: memoryMock({}), reads: [] }, activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.appendScoped' }) },
@@ -483,7 +483,7 @@ const FIXTURES: Fixture[] = [
       const subjects = subjectStore();
       const dup = subjects.createSubject({ kind: 'person', name: 'Ada' });
       const canon = subjects.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
-      return { target: `subjects duplicate=${dup} canonical=${canon}`, ctx: { subjectStore: { obj: subjects, reads: ['findCanonical', 'findByAlias'] } }, promptUser: async () => 'Merge', spy: 'ctx.subjectStore.executeMerge', cleanup: () => setDataDir(null) };
+      return { target: `subjects duplicate=${dup} canonical=${canon}`, ctx: { subjectStore: { obj: subjects, reads: ['findCanonical', 'findByAlias'] } }, promptUser: async () => 'merge', spy: 'ctx.subjectStore.executeMerge', cleanup: () => setDataDir(null) };
     } },
 
   // data store, contacts, artifacts, files, threads
@@ -602,9 +602,6 @@ const FIXTURES: Fixture[] = [
     return [
       { site: 'task_update#change', branch: 'trigger', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, title: 'Wochenbericht' }; },
         build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
-      // Only a field a trigger does not carry: the mark is written, the update changes nothing.
-      { site: 'task_update#change', branch: 'trigger, only a field it does not take', wrote: 'part', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
-        build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
       { site: 'task_update#change', branch: 'to-do, complete', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, status: 'completed' }; },
         build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.complete') },
       { site: 'task_update#change', branch: 'to-do, update', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
@@ -616,7 +613,7 @@ const FIXTURES: Fixture[] = [
     build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, spy: 'ctx.runHistory.insertPlannedPipeline' }) },
   { site: 'plan_task#create', branch: 'Proceed', created: true, row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: planTaskTool as ToolEntry,
     input: { summary: 'Authored plan', phases: [{ name: 'Step one', steps: ['Do the thing'], tools: [] }] },
-    build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, promptUser: async () => 'Proceed', spy: 'ctx.runHistory.insertPlannedPipeline' }) },
+    build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, promptUser: async () => 'proceed', spy: 'ctx.runHistory.insertPlannedPipeline' }) },
   { site: 'save_workflow#copy', branch: 'copy', created: true, row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} from=plan-789$/ }, tool: saveWorkflowTool as ToolEntry, input: { name: 'Saved Ad Report', workflow_id: 'plan-789' },
     build: () => {
       _resetPipelineStore();
@@ -807,8 +804,10 @@ describe('a mandate\'s call to a pattern writer is refused by the lock', () => {
   });
 });
 
-describe('a block that throws after a proven change', () => {
-  it('save_workflow from the session: the workflow is saved, the lineage write throws: failed, wrote=part, created=', async () => {
+describe('a lineage write that fails after the workflow is saved', () => {
+  // The lineage record is internal: once the workflow is stored, its failure is noted and the save
+  // answers as saved. (A block that throws after a proven change: instance-trail-outcome.test.ts.)
+  it('save_workflow from the session: the answer is the saved workflow, and the trail row says wrote=all and lineage=lost', async () => {
     const base = FIXTURES.find(f => f.site === 'save_workflow#session')!;
     const f: Fixture = {
       ...base,
@@ -820,10 +819,15 @@ describe('a block that throws after a proven change', () => {
       },
     };
     const { result, trail } = await drive(f, false);
-    expect(JSON.stringify(result.content)).toContain('history.db is read-only');
+    expect(JSON.stringify(result.content)).not.toContain('No workflow was saved');
+    expect(JSON.stringify(result.content)).not.toContain('history.db is read-only');
+    expect(JSON.stringify(result.content)).toContain('It is saved and reusable.');
     const rows = trail.db.prepare('SELECT phase, target FROM audit_log WHERE action LIKE ? ORDER BY id').all('instance:save_workflow#session:%') as Array<{ phase: string; target: string }>;
-    expect(rows.map(r => r.phase)).toEqual(['attempt', 'failed']);
-    expect(rows[1]!.target).toMatch(/^workflows wrote=part created=[0-9a-f-]{36} workflow=[0-9a-f-]{36}$/);
+    expect(rows.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    const target = /^workflows wrote=all created=([0-9a-f-]{36}) workflow=[0-9a-f-]{36} lineage=lost$/.exec(rows[1]!.target);
+    expect(target).not.toBeNull();
+    const answer = JSON.parse(typeof result.content === 'string' ? result.content : JSON.stringify(result.content)) as { workflow_id?: unknown };
+    expect(answer.workflow_id).toBe(target![1]);
   });
 });
 

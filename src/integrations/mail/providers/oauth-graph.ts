@@ -57,12 +57,14 @@ import {
   type MailWatchHandle,
   type MailWatchHandler,
   type MailWatchOptions,
+  listIdFromHeader,
 } from '../provider.js';
 import { GRAPH_API_HOSTS, graphFetch } from '../../../core/connector-egress.js';
 import { joinCallSignal } from '../../../core/call-connection.js';
 import { assertHostPolicy } from '../../../core/network-guard.js';
 import { buildRfc2822 } from '../mime-compose.js';
-import { htmlToTextSnippet, isAutoRepliedHeader, isAutoSubmittedHeader } from './imap-smtp.js';
+import { htmlToTextSnippet } from './imap-smtp.js';
+import { automaticMail } from '../automatic-mail.js';
 
 const GRAPH_HOST = 'graph.microsoft.com';
 const GRAPH_ME = `https://${GRAPH_HOST}/v1.0/me`;
@@ -94,8 +96,8 @@ const NO_LOWER_BOUND = '1970-01-01T00:00:00Z';
 /**
  * Envelope fields for list, search and watch. `internetMessageHeaders` is NOT
  * among them: the archived source documents it on the single-message GET only.
- * So an envelope from a collection carries no In-Reply-To and no Auto-Submitted
- * (`isAutoReply` false); `fetch` reads both, and the reply tool's auto-reply
+ * So an envelope from a collection carries no In-Reply-To and none of the
+ * automatic-mail headers (`isAutoReply` false); `fetch` reads them, and the reply tool's auto-reply
  * refusal reads the FETCHED envelope.
  */
 const ENVELOPE_FIELDS = [
@@ -889,6 +891,7 @@ export class OAuthGraphProvider implements MailProvider {
       replyTo: toAddresses(msg.replyTo),
       subject: typeof msg.subject === 'string' ? msg.subject : '',
       date: Number.isNaN(received.getTime()) ? new Date() : received,
+      arrivedAt: Number.isNaN(received.getTime()) ? undefined : received,
       flags: flagsOf(msg),
       // Graph's own `bodyPreview`, rendered on the server: unlike `fetch`, it does
       // NOT pass through the hidden-text stripper. Same gap as the Gmail snippet.
@@ -899,8 +902,8 @@ export class OAuthGraphProvider implements MailProvider {
       // `hasAttachments` does not count inline attachments.
       attachmentCount: hasAttachments ? 1 : 0,
       sizeBytes: undefined,
-      isAutoReply: isAutoSubmittedHeader(headerValue(msg, 'Auto-Submitted')),
-      isAutoReplied: isAutoRepliedHeader(headerValue(msg, 'Auto-Submitted')),
+      ...automaticMail((name) => headerValue(msg, name)),
+      listId: listIdFromHeader(headerValue(msg, 'List-Id')),
     };
   }
 

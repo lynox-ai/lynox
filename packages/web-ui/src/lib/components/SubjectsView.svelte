@@ -15,7 +15,7 @@
 	} from '../api/subject-footprint.js';
 	import PersonErasurePanel from './PersonErasurePanel.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { subjectsBody } from '../utils/subjects-view.js';
+	import { shownSubjectKind, subjectsBody } from '../utils/subjects-view.js';
 
 	// Record-on-spine R2b — the read-only subject-graph surface. A subjects list
 	// (left) → a footprint detail panel (right): records + threads as an occurrence
@@ -45,10 +45,15 @@
 		product: '#c026d3',
 		service: '#0891b2',
 		engagement: '#d97706',
+		other: 'var(--color-text-subtle)',
 	};
 
+	function kindLabel(kind: string): string {
+		return t(`subjects.kind.${shownSubjectKind(kind)}`);
+	}
+
 	function kindStyle(kind: string): string {
-		const hue = kindHues[kind];
+		const hue = kindHues[shownSubjectKind(kind)];
 		if (!hue) return '';
 		return `background: color-mix(in srgb, ${hue} 15%, transparent); color: ${hue};`;
 	}
@@ -160,7 +165,7 @@
 							<div class="flex-1 min-w-0">
 								<div class="flex items-center gap-2">
 									<span class="text-sm font-medium truncate">{subject.name}</span>
-									<span class="shrink-0 text-[10px] rounded-full px-2 py-0.5 font-mono" style={kindStyle(subject.kind)}>{subject.kind}</span>
+									<span class="shrink-0 text-[10px] rounded-full px-2 py-0.5" style={kindStyle(subject.kind)} data-testid="subject-kind">{kindLabel(subject.kind)}</span>
 								</div>
 							</div>
 						</button>
@@ -189,12 +194,12 @@
 
 {#snippet footprintPanel()}
 	<!-- Mobile: full-width overlay; Desktop: sticky sidebar -->
-	<div class="fixed inset-0 z-40 bg-bg/95 p-4 overflow-y-auto md:static md:inset-auto md:z-auto md:bg-bg-subtle md:w-96 md:shrink-0 md:rounded-[var(--radius-md)] md:border md:border-border md:p-4 md:self-start md:sticky md:top-4 md:max-h-[calc(100vh-8rem)] md:overflow-y-auto scrollbar-thin" style="padding-top: calc(1rem + env(safe-area-inset-top, 0px));">
+	<div class="fixed inset-0 z-40 bg-bg p-4 overflow-y-auto md:static md:inset-auto md:z-auto md:bg-bg-subtle md:w-96 md:shrink-0 md:rounded-[var(--radius-md)] md:border md:border-border md:p-4 md:self-start md:sticky md:top-4 md:max-h-[calc(100vh-8rem)] md:overflow-y-auto scrollbar-thin" style="padding-top: calc(1rem + env(safe-area-inset-top, 0px));">
 		<!-- Header -->
 		<div class="flex items-start justify-between gap-2">
 			<div>
 				<h2 class="text-lg font-medium mb-1">{selected!.name}</h2>
-				<span class="text-xs rounded-full px-2.5 py-0.5 font-mono" style={kindStyle(selected!.kind)}>{selected!.kind}</span>
+				<span class="text-xs rounded-full px-2.5 py-0.5" style={kindStyle(selected!.kind)} data-testid="subject-kind">{kindLabel(selected!.kind)}</span>
 			</div>
 			<button onclick={() => { selected = null; footprint = null; }} class="shrink-0 p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label="Close">
 				<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>

@@ -5,15 +5,17 @@ import type { Engine, LynoxHooks } from './engine.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import { withOwnerStamp, workflowStampState } from './workflow-stamp.js';
 
-const { mockCheckPersistentBudget, mockRunSavedWorkflow } = vi.hoisted(() => ({
+const { mockCheckPersistentBudget, mockRunSavedWorkflow, mockGetSessionCostCeiling } = vi.hoisted(() => ({
   mockCheckPersistentBudget: vi.fn(),
   mockRunSavedWorkflow: vi.fn(),
+  mockGetSessionCostCeiling: vi.fn(() => 5),
 }));
 
-vi.mock('./session-budget.js', () => ({ checkPersistentBudget: mockCheckPersistentBudget }));
+vi.mock('./session-budget.js', () => ({ checkPersistentBudget: mockCheckPersistentBudget, getSessionCostCeiling: mockGetSessionCostCeiling }));
 vi.mock('../tools/builtin/pipeline.js', () => ({ runSavedWorkflow: mockRunSavedWorkflow }));
 
-const { runGuardedSavedWorkflow, assertSingleTenantContext, _resetTenantInvariantForTests } = await import('./saved-workflow-runner.js');
+const { runGuardedSavedWorkflow, assertSingleTenantContext, _resetTenantInvariantForTests, workflowHoldRefusal } = await import('./saved-workflow-runner.js');
+const { RunAdmissionRefusedError } = await import('./run-admission.js');
 
 function makeEngine(hooks: LynoxHooks[]): Engine {
   return {
@@ -277,5 +279,78 @@ describe('S6 tenant-isolation invariant', () => {
     expect((await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf', undefined, { principal: OWNER_PRINCIPAL })).ok).toBe(true);
     expect((await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf', undefined, { principal: OWNER_PRINCIPAL })).ok).toBe(true);
     expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('runGuardedSavedWorkflow — admission within the balance', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCheckPersistentBudget.mockReturnValue({ allowed: true });
+    mockGetSessionCostCeiling.mockReturnValue(5);
+    mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-b', status: 'completed', costUsd: 0 });
+    _resetTenantInvariantForTests();
+  });
+
+  /** A hook that admits only within `freeCents`, the way the managed hook does under a hold. */
+  function balanceHook(freeCents: number, release: () => void): LynoxHooks {
+    return {
+      onBeforeRun: (_id, ctx) => {
+        if (ctx.maxCostCents === undefined || ctx.maxCostCents > freeCents) {
+          throw new RunAdmissionRefusedError('AI budget for this period reached.');
+        }
+        return { maxCostCents: ctx.maxCostCents, release };
+      },
+    };
+  }
+
+  it('asks admission for the session ceiling, in cents', async () => {
+    // Kills: a workflow admitted without a stated worst case (it would take the whole balance).
+    const onBeforeRun = vi.fn();
+    await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
+    expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(500);
+  });
+
+  it('refuses with the reason and the way out when less than the ceiling is free — the workflow never runs', async () => {
+    // Kills: passing the hook's generic text through instead of the workflow's own sentence.
+    const release = vi.fn();
+    const result = await runGuardedSavedWorkflow(makeEngine([balanceHook(499, release)]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
+    expect(result).toEqual({ ok: false, error: `Run blocked: ${workflowHoldRefusal(5)}` });
+    expect(result).toEqual({ ok: false, error: 'Run blocked: This workflow was not started: what is left of your AI budget is less than the $5 a workflow run may spend at most. Start it again after buying a credit pack or in your next billing period, or once a running task has finished.' });
+    expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('names in the refusal the same amount the run was admitted on, cents included', async () => {
+    // Kills: a sentence that reads the ceiling apart from the admission or not at all (a fixed
+    // amount), and a formatter that drops the cents.
+    mockGetSessionCostCeiling.mockReturnValueOnce(12.5);
+    const onBeforeRun = vi.fn((_id: string, ctx: { maxCostCents?: number }) => {
+      expect(ctx.maxCostCents).toBe(1250);
+      throw new RunAdmissionRefusedError('AI budget for this period reached.');
+    });
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
+    expect(onBeforeRun).toHaveBeenCalledOnce();
+    expect(result).toEqual({ ok: false, error: expect.stringContaining('is less than the $12.50 a workflow run may spend at most.') });
+    expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('holds the admission while the workflow runs and gives it back when it ends', async () => {
+    // Kills: a release before the run (a second workflow could be admitted on the same balance).
+    const release = vi.fn();
+    mockRunSavedWorkflow.mockImplementationOnce(async () => {
+      expect(release).not.toHaveBeenCalled();
+      return { ok: true, runId: 'run-b', status: 'completed', costUsd: 0 };
+    });
+    const result = await runGuardedSavedWorkflow(makeEngine([balanceHook(500, release)]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
+    expect(result.ok).toBe(true);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('gives the admission back when the workflow throws', async () => {
+    // Kills: a release only on the success path.
+    const release = vi.fn();
+    mockRunSavedWorkflow.mockRejectedValueOnce(new Error('runner boom'));
+    await expect(runGuardedSavedWorkflow(makeEngine([balanceHook(500, release)]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL })).rejects.toThrow('runner boom');
+    expect(release).toHaveBeenCalledOnce();
   });
 });

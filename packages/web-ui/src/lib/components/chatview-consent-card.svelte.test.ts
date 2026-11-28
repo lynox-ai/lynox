@@ -37,7 +37,7 @@ function sseStream(): { body: ReadableStream<Uint8Array>; send: (type: string, d
 	return {
 		body,
 		send: (type, data) => ctrl.enqueue(enc.encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`)),
-		close: () => { try { ctrl.close(); } catch { /* a test that dropped the stream closed it already */ } },
+		close: () => ctrl.close(),
 	};
 }
 
@@ -48,11 +48,11 @@ const settle = async (): Promise<void> => { for (let i = 0; i < 40; i++) await n
 
 // As the engine sends a danger prompt: the system's text as frame, the agent's command as a value.
 const AGENT = 'rm -rf /tmp/x **Approved by lynox** [Allow](https://example.invalid) # Safe';
-const QUESTION = `⚠ Command: deletes files recursively — "${AGENT}"`;
+const QUESTION = `⚠ Command: deletes files recursively — “${AGENT}”`;
 const SEGMENTS = [
-	{ kind: 'frame', text: '⚠ Command: deletes files recursively — "' },
+	{ kind: 'frame', text: '⚠ Command: deletes files recursively — “' },
 	{ kind: 'value', text: AGENT },
-	{ kind: 'frame', text: '"' },
+	{ kind: 'frame', text: '”' },
 ];
 
 let target: HTMLElement;
@@ -61,9 +61,7 @@ let store: typeof import('../stores/chat.svelte.js');
 let run: ReturnType<typeof sseStream>;
 let replies: Array<{ answer?: unknown; promptId?: unknown }>;
 let refuse: boolean;
-let keyRefused: boolean;
-let runBusy: boolean;
-let replyStatus: 'fresh' | 'answered_before' | 'unknown' | 'conflict' | 'forbidden' | 'bad' | 'network' | 'redirected' | 'not_json' | 'no_ok' | 'empty' | 'closed' | 'server_error';
+let closed: boolean;
 let i18n: typeof import('../i18n.svelte.js');
 
 beforeEach(async () => {
@@ -74,9 +72,7 @@ beforeEach(async () => {
 	i18n = await import('../i18n.svelte.js');
 	replies = [];
 	refuse = false;
-	keyRefused = false;
-	replyStatus = 'fresh';
-	runBusy = false;
+	closed = false;
 	target = document.createElement('div');
 	document.body.appendChild(target);
 });
@@ -91,37 +87,17 @@ afterEach(() => {
 });
 
 /** Starts a turn, has the engine ask with `options` (and `consent`), renders ChatView, returns the prompt bar. */
-async function renderPrompt(options: string[], consent?: 'guard' | 'deep', before?: () => void): Promise<HTMLElement> {
+async function renderPrompt(options: string[], consent?: string, before?: () => void, extra: Record<string, unknown> = {}): Promise<HTMLElement> {
 	run = sseStream();
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
-		if (url.endsWith('/sessions/t1/run') && runBusy) return json({ error: 'Session is busy' }, 409);
 		if (url.endsWith('/sessions/t1/run')) return new Response(run.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		if (url.endsWith('/sessions/t1/reply')) {
 			replies.push(JSON.parse(String(init?.body ?? '{}')) as { answer?: unknown });
-			if (keyRefused) return json({ error: 'No key here.', code: 'mandate_key_input' }, 422);
-			if (replyStatus === 'unknown') return json({ error: 'No pending prompt' }, 404);
-			if (replyStatus === 'conflict') return json({ error: 'Prompt belongs to a different session' }, 409);
-			if (replyStatus === 'forbidden') return json({ error: 'Not yours' }, 403);
-			if (replyStatus === 'bad') return json({ error: 'Bad request' }, 400);
-			if (replyStatus === 'network') throw new TypeError('Failed to fetch');
-			if (replyStatus === 'closed') return json({ error: 'Prompt closed: its time ran out.', code: 'timed_out' }, 410);
-			if (replyStatus === 'server_error') return json({ error: 'Internal' }, 502);
-			// 2xx answers that are not the server's own reply: a login page reached by a redirect, a
-			// proxy's page, a JSON body without `ok: true`, no body at all.
-			if (replyStatus === 'redirected') {
-				const res = json(refuse ? { ok: true, refused: 'unrecognised_answer' } : { ok: true });
-				Object.defineProperty(res, 'redirected', { value: true });
-				return res;
-			}
-			if (replyStatus === 'not_json') return new Response('<html>Sign in</html>', { status: 200, headers: { 'Content-Type': 'text/html' } });
-			if (replyStatus === 'no_ok') return json(refuse ? { refused: 'unrecognised_answer' } : { status: 'fine' });
-			if (replyStatus === 'empty') return new Response(null, { status: 204 });
-			if (replyStatus === 'answered_before') return json({ ok: true, idempotent: true, ...(refuse ? { refused: 'unrecognised_answer' } : {}) });
+			if (closed) return new Response(JSON.stringify({ code: 'timed_out' }), { status: 410, headers: { 'Content-Type': 'application/json' } });
 			return json(refuse ? { ok: true, refused: 'unrecognised_answer' } : { ok: true });
 		}
-		if (url.endsWith('/sessions/t1/pending-prompt')) return json(runBusy ? { pending: true, promptType: 'ask_user', question: '⚠ Command: x', options: ['allow', 'deny'], promptId: 'p1', consent: 'guard' } : { pending: false });
 		if (url.endsWith('/threads/t1')) return json({ thread: null });
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/threads/t1/messages')) return json({ messages: [] });
@@ -132,7 +108,7 @@ async function renderPrompt(options: string[], consent?: 'guard' | 'deep', befor
 	await settle();
 	before?.();
 	await settle();
-	run.send('prompt', { question: '⚠ Command: x', options, promptId: 'p1', agent: 'lynox', ...(consent ? { consent } : {}) });
+	run.send('prompt', { question: '⚠ Command: x', options, promptId: 'p1', agent: 'lynox', ...(consent ? { consent } : {}), ...extra });
 	await settle();
 	const { default: ChatView } = await import('./ChatView.svelte');
 	component = svelte.mount(ChatView, { target });
@@ -198,8 +174,177 @@ describe('the engine\'s own confirmation', () => {
 	});
 });
 
+describe('a tool\'s own confirmation', () => {
+	const KINDS = [
+		{ kind: 'send', keys: ['send', 'cancel'], labels: ['chat.consent.send', 'chat.consent_cancel'] },
+		{ kind: 'merge', keys: ['merge', 'cancel'], labels: ['chat.consent.merge', 'chat.consent_cancel'] },
+		{ kind: 'apply', keys: ['apply', 'cancel'], labels: ['chat.consent.apply', 'chat.consent_cancel'] },
+		{ kind: 'retire', keys: ['retire', 'cancel'], labels: ['chat.consent.retire', 'chat.consent_cancel'] },
+		{ kind: 'plan', keys: ['proceed', 'adjust', 'cancel'], labels: ['chat.consent.proceed', 'chat.consent.adjust', 'chat.consent_cancel'] },
+		{ kind: 'formula', keys: ['as-text', 'as-formulas', 'cancel'], labels: ['chat.consent.write_text', 'chat.consent.write_formulas', 'chat.consent.dont_write'] },
+		{ kind: 'formula-text', keys: ['as-text', 'cancel'], labels: ['chat.consent.write_text', 'chat.consent.dont_write'] },
+	] as const;
+	for (const locale of ['de', 'en'] as const) {
+		for (const k of KINDS) {
+			it(`${k.kind}, ${locale}: the keys in the chat's words, no skip, and the first sends its key`, async () => {
+				i18n.setLocale(locale);
+				const bar = await renderPrompt([...k.keys], k.kind);
+				expect(buttons(bar)).toEqual(k.labels.map((l) => i18n.t(l)));
+				for (const key of k.keys) expect(buttons(bar)).not.toContain(key);
+				expect(bar.querySelector(`[aria-label="${i18n.t('chat.dismiss')}"]`)).toBeNull();
+				await click(bar, i18n.t(k.labels[0]));
+				expect(replies.map((r) => r.answer)).toEqual([k.keys[0]]);
+			});
+		}
+
+		it(`google, ${locale}: the confirming button names the action; a delete is red`, async () => {
+			i18n.setLocale(locale);
+			const bar = await renderPrompt(['confirm', 'cancel'], 'google', undefined, { consentAction: 'delete' });
+			expect(buttons(bar)).toEqual([i18n.t('chat.consent.action.delete'), i18n.t('chat.consent_cancel')]);
+			const del = bar.querySelector<HTMLElement>('[data-consent-key="confirm"]')!;
+			expect(del.className).toContain('text-danger');
+			await click(bar, i18n.t('chat.consent.action.delete'));
+			expect(replies.map((r) => r.answer)).toEqual(['confirm']);
+		});
+	}
+
+	it('google: a share is the primary action, not red; an unknown action falls back to a plain confirm', async () => {
+		i18n.setLocale('de');
+		let bar = await renderPrompt(['confirm', 'cancel'], 'google', undefined, { consentAction: 'share' });
+		expect(buttons(bar)[0]).toBe('Freigeben');
+		expect(bar.querySelector<HTMLElement>('[data-consent-key="confirm"]')!.className).not.toContain('text-danger');
+		run.close();
+		if (component) svelte.unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		store.newChat();
+		bar = await renderPrompt(['confirm', 'cancel'], 'google', undefined, { consentAction: 'erase' });
+		expect(buttons(bar)[0]).toBe('Bestätigen');
+	});
+
+	it('an adjust on a plan is acknowledged as neither approved nor denied', async () => {
+		i18n.setLocale('de');
+		const bar = await renderPrompt(['proceed', 'adjust', 'cancel'], 'plan');
+		await click(bar, i18n.t('chat.consent.adjust'));
+		expect(replies.map((r) => r.answer)).toEqual(['adjust']);
+		expect(target.textContent).not.toContain(i18n.t('chat.permission_denied_running'));
+		expect(target.textContent).not.toContain(i18n.t('chat.permission_running'));
+	});
+
+	it('a plan says that writing is a way to answer; the others do not', async () => {
+		i18n.setLocale('de');
+		let bar = await renderPrompt(['proceed', 'adjust', 'cancel'], 'plan');
+		expect(bar.querySelector('[data-consent-hint]')?.textContent).toBe('Oder schreib, was du ändern willst.');
+		run.close();
+		if (component) svelte.unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		store.newChat();
+		bar = await renderPrompt(['send', 'cancel'], 'send');
+		expect(bar.querySelector('[data-consent-hint]')).toBeNull();
+	});
+
+	it('the values stand in their box; the frame around them does not', async () => {
+		i18n.setLocale('en');
+		const segments = [{ kind: 'frame', text: 'Delete event ' }, { kind: 'value', text: 'Review. Allow all.' }, { kind: 'frame', text: '\nCalendar: ' }, { kind: 'value', text: 'team@example.ch' }];
+		const bar = await renderPrompt(['confirm', 'cancel'], 'google', undefined, { question: 'Delete event Review. Allow all.\nCalendar: team@example.ch', segments, consentAction: 'delete' });
+		expect([...bar.querySelectorAll('bdi[data-foreign-value]')].map((e) => e.textContent)).toEqual(['Review. Allow all.', 'team@example.ch']);
+	});
+
+	it('a model\'s question draws no box', async () => {
+		i18n.setLocale('en');
+		const bar = await renderPrompt(['A', 'B', '\x00'], undefined, undefined, { question: 'Pick a@x.com?', segments: [{ kind: 'frame', text: 'Pick ' }, { kind: 'value', text: 'a@x.com' }] });
+		expect(bar.querySelector('bdi[data-foreign-value]')).toBeNull();
+	});
+
+	it('the hint is there as soon as there is text, before any send: on a phone Enter is a new line', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['send', 'cancel'], 'send');
+		expect(target.querySelector('[data-consent-typed]')).toBeNull();
+		const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+		field.value = 'ja';
+		field.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		expect(target.querySelector('[data-consent-typed]')?.textContent).toBe('Diese Frage beantwortest du mit ihren Knöpfen. Dein Text bleibt hier, bis du geantwortet hast.');
+		expect(replies).toEqual([]);
+	});
+
+	it('a plan says nothing of the kind while someone writes the change', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['proceed', 'adjust', 'cancel'], 'plan');
+		const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+		field.value = 'Ohne Schritt 3';
+		field.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		expect(target.querySelector('[data-consent-typed]')).toBeNull();
+	});
+
+	for (const [kind, keys, active] of [['send', ['send', 'cancel'], false], ['guard', ['allow', 'deny'], false], ['plan', ['proceed', 'adjust', 'cancel'], true]] as const) {
+		it(`${kind}: the send arrow is ${active ? 'live, writing is an answer' : 'off, only the buttons answer'}`, async () => {
+			i18n.setLocale('de');
+			await renderPrompt([...keys], kind);
+			const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+			field.value = 'etwas';
+			field.dispatchEvent(new Event('input', { bubbles: true }));
+			await settle();
+			const arrow = target.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t('chat.send')}"]`)!;
+			expect(arrow.disabled).toBe(!active);
+		});
+	}
+
+	it('the question keeps its markdown: a tool\'s card is no <pre>', async () => {
+		i18n.setLocale('en');
+		const bar = await renderPrompt(['send', 'cancel'], 'send', undefined, { question: '**Send email?**', segments: [{ kind: 'frame', text: '**Send email?**' }] });
+		expect(bar.querySelector('pre')).toBeNull();
+		expect(bar.querySelector('strong')?.textContent).toBe('Send email?');
+	});
+
+	for (const [kind, keys, typed] of [['send', ['send', 'cancel'], 'send'], ['send', ['send', 'cancel'], 'ja'], ['google', ['confirm', 'cancel'], 'confirm'], ['guard', ['allow', 'deny'], 'allow'], ['deep', ['deep', 'balanced', 'cancel'], 'deep'], ['merge', ['merge', 'cancel'], 'merge'], ['apply', ['apply', 'cancel'], 'apply'], ['retire', ['retire', 'cancel'], 'retire'], ['plan', ['proceed', 'adjust', 'cancel'], 'proceed'], ['plan', ['proceed', 'adjust', 'cancel'], 'cancel']] as const) {
+		it(`${kind}: typed ${JSON.stringify(typed)} is no answer: it stays in the field with a hint`, async () => {
+			i18n.setLocale('de');
+			await renderPrompt([...keys], kind);
+			const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+			field.value = typed;
+			field.dispatchEvent(new Event('input', { bubbles: true }));
+			await settle();
+			field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+			await settle();
+			expect(replies, 'nothing was answered').toEqual([]);
+			expect(target.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe(typed);
+			expect(target.querySelector('[data-consent-typed]')?.textContent).toBe('Diese Frage beantwortest du mit ihren Knöpfen. Dein Text bleibt hier, bis du geantwortet hast.');
+			expect(target.querySelector('[data-prompt-kind="permission"]')).not.toBeNull();
+		});
+	}
+
+	it('plan: typed text is sent as the change asked for, and comes back to the field if the question closed', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['proceed', 'adjust', 'cancel'], 'plan');
+		closed = true;
+		const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+		field.value = 'Ohne Schritt 3';
+		field.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+		await settle();
+		await settle();
+		expect(replies.map((r) => r.answer)).toEqual(['Ohne Schritt 3']);
+		expect(target.querySelector('[data-consent-typed]')).toBeNull();
+		expect(target.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('Ohne Schritt 3');
+	});
+
+	it('typed text to a send is refused visibly, as for the guard', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['send', 'cancel'], 'send');
+		refuse = true;
+		await store.replyPermission('ja');
+		await settle();
+		expect(replies.map((r) => r.answer)).toEqual(['ja']);
+		expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
+	});
+});
+
 describe('a question the model wrote', () => {
-	for (const options of [['Allow', 'Deny', '\x00'], ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], ['allow', 'deny']]) {
+	for (const options of [['Allow', 'Deny', '\x00'], ['Allow Deep', 'Run on Balanced', 'Cancel', '\x00'], ['allow', 'deny']]) {
 		it(`offering ${options.filter((o) => o !== '\x00').join(' / ')} without the marker is an ordinary question`, async () => {
 			i18n.setLocale('de');
 			const bar = await renderPrompt(options);
@@ -231,156 +376,5 @@ describe('the model\'s batched questions', () => {
 		const bar = await renderPrompt(['allow', 'deny'], 'guard', batch);
 		expect(buttons(bar)).toEqual(expect.arrayContaining([i18n.t('chat.allow'), i18n.t('chat.deny')]));
 		expect(target.textContent).not.toContain('Continue?');
-	});
-});
-
-describe('text typed as the answer', () => {
-	const type = async (text: string): Promise<void> => {
-		const area = target.querySelector<HTMLTextAreaElement>('textarea');
-		if (!area) throw new Error('no message field');
-		area.value = text;
-		area.dispatchEvent(new Event('input', { bubbles: true }));
-		await settle();
-		const send = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.getAttribute('aria-label') === i18n.t('chat.send'));
-		if (!send) throw new Error('no send button');
-		send.click();
-		await settle();
-	};
-	const lines = (): string[] => [...target.querySelectorAll('[data-typed-answer]')].map((e) => (e.textContent ?? '').replace(/\s+/g, ' ').trim());
-
-	for (const locale of ['de', 'en'] as const) {
-		it(`${locale}: to the engine's confirmation, it stays in the chat where the question stood, and the refusal stands beside it`, async () => {
-			i18n.setLocale(locale);
-			await renderPrompt(['allow', 'deny'], 'guard');
-			refuse = true;
-			await type(locale === 'de' ? 'ja' : 'yes');
-			expect(replies.map((r) => r.answer)).toEqual([locale === 'de' ? 'ja' : 'yes']);
-			expect(lines()).toEqual([`${i18n.t('chat.typed_answer')} "${locale === 'de' ? 'ja' : 'yes'}"`]);
-			expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
-			// The run's result comes after the line, not over it.
-			run.send('done', { result: 'Not sent to the AI model.' });
-			await settle();
-			svelte.flushSync();
-			expect(lines()).toHaveLength(1);
-			expect(target.textContent).toContain('Not sent to the AI model.');
-			const text = target.textContent ?? '';
-			expect(text.indexOf(i18n.t('chat.typed_answer'))).toBeLessThan(text.indexOf('Not sent to the AI model.'));
-		});
-	}
-
-	it('a click leaves no line: the button already says what was answered', async () => {
-		i18n.setLocale('de');
-		const bar = await renderPrompt(['allow', 'deny'], 'guard');
-		await click(bar, i18n.t('chat.allow'));
-		expect(lines()).toEqual([]);
-	});
-
-	it('one the engine did not take (a key it refused) is not kept: it was not given', async () => {
-		i18n.setLocale('de');
-		await renderPrompt(['allow', 'deny'], 'guard');
-		keyRefused = true;
-		await type('password: Hunter2!x');
-		expect(replies.map((r) => r.answer)).toEqual(['password: Hunter2!x']);
-		expect(lines()).toEqual([]);
-		expect(JSON.stringify(store.getMessages())).not.toContain('Hunter2');
-	});
-
-	// The sentence is the server's verdict on the newest answer; whatever stands was set earlier in
-	// the same run (every run starts with no error), so it gives way.
-	it('an answer read as none of the keys replaces a sentence standing from before: the open question', async () => {
-		i18n.setLocale('de');
-		await renderPrompt(['allow', 'deny'], 'guard');
-		// The stream drops while the question stays open on the server; a message sent then is
-		// refused because of it.
-		runBusy = true;
-		run.close();
-		await new Promise((r) => setTimeout(r, 1500));
-		await settle();
-		await store.checkPendingPrompt(); // as after a reload: the question is still open
-		await settle();
-		svelte.flushSync();
-		void store.sendMessage('and then the next thing');
-		await settle();
-		expect(store.getChatError()).toBe(i18n.t('chat.error_blocked_by_prompt'));
-		refuse = true;
-		await type('ja');
-		expect(replies.map((r) => r.answer)).toEqual(['ja']);
-		expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
-	});
-
-	it('an answer read as none of the keys replaces a sentence standing from before: a refused key', async () => {
-		i18n.setLocale('de');
-		await renderPrompt(['allow', 'deny'], 'guard');
-		keyRefused = true;
-		await type('password: Hunter2!x');
-		expect([i18n.t('chat.mandate_key_input'), i18n.t('chat.mandate_key_input_returned')]).toContain(store.getChatError());
-		// The question comes back, and the next typed answer is sent and read as none of its keys.
-		keyRefused = false;
-		refuse = true;
-		run.send('prompt', { question: '⚠ Command: x', options: ['allow', 'deny'], promptId: 'p2', agent: 'lynox', consent: 'guard' });
-		await settle();
-		svelte.flushSync();
-		await type('vielleicht');
-		expect(replies.map((r) => r.answer)).toEqual(['password: Hunter2!x', 'vielleicht']);
-		expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
-	});
-
-	it('control: with nothing standing, an answer read as none of the keys says so', async () => {
-		i18n.setLocale('de');
-		await renderPrompt(['allow', 'deny'], 'guard');
-		refuse = true;
-		await type('vielleicht');
-		expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
-	});
-
-	const stored = (): string => { try { return localStorage.getItem('lynox-chat') ?? ''; } catch { return ''; } };
-	for (const status of ['answered_before', 'unknown', 'conflict', 'forbidden', 'bad', 'network', 'redirected', 'not_json', 'no_ok', 'empty', 'closed', 'server_error'] as const) {
-		for (const unrecognised of [false, true]) {
-			it(`one the engine did not take as this answer (${status}${unrecognised ? ', read as no key' : ''}) is neither shown nor stored`, async () => {
-				i18n.setLocale('de');
-				await renderPrompt(['allow', 'deny'], 'guard');
-				replyStatus = status;
-				refuse = unrecognised;
-				await type('password: Hunter2!x');
-				await new Promise((r) => setTimeout(r, 1200)); // the one retry after a failed send
-				await settle();
-				expect(replies.length).toBeGreaterThanOrEqual(1);
-				expect(lines()).toEqual([]);
-				expect(JSON.stringify(store.getMessages())).not.toContain('Hunter2');
-				expect(stored()).not.toContain('Hunter2');
-			});
-		}
-	}
-
-	it('control: one the engine took now is shown, and kept with the chat', async () => {
-		i18n.setLocale('de');
-		await renderPrompt(['allow', 'deny'], 'guard');
-		await type('ja');
-		expect(lines()).toEqual([`${i18n.t('chat.typed_answer')} "ja"`]);
-		expect(JSON.stringify(store.getMessages())).toContain('"type":"answer"');
-	});
-
-	it('goes into the reply of the run that asked, also when a message waits behind it', async () => {
-		i18n.setLocale('de');
-		await renderPrompt(['allow', 'deny'], 'guard');
-		void store.sendMessage('and then the next thing');
-		await settle();
-		refuse = true;
-		await type('ja');
-		const msgs = store.getMessages();
-		const holder = msgs.findIndex((m) => m.blocks?.some((b) => b.type === 'answer'));
-		const waiting = msgs.findIndex((m) => m.role === 'user' && m.content === 'and then the next thing');
-		expect(waiting).toBeGreaterThan(-1);
-		expect(holder).toBeGreaterThan(-1);
-		expect(holder).toBeLessThan(waiting);
-		expect(lines()).toHaveLength(1);
-	});
-
-	it('to a question the model wrote, it adds no line', async () => {
-		i18n.setLocale('de');
-		await renderPrompt(['Allow', 'Deny', '\x00']);
-		await type('ja');
-		expect(replies.map((r) => r.answer)).toEqual(['ja']);
-		expect(lines()).toEqual([]);
 	});
 });

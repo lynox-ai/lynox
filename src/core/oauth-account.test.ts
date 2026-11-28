@@ -68,6 +68,11 @@ describe('accountFromStoreOrigin', () => {
 });
 
 describe('accountLabel', () => {
+  it('a control character between two mark runs does not join them past four marks', () => {
+    const marks = '\u0301'.repeat(4);
+    expect(accountLabel(`e${marks}\u0080${marks}\u0099${marks}`)).toBe(`e${marks}`);
+  });
+
   it('keeps a plain name as it is', () => {
     expect(accountLabel('person@example.invalid')).toBe('person@example.invalid');
   });
@@ -77,7 +82,7 @@ describe('accountLabel', () => {
   });
 
   it('removes format characters, TAG characters included, and C1 controls', () => {
-    const tagged = `shop${String.fromCodePoint(0xe0041)}​‮`;
+    const tagged = `shop${String.fromCodePoint(0xe0041)}\u200B\u202E`;
     expect(accountLabel(tagged)).toBe('shop');
     expect(accountLabel('a\u009bb')).toBe('ab');
   });
@@ -89,7 +94,7 @@ describe('accountLabel', () => {
   it('gives nothing for a value that is not text or has nothing readable left', () => {
     expect(accountLabel(undefined)).toBeUndefined();
     expect(accountLabel(7)).toBeUndefined();
-    expect(accountLabel('​ \n')).toBeUndefined();
+    expect(accountLabel('\u200B \n')).toBeUndefined();
   });
 });
 

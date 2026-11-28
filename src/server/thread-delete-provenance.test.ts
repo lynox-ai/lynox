@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
+import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 import { LynoxHTTPApi } from './http-api.js';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
@@ -12,6 +13,9 @@ import type { ThreadStore } from '../core/thread-store.js';
 import type { KnowledgeStore } from '../core/knowledge-store.js';
 import type { KnowledgeLayer } from '../core/knowledge-layer.js';
 import type { PromptStore } from '../core/prompt-store.js';
+import type { RunHistory } from '../core/run-history.js';
+import { FALLBACK_MARKER } from '../core/connection-erasure.js';
+import { recordExecutedState, getExecutedResult, forgetExecutedStatesOfChat } from '../tools/builtin/pipeline.js';
 
 /**
  * Deleting a chat keeps what was learned in it, and marks the source as a deleted chat.
@@ -288,6 +292,357 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
 
     expect(ps.getById(asked)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted' });
     expect(ps.getById(kept)).toMatchObject({ status: 'pending', closed_reason: null });
+  });
+
+  function runHistory(): RunHistory {
+    const rh = (api as unknown as { engine: { getRunHistory: () => RunHistory | null } }).engine.getRunHistory();
+    if (!rh) throw new Error('fixture: no run history');
+    return rh;
+  }
+
+  /**
+   * One run of `threadId` with content in every store the chat's runs reach: its tool call, a
+   * question asked in the chat, a workflow it started with a step result, a run it spawned, a
+   * process taken from it (one plain, one promoted to a workflow), a security event, a
+   * pre-approval and an advisor suggestion. Written in clear with raw SQL: the store encrypts what its own writers put
+   * in, and a search for the mark would then find nothing whether the delete blanked it or not.
+   */
+  function seedRuns(threadId: string, mark: string): { runId: string; child: string } {
+    const rh = runHistory();
+    const db = rh.getDb();
+    const runId = rh.insertRun({ sessionId: threadId, taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    rh.updateRun(runId, { status: 'failed', costUsd: 0.25 });
+    db.prepare('UPDATE runs SET task_text = ?, response_text = ?, error_text = ?, task_hash = ?, prompt_hash = ? WHERE id = ?')
+      .run(`task ${mark}`, `reply ${mark}`, `error ${mark}`, mark, mark, runId);
+    const child = rh.insertRun({ sessionId: `spawned-${threadId}`, taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    db.prepare('UPDATE runs SET task_text = ?, spawn_parent_id = ? WHERE id = ?').run(`child ${mark}`, runId, child);
+    const call = `tc-${threadId}`;
+    db.prepare(`INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json) VALUES (?, ?, 'http_request', ?, ?)`)
+      .run(call, runId, `{"v":"${mark}"}`, `failed ${mark}`);
+    db.prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, options_json, answer, status, expires_at)
+      VALUES (?, ?, 'ask_user', ?, ?, ?, 'answered', '2099-01-01T00:00:00.000Z')`).run(`pp-${threadId}`, threadId, mark, `["${mark}"]`, mark);
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id, error) VALUES (?, 'wf', 'failed', ?, ?, ?)`)
+      .run(`wf-${threadId}`, `{"p":"${mark}"}`, threadId, mark);
+    db.prepare(`INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result, error) VALUES (?, 's1', 'failed', ?, ?)`)
+      .run(`wf-${threadId}`, mark, mark);
+    db.prepare(`INSERT INTO processes (id, name, description, source_run_id, steps_json, parameters_json) VALUES (?, 'weekly', ?, ?, ?, ?)`)
+      .run(`proc-${threadId}`, mark, runId, `[{"q":"${mark}"}]`, `[{"d":"${mark}"}]`);
+    db.prepare(`INSERT INTO processes (id, name, description, source_run_id, steps_json, parameters_json, promoted_to_pipeline_id) VALUES (?, 'saved', ?, ?, ?, '[]', 'wf-saved')`)
+      .run(`promoted-${threadId}`, `saved ${mark}`, runId, `[{"q":"saved ${mark}"}]`);
+    db.prepare(`INSERT INTO security_events (event_type, tool_name, input_preview, decision, run_id, detail) VALUES ('danger_flagged', 'http_request', ?, 'flagged', ?, ?)`)
+      .run(mark, runId, mark);
+    db.prepare(`INSERT INTO wire_snapshots (run_id, turn_index, model, provider, system_prompt_hash, user_message, user_message_chars, tool_names, tool_count, max_tokens, ephemeral_tail_present, ephemeral_tail_chars, captured_at)
+      VALUES (?, 0, 'm', 'p', 'h', ?, 1, '[]', 0, 1, 0, 0, 0)`).run(runId, mark);
+    db.prepare(`INSERT INTO pre_approval_sets (id, task_summary, approved_by, patterns_json, max_uses, ttl_ms, run_id) VALUES (?, ?, 'owner', ?, 1, 1, ?)`)
+      .run(`pa-${threadId}`, mark, `["${mark}"]`, runId);
+    db.prepare(`INSERT INTO pre_approval_events (set_id, pattern_idx, tool_name, match_string, pattern, decision, run_id) VALUES (?, 0, 'http_request', ?, ?, 'approved', ?)`)
+      .run(`pa-${threadId}`, mark, mark, runId);
+    db.prepare(`INSERT INTO advisor_suggestions (run_id, type, priority, title, detail, estimated_impact_json) VALUES (?, 'cost', 'low', ?, ?, ?)`)
+      .run(runId, mark, mark, `{"n":"${mark}"}`);
+    return { runId, child };
+  }
+
+  /**
+   * The columns {@link seedRuns} writes the mark into, per store. Its own list, not the blanking's:
+   * a store left out of the blanking must fail its test here, not drop out of it.
+   */
+  const SEEDED: Record<string, readonly string[]> = {
+    advisor_suggestions: ['title', 'detail', 'estimated_impact_json'],
+    pending_prompts: ['question', 'options_json', 'answer'],
+    pipeline_runs: ['manifest_json', 'error'],
+    pipeline_step_results: ['result', 'error'],
+    pre_approval_events: ['match_string', 'pattern'],
+    pre_approval_sets: ['task_summary', 'patterns_json'],
+    processes: ['description', 'steps_json', 'parameters_json'],
+    run_tool_calls: ['input_json', 'output_json'],
+    runs: ['task_text', 'response_text', 'error_text', 'task_hash', 'prompt_hash'],
+    security_events: ['input_preview', 'detail'],
+    wire_snapshots: ['user_message'],
+  };
+
+  /** The seeded columns of `table` that still hold `mark`. */
+  function columnsHolding(table: string, mark: string): string[] {
+    const db = runHistory().getDb();
+    return (SEEDED[table] ?? []).filter((c) =>
+      (db.prepare(`SELECT COUNT(*) AS n FROM "${table}" WHERE "${c}" LIKE ?`).get(`%${mark}%`) as { n: number }).n > 0);
+  }
+
+  describe('the content of the chat\'s runs goes with it; the rows and their costs stay', () => {
+    const MARK = `gone-${randomBytes(6).toString('hex')}`;
+    const KEPT = `kept-${randomBytes(6).toString('hex')}`;
+    let seeded: { runId: string; child: string };
+
+    beforeAll(async () => {
+      const { ts } = stores();
+      ts.createThread('t-runs-gone', { title: 'its runs go' });
+      ts.createThread('t-runs-kept', { title: 'another chat' });
+      seeded = seedRuns('t-runs-gone', MARK);
+      seedRuns('t-runs-kept', KEPT);
+      // Positive control: before the delete every store holds the mark.
+      for (const table of Object.keys(SEEDED)) {
+        if (columnsHolding(table, MARK).length === 0) throw new Error(`fixture: the seed did not reach ${table}`);
+      }
+      const { status } = await deleteChat('t-runs-gone');
+      if (status !== 200) throw new Error(`fixture: delete answered ${String(status)}`);
+    });
+
+    it.each(Object.keys(SEEDED))('%s keeps none of the chat\'s content', (table) => {
+      expect(columnsHolding(table, MARK)).toEqual([]);
+    });
+
+    it('keeps every run with its cost, and blanks the run it spawned', () => {
+      const db = runHistory().getDb();
+      const row = (id: string) => db.prepare('SELECT task_text AS t, cost_usd AS c FROM runs WHERE id = ?').get(id) as { t: string; c: number } | undefined;
+      expect(row(seeded.runId)).toEqual({ t: FALLBACK_MARKER, c: 0.25 });
+      expect(row(seeded.child)?.t).toBe(FALLBACK_MARKER);
+    });
+
+    it('blanks a process promoted to a workflow as well: it is lineage, the workflow lives elsewhere', () => {
+      const proc = runHistory().getDb().prepare('SELECT description, steps_json, promoted_to_pipeline_id AS p FROM processes WHERE id = ?').get('promoted-t-runs-gone');
+      expect(proc).toEqual({ description: FALLBACK_MARKER, steps_json: FALLBACK_MARKER, p: 'wf-saved' });
+    });
+
+    it('leaves another chat\'s runs as they were', () => {
+      for (const table of Object.keys(SEEDED)) {
+        expect(columnsHolding(table, KEPT).length, table).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  describe('what a run of the chat writes after the delete is blanked too', () => {
+    const MARK = `late-${randomBytes(6).toString('hex')}`;
+    const KEPT = `other-${randomBytes(6).toString('hex')}`;
+    let seeded: { runId: string; child: string };
+    let lateQuestion = '';
+    let otherRun = '';
+
+    /** A write into every content store, keyed on `runId` and `workflow`, as a run still going would do. */
+    function writeLate(db: Database.Database, runId: string, workflow: string, mark: string, tag: string, status: 'pending' | 'answered'): string {
+      db.prepare('UPDATE runs SET response_text = ?, error_text = ? WHERE id = ?').run(`answer ${mark}`, `error ${mark}`, runId);
+      db.prepare(`INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json) VALUES (?, ?, 'http_request', ?, ?)`)
+        .run(`late-tc-${tag}`, runId, `{"v":"${mark}"}`, `out ${mark}`);
+      db.prepare('UPDATE pipeline_runs SET error = ?, manifest_json = ? WHERE id = ?').run(mark, `{"p":"${mark}"}`, workflow);
+      db.prepare(`INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result, error) VALUES (?, 'late', 'failed', ?, ?)`).run(workflow, mark, mark);
+      db.prepare(`INSERT INTO processes (id, name, description, source_run_id, steps_json, parameters_json) VALUES (?, 'late', ?, ?, ?, ?)`)
+        .run(`late-proc-${tag}`, mark, runId, `[{"q":"${mark}"}]`, `[{"d":"${mark}"}]`);
+      db.prepare(`INSERT INTO security_events (event_type, tool_name, input_preview, decision, run_id, detail) VALUES ('danger_flagged', 'http_request', ?, 'flagged', ?, ?)`)
+        .run(mark, runId, mark);
+      db.prepare(`INSERT INTO wire_snapshots (run_id, turn_index, model, provider, system_prompt_hash, user_message, user_message_chars, tool_names, tool_count, max_tokens, ephemeral_tail_present, ephemeral_tail_chars, captured_at)
+        VALUES (?, 7, 'm', 'p', 'h', ?, 1, '[]', 0, 1, 0, 0, 0)`).run(runId, mark);
+      db.prepare(`INSERT INTO pre_approval_sets (id, task_summary, approved_by, patterns_json, max_uses, ttl_ms, run_id) VALUES (?, ?, 'owner', ?, 1, 1, ?)`)
+        .run(`late-pa-${tag}`, mark, `["${mark}"]`, runId);
+      db.prepare(`INSERT INTO pre_approval_events (set_id, pattern_idx, tool_name, match_string, pattern, decision, run_id) VALUES (?, 0, 'http_request', ?, ?, 'approved', NULL)`)
+        .run(`late-pa-${tag}`, mark, mark);
+      db.prepare(`INSERT INTO advisor_suggestions (run_id, type, priority, title, detail, estimated_impact_json) VALUES (?, 'cost', 'low', ?, ?, ?)`)
+        .run(runId, mark, mark, `{"n":"${mark}"}`);
+      const question = `late-pp-${tag}`;
+      db.prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, options_json, status, expires_at)
+        VALUES (?, ?, 'ask_user', ?, ?, ?, '2099-01-01T00:00:00.000Z')`).run(question, workflow, mark, `["${mark}"]`, status);
+      return question;
+    }
+
+    beforeAll(async () => {
+      const { ts } = stores();
+      ts.createThread('t-late', { title: 'still running' });
+      ts.createThread('t-late-other', { title: 'another chat' });
+      seeded = seedRuns('t-late', `seed-${MARK}`);
+      otherRun = seedRuns('t-late-other', `seed-${KEPT}`).runId;
+      if ((await deleteChat('t-late')).status !== 200) throw new Error('fixture: delete failed');
+      // Positive control: the same writes into the other chat keep their content (asserted below).
+      // Answered, so the control leaves no open question in the shared engine.
+      writeLate(runHistory().getDb(), otherRun, 'wf-t-late-other', KEPT, 'other', 'answered');
+      lateQuestion = writeLate(runHistory().getDb(), seeded.runId, 'wf-t-late', MARK, 'gone', 'pending');
+    });
+
+    it.each(Object.keys(SEEDED))('%s holds nothing written after the delete', (table) => {
+      expect(columnsHolding(table, MARK)).toEqual([]);
+    });
+
+    it('the same writes into another chat keep their content', () => {
+      for (const table of Object.keys(SEEDED)) expect(columnsHolding(table, KEPT).length, table).toBeGreaterThan(0);
+    });
+
+    it('a question asked after the delete under its workflow is closed as deleted', () => {
+      expect(promptStore().getById(lateQuestion)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted', question: FALLBACK_MARKER });
+    });
+
+    it('a write through the store\'s own writer is blanked, and the run keeps its cost', () => {
+      runHistory().updateRun(seeded.runId, { responseText: `writer ${MARK}`, costUsd: 0.5 });
+      const row = runHistory().getDb().prepare('SELECT response_text AS r, cost_usd AS c FROM runs WHERE id = ?').get(seeded.runId);
+      expect(row).toEqual({ r: FALLBACK_MARKER, c: 0.5 });
+    });
+
+    it('a write on another connection to the file is blanked too', () => {
+      const other = new BetterSqlite3(runHistory().getDb().name);
+      try {
+        other.prepare(`INSERT INTO security_events (event_type, tool_name, input_preview, decision, run_id, detail) VALUES ('danger_flagged', 'x', ?, 'flagged', ?, ?)`)
+          .run(`conn ${MARK}`, seeded.child, `conn ${MARK}`);
+      } finally { other.close(); }
+      expect(columnsHolding('security_events', `conn ${MARK}`)).toEqual([]);
+    });
+
+    it('a run or workflow started later under the chat, its runs or its workflows is blanked', () => {
+      const db = runHistory().getDb();
+      const spawned = runHistory().insertRun({ sessionId: 'spawned-late', taskText: `spawned ${MARK}`, modelTier: 'sonnet', modelId: 'm', spawnParentId: seeded.child });
+      // A parent set after the insert reaches the run as well.
+      const adopted = runHistory().insertRun({ sessionId: 'adopted-late', taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+      db.prepare('UPDATE runs SET batch_parent_id = ?, task_text = ? WHERE id = ?').run(seeded.runId, `adopted ${MARK}`, adopted);
+      const inChat = runHistory().insertRun({ sessionId: 't-late', taskText: `chat ${MARK}`, modelTier: 'sonnet', modelId: 'm' });
+      db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES ('wf-late-new', 'wf', 'running', ?, 't-late')`).run(`{"p":"${MARK}"}`);
+      db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, parent_run_id) VALUES ('wf-late-nested', 'wf', 'running', ?, 'wf-late-new')`).run(`{"p":"${MARK}"}`);
+      const step = runHistory().insertRun({ sessionId: 'wf-late-nested', taskText: `step ${MARK}`, modelTier: 'sonnet', modelId: 'm' });
+      const text = (id: string) => (db.prepare('SELECT task_text AS t FROM runs WHERE id = ?').get(id) as { t: string }).t;
+      expect([text(spawned), text(adopted), text(inChat), text(step)]).toEqual([FALLBACK_MARKER, FALLBACK_MARKER, FALLBACK_MARKER, FALLBACK_MARKER]);
+      expect(columnsHolding('pipeline_runs', MARK)).toEqual([]);
+    });
+
+    it('a question a schedule parked under the chat\'s workflow is closed too', () => {
+      runHistory().getDb().prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at, trigger_id)
+        VALUES ('late-parked', 'wf-t-late', 'ask_user', ?, 'pending', '2099-01-01T00:00:00.000Z', 'trg-late')`).run(MARK);
+      expect(promptStore().getById('late-parked')).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted', question: FALLBACK_MARKER });
+    });
+  });
+
+  it('deleting the thread a scheduled workflow asks in blanks the workflow itself, now and later', async () => {
+    const { ts } = stores();
+    const mark = `asks-${randomBytes(6).toString('hex')}`;
+    // A scheduled workflow's questions have their own thread, whose id is the workflow run's.
+    const workflow = randomUUID();
+    ts.createThread(workflow, { title: 'questions of a schedule' });
+    const db = runHistory().getDb();
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, error) VALUES (?, 'wf', 'running', ?, ?)`).run(workflow, `{"p":"${mark}"}`, mark);
+    db.prepare(`INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result) VALUES (?, 's1', 'ok', ?)`).run(workflow, mark);
+
+    expect((await deleteChat(workflow)).status).toBe(200);
+    db.prepare(`INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result) VALUES (?, 's2', 'ok', ?)`).run(workflow, `later ${mark}`);
+
+    expect(columnsHolding('pipeline_runs', mark)).toEqual([]);
+    expect(columnsHolding('pipeline_step_results', mark)).toEqual([]);
+  });
+
+  it('deleting a chat forgets the outputs of its workflows that a retry would read, also of one ending later', async () => {
+    const { ts } = stores();
+    const id = randomUUID();
+    const other = randomUUID();
+    ts.createThread(id, { title: 'ran a workflow' });
+    const state = { manifest: { name: 'wf', steps: [] }, state: { outputs: new Map() }, ranAs: 'owner' } as unknown as Parameters<typeof recordExecutedState>[1];
+    recordExecutedState(`wf-run-${id}`, { ...state, originThreadId: id });
+    recordExecutedState(`wf-other-${id}`, { ...state, originThreadId: other });
+
+    expect((await deleteChat(id)).status).toBe(200);
+    // A workflow the chat started that ends after the delete records its outputs then.
+    recordExecutedState(`wf-late-${id}`, { ...state, originThreadId: id });
+
+    expect(getExecutedResult(`wf-run-${id}`)).toBeUndefined();
+    expect(getExecutedResult(`wf-late-${id}`)).toBeUndefined();
+    expect(getExecutedResult(`wf-other-${id}`)).toBeDefined();
+    forgetExecutedStatesOfChat(other, []);
+  });
+
+  it('deleting a chat forgets its workflow by id after a retry from another chat made that chat the origin', async () => {
+    const { ts } = stores();
+    const id = randomUUID();
+    const retrier = randomUUID();
+    ts.createThread(id, { title: 'ran a workflow another chat retried' });
+    const workflow = `wf-retried-${id}`;
+    // A run has its own id; the workflow it executed is `workflow_id`, which the retry cache is keyed by.
+    runHistory().getDb().prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id, workflow_id) VALUES (?, 'wf', 'completed', '{}', ?, ?)`).run(`run-of-${workflow}`, id, workflow);
+    const state = { manifest: { name: 'wf', steps: [] }, state: { outputs: new Map() }, ranAs: 'owner' } as unknown as Parameters<typeof recordExecutedState>[1];
+    // The retry records the state again with the retrying chat as its origin; the outputs are this chat's.
+    recordExecutedState(workflow, { ...state, originThreadId: retrier });
+
+    expect((await deleteChat(id)).status).toBe(200);
+
+    expect(getExecutedResult(workflow)).toBeUndefined();
+    forgetExecutedStatesOfChat(retrier, []);
+  });
+
+  it('a question a schedule parked in the chat before the delete is closed too', async () => {
+    const { ts } = stores();
+    const id = randomUUID();
+    ts.createThread(id, { title: 'a schedule asked here' });
+    runHistory().getDb().prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at, trigger_id)
+      VALUES (?, ?, 'ask_user', 'Send it?', 'pending', '2099-01-01T00:00:00.000Z', 'trg-early')`).run(`parked-${id}`, id);
+
+    expect((await deleteChat(id)).status).toBe(200);
+
+    expect(promptStore().getById(`parked-${id}`)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted', question: FALLBACK_MARKER });
+  });
+
+  it('a failure in the third store answers 500 and changes nothing; deleting again clears every store', async () => {
+    const { ts } = stores();
+    const mark = `retry-${randomBytes(6).toString('hex')}`;
+    ts.createThread('t-runs-retry', { title: 'fails once' });
+    seedRuns('t-runs-retry', mark);
+    const tables = Object.keys(SEEDED);
+    const third = tables[2]!;
+    const db = runHistory().getDb();
+    // Temp, so it lives on the engine's own connection only and goes with the DROP below.
+    db.exec(`CREATE TEMP TRIGGER fail_third BEFORE UPDATE ON "${third}" BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;`);
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let first: { status: number; body: Record<string, unknown> };
+    try {
+      first = await deleteChat('t-runs-retry');
+    } finally {
+      db.exec('DROP TRIGGER IF EXISTS fail_third');
+      spy.mockRestore();
+    }
+
+    expect(first.status).toBe(500);
+    expect(ts.getThread('t-runs-retry'), 'the chat is still there').toBeDefined();
+    // Nothing went half way: the stores before the third hold their content again.
+    for (const table of tables) expect(columnsHolding(table, mark).length, table).toBeGreaterThan(0);
+
+    const second = await deleteChat('t-runs-retry');
+
+    expect(second.status).toBe(200);
+    expect(ts.getThread('t-runs-retry')).toBeUndefined();
+    for (const table of tables) expect(columnsHolding(table, mark), table).toEqual([]);
+  });
+
+  it('a failure after the chat is deleted answers 500 and undoes the delete and the blanking; deleting again finishes', async () => {
+    const { ts } = stores();
+    const mark = `late-${randomBytes(6).toString('hex')}`;
+    ts.createThread('t-runs-late', { title: 'fails after the delete' });
+    seedRuns('t-runs-late', mark);
+    const db = runHistory().getDb();
+    // The wire snapshots go last, after the chat's own row: only the outer transaction can take
+    // the delete and the blanking back when they fail.
+    db.exec(`CREATE TEMP TRIGGER fail_last BEFORE DELETE ON wire_snapshots BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;`);
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let first: { status: number; body: Record<string, unknown> };
+    try {
+      first = await deleteChat('t-runs-late');
+    } finally {
+      db.exec('DROP TRIGGER IF EXISTS fail_last');
+      spy.mockRestore();
+    }
+
+    expect(first.status).toBe(500);
+    expect(ts.getThread('t-runs-late'), 'the chat is still there').toBeDefined();
+    expect(ts.isDeleted('t-runs-late'), 'and not refused as deleted').toBe(false);
+    for (const table of Object.keys(SEEDED)) expect(columnsHolding(table, mark).length, table).toBeGreaterThan(0);
+
+    expect((await deleteChat('t-runs-late')).status).toBe(200);
+    expect(ts.getThread('t-runs-late')).toBeUndefined();
+    for (const table of Object.keys(SEEDED)) expect(columnsHolding(table, mark), table).toEqual([]);
+  });
+
+  it('a question a workflow started from the chat is waiting on is blanked and withdrawn, not left open', async () => {
+    const { ts } = stores();
+    const ps = promptStore();
+    const id = randomUUID();
+    const workflow = `wf-${id}`;
+    ts.createThread(id, { title: 'started a workflow' });
+    runHistory().getDb().prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES (?, 'wf', 'running', '{}', ?)`).run(workflow, id);
+    // A step of the workflow asks under the workflow's id, as its runs do.
+    const asked = ps.insertAskUser(workflow, 'Which list, A or B?', ['A', 'B']);
+    const other = ps.insertAskUser(`wf-${randomUUID()}`, 'Send it now?', ['Yes', 'No']);
+
+    expect((await deleteChat(id)).status).toBe(200);
+
+    expect(ps.getById(asked)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted', question: FALLBACK_MARKER });
+    expect(ps.getById(other)).toMatchObject({ status: 'pending', closed_reason: null });
   });
 
   it('a session built for a deleted id writes no thread row', () => {

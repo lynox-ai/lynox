@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, sameValue,
+  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, recreatedGrants, sameValue,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -29,6 +29,8 @@ import { processUmask } from './workspace-rel.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
+import { shopifyConsentBlock, shopifyProductWriteAccess } from './bulk-shopify.js';
+import { isShopifyStoreHostName } from './shopify-graphql.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
 
@@ -64,8 +66,10 @@ export interface TargetWriter {
   /** `hostAddedMarkup`: the read-back holds markup the write never sent (PRD shopify-preset
    *  §21.2 item 6). The target is written all the same — the value is in the store — and is
    *  recorded with its mark; the run then halts. `hostRewrote`: the host stored the value otherwise
-   *  than sent, within what the run may write — counted on the target, not halted. */
-  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true; hostRewrote?: true }>;
+   *  than sent, within what the run may write — counted on the target, not halted.
+   *  `grants`: the stamp a data-store row is written with (`_source_grants`); null or absent is
+   *  unknown. A writer with no such stamp ignores it. */
+  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void, grants?: readonly string[] | null): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true; hostRewrote?: true }>;
 }
 
 /**
@@ -122,6 +126,9 @@ export interface BulkEffectOutcome {
   planned?: true;
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
+  /** Set where the push says the same shorter than `summary`, so that it fits the web-push cut;
+   *  the run result keeps `summary`, the way included. */
+  pushSummary?: string;
 }
 
 /** A run left `pending` is tried again after this. */
@@ -196,6 +203,13 @@ export interface BulkEffectDeps {
   trailFor: (run: BulkRunForApply) => BulkRunTrail | null;
   /** The sentences of the outcome's summary, in the instance's notice language; English without. */
   notices?: BulkNotices | undefined;
+  /**
+   * The grant of the Shopify connection a store host maps to (`OAuthGrantRecord`), read on every
+   * call of a Shopify run: which customer text it was confirmed under decides which fields the run
+   * may write (`shopifyConsentBlock`). Without it, or for a host no single connection maps to, no
+   * grant is known, and the run writes only what a connection confirmed under no text may.
+   */
+  shopifyGrantOf?: ((host: string) => unknown) | undefined;
 }
 
 /**
@@ -269,6 +283,44 @@ async function applyRunEffect(
   if (ledger.isWriteSwitchedOff(runId)) {
     ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff);
     return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.shopifyWriteOff), say) };
+  }
+  // A run on a store host that is not a Shopify run by its rows (`shopifyApplyOf` null) writes
+  // nothing: neither the consent below nor the markup check before sending would read it.
+  const host = externalHostOf(run.targetSystem);
+  const apply = ledger.shopifyApplyOf(runId);
+  if (apply === null && host !== null && isShopifyStoreHostName(host)) {
+    ledger.halt(runId, BULK_HALT_REASONS.contract);
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.contract), say) };
+  }
+  // A Shopify run that writes a field its connection was not confirmed for writes nothing: halted
+  // before its writer is built, on the first call and on every resume. An undo of a run that was not
+  // itself an undo restores what that run found and is not held back; an undo of an undo writes the
+  // new values again and is held like the run that first wrote them. Further down a chain every undo
+  // is held, also one that only restores: held too much, never too little.
+  const source = run.kind === 'undo' && run.sourceRunId !== null ? ledger.getRunForApply(run.sourceRunId) : null;
+  const restoresOnly = source !== null && source.kind !== 'undo';
+  if (!restoresOnly) {
+    const grant = host === null ? undefined : deps.shopifyGrantOf?.(host);
+    // The product form writes only through a connection that asked for `write_products` and was
+    // granted it (`shopifyProductWriteAccess`), read on every call like the grant below.
+    if (apply !== null && apply.form === 'shopify_product') {
+      const access = shopifyProductWriteAccess(grant);
+      if (access !== 'writable') {
+        ledger.halt(runId, BULK_HALT_REASONS.productWriteNotAsked);
+        const nothingYet = run.applied === 0 && ledger.sentCount(runId) === 0;
+        return {
+          status: 'refused',
+          summary: summarize(ledger, runId, say.productWriteNotAsked(access, nothingYet), say),
+          pushSummary: summarize(ledger, runId, say.productWriteNotAskedPush(access, nothingYet), say),
+        };
+      }
+    }
+    const blocked = apply === null ? [] : shopifyConsentBlock(apply, grant);
+    if (blocked.length > 0) {
+      ledger.halt(runId, BULK_HALT_REASONS.consentOutdated);
+      const nothingYet = run.applied === 0 && ledger.sentCount(runId) === 0;
+      return { status: 'refused', summary: summarize(ledger, runId, say.consentOutdated(blocked, nothingYet), say) };
+    }
   }
   const writer = deps.writerFor(run);
   if (!writer) {
@@ -442,13 +494,15 @@ async function applyRunEffect(
   /** One claimed target: what to record for it. */
   async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
     Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
+    let localSent = false;
     try {
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
       if (cur !== 'foreign' && (sameImage(cur, t.after, htmlFields) || (savedForm && sameInSavedForm(cur, t.after, htmlFields)))) {
-        // Found as planned: either a loop of this run wrote it and died before recording it
-        // (the target is marked sent), or someone else set the value, and the run sends
-        // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
+        // Found as planned: a send of this run may have written it (one still unclear, or on a
+        // local run a writer that threw after its write), or someone else set the value; the run
+        // sends nothing to it, and the ledger tells the two apart ({@link
+        // BulkLedger.recordApplied}, `found_unsent`). What is there is
         // also what an undo must expect.
         // Found only under the HTML comparison is not counted as a rewrite: the comparison explains
         // the store's form of the planned description, as for a read-back.
@@ -470,8 +524,9 @@ async function applyRunEffect(
       // target is recorded still left a row saying whose credential reached the host.
       const sent = (): void => { ledger.markSent(runId, t.seq, carried?.() ?? null); };
       const refused = (): void => { ledger.markRefused(runId, t.seq); };
-      if (w.reportsSend !== true) sent();
-      const out = await w.write(t.key, t.after, sent, refused);
+      if (w.reportsSend !== true) { sent(); localSent = true; }
+      // The run's stamp, or the one an undo target writes back (`ApplyTarget.writeGrants`).
+      const out = await w.write(t.key, t.after, sent, refused, t.writeGrants !== undefined ? t.writeGrants : run!.plannerGrants);
       if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
       return {
         kind: 'applied', result: out.result, actual: out.actual,
@@ -479,6 +534,11 @@ async function applyRunEffect(
         ...(out.hostRewrote === true ? { hostRewrote: true as const } : {}),
       };
     } catch (err: unknown) {
+      // A local writer that throws has answered: its outcome is known, so its send is booked as
+      // answered, as an external writer's refusal is (`onRefused`). Only the send of this pass,
+      // never one a loop that died left before it. No count reads a local run's open sends today;
+      // this keeps the column true for whatever reads it next.
+      if (localSent) ledger.markRefused(runId, t.seq);
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
       if (err instanceof BulkSecretError) return { kind: 'secret' };
@@ -515,7 +575,10 @@ async function rollBack(
       }
       // Left as it is, and unmarked: the owner's view marks it as one to check by hand.
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
-      await writer.write(t.key, t.expected);
+      // Taken back with the stamp the row held before the run wrote it. A row the run deleted is
+      // re-created, and its recorded stamp may be older than the row it removed: `unknown` beside
+      // it (`recreatedGrants`).
+      await writer.write(t.key, t.expected, undefined, undefined, t.change === 'delete' ? recreatedGrants(t.beforeGrants) : t.beforeGrants);
       if (recorded) ledger.recordRolledBack(run, t.seq, now());
       else ledger.recordUnrecordedSettled(run.id, t.seq, now());
     } catch {
@@ -731,16 +794,20 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
     async read(key) {
       return readRow(key);
     },
-    async write(key, after) {
+    async write(key, after, _onSend, _onRefused, grants) {
       if (after.absent) {
         store.deleteRecords({ collection, filter: { [keyCol]: coercePlainColumnValue(key, keyDef) } });
         return 'deleted';
       }
       const row = after.value;
       if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error('not a row');
-      // Bulk apply runs in the worker, outside any conversation, so it holds no grant set:
-      // the row reads as unknown, and an update keeps what the row already held beside it.
-      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null });
+      // Bulk apply runs in the worker, outside any conversation, so the stamp comes with the
+      // write: the run's (`BulkRunForApply.plannerGrants`, the planning conversation's set with
+      // its source's), or for an undo the one the row held before its source wrote it — with
+      // `unknown` beside it where a row is re-created (`recreatedGrants`). A created row holds
+      // exactly the stamp passed; an update keeps what the row already held beside it. Null
+      // reads as unknown.
+      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: grants ?? null, runId: null, writtenBy: null, untrusted: false });
     },
   };
 }

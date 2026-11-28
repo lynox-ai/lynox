@@ -55,6 +55,14 @@ export interface UsageFlushResponse {
   accepted: number;
   balance_cents: number;
   allowed: boolean;
+  /**
+   * The control plane asks the engine to admit new runs only within the
+   * balance: a run admitted while this is `true` must not cost more than the
+   * balance it was admitted on. A run already running is not affected. Only
+   * `true` and `false` are statements ({@link readOverrunHold}); absent means
+   * the control plane made none.
+   */
+  overrun_hold?: boolean | undefined;
 }
 
 // === Provider incident — POST /internal/usage/:instanceId/incident (engine → CP) ===
@@ -174,6 +182,14 @@ export interface UsageStatusResponse {
    * route again, so a control plane that lost the record gets it back.
    */
   exact_held?: boolean | undefined;
+  /**
+   * The control plane asks the engine to admit new runs only within the
+   * balance: a run admitted while this is `true` must not cost more than the
+   * balance it was admitted on. A run already running is not affected. Only
+   * `true` and `false` are statements ({@link readOverrunHold}); absent means
+   * the control plane made none.
+   */
+  overrun_hold?: boolean | undefined;
 }
 
 // === Usage status — request headers of GET /internal/usage/:instanceId/status (engine → CP) ===
@@ -277,6 +293,15 @@ export function readExactHeld(body: unknown): boolean | null {
 }
 
 /**
+ * Reads `overrun_hold` off a parsed usage-flush or usage-status body. `true` and
+ * `false` are the only statements; anything else is `null`, no statement.
+ */
+export function readOverrunHold(body: unknown): boolean | null {
+  const value = ownDataField(body, 'overrun_hold');
+  return typeof value === 'boolean' ? value : null;
+}
+
+/**
  * The value of `key` when `body` is a plain (non-array) object that carries it as its
  * OWN data property; otherwise `undefined`. A parsed JSON body always qualifies; what is
  * refused is an inherited value (a polluted `Object.prototype`) or a getter, so neither
@@ -355,6 +380,14 @@ export interface HealthBody {
      * route answers without auth. Absent from engines older than this field.
      */
     durable_memory?: DurableMemoryState | undefined;
+    /**
+     * Whether the instance log keeps its retention: `ok`; `stalled` when the last sweep was
+     * refused, or when a poll older than its fold date is still a single row and the sweeps have
+     * stopped folding. The control plane alerts its operator on `stalled`. One word, no reason:
+     * the route answers without auth. Absent from engines older than this field and from an
+     * engine without engine.db.
+     */
+    audit_retention?: AuditRetentionState | undefined;
   };
   /**
    * What a migration into this instance may hold in memory. A source reads it before it
@@ -378,6 +411,9 @@ export interface HealthBody {
 
 /** The `engine.durable_memory` word of {@link HealthBody}. */
 export type DurableMemoryState = 'on' | 'off' | 'not_loaded';
+
+/** The `engine.audit_retention` word of {@link HealthBody}. */
+export type AuditRetentionState = 'ok' | 'stalled';
 
 // === Magic-link verify — POST /internal/auth/verify-magic (engine → CP) ===
 

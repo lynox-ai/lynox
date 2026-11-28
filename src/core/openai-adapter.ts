@@ -884,7 +884,7 @@ export class OpenAIAdapter {
        * `createLLMClient`, so the compiler was satisfied and every one of them threw
        * `client.beta.messages.create is not a function` at RUNTIME on any tenant whose
        * `wireClient` is `openai` — that is, every Mistral and OpenAI customer. `save_workflow`
-       * answered them with "Workflow extraction failed … call save_workflow again to retry",
+       * answered them with its error text of that time, "… call save_workflow again to retry",
        * a retry prompt for an error that recurs deterministically.
        *
        * It is the same request either way; only the delivery differs. Collecting the stream

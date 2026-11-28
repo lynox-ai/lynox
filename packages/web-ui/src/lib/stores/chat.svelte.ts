@@ -1,5 +1,4 @@
 import { getApiBase } from '../config.svelte.js';
-import { maskText } from '../utils/mask-text.js';
 import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t, tf } from '../i18n.svelte.js';
@@ -25,16 +24,16 @@ import { markCall, trimToMark, type CallMark } from './stream-attempt.js';
 import { turnEndSettlesTools, promptCreatedAtMs, lostPromptRecheckVerdict, shouldArmRecheck } from './prompt-liveness.js';
 import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, anchorKnowledgeChips, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
-import { loadThreads } from './threads.svelte.js';
+import { loadThreads, getRunStatus } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { containedPrefill } from './contained-way-out.js';
 import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, isConsentCard, type ClosedCode } from './closed-question.js';
-import { CONSENT_UNRECOGNISED, isConsentKind, type ConsentKind } from '../contract/prompt.js';
+import { CONSENT_UNRECOGNISED, isConsentKind, type ConsentKind, isConsentAction, type ConsentAction, consentTakesText } from '../contract/prompt.js';
 import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
+import { selectReattachTarget, scheduledQuestionWaits, offlineTurnArrived, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 import { containedTextKeys, readContainedUnknown, type ContainedUnknown } from './contained-text.js';
 
@@ -125,6 +124,15 @@ export interface ChatMessage {
 	 *  (connection lost, server unreachable), so the turn may or may not have arrived. Nothing
 	 *  sends it again without first asking the server whether a turn is still running. */
 	sendUnconfirmed?: boolean;
+	/** A new message held back, unsent, because a scheduled run's question waited in this chat
+	 *  when it was sent, or a changeset review opened while the server was asked. Not a failure: nothing sends it by itself (not the reconnect, not an
+	 *  answered question), it outlives a reload and the server's transcript, and only a tap
+	 *  sends it (`sendHeldMessage`), asking the server first. */
+	held?: boolean;
+	/** What a held message sends when it is not its shown text (a chip's prompt). */
+	heldTask?: string;
+	/** The run options a held message is sent with (effort, thinking, typed). */
+	heldOptions?: RunOptions;
 	/** Agent-generated follow-up suggestions (parsed from <follow_ups> block) */
 	followUps?: FollowUpSuggestion[];
 	/** DK-UX: durable-knowledge writes made during this turn, surfaced as inline chips
@@ -224,6 +232,8 @@ export interface PermissionPrompt {
 	/** One of the engine's own confirmations, by its marker: the card is drawn from this alone,
 	 *  its options are that kind's keys, and its answer is one of them. */
 	consent?: ConsentKind;
+	/** What the card's confirming button names (a Google write); words only. */
+	consentAction?: ConsentAction;
 }
 
 /** Question descriptor inside a multi-question tabs prompt. Mirrors the
@@ -467,9 +477,6 @@ let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
 // Deferred-follow-ups tray for the current thread (rehydrated on resume/switch).
 let isStreaming = $state(false);
-/** The reply of the run this view started, by object; read only while `isStreaming`. A reattached
- *  run has none: its reply is made on its first event, so a typed answer has no place yet. */
-let liveAnswer: ChatMessage | null = null;
 let streamingActivity = $state<'thinking' | 'tool' | 'writing' | 'idle'>('idle');
 let streamingToolName = $state<string | null>(null);
 // Sub-phase emitted by the running tool itself (currently only `api_setup`
@@ -616,6 +623,10 @@ function isInstanceSuppliedLlm(): boolean {
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 /** The run whose changes `pendingChangeset` shows; the review answer sends it back. */
 let pendingChangesetRunId: string | null = null;
+/** A rollback of the open review that stopped partway: the files it has not restored, for the
+ *  card to say so until the review is decided or a later answer succeeds. Tied to the review's
+ *  run, so a review of a later run never shows it. */
+let rollbackStopped = $state<{ runId: string | null; files: string[] } | null>(null);
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
 /** The open chat read data through a store connection (`contained` on the thread). */
@@ -656,13 +667,52 @@ let _offlineProbeInFlight = false;
 let _userStopEpoch = -1;
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
+/** The queued message the server last held for a review the fetch after it did not show. Held a
+ *  second time in a row without a card, it is not sent again by itself (see `_runTurn`). */
+let _heldWithoutCard: string | null = null;
+/** The changeset fetch in flight, so a drain that starts meanwhile waits for what it says. */
+let _changesetFetch: Promise<boolean> | null = null;
+/** The opening of a thread a drain is due or waiting for. A second drain asked for in the same
+ *  opening is the same one; one asked for after the thread was opened (again) is its own, and
+ *  the earlier one drops itself. */
+let _drainDue: { sid: string | null; gen: number } | null = null;
+
+/**
+ * Start the next queued turn after `delayMs`. Every automatic send from the queue goes through
+ * here. When the turn would start, an open changeset review holds it, also one whose fetch is
+ * still in flight, and so does a running turn. A drain asked for before the thread was left or
+ * opened again is dropped.
+ * A held turn stays first in the queue; an answered review starts it. One drain at a time, so
+ * two that wait for the same fetch do not start two turns.
+ */
+function drainQueueSoon(delayMs: number): void {
+	if (messageQueue.length === 0) return;
+	if (_drainDue && _drainDue.sid === sessionId && _drainDue.gen === _resumeGeneration) return;
+	const due = { sid: sessionId, gen: _resumeGeneration };
+	_drainDue = due;
+	setTimeout(() => { void drainQueueNow(due); }, delayMs);
+}
+
+async function drainQueueNow(due: { sid: string | null; gen: number }): Promise<void> {
+	// The fetch never rejects (`loadChangeset` answers false instead).
+	while (_changesetFetch) await _changesetFetch;
+	if (_drainDue === due) _drainDue = null;
+	// A new chat (newChat) leaves the opening as it is: the thread says it.
+	if (sessionId !== due.sid || _resumeGeneration !== due.gen || isStreaming || messageQueue.length === 0) return;
+	// The open review holds the turn, checked right before it is sent.
+	if (sendBlockedByReview({ silent: true })) return;
+	const next = messageQueue.shift()!;
+	persistChatNow(); // queue shrank — keep the durable copy in sync
+	await _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
+}
+
 /** Queue a failed user turn for another send. Extracted so the confirmed and
  *  the offline-verified paths below re-fire through exactly one place. */
 function refireFailedTurn(msg: ChatMessage): void {
 	// Runs past `sendMessage`, so it checks the open review itself. Silently: it is not the
 	// user's action, and browsers fire `online` in bursts. The turn stays failed, with its
 	// tap-to-retry and its `failedOffline` mark, so the next automatic re-send probes again.
-	if (pendingChangeset) return;
+	if (sendBlockedByReview({ silent: true })) return;
 	msg.failed = false;
 	msg.failedOffline = false;
 	msg.sendUnconfirmed = false;
@@ -670,13 +720,8 @@ function refireFailedTurn(msg: ChatMessage): void {
 	msg.queueId = newQueueId();
 	messageQueue.push({ id: msg.queueId, task: msg.content });
 	chatError = null;
-	// Small delay to let network stabilize
-	setTimeout(() => {
-		if (messageQueue.length > 0) {
-			const next = messageQueue.shift()!;
-			void _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
-		}
-	}, 500);
+	// Small delay to let network stabilize. A review can open in it: the drain checks again.
+	drainQueueSoon(500);
 }
 
 // Offline detection + auto-retry on reconnect
@@ -720,6 +765,7 @@ if (typeof window !== 'undefined') {
 						let lastRole: string | undefined;
 						let activeRun: boolean | undefined;
 						let scheduledQuestion = false;
+						let transcript: unknown = null;
 						if (!probeSid) return;
 						try {
 							const ar = await fetch(`${getApiBase()}/runs/active`);
@@ -739,17 +785,29 @@ if (typeof window !== 'undefined') {
 								if (Array.isArray(md.messages)) {
 									reached = true;
 									lastRole = md.messages.at(-1)?.role;
+									transcript = md;
 								}
 							}
 						} catch { /* still blind — shouldRefireOfflineTurn declines */ }
 						if (sessionId !== probeSid) return; // thread switched mid-probe
 						// A scheduled run's question waits here. A transcript ending on it reads as
 						// "answered", which cleared the failed message and lost it. It stays failed and marked
-						// offline, is not sent past the question, and the card comes back. Whether it arrived
-						// meanwhile is not decided here: text equality cannot tell it from an earlier message
-						// with the same words. Once the question is answered, the user decides by tapping;
-						// if it had arrived after all, that tap sends it a second time.
+						// offline, is not sent past the question, and the card comes back. A message the
+						// server holds after all is no longer failed, so a tap after the answer does not send
+						// it a second time: the server holds one user row more than this client counts, and
+						// that row carries its words (`offlineTurnArrived`). Equal words alone would not say
+						// it: an earlier message with the same words is a row the client counts already. With
+						// another failed message in the list the count says nothing, so it stays held.
 						if (scheduledQuestion) {
+							const counted = messages.filter((m) => m.role === 'user' && !m.queued && !m.failed && !m.held && m.content.trim().length > 0).length;
+							const onlyFailed = messages.filter((m) => m.role === 'user' && m.failed).length === 1;
+							if (onlyFailed && offlineTurnArrived(transcript, counted, lastFailed.content)) {
+								lastFailed.failed = false;
+								lastFailed.failedOffline = false;
+								chatError = null;
+								await reconcileThread();
+								if (sessionId !== probeSid) return;
+							}
 							sayQuestionWaiting(await checkPendingPrompt());
 							return;
 						}
@@ -894,15 +952,22 @@ export interface RunOptions {
 	/** The text is what the user typed or dictated in the composer. Client-only, never sent:
 	 *  it marks the message `typed` (see `ChatMessage.typed`). */
 	typed?: boolean;
+	/** The text is the composer's, and the composer was empty when the person started it: no
+	 *  prefill, no retry, no follow-up chip, nothing the app put there. Only then the run carries
+	 *  the text as `typed`, which the engine may count as words the owner wrote. */
+	composedFromEmpty?: boolean;
 }
 
 /**
  * Whether a send must wait for the open changeset review — and if so, says so and points at
  * the review. A caller that holds the user's text asks this BEFORE clearing it: `sendMessage`
- * returns without sending in that case, and text cleared first is lost.
+ * returns without sending in that case, and text cleared first is lost. `silent` is for a send
+ * the user did not take (the queue's drain, a re-send on reconnect): it waits without a word,
+ * as browsers fire `online` in bursts.
  */
-export function sendBlockedByReview(): boolean {
+export function sendBlockedByReview(opts?: { silent?: boolean }): boolean {
 	if (!pendingChangeset) return false;
+	if (opts?.silent === true) return true;
 	addToast(t('changeset.review_pending'), 'info', 4000);
 	// Scroll changeset into view if visible
 	setTimeout(() => {
@@ -936,10 +1001,178 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		return;
 	}
 
+	// A scheduled run's question waits in this chat: the message is held, not sent past it.
+	// Asked only when the chat may be waiting, so an ordinary send starts in this same tick.
+	if (mayHold(files)) {
+		const sid = sessionId!;
+		const held = await inHoldOrder(() => holdAtScheduledQuestion(sid, task, displayText, runOptions));
+		if (held) return;
+		// A review that opened while the server was asked blocks this send. The composer is
+		// cleared already, so the message stays as a held bubble; a tap sends it once the
+		// review is answered (`sendHeldMessage` checks the review again).
+		if (sendBlockedByReview()) {
+			messages.push(heldBubble(task, displayText, runOptions));
+			persistChatNow();
+			return;
+		}
+	}
+	await sendNow(task, displayText, files, runOptions);
+}
+
+/** The send after any hold: behind a running turn it waits in the queue, else it starts. */
+async function sendNow(task: string, displayText: string | undefined, files: FileAttachment[] | undefined, runOptions: RunOptions | undefined): Promise<void> {
+	// A turn started while the server was asked: this message waits behind it.
+	if (isStreaming) { await sendMessage(task, displayText, files, runOptions); return; }
 	// The reason for a refused chat or run is about what came before: the reader's own message
 	// starts what follows, so it goes (register 1112).
 	threadReadRefusal = null;
 	await _executeRun(task, files, displayText, runOptions);
+}
+
+/** Whether a new message may be held: a chat the nav's poll shows waiting for input, online,
+ *  with no files. Synchronous, so a send that cannot be held is not delayed by a tick. Files are
+ *  not held because a held message must outlive a reload, and the saved chat keeps no files. A
+ *  question that came up since the last poll (4 s) is not seen; that message is sent as before. */
+function mayHold(files: FileAttachment[] | undefined): boolean {
+	if (!sessionId || (files !== undefined && files.length > 0)) return false;
+	if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
+	return getRunStatus(sessionId) === 'awaiting_input';
+}
+
+/** The asks before a hold run one after another, so two messages sent while the server is asked
+ *  keep their order, and a tap waits for a send's ask instead of being dropped. */
+let _holdOrder: Promise<unknown> = Promise.resolve();
+function inHoldOrder<T>(step: () => Promise<T>): Promise<T> {
+	const run = _holdOrder.then(step, step);
+	_holdOrder = run.catch(() => undefined);
+	return run;
+}
+
+/** How long a hold waits for the server's answer; then the message is sent as before. Every ask
+ *  waits behind the one before it, so one that never answers must not hold up the rest. */
+const HOLD_ASK_MS = 5_000;
+
+/** What a held message keeps of its run options: those a reload can save. A context opens a new
+ *  chat first, so a message carrying one is never held. `composedFromEmpty` is not kept, so a held
+ *  message is never sent as words the owner typed; `typed` only marks its bubble. */
+function heldOptions(runOptions: RunOptions | undefined): RunOptions | undefined {
+	if (!runOptions) return undefined;
+	const { effort, thinking, typed } = runOptions;
+	const kept: RunOptions = { ...(effort ? { effort } : {}), ...(thinking ? { thinking } : {}), ...(typed === true ? { typed: true } : {}) };
+	return Object.keys(kept).length > 0 ? kept : undefined;
+}
+
+/** An unsent bubble for a message that is held: only a tap sends it. */
+function heldBubble(task: string, displayText: string | undefined, runOptions: RunOptions | undefined): ChatMessage {
+	const shown = displayText ?? task;
+	const options = heldOptions(runOptions);
+	return {
+		role: 'user', content: shown, held: true,
+		...(task !== shown ? { heldTask: task } : {}),
+		...(options ? { heldOptions: options } : {}),
+		...(options?.typed === true ? { typed: true } : {}),
+		createdAt: new Date().toISOString(),
+	};
+}
+
+/**
+ * Asks the server whether a scheduled run's question waits in thread `sid`, and if so holds the
+ * message: an unsent bubble marked `held` (or `existing`, the held bubble a tap sends), and the
+ * question's card is brought back with the sentence for it. A server that cannot be asked sends
+ * as before. When the thread changed while the server was asked, the message goes into its own
+ * thread's saved copy, held, whatever the answer: it is never sent into the chat now on screen.
+ * Never rejects.
+ */
+async function holdAtScheduledQuestion(sid: string, task: string, displayText: string | undefined, runOptions: RunOptions | undefined, existing?: ChatMessage): Promise<boolean> {
+	let waits: boolean | null = null;
+	if (sessionId === sid && (typeof navigator === 'undefined' || navigator.onLine)) {
+		try {
+			const res = await fetch(`${getApiBase()}/runs/active`, { signal: AbortSignal.timeout(HOLD_ASK_MS) });
+			if (res.ok) {
+				const body: unknown = await res.json();
+				waits = selectReattachTarget(body, sid) === null && scheduledQuestionWaits(body, sid);
+			}
+		} catch { /* not asked: sent as before */ }
+	}
+	const held: ChatMessage = existing ?? heldBubble(task, displayText, runOptions);
+	if (sessionId !== sid) {
+		if (!existing) holdInSavedThread(sid, held);
+		return true;
+	}
+	if (waits !== true) return false;
+	if (!existing) messages.push(held);
+	persistChatNow();
+	// The card is fetched outside the order: the message is held already, and the next ask need
+	// not wait for it.
+	void checkPendingPrompt().then((card) => { if (sessionId === sid) sayQuestionWaiting(card, true); });
+	return true;
+}
+
+/** Put a held message into a thread's saved copy, for a thread no longer on screen. A thread
+ *  archived or deleted meanwhile stays gone, as for a failed turn. */
+function holdInSavedThread(threadId: string, msg: ChatMessage): void {
+	if (_droppedThreads.has(threadId) || _deletedOnServer.has(threadId)) return;
+	const root = readPersistedRoot();
+	const list = root.threads[threadId] ?? [];
+	list.push({ ...msg });
+	root.threads[threadId] = list;
+	writePersistedRoot(root);
+}
+
+/**
+ * The tap on a held message. Asks the server first: while the question still waits, the message
+ * stays held and the card comes back; once it is gone, the message is sent at once, without
+ * asking the user again (the bubble is the check; for a chip it shows the chip's label, and the
+ * chip's prompt is sent as the chip offered it) and without asking the server a
+ * second time, so it is never off screen unsaved. Never rejects.
+ */
+export async function sendHeldMessage(msg: ChatMessage): Promise<void> {
+	if (!msg.held || !sessionId) return;
+	if (sendBlockedByReview()) return;
+	const sid = sessionId;
+	const task = msg.heldTask ?? msg.content;
+	const display = msg.heldTask !== undefined ? msg.content : undefined;
+	const runOptions = msg.heldOptions ?? (msg.typed === true ? { typed: true } : undefined);
+	const send = await inHoldOrder(async () => {
+		// A second tap on the same bubble finds it sent already.
+		if (!msg.held || sessionId !== sid || !messages.includes(msg)) return false;
+		if (await holdAtScheduledQuestion(sid, task, display, runOptions, msg)) return false;
+		// A review that opened while the server was asked holds the send, and the message stays.
+		if (sendBlockedByReview()) return false;
+		const i = messages.indexOf(msg);
+		if (i < 0 || !msg.held) return false;
+		messages.splice(i, 1);
+		return true;
+	});
+	if (!send) return;
+	await sendNow(task, display, undefined, runOptions);
+}
+
+/** The X on a held message: it goes, unsent. */
+export function removeHeldMessage(msg: ChatMessage): void {
+	const i = messages.indexOf(msg);
+	if (i < 0 || !msg.held) return;
+	messages.splice(i, 1);
+	persistChatNow();
+}
+
+/** A message the server never had and a taken server transcript keeps: a held one, or one still
+ *  waiting in the send-queue (a bubble whose entry is gone has been sent or dropped). */
+function carriedOver(m: ChatMessage): boolean {
+	if (m.role !== 'user') return false;
+	return m.held === true || (m.queued === true && m.queueId !== undefined && messageQueue.some((q) => q.id === m.queueId));
+}
+
+/** How many messages of a local list the server can have: the ones {@link carryHeld} carries
+ *  over are not counted when a server transcript is compared with it. */
+function serverLength(list: ChatMessage[]): number {
+	return list.filter((m) => !carriedOver(m)).length;
+}
+
+/** After a server transcript replaced the list: the messages the server never had (held, or
+ *  still waiting in the send-queue) go on at its end. */
+function carryHeld(from: ChatMessage[], to: ChatMessage[]): void {
+	for (const m of from) if (carriedOver(m) && !to.includes(m)) to.push(m);
 }
 
 /** The run refused because no AI provider is set up (`code: 'llm_not_configured'`): the
@@ -1161,21 +1394,32 @@ async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<R
 	// `since` = what THIS client already rendered, so no event double-renders.
 	const since = lastAppliedSeq > 0 ? lastAppliedSeq : target.lastPersistedSeq;
 	const epochBefore = streamEpoch;
-	await reattachRun(sid, target.runId, since, _resumeGeneration);
+	const gen = _resumeGeneration;
+	const reattach = await reattachRun(sid, target.runId, since, gen);
 	if (streamEpoch !== epochBefore) return 'took-over'; // reattachRun took over + owns teardown
 	// Non-takeover: the run finished in the tiny /runs/active → /stream gap
-	// (reattachRun 404'd before claiming the stream). We already spliced the empty
+	// (reattachRun 404'd before claiming the stream), or the stream could not be
+	// reached or read and the run may still go on. We already spliced the empty
 	// bubble and may have restored a now-stale prompt, so reconcile to the
-	// authoritative persisted transcript instead of leaving the just-finished turn
-	// invisible until a manual reload. Return true so the caller skips its own
+	// authoritative persisted transcript instead of leaving the turn invisible
+	// until a manual reload. Return true so the caller skips its own
 	// (now stale-indexed) cleanup + tail.
-	endStreaming();
-	streamingActivity = 'idle';
-	streamingToolName = null;
-	streamingToolPhase = null;
-	pendingPermission = null;
-	pendingTabsPrompt = null;
-	await reconcileThread();
+	// Another thread opened meanwhile has its own state (the card of a question waiting there):
+	// it is left as it is, and it is not this turn's to reconcile.
+	if (sessionId === sid) {
+		endStreaming();
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		pendingPermission = null;
+		pendingTabsPrompt = null;
+		await reconcileThread();
+	}
+	// The stream could not be reached or its reading was refused: the run may still go on. When
+	// this turn still streamed, the wait for its end that reattachRun started stopped at once; now
+	// that it does not, a turn queued behind it waits for the run's end from here (a wait that
+	// already runs for this run is not started twice).
+	if (reattach === 'let-go') drainWhenRunEnds(target.runId, gen);
 	return 'took-over';
 }
 
@@ -1304,11 +1548,7 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 	// The turns queued behind this one still get their go, once there is a connection to try:
 	// a turn started offline returns without sending and would be dropped from the queue.
 	const online = typeof navigator === 'undefined' || navigator.onLine;
-	if (online && !pendingChangeset && messageQueue.length > 0) {
-		const next = messageQueue.shift()!;
-		persistChatNow();
-		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-	}
+	if (online) drainQueueSoon(100);
 }
 
 /** The same user turn in another copy of a thread's list: same text, sent at the same time. */
@@ -1347,7 +1587,7 @@ let _resendProbeInFlight = false;
  * attached. A scheduled run's question waiting there holds it back too: the user is told and
  * the question's card is brought back. Resolves whether to send; never rejects.
  */
-async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promise<boolean> {
+async function askBeforeResend(opts: { unreachableSends?: boolean; sayTurnStarted?: boolean } = {}): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
 	const sid = sessionId;
 	// No session yet: the failed turn never reached one, so nothing can be running.
@@ -1372,8 +1612,16 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 	} finally {
 		_resendProbeInFlight = false;
 	}
-	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
-	if (sessionId !== sid || isStreaming) return false;
+	// The thread changed meanwhile: the message belongs to a chat no longer shown, so nothing is said.
+	if (sessionId !== sid) return false;
+	// A turn started meanwhile: that is now the turn in charge, and the message is not sent again.
+	// A tap or a Retry the user made is told why it did nothing (`sayTurnStarted`); the re-send on
+	// reconnect is not the user's action, and the turn running is usually the one they just sent;
+	// the failed message keeps its tap either way.
+	if (isStreaming) {
+		if (opts.sayTurnStarted === true) addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
+		return false;
+	}
 	if (live === null && scheduledQuestion) {
 		// A scheduled run's question has no stream to attach: the way on is to answer it, so
 		// its card is brought back rather than a turn sent past it.
@@ -1385,7 +1633,7 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 	// comes with the attached stream, so the sentence names no card and no X; for an approval it
 	// says "question", as main did, rather than fetch the card and race a second probe.
 	if (live.status === 'awaiting_input') addToast(t('chat.question_waiting_plain'), 'info', QUESTION_TOAST_MS);
-	else addToast(t('chat.still_running'), 'info', 6000);
+	else addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
@@ -1400,30 +1648,35 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
  * does another kind of card that came back (several questions, a secret, a mail connection). With
  * no card restored, nothing is said: a sentence about one could be false.
  */
-function sayQuestionWaiting(card: PendingCard): void {
-	const key = questionWaitingKey(card);
+function sayQuestionWaiting(card: PendingCard, held = false): void {
+	const key = questionWaitingKey(card, held);
 	if (key !== null) addToast(t(key), 'info', QUESTION_TOAST_MS);
 }
 
 /** The longest of these sentences runs to about 200 characters; 6 s was too short to read it. */
 const QUESTION_TOAST_MS = 10_000;
 
-/** The sentence for `card`, or null when no card came back. */
-export function questionWaitingKey(card: PendingCard): string | null {
-	if (card === 'decision') return 'chat.question_waiting_decision';
-	if (card === 'question') return 'chat.question_waiting';
-	if (card === 'other') return 'chat.question_waiting_plain';
+/** `chat.still_running` runs to about 120 characters: 8 s, by the same measure (6 s was short). */
+const STILL_RUNNING_TOAST_MS = 8_000;
+
+/** The sentence for `card` (for a held message when `held`), or null when no card came back. */
+export function questionWaitingKey(card: PendingCard, held = false): string | null {
+	// A held message was never sent, so its sentence does not say "not sent again".
+	const end = held ? '_held' : '';
+	if (card === 'decision') return `chat.question_waiting_decision${end}`;
+	if (card === 'question') return `chat.question_waiting${end}`;
+	if (card === 'other') return `chat.question_waiting_plain${end}`;
 	return null;
 }
 
 /** The tap on a failed message: asks first, then sends `text` again. Never rejects. */
 export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<void> {
 	if (isStreaming) {
-		addToast(t('chat.still_running'), 'info', 6000);
+		addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
 		return;
 	}
 	if (sendBlockedByReview()) return;
-	if (!await askBeforeResend()) return;
+	if (!await askBeforeResend({ sayTurnStarted: true })) return;
 	const shown = messages.includes(msg);
 	if (!shown) {
 		msg.failed = false;
@@ -1435,9 +1688,10 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	// The message on screen is the one sent again, not a copy added under it: it goes out as a
 	// queued turn, which the run finds by its id, as the automatic re-send does. The checks
 	// sendMessage makes are made again here, after the question to the server: a review may
-	// have opened meanwhile.
+	// have opened meanwhile. A turn that started during the question is already said by
+	// askBeforeResend; this guards the step between its answer and here.
 	if (isStreaming) {
-		addToast(t('chat.still_running'), 'info', 6000);
+		addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
 		return;
 	}
 	if (sendBlockedByReview()) return;
@@ -1453,13 +1707,104 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	// A turn that stopped before its run took the message (offline, a signed-out session) leaves
 	// it queued with an id no queue holds: nothing would ever send it. It is failed again, so the
 	// tap and the reconnect can.
-	if (msg.queued === true && msg.queueId === id) {
+	// A message the open review holds is in the queue again and waits there.
+	if (msg.queued === true && msg.queueId === id && !messageQueue.some((q) => q.id === id)) {
 		msg.queued = false;
 		msg.failed = true;
 	}
 }
 
+/** Drop the empty answer bubble a turn put right after its message. */
+function dropEmptyAnswerAfter(list: ChatMessage[], i: number): void {
+	const next = list[i + 1];
+	if (next && next.role === 'assistant' && !next.content && !(next.toolCalls && next.toolCalls.length > 0) && !(next.blocks && next.blocks.length > 0)) list.splice(i + 1, 1);
+}
+
+/**
+ * The open review held a message after its thread was left or opened again: the message waits
+ * in that thread, so it is back, waiting, when the thread is shown. Opened again, that is the list
+ * on screen; left, it is the thread's saved copy (or, with none yet, the list the turn started
+ * in), which a waiting message keeps over the server's transcript when the thread opens. A copy
+ * from before the message gets it added, as {@link markFailedInSavedThread} does. A message still
+ * in its thread's queue waits already. A message with files cannot wait in the saved copy (its
+ * queue keeps text only) and is marked failed there: a tap sends its text again, without the
+ * files, and failed says something went wrong. Held would promise the message as shown.
+ */
+function requeueHeldInThread(sid: string, turn: TurnStart, task: string, files: FileAttachment[] | undefined): void {
+	const msg = turn.userMsg;
+	if (!msg || _deletedOnServer.has(sid) || _droppedThreads.has(sid)) return;
+	const withFiles = files !== undefined && files.length > 0;
+	const place = (list: ChatMessage[]): number => {
+		const i = list.findIndex((m) => isSameTurn(m, msg));
+		if (i >= 0) return i;
+		list.push({ role: 'user', content: msg.content, ...(msg.createdAt ? { createdAt: msg.createdAt } : {}) });
+		return list.length - 1;
+	};
+	if (sessionId === sid) {
+		const i = place(messages);
+		const shown = messages[i]!;
+		dropEmptyAnswerAfter(messages, i);
+		if (!(shown.queued === true && shown.queueId !== undefined && messageQueue.some((q) => q.id === shown.queueId))) {
+			const id = newQueueId();
+			shown.queueId = id;
+			shown.queued = true;
+			shown.failed = false;
+			messageQueue.unshift({ id, task, ...(withFiles ? { files } : {}) });
+		}
+		persistChatNow();
+		// The card of the review that holds it, as `holdForReview` fetches it.
+		void fetchChangeset();
+		return;
+	}
+	const root = readPersistedRoot();
+	// The debounced save writes the thread on screen only, so a thread left mid-turn may have no
+	// saved copy yet: the list the turn started in is that thread's.
+	const list = root.threads[sid] ?? (JSON.parse(JSON.stringify(turn.messages)) as ChatMessage[]);
+	root.threads[sid] = list;
+	const i = place(list);
+	const saved = list[i]!;
+	dropEmptyAnswerAfter(list, i);
+	const savedQueue = root.queues?.[sid] ?? [];
+	const waitsAlready = saved.queued === true && saved.queueId !== undefined && savedQueue.some((q) => q.id === saved.queueId);
+	if (!waitsAlready && withFiles) {
+		saved.queued = false;
+		saved.failed = true;
+	} else if (!waitsAlready) {
+		const id = newQueueId();
+		saved.queueId = id;
+		saved.queued = true;
+		saved.failed = false;
+		root.queues = { ...(root.queues ?? {}), [sid]: [{ id, task }, ...savedQueue] };
+	}
+	writePersistedRoot(root);
+}
+
+/** Whether a refused `/run` says the open review holds the message (`code: 'review_pending'`).
+ *  Reads a copy of the body, so the caller can still read the answer itself. */
+async function reviewPendingIn(res: Response): Promise<boolean> {
+	try {
+		const body = (await res.clone().json()) as { code?: unknown } | null;
+		return body?.code === 'review_pending';
+	} catch {
+		return false;
+	}
+}
+
+/** Whether a refused `/run` says another person's open review in this conversation keeps the
+ *  run from starting (`code: 'review_pending_owner'`): the sender cannot answer it, so waiting
+ *  would never end. Reads a copy of the body, as {@link reviewPendingIn} does. */
+async function ownerReviewPendingIn(res: Response): Promise<boolean> {
+	try {
+		const body = (await res.clone().json()) as { code?: unknown } | null;
+		return body?.code === 'review_pending_owner';
+	} catch {
+		return false;
+	}
+}
+
 async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {
+	// The opening of the thread this turn started in: a hold below acts on its list only.
+	const turnGen = _resumeGeneration;
 	chatError = null;
 	retryStatus = null;
 
@@ -1506,7 +1851,6 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	const assistantIdx = messages.length;
 	messages.push({ role: 'assistant', content: '', toolCalls: [] });
 	turn.assistantMsg = messages[assistantIdx] ?? null;
-	liveAnswer = turn.assistantMsg;
 
 	// Claim ownership of the shared streaming state so an in-flight re-attach
 	// that ends mid-send can't switch off this run's activity indicators.
@@ -1530,6 +1874,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 	if (runOptions?.effort) payload['effort'] = runOptions.effort;
 	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
+	// Only a message the person wrote from an empty composer says what was typed; everything else
+	// (a prefill, a retry, a chip, a view's own message) sends none.
+	if (runOptions?.composedFromEmpty === true && runOptions.typed === true) payload['typed'] = task;
 	if (runOptions?.context) payload['context'] = runOptions.context;
 	// The first run of a chat opened with "Plan in a new chat" carries where it came from: the
 	// engine turns that into a fixed sentence pointing at a bulk run, and reads nothing by it.
@@ -1606,6 +1953,99 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	// pauses JS when backgrounded → SSE drops → client thinks idle → user resends
 	// → server says 409). Show the message as queued, not failed, and poll until
 	// the previous run completes.
+	// The server holds the message while the review of the last run is open: a new run would
+	// replace it. The message waits, first in the queue, and the review card is fetched; the
+	// answer to the review sends it. Read before the question fast-fail below and in every poll,
+	// since the review can be what answers there too.
+	const holdForReview = async (): Promise<void> => {
+		if (_queuePollController) {
+			_queuePollController.abort();
+			_queuePollController = null;
+		}
+		// The thread was left or opened again meanwhile: the list belongs to another opening now.
+		// The message still waits for the review, in the thread it was typed in.
+		if (sessionId !== sid || _resumeGeneration !== turnGen) {
+			endStreaming(turn.assistantMsg);
+			streamingActivity = 'idle';
+			streamingToolName = null;
+			streamingToolPhase = null;
+			requeueHeldInThread(sid, turn, task, files);
+			return;
+		}
+		const held = messages[userMsgIdx];
+		let id: string | null = null;
+		if (held) {
+			id = held.queueId ?? newQueueId();
+			held.queueId = id;
+			held.queued = true;
+			held.failed = false;
+			if (!messageQueue.some((q) => q.id === id)) {
+				messageQueue.unshift({ id, task, ...(files && files.length > 0 ? { files } : {}), ...(runOptions ? { runOptions } : {}) });
+			}
+			persistChatNow();
+		}
+		if (messages[assistantIdx] && !messages[assistantIdx]!.content) {
+			messages.splice(assistantIdx, 1);
+		}
+		endStreaming(turn.assistantMsg);
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		const answered = await fetchChangeset();
+		if (sessionId !== sid || _resumeGeneration !== turnGen || held === undefined || id === null) return;
+		if (pendingChangeset) { _heldWithoutCard = null; return; }
+		// No card, although the server holds the message. Answered without one, the review is
+		// gone by now (answered elsewhere, its files put back): the message goes once more. Not
+		// answered, or held again right after that try, the card cannot be shown: the message
+		// is failed, for a tap to send again, instead of asking the server again and again.
+		if (answered && _heldWithoutCard !== id) {
+			_heldWithoutCard = id;
+			drainQueueSoon(100);
+			return;
+		}
+		_heldWithoutCard = null;
+		const at = messageQueue.findIndex((q) => q.id === id);
+		if (at >= 0) messageQueue.splice(at, 1);
+		held.queued = false;
+		held.failed = true;
+		persistChatNow();
+		// The messages behind it do not wait on it: each is sent and, held the same way, failed the same way.
+		drainQueueSoon(100);
+	};
+
+	if (res.status === 409 && await reviewPendingIn(res)) {
+		await holdForReview();
+		return;
+	}
+
+	// Polling would not help: only the owner's answer, or a new chat, lets a run start here.
+	const refusedForOwnerReview = (): void => {
+		// The messages and the error belong to this opening of this thread; after a switch (or a
+		// reopen) they are another list.
+		if (sessionId === sid && _resumeGeneration === turnGen) {
+			if (messages[userMsgIdx]) {
+				messages[userMsgIdx]!.queued = false;
+				messages[userMsgIdx]!.failed = true;
+			}
+			if (messages[assistantIdx] && !messages[assistantIdx]!.content) {
+				messages.splice(assistantIdx, 1);
+			}
+			chatError = t('changeset.review_pending_owner');
+			chatErrorDetail = null;
+		}
+		endStreaming(turn.assistantMsg);
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		// The messages behind it do not wait on it: each is sent and, refused the same way,
+		// failed the same way.
+		if (sessionId === sid && _resumeGeneration === turnGen) drainQueueSoon(100);
+	};
+	if (res.status === 409 && await ownerReviewPendingIn(res)) {
+		refusedForOwnerReview();
+		return;
+	}
+
 	if (res.status === 409) {
 		// Fast-fail when we already know the engine is blocked on a prompt
 		// from this client. Polling for up to 6 min won't unblock anything —
@@ -1644,6 +2084,8 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		_queuePollController = new AbortController();
 		const signal = _queuePollController.signal;
 		let bailedOut = false;
+		let heldForReview = false;
+		let heldByOwnerReview = false;
 		try {
 			for (let attempt = 1; attempt <= MAX_POLLS && res.status === 409; attempt++) {
 				// Stop / thread-switch: drop out of the loop without another fetch.
@@ -1669,10 +2111,21 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 					if (signal.aborted) { bailedOut = true; break; }
 					throw err;
 				}
+				if (res.status === 409 && await reviewPendingIn(res)) { heldForReview = true; break; }
+				if (res.status === 409 && await ownerReviewPendingIn(res)) { heldByOwnerReview = true; break; }
 			}
 		} finally {
 			retryStatus = null;
 			_queuePollController = null;
+		}
+
+		if (heldForReview) {
+			await holdForReview();
+			return;
+		}
+		if (heldByOwnerReview) {
+			refusedForOwnerReview();
+			return;
 		}
 
 		if (bailedOut) {
@@ -1716,7 +2169,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			// The message read as carrying a key in a chat that takes none (a mandate's): the server
 			// kept nothing of it, and this page drops it too, so it is neither stored here nor sent
 			// again by a retry. The message field was emptied when it was sent.
-			if (messages[assistantIdx] && !messages[assistantIdx]!.content && !holdsTypedAnswer(messages[assistantIdx]!)) messages.splice(assistantIdx, 1);
+			if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 			if (messages[userMsgIdx] === turn.userMsg) messages.splice(userMsgIdx, 1);
 			// This browser's saved copy of the refused message's thread can hold it: a queued message
 			// is saved with its text, and its thread is saved again as it leaves the queue. The copy of
@@ -1732,7 +2185,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		}
 		chatError = noLlmKeyText(res.status, chatErrorDetail ?? '') ?? mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
-		if (messages[assistantIdx] && !messages[assistantIdx]!.content && !holdsTypedAnswer(messages[assistantIdx]!)) messages.splice(assistantIdx, 1);
+		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 		if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
 		return;
 	}
@@ -1956,7 +2409,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 				try {
 					const r = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}/messages`);
 					if (r.ok) {
-						const localUserTurns = messages.filter((m) => m.role === 'user' && !m.queued && !m.failed && m.content.trim().length > 0).length;
+						const localUserTurns = messages.filter((m) => m.role === 'user' && !m.queued && !m.failed && !m.held && m.content.trim().length > 0).length;
 						const note = trailingTurnNote(await r.json(), localUserTurns);
 						// The bubble by object, after the awaits: opening the thread again
 						// in between replaces `messages` (same session id, so an id check
@@ -1971,13 +2424,19 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		}
 	}
 
-	endStreaming(turn.assistantMsg);
-	streamingActivity = 'idle';
-	streamingToolName = null;
-	streamingToolPhase = null;
-	pendingPermission = null;
-	pendingTabsPrompt = null;
-	retryStatus = null;
+	// The streaming state is the open chat's. A run started since (in a new chat, or in this one
+	// opened again) owns it now, and this run's end leaves it as that run has it. Another thread
+	// opened since without a run of its own has its own state too (the card of a question waiting
+	// there): this run's end leaves it.
+	if (streamEpoch === turn.epoch && sessionId === sid) {
+		endStreaming(turn.assistantMsg);
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		pendingPermission = null;
+		pendingTabsPrompt = null;
+		retryStatus = null;
+	}
 
 	// Parse follow-up suggestions from assistant response. FALLBACK only: if the
 	// agent used the suggest_follow_ups tool, the tool_call handler already set
@@ -2020,13 +2479,11 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		setTimeout(() => { void loadThreads(); }, 6000);
 	}
 
-	// Process queue: send next queued message
-	if (messageQueue.length > 0) {
-		const next = messageQueue.shift()!;
-		persistChatNow(); // queue shrank — keep the durable copy in sync
-		// Small delay so the UI updates before next run starts
-		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-	}
+	// Process queue: send next queued message. Small delay so the UI updates before the next
+	// run starts; a review this run left open holds it (`drainQueueSoon`). Only the queue of the
+	// thread this run ran in, as it was opened then: a thread shown since has its own queue and
+	// review, and its opening drains them.
+	if (sessionId === sid && _resumeGeneration === turnGen) drainQueueSoon(100);
 }
 
 /**
@@ -2113,7 +2570,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				chatErrorDetail = text;
 				const statusMatch = text.trim().match(/^(\d{3})/);
 				chatError = mapApiError(statusMatch ? parseInt(statusMatch[1]!, 10) : 0, text);
-				if (messages[idx] && !messages[idx]!.content && !holdsTypedAnswer(messages[idx]!)) messages.splice(idx, 1);
+				if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
 				break;
 			}
 			// Insert newline between text segments separated by tool calls
@@ -2312,6 +2769,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				multiSelect: data['multi_select'] === true,
 				origin: originFromEvent(data),
 				...(isConsentKind(data['consent']) ? { consent: data['consent'] } : {}),
+				...(isConsentAction(data['consentAction']) ? { consentAction: data['consentAction'] } : {}),
 			};
 			break;
 		case 'prompt_tabs': {
@@ -2339,6 +2797,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'secret_prompt':
+			// The same prompt again (a re-attach replays the run's events): the card stays as it is,
+			// with what the user has typed into it.
+			if (sameOpenPrompt(pendingSecretPrompt?.promptId, data['promptId'])) break;
 			if (!pendingSecretPrompt) runPromptCount++;
 			pendingSecretPrompt = {
 				name: String(data['name'] ?? ''),
@@ -2351,6 +2812,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			secretPromptGeneration++;
 			break;
 		case 'mail_connect_prompt':
+			if (sameOpenPrompt(pendingMailConnect?.promptId, data['promptId'])) break;
 			if (!pendingMailConnect) runPromptCount++;
 			pendingMailConnect = {
 				promptId: data['promptId'] as string | undefined,
@@ -2548,6 +3010,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					'info',
 					8000,
 				);
+			} else if (code === 'run_blocked' && data['reason'] === 'hold_exhausted') {
+				// Refused because nothing of the AI budget is free for this run (another task may hold
+				// it). Shown as a note in the owner's language; the engine's own sentence is the note's
+				// detail line, and `done` does not render it a second time as the reply.
+				const detail = String(data['detail'] ?? '').slice(0, 300);
+				msg.note = { code: 'hold_exhausted', ...(detail ? { detail } : {}) };
 			} else if (code === 'run_blocked') {
 				// A run the engine fail-closed before the LLM (stale managed-credit
 				// status, budget reached). 'info' not 'error' — it's transient and
@@ -2593,10 +3061,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// so the `!msg.content` guard prevents a duplicate render.
 			const streamedText = msg.blocks?.some(b => b.type === 'text' && b.text) ?? false;
 			const result = typeof data['result'] === 'string' ? data['result'] : '';
-			if (!msg.content && !streamedText && result.trim()) {
+			if (!msg.content && !streamedText && result.trim() && msg.note?.code !== 'hold_exhausted') {
 				msg.content = result;
-				// After any line already there (a typed answer to a confirmation), not over it.
-				msg.blocks = [...(msg.blocks ?? []), { type: 'text', text: result }];
+				msg.blocks = [{ type: 'text', text: result }];
 			}
 			// Budget threshold check — usage dashboard Phase 4. Dynamic import
 			// keeps the alerts code out of the initial chat-store bundle for
@@ -2667,7 +3134,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// here is what offered "tap to retry" on a run that was still executing
 			// and being billed. `_executeRun` defers this and asks the server.
 			if (!opts?.deferErrorDisposition) {
-				if (messages[idx] && !messages[idx]!.content && !holdsTypedAnswer(messages[idx]!)) messages.splice(idx, 1);
+				if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
 				if (messages[userIdx]) messages[userIdx]!.failed = true;
 			}
 			break;
@@ -2719,26 +3186,19 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 	}
 }
 
-export async function replyPermission(answer: string, opts: { typed?: boolean } = {}): Promise<void> {
+export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
-	const consent = isConsentCard(pendingPermission?.consent);
 	// A consent card's answer is a click; as text in the message field it would approve nothing.
-	const draftable = consent ? null : answer;
-	// Where a typed answer to one of the engine's confirmations is kept: the reply of the run that
-	// asked, taken now — later messages (a queued one) must not move it.
-	const keepIn = consent && opts.typed === true && isStreaming ? liveAnswer : null;
+	const consent = pendingPermission?.consent;
+	const draftable = isConsentCard(consent) && !consentTakesText(consent) ? null : answer;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
-	const outcome = await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId });
-	// Kept only once the engine took this answer: one it refused (a key typed into the field), never
-	// got, or did not judge (a question already answered, unknown or not this chat's) is not shown as
-	// given. Masked, like everything else the chat shows of what was typed.
-	if (keepIn !== null && sessionId === sid && (outcome === 'taken' || outcome === 'consent_unrecognised') && messages.includes(keepIn)) {
-		keepIn.blocks = [...(keepIn.blocks ?? []), { type: 'answer', text: maskText(answer) }];
-	}
-	await reportReply(sid, outcome, draftable);
+	// Without the question's id the answer is not sent: the server would take it for whatever
+	// question is open by then, so the open one is brought back to be answered by name.
+	if (!promptId) { await reportReply(sid, 'id_required', null); return; }
+	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to
@@ -2778,13 +3238,29 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		chatErrorDetail = null;
 		return;
 	}
-	if (outcome === 'consent_unrecognised' || outcome === 'consent_unrecognised_before') {
+	if (outcome === 'consent_unrecognised') {
 		if (sessionId !== sid) return;
 		chatError = t('chat.consent_unrecognised');
 		chatErrorDetail = null;
 		return;
 	}
-	if (outcome === 'settled' || outcome === 'taken' || sessionId !== sid) return;
+	if (outcome === 'id_required') {
+		// Nothing was answered. The open question comes back with its id, to be answered again on
+		// purpose: sending the same answer to it unasked could approve what the person never saw.
+		if (sessionId !== sid) return;
+		let saidNoneOpen = false;
+		await checkPendingPrompt((nothingOpen) => { saidNoneOpen = nothingOpen; });
+		if (sessionId !== sid) return;
+		// The answer does not go back into the message field: which question is open now is not
+		// known to match the one answered (a mail to send, say), and one keystroke would answer it.
+		// "Nothing is open" only when the server said so; a failed check says nothing either way.
+		const none = saidNoneOpen;
+		chatError = t(none ? 'chat.reply_needs_question_none' : 'chat.reply_needs_question');
+		chatErrorDetail = null;
+		unmatchedAnswerCount++;
+		return;
+	}
+	if (outcome === 'settled' || sessionId !== sid) return;
 	if (chatError !== null && chatError !== closedReplySentence) return;
 	// Who reads it decides the way out where only the owner can act. Unknown reads as the owner,
 	// as on the settings pages; the server is the boundary either way.
@@ -2830,12 +3306,11 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 
 /** How a reply ended: `lost` when the server could not be reached or failed twice, `closed` when
  *  it answered 410 (a closed question, with the reason the server gave, or null), `key_refused`
- *  when it refused the answer as carrying a key (422 `mandate_key_input`), `taken` when the
- *  server recorded this answer now, and `settled` for every other final word: a question already
- *  answered (a retry, another tab), unknown or refused (404, 409, 403, 400), and a 2xx that is not
- *  the server's own reply (a redirect, a body without `ok: true`). The two `consent_unrecognised`
- *  outcomes say the same to the person; only the first is this answer's. */
-type ReplyOutcome = 'taken' | 'settled' | 'lost' | 'key_refused' | 'consent_unrecognised' | 'consent_unrecognised_before' | { readonly closed: ClosedCode | null };
+ *  when it refused the answer as carrying a key (422 `mandate_key_input`), and `settled` for
+ *  every other final word except `id_required`: the answer went without the question's id
+ *  (409 `prompt_id_required`), so nothing was answered; `consent_unrecognised` when the answer
+ *  resolved an engine confirmation but was none of its keys, so the gate refused. */
+type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | 'id_required' | 'consent_unrecognised' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -2858,6 +3333,12 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				try { detail = await res.text(); } catch { /* no body */ }
 				if (isKeyInputRefusal(422, detail)) return 'key_refused';
 			}
+			// Sent without the question's id: nothing was answered, the open question waits.
+			if (res.status === 409) {
+				let code: unknown;
+				try { code = ((await res.clone().json()) as { code?: unknown } | null)?.code; } catch { /* no body */ }
+				if (code === 'prompt_id_required') return 'id_required';
+			}
 			// 5xx → retry once
 			if (res.status >= 500) {
 				if (attempt === 0) {
@@ -2866,17 +3347,12 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				}
 				return 'lost';
 			}
-			// Every 200 of `/reply` is JSON with `ok: true`. A redirect followed to a page answering
-			// 2xx (a login page), or a proxy's own 2xx, is not the server's reply: nothing was recorded.
+			// An answer to one of the engine's confirmations that is none of its keys: recorded as a
+			// refusal, and said to the person, never a silent "no".
 			if (res.ok) {
-				let reply: { ok?: unknown; refused?: unknown; idempotent?: unknown } | null = null;
-				try { reply = (await res.json()) as { ok?: unknown; refused?: unknown; idempotent?: unknown } | null; } catch { /* no body */ }
-				if (res.redirected || reply === null || typeof reply !== 'object' || reply.ok !== true) return 'settled';
-				// An answer to one of the engine's confirmations that is none of its keys: recorded as a
-				// refusal, and said to the person, never a silent "no".
-				const before = reply.idempotent === true;
-				if (reply.refused === CONSENT_UNRECOGNISED) return before ? 'consent_unrecognised_before' : 'consent_unrecognised';
-				return before ? 'settled' : 'taken';
+				let refused: unknown;
+				try { refused = ((await res.json()) as { refused?: unknown } | null)?.refused; } catch { /* no body */ }
+				if (refused === CONSENT_UNRECOGNISED) return 'consent_unrecognised';
 			}
 			// 2xx and the other final answers (404 stale, 409 refused, 400) are all "done".
 			return 'settled';
@@ -3090,11 +3566,17 @@ export function getMailConnectGeneration() {
  */
 export type PendingCard = 'question' | 'decision' | 'other' | null;
 
+/** Whether `incoming` names the prompt whose card is open already. A prompt without an id is
+ *  never the same one, so it is set as before. */
+function sameOpenPrompt(open: string | undefined, incoming: unknown): boolean {
+	return typeof open === 'string' && open.length > 0 && incoming === open;
+}
+
 /**
  * Check the server for a pending prompt that survived a disconnect/refresh.
  * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
  */
-export async function checkPendingPrompt(): Promise<PendingCard> {
+export async function checkPendingPrompt(onAnswered?: (nothingOpen: boolean) => void): Promise<PendingCard> {
 	const sid = sessionId;
 	if (!sid) return null;
 	let card: PendingCard = null;
@@ -3106,6 +3588,8 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 		// The chat may have changed while the request ran: the card belongs to the chat it was
 		// asked for, and set now it would show in another one.
 		if (sessionId !== sid) return null;
+		// This call got the server's word on what is open; a failed one knows nothing about it.
+		onAnswered?.(data['pending'] === false);
 		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;
@@ -3148,9 +3632,13 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 				multiSelect: data['multiSelect'] === true,
 				origin,
 				...(isConsentKind(data['consent']) ? { consent: data['consent'] } : {}),
+				...(isConsentAction(data['consentAction']) ? { consentAction: data['consentAction'] } : {}),
 			};
 			card = isConsentCard(pendingPermission.consent) ? 'decision' : 'question';
 		} else if (promptType === 'ask_secret') {
+			// The card already open for this prompt stays, with what the user has typed into it: a
+			// reconnect asks again, and setting it anew would clear the field.
+			if (sameOpenPrompt(pendingSecretPrompt?.promptId, data['promptId'])) return 'other';
 			pendingSecretPrompt = {
 				name: String(data['secretName'] ?? ''),
 				prompt: String(data['question'] ?? ''),
@@ -3161,6 +3649,7 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 			secretPromptGeneration++;
 			card = 'other';
 		} else if (promptType === 'connect_mail' && data['mailConnect']) {
+			if (sameOpenPrompt(pendingMailConnect?.promptId, data['promptId'])) return 'other';
 			const mc = data['mailConnect'] as Record<string, unknown>;
 			pendingMailConnect = {
 				promptId: data['promptId'] as string | undefined,
@@ -3272,39 +3761,78 @@ export async function compactNow(): Promise<{ ok: boolean; error?: string }> {
 	}
 }
 
-async function fetchChangeset(): Promise<void> {
-	if (!sessionId) return;
+/** Ask the server for the open review; true when it answered (with or without one). */
+function fetchChangeset(): Promise<boolean> {
+	const run = loadChangeset();
+	_changesetFetch = run;
+	void run.finally(() => { if (_changesetFetch === run) _changesetFetch = null; });
+	return run;
+}
+
+async function loadChangeset(): Promise<boolean> {
+	if (!sessionId) return false;
+	// The answer is about the thread open when it was asked for. Once another thread is shown (or
+	// this one was opened again) it says nothing about the view: it sets no card there, and it is
+	// no answer for that view's queue.
+	const sid = sessionId;
+	const gen = _resumeGeneration;
+	const stale = (): boolean => sessionId !== sid || _resumeGeneration !== gen;
 	changesetLoading = true;
 	try {
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
-		if (res.ok) {
-			const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
-			if (data.hasChanges && data.files.length > 0) {
-				pendingChangeset = data.files;
-				pendingChangesetRunId = data.runId ?? null;
-			}
+		// No time limit of its own: a slow answer that carries a review must still show it, and a
+		// queued turn waits for it. A fetch the network ends lands in the catch and frees the queue.
+		const res = await fetch(`${getApiBase()}/sessions/${sid}/changeset`);
+		const data = res.ok ? (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] } : null;
+		// Checked once the whole answer is in. The same thread opened again: its review is read
+		// again, for that opening.
+		if (stale()) return sessionId === sid ? await loadChangeset() : false;
+		// No session on the server (restarted, or dropped): it holds no review, which is an answer.
+		if (res.status === 404) return true;
+		if (!data) return false;
+		if (data.hasChanges && data.files.length > 0) {
+			pendingChangeset = data.files;
+			pendingChangesetRunId = data.runId ?? null;
 		}
-	} catch { /* best-effort — don't block UX */ }
+		if (rollbackStopped && (!(data.hasChanges && data.files.length > 0) || rollbackStopped.runId !== (data.runId ?? null))) rollbackStopped = null;
+		return true;
+	} catch { return false; /* best-effort — don't block UX */ }
 	finally { changesetLoading = false; }
 }
 
 /** The most file names the "not restored" message lists before it counts the rest. */
 const NOT_RESTORED_SHOWN = 5;
 
+/** File names for a message the person acts on: at most {@link NOT_RESTORED_SHOWN}, then a count. */
+function namedFiles(names: string[]): string {
+	const shown = names.slice(0, NOT_RESTORED_SHOWN).join(', ');
+	return names.length > NOT_RESTORED_SHOWN
+		? tf('changeset.not_restored_more', { files: shown, n: String(names.length - NOT_RESTORED_SHOWN) })
+		: shown;
+}
+
 export async function submitChangesetReview(
 	action: 'accept' | 'rollback' | 'partial',
 	rolledBackFiles?: string[],
 ): Promise<void> {
 	if (!sessionId) return;
+	// The answer is about this thread as it is open now. When another thread is shown by the time
+	// the server answers (or this one was opened again), the review and the queue on screen are
+	// not the ones answered: nothing here clears or drains them.
+	const sid = sessionId;
+	const gen = _resumeGeneration;
+	const stale = (): boolean => sessionId !== sid || _resumeGeneration !== gen;
 	// The server refuses an answer whose run is not the one holding the changes now.
 	const body: Record<string, unknown> = { action, runId: pendingChangesetRunId };
+	// The card as it was answered: a rollback that stops partway brings back what is left of it.
+	const shown = pendingChangeset;
+	const shownRunId = pendingChangesetRunId;
 	if (action === 'partial' && rolledBackFiles) {
 		body['rolledBackFiles'] = rolledBackFiles;
 	}
 	let status: number;
 	let res: Response;
 	try {
-		res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
+		res = await fetch(`${getApiBase()}/sessions/${sid}/changeset/review`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body),
@@ -3315,30 +3843,77 @@ export async function submitChangesetReview(
 		addToast(t('changeset.review_unsent'), 'error', 5000);
 		return;
 	}
-	pendingChangeset = null;
-	pendingChangesetRunId = null;
+	if (!stale()) {
+		pendingChangeset = null;
+		pendingChangesetRunId = null;
+	}
 	if (status >= 200 && status < 300) {
+		if (!stale()) rollbackStopped = null;
 		// A rollback leaves a file as it is when it was replaced or linked since the review, or
 		// could not be written. Closing the review without a word would read as all restored.
-		const notRestored = await res.json().then(
-			(j: unknown) => (j as { notRestored?: unknown } | null)?.notRestored,
-			() => undefined,
+		const answer = await res.json().then(
+			(j: unknown) => j as { notRestored?: unknown; rolledBack?: unknown } | null,
+			() => null,
 		);
+		const notRestored = answer?.notRestored;
+		// No count (`rolledBack: null`): the server could not read the changes and rolled back
+		// from the backups alone, so it does not know why a file stayed. The usual reason would
+		// be a guess; this answer says the reason is unknown.
+		const reasonUnknown = answer?.rolledBack === null;
 		const names = Array.isArray(notRestored) ? notRestored.filter((f): f is string => typeof f === 'string') : [];
 		if (names.length > 0) {
 			// The person has to act on this list: it stays until they close it, and names at most five.
-			const shown = names.slice(0, NOT_RESTORED_SHOWN).join(', ');
-			const files = names.length > NOT_RESTORED_SHOWN
-				? tf('changeset.not_restored_more', { files: shown, n: String(names.length - NOT_RESTORED_SHOWN) })
-				: shown;
-			addToast(tf('changeset.not_restored', { files }), 'error', null);
+			addToast(tf(reasonUnknown ? 'changeset.not_restored_unknown' : 'changeset.not_restored', { files: namedFiles(names) }), 'error', null);
 		}
+		// The turns queued behind the run that opened the review go now.
+		if (!stale()) drainQueueSoon(100);
+		return;
+	}
+	const failed = await res.json().then(
+		(j: unknown) => j as { code?: unknown; notRestored?: unknown } | null,
+		() => null,
+	);
+	if (failed?.code === 'rollback_aborted') {
+		// The rollback stopped partway. The server keeps the review with what is left, and its
+		// backups: the card comes back with those files and says what is not restored yet, so the
+		// person can try again or accept them, and the held messages keep waiting on it.
+		const left = Array.isArray(failed.notRestored) ? failed.notRestored.filter((f): f is string => typeof f === 'string') : [];
+		if (stale()) return;
+		// Nothing named: the throw came after the last file was back, and there is nothing to retry.
+		rollbackStopped = left.length > 0 ? { runId: typeof body['runId'] === 'string' ? body['runId'] : null, files: left } : null;
+		// Until the server's card arrives, the card shows what is left of the one answered, so the
+		// sentence is on screen even when that fetch fails.
+		const rest = (shown ?? []).filter((f) => left.includes(f.file));
+		// Read back after the assignment: the state holds its own proxy of `rest`, not `rest`.
+		let provisional: typeof pendingChangeset = null;
+		if (rest.length > 0) {
+			pendingChangeset = rest;
+			pendingChangesetRunId = shownRunId;
+			provisional = pendingChangeset;
+		}
+		const answered = await fetchChangeset();
+		if (!answered || stale()) return;
+		// The server answered without a card (none open any more, or no session): the card shown
+		// for the meantime claims a review it just denied, so it goes, and so does the sentence.
+		// The files it named may still carry the change, and their backups may be gone: the person
+		// is told which, as when a rollback leaves files without knowing why, before the message goes.
+		if (provisional !== null && pendingChangeset === provisional) {
+			pendingChangeset = null;
+			pendingChangesetRunId = null;
+			rollbackStopped = null;
+			addToast(tf('changeset.not_restored_unknown', { files: namedFiles(left) }), 'error', null);
+		}
+		// The drain waits while a card is shown, so this sends only once the review is over.
+		drainQueueSoon(100);
 		return;
 	}
 	// The answer did nothing. Closing the review silently would read as done: say so, and show
 	// what is pending now. 409 is the review of an earlier run, or a run in progress.
 	addToast(t(status === 409 ? 'changeset.review_refused' : 'changeset.review_failed'), 'info', 5000);
-	await fetchChangeset();
+	// Only an answer from the server says nothing is pending: a failed fetch leaves no review
+	// shown, and the queued turns would go past the one the server still holds.
+	if (stale()) return;
+	if (await fetchChangeset() && !stale()) drainQueueSoon(100);
 }
 
 export function cancelQueue(): void {
@@ -3416,10 +3991,6 @@ export async function reviewKnowledge(
 
 export function getMessages() {
 	return messages;
-}
-/** A reply that holds a typed answer is kept when it ends empty: the answer was given. */
-function holdsTypedAnswer(msg: ChatMessage): boolean {
-	return msg.blocks?.some((b) => b.type === 'answer') ?? false;
 }
 /** Add a temporary placeholder message (e.g. voice transcription bubble). Returns its index. */
 export function pushPlaceholder(content: string): number {
@@ -3534,6 +4105,12 @@ export function getRunStartedAt(): number | null {
 export function getRunPromptCount(): number {
 	return runPromptCount;
 }
+/** Bumped each time an answer named no question: the chat moves focus to the sentence then. */
+let unmatchedAnswerCount = $state(0);
+export function getUnmatchedAnswerCount(): number {
+	return unmatchedAnswerCount;
+}
+
 export function getChatError() {
 	return chatError;
 }
@@ -3574,6 +4151,11 @@ export function clearError() {
 	chatErrorDetail = null;
 	authError = false;
 }
+/** The files a stopped rollback of the open review has not restored yet, or null. */
+export function getRollbackStopped(): string[] | null {
+	return rollbackStopped?.files ?? null;
+}
+
 export function getPendingChangeset() {
 	return pendingChangeset;
 }
@@ -3765,6 +4347,7 @@ export function newChat() {
 	pendingSecretPrompt = null;
 	pendingMailConnect = null;
 	pendingChangeset = null;
+	rollbackStopped = null;
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;
@@ -3863,19 +4446,33 @@ export async function repickSessionModel(tier: string): Promise<
 > {
 	if (!sessionId) return { ok: false, reason: 'no_session' };
 	if (isStreaming) return { ok: false, reason: 'busy' };
+	const sid = sessionId;
+	const repick = (): Promise<Response> => fetch(`${getApiBase()}/sessions/${sid}/model`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ tier }),
+	});
 	try {
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/model`, {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ tier }),
-		});
+		let res = await repick();
+		// The server no longer holds this chat's session (dropped while idle, or a restart), as on
+		// a page reloaded long after: open it again for this chat, as a run does, and ask once more.
+		if (res.status === 404) {
+			const reopened = await fetch(`${getApiBase()}/sessions`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ threadId: sid }),
+			});
+			if (!reopened.ok || sessionId !== sid) return { ok: false, reason: 'error' };
+			res = await repick();
+		}
 		if (res.ok) {
 			const data = (await res.json()) as { model?: string; modelId?: string };
 			// `model` is the resolved (clamped) TIER; `modelId` is the concrete
 			// model-id. Keep sessionModel a model-id (consistent with the turn_end
 			// frame + the StatusBar tooltip) and sessionTier the tier (drives the
 			// per-thread control). Falling back to the tier only if modelId is absent.
-			if (data.model) {
+			// Only on the chat it was asked for: the user may have switched chats meanwhile.
+			if (data.model && sessionId === sid) {
 				sessionTier = data.model;
 				sessionModel = data.modelId ?? data.model;
 			}
@@ -3917,13 +4514,14 @@ export async function retryInterruptedRun(): Promise<void> {
 	let lastUserText = '';
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
-		if (m && m.role === 'user' && m.content) { lastUserText = m.content; break; }
+		// A held message was never sent: it is not the interrupted turn, and its tap sends it.
+		if (m && m.role === 'user' && m.content && m.held !== true) { lastUserText = m.content; break; }
 	}
 	// Asked before the dismiss: a waiting question (or a live run, or no answer from the server)
 	// keeps the banner and its Retry, and nothing is sent. The chat is checked after each await,
 	// so the retry never goes into a chat opened meanwhile.
 	const sid = sessionId;
-	if (lastUserText && !await askBeforeResend()) return;
+	if (lastUserText && !await askBeforeResend({ sayTurnStarted: true })) return;
 	await dismissInterruptedRun();
 	if (sessionId !== sid) return;
 	if (lastUserText) await sendMessage(lastUserText);
@@ -3941,7 +4539,92 @@ export async function retryInterruptedRun(): Promise<void> {
  * already-finished run (404 / immediate `done`) or an awaiting-input run (no
  * events until the user answers) never leaves an empty bubble.
  */
-async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<void> {
+/**
+ * After a re-attach that found its run already ended: the turns queued in this opening go once
+ * the review is asked for. Only an answer from the server says no review holds them; an open one
+ * holds them in the drain. The run a turn was queued behind drains nothing here: the thread was
+ * opened again since.
+ */
+function drainAfterReattach(gen: number): void {
+	if (gen !== _resumeGeneration) return;
+	void fetchChangeset().then((answered) => { if (answered && gen === _resumeGeneration) drainQueueSoon(100); });
+}
+
+/** How long to wait between asks whether a run a re-attach lost hold of still runs. */
+const RUN_END_POLL_MS = 2000;
+/** How often it is asked, at most (six minutes, as the busy wait); then the turn waits for the user. */
+const RUN_END_MAX_ASKS = 180;
+/** The wait for a run's end in progress, by opening, stream and run: one at a time. */
+let _runEndWait: string | null = null;
+
+/**
+ * The run was still going when the wait ran out: the turns queued in this opening are marked
+ * failed, for a tap to send again, as the busy wait leaves a turn after its six minutes. A turn
+ * without its bubble on screen gets one.
+ */
+function failWaitingTurns(): void {
+	const waiting = messageQueue;
+	messageQueue = [];
+	for (const q of waiting) {
+		const m = messages.find((x) => x.role === 'user' && x.queueId === q.id);
+		if (m) {
+			m.queued = false;
+			m.failed = true;
+		} else {
+			// The opening showed the server's transcript, without the waiting bubble: it comes
+			// back, failed, so the turn is not dropped unseen.
+			messages.push({ role: 'user', content: q.task, failed: true, ...(q.runOptions?.typed === true ? { typed: true } : {}) });
+		}
+	}
+	persistChatNow();
+}
+
+/**
+ * A re-attach let go of its run before the run ended: the stream dropped, could not be reached,
+ * or its reading was refused. The run may still go on on the server, so a turn queued in this
+ * opening waits for its end: sent earlier, the server would answer busy. The registry is asked
+ * for six minutes at most (then the turns are failed, for a tap), until the run is no longer in it (or no longer running), then the turns go as after a re-attach that found its run
+ * ended (the review is asked for first). An unanswered ask is asked again. It stops when the
+ * thread is left or opened again, a run of this chat starts (that run drains the queue), or
+ * nothing waits any more.
+ */
+function drainWhenRunEnds(runId: string, gen: number): void {
+	const epoch = streamEpoch;
+	const key = `${gen}:${epoch}:${runId}`;
+	if (_runEndWait === key) return; // one wait per opening, stream and run
+	_runEndWait = key;
+	let asks = 0;
+	const current = (): boolean => _runEndWait === key && gen === _resumeGeneration && streamEpoch === epoch && !isStreaming && messageQueue.length > 0;
+	const stop = (): void => { if (_runEndWait === key) _runEndWait = null; };
+	const ask = async (): Promise<void> => {
+		if (!current()) { stop(); return; }
+		if (++asks > RUN_END_MAX_ASKS) { stop(); failWaitingTurns(); return; }
+		let ended = false;
+		try {
+			const res = await fetch(`${getApiBase()}/runs/active`);
+			if (res.ok) {
+				const runs = ((await res.json()) as { runs?: unknown } | null)?.runs;
+				// Only a running or answer-awaiting run goes on: one a restart left `interrupted`
+				// stays listed but runs no more.
+				ended = Array.isArray(runs) && !runs.some((r) => {
+					if (typeof r !== 'object' || r === null) return false;
+					const { runId: id, status } = r as { runId?: unknown; status?: unknown };
+					return id === runId && (status === 'running' || status === 'awaiting_input');
+				});
+			}
+		} catch { /* not answered: asked again */ }
+		if (!current()) { stop(); return; }
+		if (ended) { stop(); drainAfterReattach(gen); return; }
+		setTimeout(() => { void ask(); }, RUN_END_POLL_MS);
+	};
+	void ask();
+}
+
+/**
+ * How a re-attach that did not take over the stream ended: `let-go` when the stream could not be
+ * reached or its reading was refused (the run may still go on), `other` otherwise.
+ */
+async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<'let-go' | 'other'> {
 	// userIdx for handleSSEEvent's error path = the last user message.
 	let userIdx = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -3959,20 +4642,22 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	try {
 		res = await fetch(`${getApiBase()}/runs/${runId}/stream?since=${since}`);
 	} catch {
-		return; // network drop — nav poll still reflects the run; user can reload
+		// Network drop — nav poll still reflects the run; user can reload. A turn queued here
+		// waits for the run's end.
+		drainWhenRunEnds(runId, gen);
+		return 'let-go';
 	}
 	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
 	const refused = res.ok ? null : await containedReadKey(res);
-	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; return; }
+	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; drainWhenRunEnds(runId, gen); return 'let-go'; }
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
-	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); return; }
-	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return; }
+	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); drainAfterReattach(gen); return 'other'; }
+	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return 'other'; }
 
 	const myEpoch = ++streamEpoch;
 	isStreaming = true;
-	liveAnswer = null;
 	containedAtRunStart = threadContained;
 	isReattached = true;
 	lastAppliedSeq = since;
@@ -4065,17 +4750,17 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			// comment above ("the queued turn drains after it") assumes THIS
 			// finally drains it — but it never did, so a message typed while a
 			// resumed run streamed sat in the queue forever. Mirror the
-			// normal-path drain in _executeRun's finally; skip if the resumed
-			// run left a changeset to review (sendMessage's guard is bypassed
-			// because we call _executeRun directly).
-			if (!pendingChangeset && messageQueue.length > 0) {
-				const next = messageQueue.shift()!;
-				persistChatNow(); // queue shrank — keep the durable copy in sync
-				setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-			}
+			// normal-path drain at the end of `_runTurn`; a changeset the resumed
+			// run left to review holds it (`drainQueueSoon`). A thread opened meanwhile has its
+			// own queue and review: not this re-attach's to drain.
+			if (gen === _resumeGeneration) drainQueueSoon(100);
+		} else if (!completedNormally && streamEpoch === myEpoch && gen === _resumeGeneration) {
+			// The stream ended without its `done`: the run may still be going.
+			drainWhenRunEnds(runId, gen);
 		}
 		persistChat();
 	}
+	return 'other';
 }
 
 /**
@@ -4132,6 +4817,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	pendingSecretPrompt = null;
 	pendingMailConnect = null;
 	pendingChangeset = null;
+	rollbackStopped = null;
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;
@@ -4326,12 +5012,13 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// adopting the shorter server list would wipe the in-flight user bubble +
 			// placeholder. The `>=` path stays unguarded — a thread switch that legitimately
 			// loads an equal-or-longer transcript is unaffected.
-			if (serverMessages.length >= shown.length
+			if (serverMessages.length >= serverLength(shown)
 				|| (!isStreaming && !resumeActiveRun && !hasUnpersistedLocal)) {
 				// Server messages never carry chips — without this, adoption wipes a
 				// pending-review chip at run end (the observed end-of-run flicker) and
 				// loses it for good on a settled reload.
 				carryKnowledgeWrites(localMessages, serverMessages);
+				carryHeld(shown, serverMessages);
 				messages = serverMessages;
 				adoptedServer = true;
 				// The carried chips cover what LOCAL storage remembered, but a reload
@@ -4400,10 +5087,10 @@ export async function resumeThread(threadId: string): Promise<void> {
 		// streamed, then carried across a reload. Only when this resume is still
 		// current, the thread is idle, there's no pending prompt blocking, and
 		// we're not re-attaching to a live run (the queued turn drains after it).
-		if (gen === _resumeGeneration && !isStreaming && !reattaching && !pendingChangeset && messageQueue.length > 0) {
-			const next = messageQueue.shift()!;
-			persistChatNow();
-			setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
+		// A review the server holds was not shown before the reload: it is asked for first, and
+		// the turn waits for it. Without an answer the turn stays queued.
+		if (gen === _resumeGeneration && !isStreaming && !reattaching && messageQueue.length > 0) {
+			void fetchChangeset().then((answered) => { if (answered && gen === _resumeGeneration) drainQueueSoon(100); });
 		}
 		// The chip that announced any queued write in this thread is client-only and did not
 		// survive the reload, so ask the server what is still waiting HERE.
@@ -4439,6 +5126,25 @@ export async function resumeThread(threadId: string): Promise<void> {
  *
  * Safe to call on every ChatView mount — additive, no SSE-lifecycle change.
  */
+/**
+ * After a reload the chat holds its id (kept in this browser) but not its tier: no session was
+ * opened, the transcript was only read back, so nothing set the tier and the model row and picker
+ * stayed hidden. The thread's record says the tier it runs on (`run_tier`: the stored pick held to
+ * today's ceiling as a resume would; not the stored pick as asked). Read
+ * only while the tier is unknown, and kept only if the same chat is still open and nothing set a
+ * tier meanwhile.
+ */
+async function restoreThreadTier(sid: string): Promise<void> {
+	if (sessionTier !== null) return;
+	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
+	if (!res?.ok) return;
+	const data = (await res.json().catch(() => null)) as { thread?: { run_tier?: unknown } | null } | null;
+	// Checked once the whole answer is in: the user may have switched chats, or a session set the tier.
+	if (sessionId !== sid || sessionTier !== null) return;
+	const tier = data?.thread?.run_tier;
+	if (typeof tier === 'string' && tier !== '') sessionTier = tier;
+}
+
 export async function reconcileThread(): Promise<void> {
 	const tid = sessionId;
 	if (!tid) return;
@@ -4446,6 +5152,7 @@ export async function reconcileThread(): Promise<void> {
 	// run answered in the drop window, a mount), and the run may have contained the chat. Not
 	// every end does: the server's refusal stays the enforcement, this only keeps the switch honest.
 	runEnded(null);
+	void restoreThreadTier(tid);
 	if (isStreaming) return;
 	try {
 		const res = await fetch(`${getApiBase()}/threads/${tid}/messages`);
@@ -4508,10 +5215,11 @@ export async function reconcileThread(): Promise<void> {
 		// server transcript and WIPE the just-sent user bubble + streaming placeholder.
 		// Never adopt while a turn is in flight.
 		if (tid === sessionId && !isStreaming
-			&& (serverMessages.length >= messages.length || (!data.activeRun && !hasUnpersistedLocal))) {
+			&& (serverMessages.length >= serverLength(messages) || (!data.activeRun && !hasUnpersistedLocal))) {
 			// Same carry-over as resumeThread — a reconcile on remount must not wipe
 			// a pending-review chip either.
 			carryKnowledgeWrites(messages, serverMessages);
+			carryHeld(messages, serverMessages);
 			messages = serverMessages;
 			adopted = true;
 			persistChatNow();
