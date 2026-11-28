@@ -48,6 +48,8 @@ let component: Record<string, unknown> | undefined;
 let run: BulkRunDetailData;
 let managed: boolean;
 let posts: string[];
+// The code the engine refuses an approval or a resume with.
+let code: string;
 const locale = getLocale();
 
 beforeEach(() => {
@@ -57,12 +59,13 @@ beforeEach(() => {
 	run = makeRun();
 	managed = true;
 	posts = [];
+	code = 'shopify_off';
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 		if (init?.method === 'POST') {
 			posts.push(u);
-			if (u.endsWith('/approve') || u.endsWith('/resume')) return reply({ error: ENGINE, code: 'shopify_off' }, 409);
+			if (u.endsWith('/approve') || u.endsWith('/resume')) return reply({ error: ENGINE, code }, 409);
 			return reply({});
 		}
 		if (u.endsWith('/config')) return reply({ managed, viewer: 'owner' });
@@ -131,5 +134,12 @@ describe('a Shopify run refused while bulk changes are off', () => {
 		await render();
 		await press(t('bulk.approve.write_only'));
 		expect(errorLine()).toBe(`${t('bulk.resume.refused.shopify_off')} ${t('bulk.halt.shopifyWriteOff_before_selfhost')}`);
+	});
+
+	it('control: a refusal of another kind keeps its own sentence alone, with no way to turn the changes on', async () => {
+		code = 'start_domains_frozen';
+		await render();
+		await press(t('bulk.approve.write_only'));
+		expect(errorLine()).toBe(t('bulk.start_domains.frozen'));
 	});
 });
