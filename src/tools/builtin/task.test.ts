@@ -1581,6 +1581,23 @@ describe('Task Tools', () => {
         expect(rest[3]).toBe(NOTE);
       });
 
+      it('a person with access reads a workflow another mandate made as a mandate\'s, without whose: fenced, no address', async () => {
+        history.insertPlannedPipeline({ id: 'wf-other', name: 'Export', goal: '', steps: [{ id: 'export', task: 't' }], reasoning: '', estimatedCost: 0, createdAt: '2026-11-01T00:00:00.000Z', template: true }, { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' } as RequestPrincipal);
+        const id = await mkSchedule('Other workflow check');
+        setTrigger(id, 'target_workflow_id', 'wf-other');
+        failWith(id, NOTE);
+        const reader = { kind: 'mandate', email: 'bob@firm.example', mandateId: 'grant-bob' } as RequestPrincipal;
+        const out = await taskListTool.handler({}, makeAgent(undefined, reader));
+        const rest = after(out, 'Other workflow check');
+        expect(rest[1]).toBe('<other_run_text>');
+        expect(rest[2]).toMatch(/^Recorded by the last run of a trigger whose workflow was set up or changed by someone you let in\. /);
+        expect(rest[3]).toBe(NOTE);
+        expect(out).not.toContain('eva@firm.example');
+        // Control: the owner reads who made it.
+        const owners = after(await taskListTool.handler({}, makeAgent()), 'Other workflow check');
+        expect(owners[2]).toMatch(/^Recorded by the last run of a trigger whose workflow was set up by eva@firm\.example\. /);
+      });
+
       it('a closing tag in the result stays inside the fence', async () => {
         const id = await mkSchedule('Breakout check');
         setTrigger(id, 'created_by', 'mandate:eva@firm.example');

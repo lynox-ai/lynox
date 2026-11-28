@@ -350,11 +350,21 @@ function taskReaderOf(agent: IAgent): TaskReader {
   };
 }
 
-/** The run history's workflow record reader, when the context has one that reads it. */
+/**
+ * The run history's workflow record reader, when the context has one that reads it. A person with
+ * access reads a workflow's marks as they read a trigger's (`withoutForeignMarks`): another
+ * mandate's tag says only that a mandate made it, never which one.
+ */
 function workflowAuthorshipOf(agent: IAgent): TaskReader['workflowAuthorship'] {
   const history = agent.toolContext.runHistory;
   if (!history || typeof history.getWorkflowAuthorship !== 'function') return undefined;
-  return (id) => history.getWorkflowAuthorship(id);
+  const principal = agent.principal ?? OWNER_PRINCIPAL;
+  return (id) => {
+    const a = history.getWorkflowAuthorship(id);
+    if (a === undefined) return undefined;
+    const shown = withoutForeignMarks({ created_by: a.createdBy, mandate_editor: a.mandateEditor }, principal);
+    return { createdBy: shown.created_by, mandateEditor: shown.mandate_editor };
+  };
 }
 
 // Catches an LLM output failure mode where the model emits an escaped close-quote
