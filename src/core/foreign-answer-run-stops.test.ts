@@ -196,16 +196,19 @@ describe('a run that only an answer from another chat made due', () => {
   it('a mark another process\'s run outlived is cleared when a later re-arm finds the row due on its own', async () => {
     const p = boot({ 'thread-owner': 'owner' });
     parkedPlan(p);
-    answeredIn(p, 'thread-owner');
+    const first = answeredIn(p, 'thread-owner');
     await tick(p);
     // Another process holds the run's lease, so this one does not pick it up, and its mark stays.
     const until = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     p.db.prepare('UPDATE triggers SET lease_holder = ?, lease_until = ?, lease_since = ? WHERE id = ?').run('other-process', until, new Date().toISOString(), 'p');
     await tick(p);
     expect(p.turns, 'held by the other process: not run here').toEqual([]);
-    // That process's run asked again and parked; meanwhile the schedule's own time came.
+    // That process's run released the answer unread, asked again and parked; meanwhile the
+    // schedule's own time came, and the new question was answered in the same other chat.
+    expect(p.prompts.releaseTrigger(first), 'the other run released the first answer').toBe(true);
     p.db.prepare('UPDATE triggers SET lease_holder = NULL, lease_until = NULL, lease_since = NULL WHERE id = ?').run('p');
     p.history.updateTrigger('p', { status: 'waiting', waitingUntil: new Date(Date.now() + 24 * H * 1000).toISOString(), nextRunAt: PAST });
+    answeredIn(p, 'thread-owner');
     await tick(p);
     await tick(p);
     expect(p.turns, 'due on its own: it ran').toHaveLength(1);
