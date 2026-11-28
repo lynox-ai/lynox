@@ -20341,19 +20341,14 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
       getSecretStore: () => ({ hasVault: false, scrubFreedPages: () => undefined, listVaultNames: () => [], vaultRowCount: 0, listNames: () => [], deleteSecret: () => undefined }),
     };
-    // `keyless` takes the real path: the vault opens and migrates its file, then
-    // throws for the missing key, which leaves an empty vault.db behind.
+    // `keyless`: an empty vault.db, as a keyless open left behind before it threw ahead of
+    // opening the file. Such a file can still lie on an instance; a vault without a secret row
+    // stands in for it (the same tables, no secrets).
     async function seedVault(dir: string, mode: 'secret' | 'keyless'): Promise<void> {
       const { SecretVault } = await import('../core/secret-vault.js');
       const path = join(dir, 'vault.db');
       if (mode === 'keyless') {
-        const prior = process.env['LYNOX_VAULT_KEY'];
-        delete process.env['LYNOX_VAULT_KEY'];
-        try {
-          expect(() => new SecretVault({ path })).toThrow(/master key required/);
-        } finally {
-          if (prior !== undefined) process.env['LYNOX_VAULT_KEY'] = prior;
-        }
+        new SecretVault({ path, masterKey: 'k'.repeat(64) }).close();
         expect(existsSync(path)).toBe(true);
         return;
       }
