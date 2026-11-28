@@ -833,8 +833,9 @@ beforeAll(async () => {
   // The whole file shares this instance's rate windows, and its tests pay back what they spend.
   // Its clock stands still, so a window never runs out during the file: not halfway through a
   // test, which a file that runs past a minute otherwise does at a point that moves with the
-  // machine's load, and not between tests either. On this instance the loopback window is 600
-  // requests for the whole run, and what the tests do not pay back adds up over all of them.
+  // machine's load, and not between tests either. On this instance each loopback client's window
+  // is 600 requests for the whole run (a request with X-Forwarded-For counts for the address it
+  // names), and what the tests do not pay back adds up over all of them.
   (api as unknown as { rateNow: () => number }).rateNow = () => 0;
   await api.init();
   await api.start(0);
@@ -12468,8 +12469,8 @@ describe('LynoxHTTPApi', () => {
 
     // ⚠ AND IT PAYS ITS OWN WAY. The per-IP window is 600 requests / 60 s
     // (`RATE_MAX_LOOPBACK`; on this file's shared instance, whose clock stands still, 600 for
-    // the whole run, see the file's beforeAll), every request in this file comes from 127.0.0.1, so the
-    // whole file shares ONE bucket — and at ~590 requests it already sat just under the
+    // the whole run, see the file's beforeAll). Every request here without X-Forwarded-For counts
+    // for 127.0.0.1, so they all share ONE bucket — and at ~590 requests it already sat just under the
     // ceiling. Measured, not feared: with these cases added and no reset, seven
     // `GET /api/oauth/callback` tests several thousand lines below failed with 429,
     // while the same file at the base commit passed all 565. A comment further down
@@ -18974,29 +18975,44 @@ describe('LynoxHTTPApi', () => {
         try { await own.init(); await own.start(0); await body(own); } finally { await own.shutdown(); }
       }
 
-      it('a step of the wall clock neither opens a window early nor stretches one', async () => {
+      it('a step of the wall clock ahead opens no window early', async () => {
         await withOwn(async (own) => {
           expect(await ask(own)).toBe(200);
           const [key, opened] = [...windowsOf(own)][0]!;
           const resetAt = opened.resetAt;
           const realNow = Date.now.bind(Date);
-          // 170 s ahead, past the window's minute on the wall clock, then 170 s back.
-          let step = 170_000;
-          const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + step);
+          // 170 s ahead, past the window's minute on the wall clock.
+          const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 170_000);
           try {
-            expect(await ask(own)).toBe(200);
-            const ahead = windowsOf(own).get(key)!;
-            expect(ahead, 'a step ahead opens no window early').toBe(opened);
-            expect(ahead.count).toBe(2);
-            step = -170_000;
             expect(await ask(own)).toBe(200);
           } finally {
             spy.mockRestore();
           }
           const after = windowsOf(own).get(key)!;
           expect(after, 'the same window is still open').toBe(opened);
-          expect(after.count).toBe(3);
-          expect(after.resetAt, 'and it ends when it did: a step back stretches nothing').toBe(resetAt);
+          expect(after.count).toBe(2);
+          expect(after.resetAt, 'and it ends when it did').toBe(resetAt);
+        });
+      });
+
+      it('a window opened while the wall clock stands ahead lasts one minute of elapsed time', async () => {
+        await withOwn(async (own) => {
+          const realNow = Date.now.bind(Date);
+          // On the wall clock this window would end 170 s + 60 s from now.
+          const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 170_000);
+          let before: number;
+          let after: number;
+          try {
+            before = performance.now();
+            expect(await ask(own)).toBe(200);
+            after = performance.now();
+          } finally {
+            spy.mockRestore();
+          }
+          const [, opened] = [...windowsOf(own)][0]!;
+          // The window opened somewhere between `before` and `after` on the elapsed clock.
+          expect(opened.resetAt, 'it ends a minute after it opened').toBeGreaterThanOrEqual(before + 60_000);
+          expect(opened.resetAt, 'and not later: the step of the wall clock stretches nothing').toBeLessThanOrEqual(after + 60_000);
         });
       });
 
@@ -19035,7 +19051,8 @@ describe('LynoxHTTPApi', () => {
           expect(await ask(own)).toBe(200);
           const second = windows.get(key)!;
           expect(second, 'the case: a new window opened after the snapshot').not.toBe(first);
-          // And a client the snapshot did not know yet.
+          // And a client the snapshot did not know yet. Its own window needs the proxy trusted,
+          // which the file's beforeAll stubs before this instance starts.
           const other = await fetch(`http://127.0.0.1:${portOf(own)}/api/secrets`, { headers: { ...authHeaders(), 'X-Forwarded-For': '203.0.113.77' } });
           await other.text();
           const newcomer = windows.get('203.0.113.77');
