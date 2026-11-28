@@ -4758,10 +4758,10 @@ describe('mandates and stored credentials', () => {
       const calls = minting();
       const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec' });
       // A name released to the profile, so the view lets it through and only the own-slot rule
-      // can refuse it.
-      // In the author's own run: the owner is refused on such a profile before the name is asked about.
+      // can refuse it. Run as the mandate that wrote the profile, so the author check lets it pass.
       const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CLIENT_SECRET' }, makeAgent(apiStore, v as never, undefined, undefined, mandate));
       expect(out).toContain('is not available for this profile');
+      expect(out).toContain('so the token goes to "CRM_API_ACCESS_TOKEN"');
       expect(calls).toEqual([]);
       expect(v.peek('CRM_CLIENT_SECRET')).toBe('sec');
     });
