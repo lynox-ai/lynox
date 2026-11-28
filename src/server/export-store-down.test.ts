@@ -404,6 +404,58 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     }
   }, 60_000);
 
+  it('masks the graph block\'s entities and relations as it masks the remembered texts, a vault value written escaped in a JSON text included, with the layer and without it', async () => {
+    const store = h.engine().getSecretStore() as SecretStore | null;
+    expect(store, 'fixture: the secret store opened').not.toBeNull();
+    // A quote and a backslash, so the value has a second form once written inside a JSON text.
+    const value = `q"${randomBytes(12).toString('hex')}\\z`;
+    const escaped = JSON.stringify(value).slice(1, -1);
+    expect(escaped, 'fixture: the escaped form differs').not.toBe(value);
+    store!.set('GRAPH_MASK_PROBE', value);
+    const legacy = new Database(join(h.dir(), 'agent-memory.db'));
+    const getKnowledgeLayer = h.engine().getKnowledgeLayer;
+    try {
+      legacy.prepare("INSERT INTO entities (id, canonical_name, entity_type, aliases, description, scope_type, scope_id, first_seen_at, last_seen_at) VALUES ('gm-a', ?, 'person', ?, ?, 'global', 'global', '2026-01-01', '2026-01-01'), ('gm-b', 'Acme', 'organization', '[]', '', 'global', 'global', '2026-01-01', '2026-01-01')")
+        .run(`Mallory ${value}`, JSON.stringify([`alias ${value}`]), `pin ${value}`);
+      legacy.prepare("INSERT INTO relations (id, from_entity_id, to_entity_id, relation_type, description, created_at) VALUES ('gm-r', 'gm-a', 'gm-b', ?, ?, '2026-01-01')")
+        .run(`owns ${value}`, `json {"pw":"${escaped}"}`);
+      legacy.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, is_active, embedding, created_at, updated_at) VALUES ('gm-m', ?, 'knowledge', 'global', 'global', 0, x'00', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')")
+        .run(JSON.stringify({ pw: value }));
+
+      for (const path of ['layer', 'no layer'] as const) {
+        if (path === 'no layer') h.engine().getKnowledgeLayer = () => null;
+        else expect(h.engine().getKnowledgeLayer(), 'fixture: the knowledge graph opened').not.toBeNull();
+        const body = await h.exportBody();
+        const graph = body.knowledge_graph as unknown as {
+          entities: Array<{ id: string; canonicalName: string; aliases: string[]; description: string }>;
+          relationships: Array<{ fromEntityId: string; relationType: string; description: string }>;
+        };
+        const entity = graph.entities.find(e => e.id === 'gm-a');
+        expect(entity, `${path}: the entity is listed`).toBeDefined();
+        expect(entity!.canonicalName, `${path}: its name, masked`).toMatch(/^Mallory \*\*\*/);
+        expect(entity!.aliases.join(' '), `${path}: its aliases, masked`).toMatch(/^alias \*\*\*/);
+        expect(entity!.description, `${path}: its description, masked`).toMatch(/^pin \*\*\*/);
+        const relation = graph.relationships.find(r => r.fromEntityId === 'gm-a');
+        expect(relation, `${path}: the relation is listed`).toBeDefined();
+        expect(relation!.relationType, `${path}: its type, masked`).toMatch(/^owns \*\*\*/);
+        expect(relation!.description, `${path}: its description, the escaped form masked`).toMatch(/^json \{"pw":"\*\*\*/);
+        const memory = body.knowledge_graph.memories!['agent-memory.db']!.memories.find(m => m['id'] === 'gm-m');
+        expect(String(memory?.['text']), `${path}: the remembered JSON text, the escaped form masked`).toMatch(/^\{"pw":"\*\*\*/);
+        const all = JSON.stringify(body.knowledge_graph);
+        for (const form of [value, escaped]) {
+          expect(all.includes(JSON.stringify(form).slice(1, -1)), `${path}: no form of the value is in the block`).toBe(false);
+        }
+      }
+    } finally {
+      h.engine().getKnowledgeLayer = getKnowledgeLayer;
+      store!.deleteSecret('GRAPH_MASK_PROBE');
+      legacy.prepare("DELETE FROM relations WHERE id = 'gm-r'").run();
+      legacy.prepare("DELETE FROM entities WHERE id IN ('gm-a', 'gm-b')").run();
+      legacy.prepare("DELETE FROM memories WHERE id = 'gm-m'").run();
+      legacy.close();
+    }
+  }, 60_000);
+
   it('lists a secret written to the vault after boot by name, not by value', async () => {
     const vault = h.engine().secretVault;
     expect(vault, 'fixture: the vault opened').not.toBeNull();

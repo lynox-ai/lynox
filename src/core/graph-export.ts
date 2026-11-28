@@ -83,6 +83,34 @@ export async function collectGraphForExport(source: GraphExportSource): Promise<
   return { entities, relationships: [...relationSet.values()], truncated, relationCapHit };
 }
 
+/**
+ * The graph block's free text through the export's mask: an entity's name, aliases and
+ * description, a relation's type and description. These are what the graph was told, as the
+ * remembered texts beside them are, so they go through the same mask. Ids, counts and times are
+ * left as they are.
+ */
+export function maskGraphForExport(
+  graph: { entities: EntityRecord[]; relationships: ExportRelation[] },
+  mask: (text: string) => string,
+): { entities: EntityRecord[]; relationships: ExportRelation[] } {
+  // A field is masked where it holds text, as `readMemoryTextsForExport` masks its rows: a record
+  // read from an older or partial row passes through with what it has.
+  const text = <T>(v: T): T => (typeof v === 'string' ? mask(v) as T : v);
+  return {
+    entities: graph.entities.map(e => ({
+      ...e,
+      canonicalName: text(e.canonicalName),
+      aliases: Array.isArray(e.aliases) ? e.aliases.map(text) : e.aliases,
+      description: text(e.description),
+    })),
+    relationships: graph.relationships.map(r => ({
+      ...r,
+      relationType: text(r.relationType),
+      description: text(r.description),
+    })),
+  };
+}
+
 /** Walks every entity by key, page by page; `null` when the source cannot, or stops part way. */
 async function walkByKey(
   next: (after: string | null, limit: number) => Promise<EntityRecord[] | null> | EntityRecord[] | null,
