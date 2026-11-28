@@ -626,7 +626,7 @@ describe('the record each connecting path leaves reads as a connection; the fres
   const answer = (body: Record<string, unknown>) => vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
     new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
 
-  it('the record a save mints for a new oauth2 profile is not a connection, on the owner\'s or a member\'s profile', async () => {
+  it('the record a save mints for a new oauth2 profile a member set up is not a connection, read by the owner or by that member', async () => {
     const { isConnection } = await import('../../core/api-store.js');
     const { profileForReader } = await import('../../core/profile-secret-view.js');
     const { EngineDb } = await import('../../core/engine-db.js');
