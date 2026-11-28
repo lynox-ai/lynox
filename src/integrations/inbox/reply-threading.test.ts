@@ -65,7 +65,7 @@ function seed(opts: { accountId?: string; tenantId?: string; threadKey?: string;
     reasonDe: 'Kundin will eine Offerte', classifiedAt: new Date('2026-11-23T08:00:00Z'),
     classifierVersion: 'v1', messageId, subject: 'Offerte', fromAddress: 'kunde@example.com',
     ...(opts.tenantId !== undefined ? { tenantId: opts.tenantId } : {}),
-  });
+  }).id;
   inbox.insertThreadMessage({
     accountId, threadKey, messageId, fromAddress: 'kunde@example.com',
     subject: 'Offerte', direction: 'inbound', inboxItemId: id,
@@ -123,7 +123,7 @@ describe('a reply on an IMAP server without thread ids', () => {
       accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'requires_user', confidence: 0.9,
       reasonDe: 'Kundin will eine Offerte', classifiedAt: new Date('2026-11-23T08:00:00Z'),
       classifierVersion: 'v1', messageId: '<first@x>', subject: 'Offerte', fromAddress: 'kunde@example.com',
-    });
+    }).id;
     inbox.updateUserAction(id, 'replied', new Date('2026-11-23T09:00:00Z'));
     expect(inbox.listThreadMessages(ACCOUNT.id, THREAD)).toEqual([]);
     expect(await hook()(ACCOUNT.id, reply())).toBe('duplicate');
@@ -137,7 +137,7 @@ describe('a reply on an IMAP server without thread ids', () => {
       accountId: ACCOUNT.id, channel: 'email', threadKey: '<keyed@x>', bucket: 'requires_user', confidence: 0.9,
       reasonDe: 'ohne Message-ID', classifiedAt: new Date('2026-11-23T08:00:00Z'),
       classifierVersion: 'v1', subject: 'Offerte', fromAddress: 'kunde@example.com',
-    });
+    }).id;
     inbox.updateUserAction(id, 'replied', new Date('2026-11-23T09:00:00Z'));
     expect(await hook()(ACCOUNT.id, reply({ inReplyTo: '<keyed@x>', references: ['<keyed@x>'] }))).toBe('enqueued');
     expect(inbox.getItem(id)!.userAction).toBe('replied');
@@ -145,7 +145,7 @@ describe('a reply on an IMAP server without thread ids', () => {
       accountId: ACCOUNT.id, channel: 'email', threadKey: 'imap:INBOX:9', bucket: 'requires_user', confidence: 0.9,
       reasonDe: 'ohne Message-ID', classifiedAt: new Date('2026-11-23T08:00:00Z'),
       classifierVersion: 'v1', subject: 'Offerte', fromAddress: 'kunde@example.com',
-    });
+    }).id;
     inbox.updateUserAction(noId, 'replied', new Date('2026-11-23T09:00:00Z'));
     expect(await hook()(ACCOUNT.id, reply({ messageId: '<reply-3@x>', inReplyTo: 'imap:INBOX:9', references: [] }))).toBe('enqueued');
     expect(inbox.getItem(noId)!.userAction).toBe('replied');

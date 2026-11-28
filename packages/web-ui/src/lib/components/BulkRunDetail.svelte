@@ -18,7 +18,7 @@
 	import MarkedLine from './MarkedLine.svelte';
 	import { shownValue, VALUE_OPEN } from '../utils/plan-takeover.js';
 	import {
-		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkListUnread, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey, bulkRefusalSentence, bulkSameValueOthers, bulkChoiceFields, bulkNumberLocale, bulkRestartHintKey,
+		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkTakenBack, bulkSentUnknownText, bulkSentUnknownParts, bulkListUnread, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep, bulkUndoApproveText, bulkUndoExplainText, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey, bulkRefusalSentence, bulkSameValueOthers, bulkChoiceFields, bulkNumberLocale, bulkRestartHintKey,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkShowsFailure, bulkShowsTargetError, bulkTargetErrorText,
 	} from './bulk-runs.js';
 	import { BulkLoadFailed, bulkLoadErrorKey } from './bulk-runs.js';
@@ -50,8 +50,8 @@
 	// Unchanged targets fold away: the owner checks what is written and what lynox leaves out.
 	let showUnchanged = $state(false);
 	// A run not loaded whole that leaves targets unchanged, or has written, opens on the targets its
-	// plan changes, the written ones first, so what it wrote is on the page however late in the run
-	// it comes (U-437). The unchanged ones and the rest load, in plan order, on the owner's ask.
+	// plan changes, the written ones first and then the ones with an error, so what it wrote and what
+	// failed is on the page however late in the run it comes (U-437). The unchanged ones and the rest load, in plan order, on the owner's ask.
 	let changedOnly = $state(false);
 	let probeOk = $state(false);
 	let maxTargets = $state(1);
@@ -217,9 +217,12 @@
 				|| (r.body.hiddenAddsTargets ?? 0) > 0
 				// So does one with a field that could not be checked for them: its sentence stands under it.
 				|| (r.body.hiddenUncheckedTargets ?? 0) > 0
-				// So does one halted on its failures: the step to check the targets with an error
-				// stands only where one is marked, and a marked one may lie past the first page.
-				|| r.body.haltKey === 'failureRate' || r.body.haltKey === 'consecutiveFailures';
+				// So does one halted on its failures while the page may still offer the step to check the
+				// targets with an error: it stands only where one is marked, and a marked one may lie past
+				// the first page. A run that ended keeps its halt but offers no step, and opens on the
+				// targets it wrote.
+				|| ((r.body.haltKey === 'failureRate' || r.body.haltKey === 'consecutiveFailures')
+					&& (r.body.phase === 'planned' || r.body.phase === 'approved' || r.body.phase === 'writing'));
 			// Every page is asked for the run this load opened, never for one the page has moved to since.
 			let firstChanged = !whole && (r.body.changes.unchanged > 0 || r.body.applied > 0);
 			let shown = whole ? await loadFrom(id, 0, r.body.total) : await loadTargets(id, 0, FIRST_PAGE, firstChanged);
@@ -308,7 +311,15 @@
 		planner_unknown: 'bulk.resume.refused.planner_unknown',
 		start_domains_invalid: 'bulk.start_domains.invalid',
 		start_domains_frozen: 'bulk.start_domains.frozen',
+		shopify_off: 'bulk.resume.refused.shopify_off',
 	};
+	/** After the refusal of a run while Shopify bulk changes are off, the way to turn them on —
+	 *  unless the run halted on that switch, whose halt already says it above. A preview is
+	 *  approved, not continued, once they are on: the support sentence says so. */
+	const refusalWayOf = (code: string | undefined): string | null =>
+		code === 'shopify_off' && run !== null && run.haltKey !== 'shopifyWriteOff'
+			? t(managed === false ? 'bulk.halt.shopifyWriteOff_before_selfhost'
+				: run.phase === 'previewed' ? 'bulk.halt.shopifyWriteOff_before_approve_managed' : 'bulk.halt.shopifyWriteOff_before_managed') : null;
 	const hopelessReason = $derived.by(() => {
 		if (hopeless === null || run === null || hopeless.id !== run.id) return null;
 		const key = bulkReachRefusalKey(hopeless.code);
@@ -321,7 +332,9 @@
 		const ruleSourceKey = bulkRuleSourceKey(code, title !== null);
 		if (ruleSourceKey !== null) return title !== null ? tf(ruleSourceKey, { title: shownValue(title) }) : t(ruleSourceKey);
 		const key = code !== undefined && Object.hasOwn(REFUSAL_KEYS, code) ? REFUSAL_KEYS[code] : code !== undefined ? bulkReachRefusalKey(code) ?? undefined : undefined;
-		return key !== undefined ? t(key) : (r.body.error ?? t('common.load_failed'));
+		if (key === undefined) return r.body.error ?? t('common.load_failed');
+		const way = refusalWayOf(code);
+		return way !== null ? `${t(key)} ${way}` : t(key);
 	};
 
 	function approve(oneFirst: boolean): Promise<void> {
@@ -989,6 +1002,8 @@
 											{/each}
 											{#if bulkRollbackLeft(run, target)}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
+											{:else if bulkTakenBack(target)}
+												<span class="ml-1 inline-block rounded-full bg-bg-muted px-1.5 text-[11px] text-text-subtle" data-testid="bulk-taken-back">{t('bulk.target.taken_back')}</span>
 											{/if}
 										</td>
 										<td role="cell" class={undoApproving ? 'block sm:table-cell pb-1.5 pt-1 sm:pt-1.5' : 'py-1.5'}>

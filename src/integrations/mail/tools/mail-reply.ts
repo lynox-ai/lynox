@@ -391,7 +391,7 @@ export async function prepareReply(
     ? said.smartReplyFrom(quotedPreviewValue(readProvider.accountId)) : pv``;
   const sendAccountConfig = sendVerdict.accountConfig;
   const personaNote = sendAccountConfig
-    ? said.replyPersona(singleLine(truncate(personaFor(sendAccountConfig), 80))) : pv``;
+    ? said.replyPersona(truncate(singleLine(personaFor(sendAccountConfig)), 80)) : pv``;
   // Shared with mail_send's preview: an oversized body must state its
   // real size instead of ending in a bare "…". Reply is the likelier
   // injection path of the two — the untrusted inbound mail is already in

@@ -135,6 +135,8 @@ export interface InboxNotifyOptions {
   flagged?: boolean;
   /** Who wrote the message the push is for, when it is not the item's own sender (a follow-up). */
   sender?: { address: string; name?: string | undefined } | undefined;
+  /** The subject of the message the push is for, when it is not the item's own (a joined mail). */
+  subject?: string | undefined;
 }
 
 export interface InboxNotifier {
@@ -220,7 +222,7 @@ export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
       const fromLabel = sender.name !== undefined && sender.name !== ''
         ? sanitisePushText(sender.name, 80)
         : sanitisePushText(sender.address, 80);
-      const subject = sanitisePushText(item.subject || item.reasonDe, 200);
+      const subject = sanitisePushText(notifyOpts.subject || item.subject || item.reasonDe, 200);
       const body = notifyOpts.flagged === true
         ? FLAGGED_PUSH_TEXT[noticeLanguage(opts.language?.())]
         : fromLabel ? `${fromLabel}: ${subject}` : subject;

@@ -3486,7 +3486,7 @@
 					<ChangesetReview
 						files={pendingChangeset}
 						onReview={(action, rolledBackFiles) => submitChangesetReview(action, rolledBackFiles)}
-						messageWaiting={queueLength > 0}
+						messagesWaiting={queueLength}
 						{rollbackStopped}
 					/>
 				{/if}

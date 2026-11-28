@@ -31,6 +31,9 @@ import { fireBeforeRunGate, type HookHost } from '../../core/metered-request.js'
 import { SINGLE_CALL_WORST_CASE_CENTS } from '../../core/run-admission.js';
 import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
+import type { MailEnvelope } from '../mail/provider.js';
+import type { SensitiveMode } from './sensitive-content.js';
+import { createFollowUpRecorder, type AccountResolver, type FollowUpRecorderOptions, type JoinVerdict } from './thread-follow-up.js';
 import type { PrefilterRule } from '../mail/triage/rules.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxRule } from '../../types/index.js';
@@ -83,6 +86,12 @@ export interface InboxQueuePayload {
    *  is checked for it. Other machine-sent mail (a dunning
    *  letter from an ERP, `auto-generated`) is checked. */
   isAutoReplied?: boolean | undefined;
+  /**
+   * The envelope as the watcher received it. When the mail's thread has its item by the time the
+   * mail is classified (another mail of the thread created it), the mail is filed into that item
+   * the way the watcher files a follow-up, and this is what that path reads.
+   */
+  mail?: MailEnvelope | undefined;
 }
 
 /**
@@ -97,6 +106,20 @@ export function sensitiveAudit(payload: Pick<InboxQueuePayload, 'sensitive'>): R
         sensitive_categories: payload.sensitive.categories,
         sensitive_masked: payload.sensitive.masked,
         sensitive_redactions: payload.sensitive.redactionCount,
+      }
+    : {};
+}
+
+/**
+ * `sensitiveAudit` for a joined mail's entry. Under keys of its own: `sensitive_categories` on any
+ * entry of an item marks the item's own mail (`sensitiveCategoriesAtIngest`), and this is another.
+ */
+function joinedSensitiveAudit(payload: Pick<InboxQueuePayload, 'sensitive'>): Record<string, unknown> {
+  return payload.sensitive
+    ? {
+        joined_sensitive_categories: payload.sensitive.categories,
+        joined_sensitive_masked: payload.sensitive.masked,
+        joined_sensitive_redactions: payload.sensitive.redactionCount,
       }
     : {};
 }
@@ -157,6 +180,21 @@ export interface BuildInboxRunnerOptions {
    * Absent when the feature is off.
    */
   ruleCheck?: { rules: Pick<InboxRulesLoader, 'descriptionRules'>; llm: LLMCaller } | undefined;
+  /**
+   * What a mail filed into an existing item needs, as the watcher hook has it: the account
+   * resolver (own address, provider), the sensitive mode, and the automatic-reply check. Without
+   * it no account is known, and the mode is `skip`.
+   */
+  followUps?: {
+    accounts: AccountResolver;
+    sensitiveMode?: SensitiveMode | undefined;
+    confirmAutoReply?: ((accountId: string, env: MailEnvelope) => Promise<boolean>) | undefined;
+  } | undefined;
+}
+
+/** Only one job of a thread runs at a time, in the order the mails were queued (see `serialKey`). */
+export function inboxSerialKey(payload: Pick<InboxQueuePayload, 'tenantId' | 'accountId' | 'threadKey'>): string {
+  return `${payload.tenantId ?? ''}\0${payload.accountId}\0${payload.threadKey}`;
 }
 
 /** A description rule named the mail: its bucket, unless it would file a sensitive or forwarded
@@ -212,6 +250,23 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
   const budget = opts.budget;
   const meteredHost = opts.meteredHost;
   const versionStamp = opts.classifierVersionOverride ?? CLASSIFIER_VERSION;
+
+  // A mail whose thread has its item already: filed into it with its own verdict, by the path the
+  // watcher files a follow-up by, never written over the item.
+  const recorderOpts: FollowUpRecorderOptions = {
+    state,
+    accounts: opts.followUps?.accounts ?? { resolve: () => null },
+  };
+  if (opts.notifier !== undefined) recorderOpts.notifier = opts.notifier;
+  if (opts.followUps?.confirmAutoReply !== undefined) recorderOpts.confirmAutoReply = opts.followUps.confirmAutoReply;
+  const recordFollowUp = createFollowUpRecorder(recorderOpts);
+  const sensitiveMode: SensitiveMode = opts.followUps?.sensitiveMode ?? 'skip';
+  const joinThread = async (payload: InboxQueuePayload, itemId: string, verdict: JoinVerdict): Promise<void> => {
+    const item = state.getItem(itemId, payload.tenantId);
+    if (!item) return;
+    const account = recorderOpts.accounts.resolve(payload.accountId) ?? { address: '' };
+    await recordFollowUp(item, payload.mail ?? _envelopeOf(payload), sensitiveMode, account, verdict);
+  };
 
   const budgetExceededVerdict = (reasonDe: string): ClassifyResult => ({
     bucket: 'requires_user',
@@ -282,12 +337,12 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       }
       return classify();
     },
-    onSuccess: (payload, classified) => {
+    onSuccess: async (payload, classified) => {
       const result = withheldSensitive(classified, payload);
       const envelopeFields = payload.envelope ?? {};
       const metadataWarning = _detectEmptyMetadata(payload.envelope);
       const rule = result.rule;
-      const itemId = state.insertItemWithAudit(
+      const inserted = state.insertItemWithAudit(
         {
           tenantId: payload.tenantId,
           accountId: payload.accountId,
@@ -338,6 +393,28 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
               }),
             },
       );
+      const itemId = inserted.id;
+      if (!inserted.created) {
+        // Another mail of the thread created the item first: this one keeps the item's sender,
+        // body, verdict and push as they are, and is filed into it with its own verdict.
+        await joinThread(payload, itemId, {
+          bucket: result.bucket,
+          confidence: result.confidence,
+          reasonDe: result.reasonDe,
+          classifierVersion: result.classifierVersion,
+          failReason: result.failReason,
+          audit: {
+            // The rule that filed this mail, or was withheld on it, as on the item's own audit.
+            ...(rule !== undefined && rule.withheld === false ? { rule_id: rule.id } : {}),
+            ...(rule !== undefined && rule.withheld !== false ? { rule_withheld: rule.id, rule_withheld_reason: rule.withheld } : {}),
+            ...(rule !== undefined && rule.name !== undefined ? { rule_name: rule.name } : {}),
+            ...(result.classifierFailReason !== undefined ? { classifier_fail_reason: result.classifierFailReason } : {}),
+            ...(result !== classified ? { classifier_bucket: classified.bucket } : {}),
+            ...joinedSensitiveAudit(payload),
+          },
+        });
+        return;
+      }
       // Persist the sanitised body the classifier saw so the draft
       // generator can read it without a second provider round-trip. We
       // store the masked variant when sensitive-mode = 'mask' so the
@@ -354,7 +431,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
         if (item) void opts.notifier.notifyNewItem(item, { flagged: payload.sensitive !== undefined });
       }
     },
-    onDeadLetter: (payload, error) => {
+    onDeadLetter: async (payload, error) => {
       // Left by a runtime being replaced: the replacing runtime classifies it. Only when that one
       // does not take it does it fall through to a failed classification below.
       if (error instanceof HandedOverError && error.handOver(payload)) return;
@@ -366,7 +443,11 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
         // The body it would have seen goes with it, as for an overflowing queue. No notification
         // per mail: the process is ending, and the items wait in Needs You.
         const forRestore = error instanceof DrainedForRestoreError;
-        const drainedId = state.insertItemWithAudit(
+        const reasonDe = forRestore
+          ? 'Wegen der Migration nicht klassifiziert — manuell prüfen.'
+          : 'Beim Herunterfahren nicht klassifiziert — manuell prüfen.';
+        const classifierVersion = forRestore ? 'restore-drain' : 'shutdown-drain';
+        const drained = state.insertItemWithAudit(
           {
             tenantId: payload.tenantId,
             accountId: payload.accountId,
@@ -374,11 +455,9 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
             threadKey: payload.threadKey,
             bucket: 'requires_user',
             confidence: 0,
-            reasonDe: forRestore
-              ? 'Wegen der Migration nicht klassifiziert — manuell prüfen.'
-              : 'Beim Herunterfahren nicht klassifiziert — manuell prüfen.',
+            reasonDe,
             classifiedAt: new Date(),
-            classifierVersion: forRestore ? 'restore-drain' : 'shutdown-drain',
+            classifierVersion,
             ...envelopeFields,
           },
           {
@@ -388,10 +467,26 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
             payloadJson: JSON.stringify({ dead_letter: true, reason: forRestore ? 'restore_drain' : 'shutdown_drain', ...sensitiveAudit(payload) }),
           },
         );
-        _writeThreadMessage(state, payload, drainedId, payload.classifierInput.body);
+        if (!drained.created) {
+          // Joined like a classified mail; no push, as for a drained item of its own.
+          await joinThread(payload, drained.id, {
+            bucket: 'requires_user',
+            confidence: 0,
+            reasonDe,
+            classifierVersion,
+            failReason: forRestore ? 'restore_drain' : 'shutdown_drain',
+            deadLetter: forRestore ? 'restore_drain' : 'shutdown_drain',
+            push: false,
+            audit: joinedSensitiveAudit(payload),
+          });
+          return;
+        }
+        _writeThreadMessage(state, payload, drained.id, payload.classifierInput.body);
         return;
       }
-      const itemId = state.insertItemWithAudit(
+      const failedReasonDe = 'Klassifizierer-Aufruf fehlgeschlagen — manuell prüfen.';
+      const failedVersion = `dead-letter:${error.name || 'Error'}`;
+      const failed = state.insertItemWithAudit(
         {
           tenantId: payload.tenantId,
           accountId: payload.accountId,
@@ -399,9 +494,9 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           threadKey: payload.threadKey,
           bucket: 'requires_user',
           confidence: 0,
-          reasonDe: 'Klassifizierer-Aufruf fehlgeschlagen — manuell prüfen.',
+          reasonDe: failedReasonDe,
           classifiedAt: new Date(),
-          classifierVersion: `dead-letter:${error.name || 'Error'}`,
+          classifierVersion: failedVersion,
           ...envelopeFields,
         },
         {
@@ -419,6 +514,19 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           }),
         },
       );
+      const itemId = failed.id;
+      if (!failed.created) {
+        await joinThread(payload, itemId, {
+          bucket: 'requires_user',
+          confidence: 0,
+          reasonDe: failedReasonDe,
+          classifierVersion: failedVersion,
+          failReason: 'dead_letter',
+          deadLetter: 'classifier_failed',
+          audit: { error_message: _scrubErrorMessage(error.message), ...joinedSensitiveAudit(payload) },
+        });
+        return;
+      }
       // Dead-letter still records the message — operator may need to
       // see what arrived even when classify failed. No body (none was
       // successfully classified).
@@ -433,6 +541,9 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
   if (policy.perJobTimeoutMs !== undefined) queueOptions.perJobTimeoutMs = policy.perJobTimeoutMs;
   if (policy.maxQueueDepth !== undefined) queueOptions.maxQueueDepth = policy.maxQueueDepth;
   if (policy.retryOnce !== undefined) queueOptions.retryOnce = policy.retryOnce;
+  // One job per thread at a time: the mail queued first creates the item, a later one of the same
+  // thread is classified after it and joins it, whichever classification would finish first.
+  queueOptions.serialKey = inboxSerialKey;
 
   return new ClassifierQueue<InboxQueuePayload>(queueOptions);
 }
@@ -452,6 +563,33 @@ function _detectEmptyMetadata(env: InboxQueuePayload['envelope']): ReadonlyArray
   if (env.fromAddress.length === 0) missing.push('from_address');
   if (env.subject.length === 0) missing.push('subject');
   return missing.length > 0 ? missing : null;
+}
+
+/**
+ * The envelope of a payload queued without one (`InboxQueuePayload.mail`), rebuilt from its
+ * stored projection, so a joined mail is still filed into its thread.
+ */
+function _envelopeOf(payload: InboxQueuePayload): MailEnvelope {
+  const env = payload.envelope;
+  return {
+    uid: 0,
+    messageId: env?.messageId,
+    folder: '',
+    threadKey: payload.threadKey,
+    inReplyTo: env?.inReplyTo,
+    from: env ? [{ address: env.fromAddress, ...(env.fromName !== undefined ? { name: env.fromName } : {}) }] : [],
+    to: [],
+    cc: [],
+    replyTo: [],
+    subject: env?.subject ?? '',
+    date: env?.mailDate ?? new Date(),
+    flags: [],
+    snippet: env?.snippet ?? '',
+    hasAttachments: false,
+    attachmentCount: 0,
+    sizeBytes: undefined,
+    isAutoReply: payload.isAutoReplied === true,
+  };
 }
 
 /**
