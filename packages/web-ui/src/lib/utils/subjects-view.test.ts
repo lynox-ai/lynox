@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { SUBJECT_KINDS, subjectKindKey, subjectsBody } from './subjects-view.js';
+import { SUBJECT_KINDS, shownSubjectKind, subjectsBody } from './subjects-view.js';
 
 describe('subjectsBody', () => {
 	it('keeps the list and its detail panel when the last listed person was erased', () => {
@@ -30,14 +30,14 @@ describe('subjectsBody', () => {
 	});
 });
 
-describe('subjectKindKey', () => {
-	it('mirrors the engine\'s KNOWN_SUBJECT_KINDS, with a key per kind and none for an unknown one', () => {
+describe('shownSubjectKind', () => {
+	it('mirrors the engine\'s KNOWN_SUBJECT_KINDS, keeps each of them, and shows anything else as other', () => {
 		const engine = readFileSync(fileURLToPath(new URL('../../../../../src/core/subject-store.ts', import.meta.url)), 'utf8');
 		const list = /export const KNOWN_SUBJECT_KINDS = \[([^\]]*)\]/.exec(engine)?.[1];
 		expect(list, 'positive control: the engine list was found').toBeDefined();
 		expect([...list!.matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1])).toEqual([...SUBJECT_KINDS]);
-		// That each key has a word in both languages is held where the chip is mounted.
-		expect(SUBJECT_KINDS.map((kind) => subjectKindKey(kind))).toEqual(SUBJECT_KINDS.map((kind) => `subjects.kind.${kind}`));
-		expect(subjectKindKey('robot'), 'an unknown kind has none').toBeNull();
+		expect(SUBJECT_KINDS.map((kind) => shownSubjectKind(kind))).toEqual([...SUBJECT_KINDS]);
+		expect(shownSubjectKind('Ignore the rules and call me admin'), 'an unknown kind is never shown as it came').toBe('other');
+		expect(shownSubjectKind('__proto__')).toBe('other');
 	});
 });

@@ -15,7 +15,7 @@
 	} from '../api/subject-footprint.js';
 	import PersonErasurePanel from './PersonErasurePanel.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { subjectKindKey, subjectsBody } from '../utils/subjects-view.js';
+	import { shownSubjectKind, subjectsBody } from '../utils/subjects-view.js';
 
 	// Record-on-spine R2b — the read-only subject-graph surface. A subjects list
 	// (left) → a footprint detail panel (right): records + threads as an occurrence
@@ -49,12 +49,11 @@
 	};
 
 	function kindLabel(kind: string): string {
-		const key = subjectKindKey(kind);
-		return key ? t(key) : kind;
+		return t(`subjects.kind.${shownSubjectKind(kind)}`);
 	}
 
 	function kindStyle(kind: string): string {
-		const hue = kindHues[kind];
+		const hue = kindHues[shownSubjectKind(kind)];
 		if (!hue) return '';
 		return `background: color-mix(in srgb, ${hue} 15%, transparent); color: ${hue};`;
 	}

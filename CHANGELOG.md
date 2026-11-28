@@ -148,7 +148,8 @@
   cancel, and the panel is no longer drawn in the warning colour. After a
   partial erasure all of it stays as it was. The subject list and panel show a
   subject's kind as a word in the page's language instead of the stored value
-  in a code font, and the kind "other" is tinted like the rest.
+  in a code font, and the kind "other" is tinted like the rest. A kind the web
+  UI does not know shows as "other", never as the stored value.
 
 ## 2.18.0 — 2026-11-17
 

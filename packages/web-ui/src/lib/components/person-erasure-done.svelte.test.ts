@@ -103,7 +103,7 @@ afterEach(() => {
 describe('PersonErasurePanel once the erasure has answered', () => {
 	it('says it is finished and offers to close, in heading, region label and button, without the warning colour', async () => {
 		await mountPanel(json(RESULT));
-		expect([heading(), region(), topButton()], 'before: an open action').toEqual([t('erasure.title'), t('erasure.title'), t('erasure.cancel')]);
+		expect([heading(), region(), topButton()], 'before: an open action').toEqual(['Diese Person aus dem Gedächtnis löschen', 'Diese Person aus dem Gedächtnis löschen', 'Abbrechen']);
 		expect(warns(), 'before: in the warning colour').toEqual([true, true, true]);
 		await confirmErasure();
 		expect(target.querySelector('[role="status"]'), 'positive control: the done answer is shown').not.toBeNull();
@@ -118,13 +118,14 @@ describe('PersonErasurePanel once the erasure has answered', () => {
 		await mountPanel(json(PARTIAL, 500));
 		await confirmErasure();
 		expect(target.querySelector('[role="alert"]')?.textContent, 'positive control: the partial answer is shown').toContain(t('erasure.step.memories_legacy'));
-		expect([heading(), region(), topButton()]).toEqual([t('erasure.title'), t('erasure.title'), t('erasure.cancel')]);
+		expect([heading(), region(), topButton()]).toEqual(['Diese Person aus dem Gedächtnis löschen', 'Diese Person aus dem Gedächtnis löschen', 'Abbrechen']);
 		expect(warns()).toEqual([true, true, true]);
 	});
 
-	it('names the finished state in English too', async () => {
+	it('names the open and the finished state in English too', async () => {
 		(await import('../i18n.svelte.js')).setLocale('en');
 		await mountPanel(json(RESULT));
+		expect([heading(), region(), topButton()], 'before').toEqual(['Erase this person from memory', 'Erase this person from memory', 'Cancel']);
 		await confirmErasure();
 		expect([heading(), region(), topButton()]).toEqual(['Erasure finished', 'Erasure finished', 'Close']);
 	});

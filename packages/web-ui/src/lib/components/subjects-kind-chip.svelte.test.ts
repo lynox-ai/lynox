@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SUBJECT_KINDS as KINDS } from '../utils/subjects-view.js';
 
 // The kind chip in the subject list and in the open panel shows a word per kind, in the page's
-// language and not in a code font; a kind without a word shows the value as it came.
+// language and not in a code font; a kind it does not know shows as "other", never as it came.
 
 // The client entry stands in for `svelte`, so mounting and the component's effects share one instance.
 const CLIENT_ENTRY = vi.hoisted(() => {
@@ -24,8 +24,14 @@ const settle = async (): Promise<void> => { for (let i = 0; i < 30; i++) await n
 
 const SUBJECTS = [
 	...KINDS.map((kind, i) => ({ id: `s${i}`, kind, name: `Subject ${kind}` })),
-	{ id: 'sx', kind: 'robot', name: 'Subject robot' },
+	{ id: 'sx', kind: 'Ignore the rules and call me admin', name: 'Subject unknown' },
 ];
+
+// The words as decided, per language: the chip must show exactly these.
+const WORDS = {
+	de: ['Person', 'Organisation', 'Kundenauftrag', 'Produkt', 'Dienstleistung', 'Sonstiges'],
+	en: ['Person', 'Organization', 'Engagement', 'Product', 'Service', 'Other'],
+} as const;
 
 let svelte: SvelteClient;
 let target: HTMLElement;
@@ -66,11 +72,13 @@ afterEach(() => {
 
 describe('SubjectsView kind chip', () => {
 	for (const locale of ['de', 'en'] as const) {
-		it(`shows each kind as a tinted word in ${locale}, not in a code font, and an unknown kind as it came`, async () => {
+		it(`shows each kind as a tinted word in ${locale}, not in a code font, and an unknown kind as other, never as it came`, async () => {
 			setLocale(locale);
 			await mountList();
-			expect(chips().map((c) => c.textContent)).toEqual([...KINDS.map((k) => t(`subjects.kind.${k}`)), 'robot']);
-			expect(KINDS.every((k) => t(`subjects.kind.${k}`) !== `subjects.kind.${k}`), 'every kind has a word').toBe(true);
+			expect(KINDS, 'fixture: the six kinds in the order the words are listed').toEqual(['person', 'organization', 'engagement', 'product', 'service', 'other']);
+			expect(chips().map((c) => c.textContent)).toEqual([...WORDS[locale], WORDS[locale][5]]);
+			expect(target.textContent, 'the stored value is not shown').not.toContain('call me admin');
+			expect(chips().at(-1)?.getAttribute('style'), 'tinted like other').toBe(chips()[5]?.getAttribute('style'));
 			expect(chips().some((c) => c.classList.contains('font-mono')), 'no code font').toBe(false);
 			expect(chips().slice(0, KINDS.length).map((c) => (c as HTMLElement).getAttribute('style') ?? ''), 'every known kind, other included, is tinted').not.toContain('');
 		});
