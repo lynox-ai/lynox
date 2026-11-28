@@ -17,6 +17,7 @@
 	import ThreadModelControl from './ThreadModelControl.svelte';
 	import StatusBar from './StatusBar.svelte';
 	import SetupBanner from './SetupBanner.svelte';
+	import StoreAccessBanner from './StoreAccessBanner.svelte';
 	import PublicDemoBanner from './PublicDemoBanner.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
@@ -1023,6 +1024,9 @@
 
 			<!-- Setup warnings -->
 			<SetupBanner />
+
+			<!-- A store whose access runs out soon or has: the owner's way without web push. -->
+			<StoreAccessBanner />
 
 			<!-- Session banner. Session-expired fires when any /api/* 401s (common cause: Safari
 				PWA cookie eviction; the engine itself is fine). A delegated access this instance

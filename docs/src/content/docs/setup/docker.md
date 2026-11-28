@@ -71,7 +71,7 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `ANTHROPIC_API_KEY` | Recommended | Anthropic API key. Anthropic-only — does NOT serve `provider: openai`. |
 | `MISTRAL_API_KEY` | Mistral only | Mistral API key (canonical primary slot for `provider: openai` with Mistral endpoint). |
 | `OPENAI_API_KEY` | Other openai-compat only | Bearer for generic OpenAI-compatible endpoints (experimental). Secondary slot — `MISTRAL_API_KEY` is also accepted. |
-| `ANTHROPIC_BASE_URL` | No | Base URL for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
+| `ANTHROPIC_BASE_URL` | No | Base URL for `provider: openai` or `custom` (e.g. `https://api.eu.mistral.ai/v1`) |
 | `LYNOX_LLM_PROVIDER` | No | `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy, see below — experimental) |
 | `OPENAI_MODEL_ID` | OpenAI only | Model ID (e.g. `mistral-medium-2604`, `llama3.2`, `gpt-4o`) — prefer pinned over `-latest` to avoid silent snapshot rolls |
 | `LYNOX_VAULT_KEY` | Recommended | Encryption key for secrets at rest |

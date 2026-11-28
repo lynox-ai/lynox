@@ -16,6 +16,8 @@ import { BulkSourceError } from './bulk-plan.js';
 import type { ExtractSchema, ExtractSchemaProperty } from './llm-helper.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
 import { hiddenCharAt } from './hidden-chars.js';
+import { createHash } from 'node:crypto';
+import { isArtifactId, type ArtifactStore } from './artifact-store.js';
 
 /** A field name of F: one top-level name, as a list's id field is. */
 const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -59,6 +61,117 @@ export interface JudgeRule {
    *  {@link SHOPIFY_CONTEXT_FIELDS}. Shown to the owner before the start. Absent when none is
    *  planned, never empty: a rule planned without C keeps its hash, and its run its checksum. */
   context?: string[] | undefined;
+  /** Where the rule's text came from when the planner named a saved artifact instead of typing
+   *  it ({@link judgeRuleFromArtifact}): the artifact, its version and the text's SHA-256 as read
+   *  at planning. The text itself is `rule`, byte for byte. Absent for a typed rule, never
+   *  `undefined`: a typed rule keeps its hash. */
+  source?: JudgeRuleSource | undefined;
+}
+
+/** The saved text a rule was taken from: read once, at planning, and never again for the run. */
+export interface JudgeRuleSource {
+  artifact: string;
+  version: number;
+  sha256: string;
+  /** The artifact's title as it was at planning, to name it to the owner later without reading it
+   *  again: once it is gone there is nothing to read. An access can write a title, so it is a
+   *  foreign value wherever it is shown. Absent for an artifact without a title. */
+  title?: string | undefined;
+}
+
+/** Why a run whose rule came from an artifact may not start, by code: the owner's page words each
+ *  code itself; `message` is the engine's English for any other reader. */
+export interface JudgeRuleSourceRefusal {
+  code: 'rule_source_changed' | 'rule_source_gone' | 'rule_source_unreadable';
+  message: string;
+  /** The title as planned ({@link JudgeRuleSource.title}); never on `rule_source_unreadable`. */
+  title?: string | undefined;
+}
+
+/** The artifact types whose content is text a rule can be: not a page, a diagram or a table. */
+const RULE_ARTIFACT_TYPES: ReadonlySet<string> = new Set(['markdown', 'text']);
+
+/** The most characters of an artifact's title a run keeps to name it later: an access can write
+ *  a title of any length, and the owner's page shows a few dozen. */
+export const JUDGE_RULE_SOURCE_TITLE_MAX = 200;
+
+const sha256Of = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
+
+/**
+ * The judge input with its rule read from a saved artifact, when the planner named one as
+ * `judge.rule_artifact` instead of typing `judge.rule`; null when it typed the rule. The model
+ * retypes a long rule on the way (it spelled out umlauts, dropped quoted examples, changed
+ * quotes), and a rule the owner had approved word for word reached the run changed. Named, the
+ * text is the artifact's content as stored, not one byte altered: no trim, no normalisation.
+ *
+ * The owner's only: an access (a mandate) lists and writes artifacts but does not read their
+ * content, and a run's rule is shown to the owner and sent to a model. Under an access the rule
+ * is typed, as before.
+ */
+export function judgeRuleFromArtifact(
+  input: unknown,
+  planner: () => { store: Pick<ArtifactStore, 'get'> | null; ownerPlans: boolean },
+): { input: Record<string, unknown>; source: JudgeRuleSource } | null {
+  if (!isPlainObject(input) || !Object.hasOwn(input, 'rule_artifact')) return null;
+  const { rule_artifact: ref, ...rest } = input;
+  const { store, ownerPlans } = planner();
+  if (rest['rule'] !== undefined) throw new BulkSourceError('Give judge.rule or judge.rule_artifact, not both.');
+  if (!ownerPlans) {
+    throw new BulkSourceError('judge.rule_artifact is for the owner: under an access, type the rule as judge.rule.');
+  }
+  if (!isArtifactId(ref)) throw new BulkSourceError('judge.rule_artifact must be the id of a saved artifact, as artifact_list shows it.');
+  if (store === null) throw new BulkSourceError('Saved artifacts are not available on this instance: type the rule as judge.rule.');
+  const artifact = store.get(ref);
+  if (artifact === null) throw new BulkSourceError(`There is no saved artifact ${ref}.`);
+  if (artifact.lostOnSave === true) throw new BulkSourceError(`Artifact ${ref} lost its document on a save: save the rule again, then plan with its id.`);
+  if (!RULE_ARTIFACT_TYPES.has(artifact.type)) {
+    throw new BulkSourceError(`Artifact ${ref} is of type ${artifact.type}; a rule is taken only from a markdown or text artifact.`);
+  }
+  // Named by the artifact, so the planner knows which text to fix: the same checks
+  // `normalizeJudgeRule` applies to a typed rule, which would name judge.rule.
+  if (artifact.content.trim() === '') throw new BulkSourceError(`Artifact ${ref} is empty; a rule needs text.`);
+  refuseHidden(artifact.content, `Artifact ${ref}`);
+  if (artifact.content.length > JUDGE_MAX_RULE_CHARS) {
+    throw new BulkSourceError(
+      `Artifact ${ref} has ${String(artifact.content.length)} characters; a rule may have at most ${String(JUDGE_MAX_RULE_CHARS)}. Save the rule alone as its own artifact and plan with that id.`,
+    );
+  }
+  return {
+    input: { ...rest, rule: artifact.content },
+    source: {
+      artifact: artifact.id, version: artifact.version, sha256: sha256Of(artifact.content),
+      ...(typeof artifact.title === 'string' && artifact.title !== ''
+        ? { title: [...artifact.title].slice(0, JUDGE_RULE_SOURCE_TITLE_MAX).join('') }
+        : {}),
+    },
+  };
+}
+
+/**
+ * Why a run whose rule was taken from an artifact may not start: the artifact changed or is gone
+ * since the run was planned; null when it holds the same text, or the rule was typed. The run
+ * keeps the text it was planned with either way, so nothing switches to the newer version; but an
+ * owner who edited the rule meant the edit, and starting on the old text would judge by a rule
+ * they replaced.
+ */
+export function judgeRuleSourceChanged(rule: Pick<JudgeRule, 'source'>, store: Pick<ArtifactStore, 'get'> | null): JudgeRuleSourceRefusal | null {
+  if (rule.source === undefined) return null;
+  // Only the code: nothing the store said about why it could not be read.
+  if (store === null) {
+    return { code: 'rule_source_unreadable', message: "Saved artifacts cannot be read on this instance right now, so lynox cannot check this run's rule. Nothing was judged. Try again later." };
+  }
+  // Named by the title it had at planning, never by one read now.
+  const title = rule.source.title;
+  const titled = title !== undefined ? { title } : {};
+  const now = store.get(rule.source.artifact);
+  if (now === null) {
+    return { code: 'rule_source_gone', message: "The artifact with this run's rule has been deleted or cannot be read. Ask lynox in the chat to plan the run again.", ...titled };
+  }
+  if (sha256Of(now.content) !== rule.source.sha256) {
+    // Someone with access to this instance may have changed it, not only the owner.
+    return { code: 'rule_source_changed', message: "This run's rule has changed since it was planned. The change may not be yours. Read the rule under Artifacts, then ask lynox in the chat to plan the run again.", ...titled };
+  }
+  return null;
 }
 
 /** The fields a Shopify product run may read as context C: the product's own texts and its
@@ -205,12 +318,12 @@ function normalizeContext(
  */
 export function normalizeJudgeRule(
   input: unknown,
-  opts: { idField?: string | undefined; contextFields?: readonly string[] | undefined; htmlFields?: readonly string[] | undefined } = {},
+  opts: { idField?: string | undefined; contextFields?: readonly string[] | undefined; htmlFields?: readonly string[] | undefined; source?: JudgeRuleSource | undefined } = {},
 ): JudgeRule {
   if (!isPlainObject(input)) throw new BulkSourceError('judge must be an object with rule and schema.');
   const rule = input['rule'];
   if (typeof rule !== 'string' || rule.trim() === '') {
-    throw new BulkSourceError(`judge.rule must be a text of 1–${String(JUDGE_MAX_RULE_CHARS)} characters.`);
+    throw new BulkSourceError(`judge.rule must be a text of 1–${String(JUDGE_MAX_RULE_CHARS)} characters, or name a saved artifact as judge.rule_artifact.`);
   }
   if (rule.length > JUDGE_MAX_RULE_CHARS) {
     // The counted length, so the model shortens by a number instead of an estimate.
@@ -257,7 +370,9 @@ export function normalizeJudgeRule(
   const context = normalizeContext(input['context'], names, opts.idField, opts.contextFields);
   // Left out, never `undefined`: `canonicalJson` writes an undefined key as null, and the rule's
   // hash would change for every rule planned without a context.
-  return { rule, schema, tier, verdict: 'envelope', ...(context !== undefined ? { context } : {}) };
+  // The source only as the caller read it (`judgeRuleFromArtifact`), never from the input: a
+  // planner that wrote one itself would claim a text it typed came from a saved artifact.
+  return { rule, schema, tier, verdict: 'envelope', ...(context !== undefined ? { context } : {}), ...(opts.source !== undefined ? { source: opts.source } : {}) };
 }
 
 /** The schema the judge's call is bound by: the rule's own over F, or around it the envelope

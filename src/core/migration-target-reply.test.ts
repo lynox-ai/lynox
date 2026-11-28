@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { REPORT_MAX_DEPTH, TargetAnswerTooSlow, TargetDidNotAnswer, askTarget, isConnectionFailure, capText, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } from './migration-target-reply.js';
+import { REPORT_MAX_DEPTH, TargetAnswerTooSlow, TargetDidNotAnswer, TransferOutOfTime, askTarget, transferDeadlineMs, isConnectionFailure, capText, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText, homeAsTilde } from './migration-target-reply.js';
 
 /** A response whose body is `parts`, then either ends or stays open; `cancelled` says whether it was let go. */
 function streamed(parts: string[], end = true): { res: Response; state: { cancelled: boolean } } {
@@ -83,6 +83,35 @@ describe('the source reads a target answer up to its cap and its deadline', () =
     await expect(askTarget(async () => { throw new Error('refused'); }, 'https://t.example/x', {}, 50)).rejects.toThrow('refused');
   });
 
+  it('cuts a request at its deadline also while the transport has not taken the signal yet', async () => {
+    // A fetch that ignores the signal, as the guard's name lookup does before it hands the request on
+    // (the guard ends that lookup itself after 5 s; here the request's deadline comes first).
+    const deaf = (): Promise<Response> => new Promise<Response>(() => { /* never answers, never listens */ });
+    const t0 = Date.now();
+    await expect(askTarget(deaf, 'https://t.example/x', {}, 50)).rejects.toBeInstanceOf(TargetDidNotAnswer);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('ends a request when the whole transfer runs out of time, and refuses to start one after', async () => {
+    const overall = new AbortController();
+    const deaf = (): Promise<Response> => new Promise<Response>(() => { /* never answers */ });
+    const asked = askTarget(deaf, 'https://t.example/x', {}, 60_000, overall.signal);
+    overall.abort();
+    await expect(asked).rejects.toMatchObject({ name: 'TransferOutOfTime', asked: true });
+    let called = false;
+    await expect(askTarget(async () => { called = true; return new Response('ok'); }, 'https://t.example/x', {}, 60_000, overall.signal)).rejects.toMatchObject({ name: 'TransferOutOfTime', asked: false });
+    expect(called).toBe(false);
+    // Control: an answer in time under a live overall deadline is returned.
+    expect(await (await askTarget(async () => new Response('ok'), 'https://t.example/x', {}, 50, new AbortController().signal)).text()).toBe('ok');
+  });
+
+  it('sets the whole transfer\'s deadline from the bundle\'s size, in whole minutes', () => {
+    expect(transferDeadlineMs(0)).toBe(20 * 60_000);
+    // 500 MiB at 128 KiB/s is 4000 s on top of the 20 minutes: 86.7 minutes, rounded up.
+    expect(transferDeadlineMs(500 * 1024 * 1024)).toBe(87 * 60_000);
+    expect(transferDeadlineMs(-1)).toBe(20 * 60_000);
+  });
+
   it('tells a failing connection from the network guard\'s own refusal', () => {
     expect(isConnectionFailure(Object.assign(new Error('connect ECONNREFUSED 203.0.113.7:443'), { code: 'ECONNREFUSED' }))).toBe(true);
     expect(isConnectionFailure(new Error('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' }) }))).toBe(true);
@@ -102,12 +131,13 @@ describe('the target\'s words are shown without what would not display as itself
   const hidden: Array<[string, string]> = [
     ['C0 and DEL', '\u0000\u0007\u001b\u007f'],
     ['C1', '\u0085\u009b'],
-    ['bidi embeddings, overrides, isolates and marks', '‪‫‬‭‮⁦⁧⁨⁩‎‏؜'],
-    ['zero-width characters and the byte order mark', '​‌‍⁠﻿'],
-    ['invisible operators and deprecated format characters', '⁡⁢⁣⁤⁪⁯'],
-    ['soft hyphen, Mongolian vowel separator, interlinear annotation', '­᠎￹￺￻'],
+    ['bidi embeddings, overrides, isolates and marks', '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\u200E\u200F\u061C'],
+    ['zero-width characters and the byte order mark', '\u200B\u200C\u200D\u2060\uFEFF'],
+    ['invisible operators and deprecated format characters', '\u2061\u2062\u2063\u2064\u206A\u206F'],
+    ['soft hyphen, Mongolian vowel separator, interlinear annotation', '\u00AD\u180E\uFFF9\uFFFA\uFFFB'],
     ['tag characters', '\u{e0001}\u{e0041}\u{e007f}'],
-    ['variation selectors and fillers', '️\u{e0100}͏ᅟㅤﾠ'],
+    ['lone surrogates', '\udc00\ud800'],
+    ['variation selectors and fillers', '\uFE0F\u{e0100}\u034F\u115F\u3164\uFFA0'],
   ];
   for (const [what, chars] of hidden) {
     it(`removes ${what}`, () => {
@@ -116,7 +146,7 @@ describe('the target\'s words are shown without what would not display as itself
   }
 
   it('turns line breaks, tabs and the line and paragraph separators into spaces', () => {
-    expect(relayedText('a\r\nb\tc d e')).toBe('a  b c d e');
+    expect(relayedText('a\r\nb\tc\u2028d\u2029e')).toBe('a  b c d e');
   });
 
   it('keeps ordinary text in any script as it is', () => {
@@ -141,7 +171,34 @@ describe('the target\'s words are shown without what would not display as itself
   });
 
   it('cleans every string of a restore report, its keys included, and leaves the rest as it is', () => {
-    expect(relayedReport({ secretsImported: 3, configApplied: true, portableDirSkipped: ['work‮space/a\nb'], 'k​': null }))
+    expect(relayedReport({ secretsImported: 3, configApplied: true, portableDirSkipped: ['work\u202Espace/a\nb'], 'k\u200B': null }))
       .toEqual({ secretsImported: 3, configApplied: true, portableDirSkipped: ['workspace/a b'], k: null });
+  });
+});
+
+describe('this instance\'s error text shows its home directory as ~', () => {
+  it('writes the home as ~ where it starts a path, every time it does', () => {
+    expect(homeAsTilde("ENOENT: no such file or directory, open '/home/x/.lynox/a.db'", ['/home/x'])).toBe("ENOENT: no such file or directory, open '~/.lynox/a.db'");
+    expect(homeAsTilde('copy /home/x/a to /home/x/b failed', ['/home/x'])).toBe('copy ~/a to ~/b failed');
+  });
+
+  it('takes a home only as a whole path segment', () => {
+    expect(homeAsTilde('open /home/xy/a.db', ['/home/x'])).toBe('open /home/xy/a.db');
+    expect(homeAsTilde('open /home/x.old/a.db', ['/home/x'])).toBe('open /home/x.old/a.db');
+    expect(homeAsTilde('open /srv/home/x/a.db', ['/home/x'])).toBe('open /srv/home/x/a.db');
+  });
+
+  it('writes a home at the end of the text as ~', () => {
+    expect(homeAsTilde('cannot write to /home/x', ['/home/x'])).toBe('cannot write to ~');
+    expect(homeAsTilde('/home/x', ['/home/x/'])).toBe('~');
+  });
+
+  it('leaves a text without the home as it is, and ignores an empty, relative or root home', () => {
+    expect(homeAsTilde('open /var/lib/a.db', ['/home/x'])).toBe('open /var/lib/a.db');
+    expect(homeAsTilde('open /var/lib/a.db', ['', '/', 'home'])).toBe('open /var/lib/a.db');
+  });
+
+  it('takes both homes when HOME names another one than the system\'s', () => {
+    expect(homeAsTilde('/home/x/a and /data/x/b', ['/home/x', '/data/x'])).toBe('~/a and ~/b');
   });
 });

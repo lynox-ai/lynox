@@ -121,6 +121,12 @@ docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" down -v --remove-orphans 2>
 step "Build + start stack"
 
 BUILD_ARGS=(-d)
+# A build id per commit (docker-compose.smoke.yml passes it into the image), so a browser that kept
+# the artifact frame endpoint of an earlier smoke build does not reuse it under the same id.
+if [[ -z "${BUILD_SHA:-}" ]]; then
+  BUILD_SHA="smoke-$(git -C "$CORE_DIR" rev-parse --short=12 HEAD 2>/dev/null || date +%s)"
+  export BUILD_SHA
+fi
 if ! $NO_BUILD; then
   BUILD_ARGS+=(--build)
 fi
@@ -158,6 +164,9 @@ bash "$CORE_DIR/scripts/image-exec-only-probe.sh" "$CONTAINER_ID"
 
 step "Check that the runtime user cannot change the image's code"
 bash "$CORE_DIR/scripts/image-app-owner-probe.sh" "$CONTAINER_ID"
+
+step "Check that a signal opens no debugger on the engine"
+bash "$CORE_DIR/scripts/image-signal-debugger-probe.sh" "$CONTAINER_ID"
 
 # ─────────────────────────────────────────────────────────────────────
 # Playwright

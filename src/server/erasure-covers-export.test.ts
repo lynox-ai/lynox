@@ -86,6 +86,9 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // sitting in export #2's own payload with every assertion green. A refuter
     // demonstrated exactly that.
     durable_pending: 'ZZMARKER-durable-pending-7f3a',
+    // A REJECTED entry: still stored, so the export carries it as
+    // `durable_knowledge.rejected_or_superseded_entries`, and the erasure must take it too.
+    durable_rejected: 'ZZMARKER-durable-rejected-7f3a',
     // `config` is exported (redacted) and reset by the erasure. With nothing seeded
     // it was `{}` in both exports, so the reset was witnessed by nothing and
     // deleting it survived every test.
@@ -114,6 +117,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     knowledge_graph: 'knowledge_graph',
     durable_knowledge: 'durable_knowledge',
     durable_pending: 'durable_knowledge',
+    durable_rejected: 'durable_knowledge',
     memory_block: 'durable_knowledge',
     contact: 'contacts',
     deal: 'deals',
@@ -248,6 +252,8 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // the substrate, which the export reads and nothing here used to seed. A queued
     // fact is stored personal data whether or not it was ever approved.
     ks.write({ text: MARK.durable_pending, sourceChannel: 'agent', sourceUntrusted: true });
+    const rejected = ks.write({ text: MARK.durable_rejected, sourceChannel: 'agent', sourceUntrusted: false });
+    e.getEngineDb()!.getDb().prepare("UPDATE knowledge_entries SET status = 'rejected' WHERE id = ?").run(rejected.id);
     ks.setBlockContent('profile', MARK.memory_block);
 
     const crm = e.getCRM();
@@ -338,8 +344,8 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     expect(Object.keys(afterJson).sort()).toEqual([
       'config', 'contacts', 'contacts_may_be_incomplete', 'contained_threads', 'contained_unknown_threads', 'datastore', 'datastore_may_be_incomplete',
       'deals', 'deals_may_be_incomplete', 'durable_knowledge', 'exported_at',
-      'knowledge_graph', 'memory', 'memory_scopes', 'memory_scopes_may_be_incomplete', 'secrets',
-      'threads', 'threads_may_be_incomplete', 'version', 'workspace', 'workspace_archive',
+      'knowledge_graph', 'knowledge_graph_may_be_incomplete', 'memory', 'memory_scopes', 'memory_scopes_may_be_incomplete',
+      'secrets', 'secrets_may_be_incomplete', 'secrets_note', 'threads', 'threads_may_be_incomplete', 'version', 'workspace', 'workspace_archive',
     ]);
 
     const survivors = Object.entries(MARK).filter(([, v]) => after.includes(v)).map(([k]) => k);
@@ -371,6 +377,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // and which nothing checked: a wipe that spared `status='pending_review'` left a
     // personal-data row in export #2's own payload with every other line green.
     expect(e.getKnowledgeStore()!.listPendingMasked(500)).toEqual([]);
+    expect(e.getKnowledgeStore()!.listRejectedOrSupersededMasked(500)).toEqual([]);
     expect(e.getKnowledgeStore()!.getBlock('profile')?.content ?? '').not.toContain(MARK.memory_block);
     expect(e.getCRM()!.listContacts(undefined, 500)).toEqual([]);
     expect(e.getCRM()!.getAllDeals(undefined, 500)).toEqual([]);
