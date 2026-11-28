@@ -40,7 +40,7 @@ function insertSampleItem(overrides: Partial<Parameters<InboxStateDb['insertItem
     classifiedAt: new Date('2026-05-10T12:00:00Z'),
     classifierVersion: 'haiku-2026-05',
     ...overrides,
-  });
+  }).id;
 }
 
 describe('InboxStateDb — items', () => {
@@ -573,7 +573,7 @@ describe('InboxStateDb — v11 envelope metadata', () => {
       snippet: 'short preview',
       messageId: '<v11msg@example.com>',
       inReplyTo: '<parent@example.com>',
-    });
+    }).id;
     const item = inbox.getItem(id);
     expect(item).toMatchObject({
       fromAddress: 'sender@example.com',
@@ -639,7 +639,7 @@ describe('InboxStateDb — v11 envelope metadata', () => {
       classifierVersion: 'v',
       fromAddress: 'a@x',
       subject: 'single thread row',
-    });
+    }).id;
     const messages = inbox.listItemsByThreadKey(TEST_ACCOUNT.id, 'imap:thr-lookup');
     expect(messages).toHaveLength(1);
     expect(messages[0]?.id).toBe(id);
@@ -889,7 +889,7 @@ describe('InboxStateDb — listItems with ?q= search', () => {
       fromAddress,
       subject,
       snippet,
-    });
+    }).id;
   }
 
   it('matches subject', () => {

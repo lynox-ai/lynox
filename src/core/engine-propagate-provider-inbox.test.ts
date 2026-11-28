@@ -615,6 +615,21 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     }
   });
 
+  it('a signal shutdown that began earlier counts its deadlines from then', async () => {
+    const { engine, usRuntime, releaseDrain } = await engineMidRebootstrap('releases');
+    try {
+      const began = Date.now() - 3_000; // the chat runs were ended first
+      await engine.shutdown({ inboxBacklog: 'bounded', deadlineFrom: began });
+      const [retiring] = usRuntime.shutdown.mock.calls.find((c) => (c[0] as { within?: unknown } | undefined)?.within !== undefined) ?? [];
+      const within = (retiring as { within: { classifyUntil: number; cutOffAt: number } } | undefined)?.within;
+      expect(within, 'positive control: drained within the deadline').toBeDefined();
+      expect(within!.classifyUntil, 'classify until counts from when the shutdown began').toBe(began + SHUTDOWN_INBOX_CLASSIFY_MS);
+      expect(within!.cutOffAt, 'the cutoff counts from then too').toBe(began + SHUTDOWN_INBOX_CUTOFF_MS);
+    } finally {
+      releaseDrain();
+    }
+  });
+
   it('a signal shutdown gives the retiring and the live runtime one deadline: classify, then cut off', async () => {
     const { engine, usRuntime, releaseDrain } = await engineMidRebootstrap('releases');
     try {

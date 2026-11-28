@@ -4,7 +4,6 @@ import { dirname, join } from 'node:path';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep, bulkWorkingLine, bulkHeadCounts, bulkConflictsText, type BulkHeads } from './bulk-runs.js';
 import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
-import { formatCost } from '../format.js';
 
 // While the engine moves a run on by itself, a line names the step it works on, with the run's
 // numbers where the engine counts them, and the head takes the counts of each ask. Before, nothing
@@ -192,10 +191,10 @@ describe('a run the engine works on', () => {
 	it('says lynox judges, with the verdicts so far out of the targets it reads, moves with each ask, and the head names only the targets', async () => {
 		run = makeRun({ total: 5, judge: { tier: 'standard', unjudged: 4, judged: 1 } });
 		await render();
-		expect(line()).toBe('lynox urteilt … 1 von 5');
+		expect(line()).toBe('lynox beurteilt die Ziele … 1 von 5');
 		run = { ...run, judge: { tier: 'standard', unjudged: 1, judged: 4 } };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox urteilt … 4 von 5');
+		expect(line()).toBe('lynox beurteilt die Ziele … 4 von 5');
 		expect(counts()).toBe('5 Ziele');
 		expect(title()).toMatch(/^5 Ziele · /);
 	});
@@ -203,7 +202,7 @@ describe('a run the engine works on', () => {
 	it('says lynox judges without numbers where the engine does not count the verdicts', async () => {
 		run = makeRun({ judge: { tier: 'standard', unjudged: 4 } });
 		await render();
-		expect(line()).toBe('lynox urteilt …');
+		expect(line()).toBe('lynox beurteilt die Ziele …');
 	});
 
 	it('says lynox writes, with the targets done out of those it writes, approved and while writing, and the head moves too', async () => {
@@ -244,7 +243,7 @@ describe('a run the engine works on', () => {
 		const asks = targetAsks;
 		run = { ...run, listFirstPage: null, total: 4, changes: UPDATES(4), judge: { tier: 'standard', unjudged: 3, judged: 1 } };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox urteilt … 1 von 4');
+		expect(line()).toBe('lynox beurteilt die Ziele … 1 von 4');
 		expect(counts()).toBe('4 Ziele');
 		// Loaded anew, its targets with it.
 		expect(targetAsks).toBeGreaterThan(asks);
@@ -281,10 +280,10 @@ describe('a run the engine works on', () => {
 	it('takes the cost and a pause with each ask while the run works', async () => {
 		run = makeRun({ total: 4, costUsd: 0.1, costCapUsd: 1, judge: { tier: 'standard', unjudged: 3, judged: 1 } });
 		await render();
-		expect(shown()).toContain(`${formatCost(0.1)} / ${formatCost(1)}`);
+		expect(shown()).toContain('0.10 USD / 1.00 USD');
 		run = { ...run, costUsd: 0.4, judge: { tier: 'standard', unjudged: 2, judged: 2 } };
 		await pass(BULK_FOLLOW_MS);
-		expect(shown()).toContain(`${formatCost(0.4)} / ${formatCost(1)}`);
+		expect(shown()).toContain('0.40 USD / 1.00 USD');
 		run = { ...run, resumesAt: '2026-11-14T12:00:00.000Z' };
 		await pass(BULK_FOLLOW_MS);
 		expect(line()).toBeNull();
