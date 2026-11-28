@@ -20,7 +20,7 @@
  * a read a plan made after that person's access had ended.
  */
 import type Database from 'better-sqlite3';
-import { TRAIL_FORM } from './audit-log.js';
+import { ADDRESS_PLACEHOLDER, TRAIL_FORM } from './audit-log.js';
 
 /** One row as the view reads it. */
 export interface TrailRow {
@@ -43,11 +43,13 @@ export interface TrailRow {
 }
 
 /**
- * The seven states an entry can be in. `ended` is not `done`: a run the owner stopped, a run
+ * The eight states an entry can be in. `ended` is not `done`: a run the owner stopped, a run
  * whose access ended, and a tool call that returned a result all end without saying the act
- * happened (a tool that asks before it sends returns one when the answer was no).
+ * happened (a tool that asks before it sends returns one when the answer was no). `review`: a
+ * memory entry the step created is stored and waits for the owner's review, read from the
+ * knowledge store (`knowledgeStatus`), never from the row.
  */
-export type TrailStatus = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted';
+export type TrailStatus = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted' | 'review';
 
 /** Who the entry is about, as the row names them; the row, not the mandate, so an ended access still reads. */
 export interface TrailPerson {
@@ -103,6 +105,12 @@ export interface TrailEvent {
    */
   readonly count?: number | undefined;
   readonly until?: string | undefined;
+  /**
+   * The name of what a read or a refused read was about (a chat's title, a mail's subject, a
+   * workflow's name, a contact, a file), resolved when the view is read, never stored in the row
+   * (`nameReads`). Absent when the object is gone or the route names none: then the route's id is all.
+   */
+  readonly name?: string | undefined;
 }
 
 /**
@@ -138,8 +146,31 @@ export const INTERFACE_POLLS: ReadonlySet<string> = new Set([
 
 /** Whether a row is a read on a route the web UI polls by itself. Writes and steps never are. */
 export function isInterfacePoll(row: Pick<TrailRow, 'phase' | 'action'>): boolean {
-  return row.phase === 'read' && INTERFACE_POLLS.has(row.action);
+  return row.phase === 'read' && (INTERFACE_POLLS.has(row.action) || INTERFACE_READS.has(row.action));
 }
+
+/**
+ * Reads the web UI makes by itself that are not a timer of the status bar or the nav, so they are
+ * not in `INTERFACE_POLLS` (which a test holds to the pollers exactly): whether secrets are set,
+ * the inbox and approval counts, and the inbox's own loading loop. The view groups them with the
+ * polls (U-306 B1(b) and C). Each answers with counts or states (secrets status also with the
+ * configured endpoint and model id), never a name of the person's objects or their text, so a read
+ * the person made on purpose that lands here hides nothing of theirs.
+ *
+ * Left out on purpose, although the interface also reads them by itself: the chat list (it carries
+ * each chat's title and summary, and `limit`/`includeArchived` are not recorded, so a read of every
+ * chat could not be told from the shell's load), the configuration, the plan list and Google's
+ * status (each is also the first load of a view the person opens, and the configuration and the
+ * plan list name things). They stay single lines. Grouping changes no row and hides nothing:
+ * opening the group shows each read. After 30 days these stay single rows; only `FOLDED_POLLS`
+ * (audit-retention.ts) folds into a day.
+ */
+export const INTERFACE_READS: ReadonlySet<string> = new Set([
+  'GET /api/secrets/status',
+  'GET /api/inbox/counts',
+  'GET /api/approvals/count',
+  'GET /api/inbox/cold-start',
+]);
 
 /** Targets a run wrote and failed: summed over its windows, a lower bound when one did not say. */
 export interface TrailTargets {
@@ -206,6 +237,8 @@ export interface TrailSources {
   bulkRunOpen(runId: string): boolean;
   /** An approval entry's state and who decided it; undefined when there is no such entry. */
   approvalOf(id: string): { readonly status: string; readonly decidedBy: string | null } | undefined;
+  /** A memory entry's `status` in the knowledge store; undefined when there is no such entry or no store. */
+  knowledgeStatus(id: string): string | undefined;
 }
 
 /** The send rows an approval writes (approval-executor.ts): `approval <id>: …`. */
@@ -223,6 +256,19 @@ function approvalOfFiling(r: TrailRow): string | undefined {
 }
 
 const BULK_ACTIONS: ReadonlySet<string> = new Set(['bulk:apply', 'bulk:undo']);
+/** The step of `remember` that creates a memory entry (knowledge.ts, `instanceAction`). */
+const REMEMBER_CREATE = 'instance:remember#create:create';
+
+/**
+ * A `remember` step that returned and created an entry the store holds for review: `review`, not
+ * `ended` (U-306 B4). The entry's id is the end row's `created=`, which the row carries only
+ * when the step proved the write. Any other status of the entry, or none, leaves the step as is.
+ */
+function reviewOf(attempt: TrailRow, end: TrailRow, src: TrailSources): TrailStatus | undefined {
+  if (attempt.action !== REMEMBER_CREATE || end.phase !== 'returned') return undefined;
+  const id = targetPairs(end.target).get('created');
+  return id !== undefined && src.knowledgeStatus(id) === 'pending_review' ? 'review' : undefined;
+}
 /** The rows of a run's own start and end: a plan's, or a workflow run's from a chat (660b). */
 const RUN_ACTIONS: ReadonlySet<string> = new Set(['plan:run', 'workflow:run']);
 
@@ -364,7 +410,7 @@ function stepsOf(rows: readonly TrailRow[], src: TrailSources, sends: ReadonlyMa
         for (const row of send ?? []) claimed.add(row.id);
         judged = filedStepStatus(approval, send, src);
       } else {
-        judged = end !== undefined ? { status: stepOutcomeStatus(end.phase) } : openStepStatus(r, src);
+        judged = end !== undefined ? { status: reviewOf(r, end, src) ?? stepOutcomeStatus(end.phase) } : openStepStatus(r, src);
       }
       out.push({
         kind: 'step', id: `step:${r.correlation_id}`, action: r.action, target: r.target, at: r.ts, person: personOf(r), status: judged.status,
@@ -556,6 +602,8 @@ export function readTrailPage(db: Database.Database, opts: { limit: number; befo
 export interface TrailSourceDeps {
   /** run-history.db, or null when the engine runs without one: then no run says anything. */
   readonly historyDb: Database.Database | null;
+  /** The engine database (`knowledge_entries`), or null: then no entry is said to wait for review. */
+  readonly engineDb: Database.Database | null;
   /** The trail key of the plan run of a trigger in flight now (worker-loop.ts `runningPlanRun`). */
   readonly runningPlanRun: (triggerId: string) => string | undefined;
   /** A bulk run's phase and halt in the ledger; undefined when the ledger has no such run. */
@@ -566,6 +614,7 @@ export interface TrailSourceDeps {
 /** The engine stores {@link trailSourceDeps} reads, each possibly absent. */
 export interface TrailStores {
   readonly historyDb: Database.Database | null;
+  readonly engineDb: Database.Database | null;
   readonly worker: { runningPlanRun(taskId: string): string | undefined } | null;
   readonly ledger: { getStatus(runId: string): { readonly phase: string; readonly haltReason: string | null } | null } | null;
   readonly approvals: { get(id: string): { readonly status: string; readonly decidedBy: string | null } | undefined | null } | null;
@@ -575,6 +624,7 @@ export interface TrailStores {
 export function trailSourceDeps(stores: TrailStores): TrailSourceDeps {
   return {
     historyDb: stores.historyDb,
+    engineDb: stores.engineDb,
     runningPlanRun: (id) => stores.worker?.runningPlanRun(id),
     bulkState: (id) => {
       const status = stores.ledger?.getStatus(id);
@@ -612,6 +662,9 @@ export function trailSources(deps: TrailSourceDeps): TrailSources {
                           AND later.rowid > me.rowid AND later.created_at <= p.created_at)
       LIMIT 1`,
   );
+  // The table comes with the engine database's schema; should it be missing, no entry waits for review.
+  let knowledge: Database.Statement | undefined;
+  try { knowledge = deps.engineDb?.prepare('SELECT status FROM knowledge_entries WHERE id = ?'); } catch { knowledge = undefined; }
   const sessionQuestion = deps.historyDb?.prepare(
     `SELECT 1 FROM pending_prompts p JOIN runs me ON me.id = ? AND p.session_id = me.session_id WHERE ${openSince} LIMIT 1`,
   );
@@ -625,5 +678,105 @@ export function trailSources(deps: TrailSourceDeps): TrailSources {
       return state !== undefined && !BULK_CLOSED.has(state.phase) && !(state.phase === 'writing' && state.haltReason !== null);
     },
     approvalOf: deps.approval,
+    knowledgeStatus: (id) => (knowledge?.get(id) as { status: string } | undefined)?.status,
   };
+}
+
+/** What {@link nameReads} asks for a name; undefined when the store has no such object, or no store. */
+export interface TrailNames {
+  /** A chat's title. */
+  thread(id: string): string | undefined;
+  /** A mail's subject in the inbox. */
+  mail(id: string): string | undefined;
+  /** A workflow run, by its id or the start of it, with its full id and its name. */
+  workflow(id: string): { readonly id: string; readonly name: string } | undefined;
+}
+
+/**
+ * The routes whose read names one object, by the action the row carries, and where its id or name
+ * sits in the row's target: a path segment (counted from the leading slash), or a query value.
+ * A contact and a file are named in the target itself; the others are looked up.
+ */
+type NamedRead =
+  | { readonly kind: 'thread' | 'mail' | 'workflow' | 'contact'; readonly segment: number; readonly exact?: true }
+  | { readonly kind: 'file'; readonly query: string };
+const NAMED_READS: ReadonlyMap<string, NamedRead> = new Map<string, NamedRead>([
+  ['GET /api/threads/:id', { kind: 'thread', segment: 3 }],
+  ['GET /api/threads/:id/messages', { kind: 'thread', segment: 3 }],
+  ['GET /api/threads/:id/debug-export', { kind: 'thread', segment: 3 }],
+  ['GET /api/inbox/items/:id', { kind: 'mail', segment: 4 }],
+  ['GET /api/inbox/items/:id/audit', { kind: 'mail', segment: 4 }],
+  ['GET /api/inbox/items/:id/full', { kind: 'mail', segment: 4 }],
+  ['GET /api/inbox/items/:id/thread', { kind: 'mail', segment: 4 }],
+  ['GET /api/inbox/items/:id/context', { kind: 'mail', segment: 4 }],
+  ['GET /api/workflows/:id', { kind: 'workflow', segment: 3 }],
+  // The steps route reads by the exact id (a run whose id only starts so is not read): named only then.
+  ['GET /api/workflows/:id/steps', { kind: 'workflow', segment: 3, exact: true }],
+  ['GET /api/crm/contacts/:name/interactions', { kind: 'contact', segment: 4 }],
+  ['GET /api/crm/contacts/:name/deals', { kind: 'contact', segment: 4 }],
+  ['GET /api/files/read', { kind: 'file', query: 'path' }],
+  ['GET /api/files/download', { kind: 'file', query: 'path' }],
+]);
+
+/** The longest name shown; a longer one is cut, so one subject cannot fill the line. */
+export const TRAIL_NAME_MAX = 80;
+
+/** A name as the view shows it: one line, no control or format characters, at most {@link TRAIL_NAME_MAX}. */
+function shownName(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const one = raw.replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (one === '' || one === ADDRESS_PLACEHOLDER) return undefined;
+  const chars = [...one];
+  return chars.length <= TRAIL_NAME_MAX ? one : `${chars.slice(0, TRAIL_NAME_MAX - 1).join('')}…`;
+}
+
+const decoded = (s: string): string | undefined => {
+  try { return decodeURIComponent(s); } catch { return undefined; }
+};
+
+/** The name of what one read was about, or undefined. */
+function nameOf(action: string, target: string | null, names: TrailNames): string | undefined {
+  const named = NAMED_READS.get(action);
+  if (named === undefined || target === null) return undefined;
+  const q = target.indexOf('?');
+  if (named.kind === 'file') {
+    if (q < 0) return undefined;
+    for (const pair of target.slice(q + 1).split('&')) {
+      const eq = pair.indexOf('=');
+      if (eq > 0 && pair.slice(0, eq) === named.query) return shownName(decoded(pair.slice(eq + 1)));
+    }
+    return undefined;
+  }
+  const piece = (q < 0 ? target : target.slice(0, q)).split('/')[named.segment];
+  const key = piece === undefined || piece === '' ? undefined : decoded(piece);
+  if (key === undefined) return undefined;
+  switch (named.kind) {
+    case 'contact': return shownName(key);
+    case 'thread': return shownName(names.thread(key));
+    case 'mail': return shownName(names.mail(key));
+    case 'workflow': {
+      const run = names.workflow(key);
+      return run === undefined || (named.exact === true && run.id !== key) ? undefined : shownName(run.name);
+    }
+  }
+}
+
+/**
+ * The entries with the name of what each read or refused read was about: looked up now, on the
+ * owner's request, never written into a row, so a renamed object shows its name of
+ * today and a deleted one none. A lookup that throws names nothing. The reads under a run are
+ * named too; a step (a write) never is.
+ */
+export function nameReads(entries: readonly TrailEntry[], names: TrailNames): TrailEntry[] {
+  const safe: TrailNames = {
+    thread: (id) => { try { return names.thread(id); } catch { return undefined; } },
+    mail: (id) => { try { return names.mail(id); } catch { return undefined; } },
+    workflow: (id) => { try { return names.workflow(id); } catch { return undefined; } },
+  };
+  const named = <E extends TrailStep | TrailEvent>(e: E): E => {
+    if (e.kind !== 'event' || (e.phase !== 'read' && e.phase !== 'refused')) return e;
+    const name = nameOf(e.action, e.target, safe);
+    return name === undefined ? e : { ...e, name };
+  };
+  return entries.map((e) => (e.kind === 'plan' ? { ...e, entries: e.entries.map(named) } : e.kind === 'bulk' ? e : named(e)));
 }

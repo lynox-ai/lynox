@@ -10,14 +10,16 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { foldInterfacePolls } from '../access-trail-fold.js';
+	import { readWord, routeText } from '../access-trail-words.js';
 
-	type Status = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted';
+	type Status = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted' | 'review';
 	type Note = 'awaits-answer' | 'awaits-approval' | 'question-open' | 'approval-expired' | 'approval-rejected' | 'send-unknown' | 'no-result';
 	interface Person { email: string | null; display: string | null; mandateId: string | null }
 	interface Targets { written: number; failed: number; atLeast: boolean }
 	interface Step { kind: 'step'; id: string; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
 	/** `auto`: a read on a route the person's web UI polls by itself, marked by the engine (row 1034). */
-	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true; count?: number; until?: string }
+	/** `name`: what the read was about (a chat's title, a mail's subject …), resolved by the engine when this page was read. */
+	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true; count?: number; until?: string; name?: string }
 	interface PlanRun { kind: 'plan'; run?: 'plan' | 'workflow'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
 	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; store?: 'files' | 'data_store' | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
 	type Entry = PlanRun | BulkRun | Step | Event;
@@ -111,12 +113,16 @@
 	// After the filters: a group holds only what they show (ux U-047).
 	const items = $derived(foldInterfacePolls(shown, (e) => personKey(e.person)));
 
-	/** "{from}–{to}" of a group; the date once when both ends fall on the same day. */
+	/**
+	 * "{from}–{to}" of a group; the date once when both ends fall on the same day, and one time when
+	 * both fall in the same second (U-306 N1), as they are shown to the second.
+	 */
 	function span(from: string, to: string): string {
 		const a = new Date(from);
 		const b = new Date(to);
 		if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return `${from}–${to}`;
 		const locale = getLocale() === 'de' ? 'de-CH' : 'en-GB';
+		if (Math.floor(a.getTime() / 1000) === Math.floor(b.getTime() / 1000)) return a.toLocaleString(locale);
 		const sameDay = a.toDateString() === b.toDateString();
 		return `${a.toLocaleString(locale)}–${sameDay ? b.toLocaleTimeString(locale) : b.toLocaleString(locale)}`;
 	}
@@ -138,9 +144,26 @@
 	function isRevoke(e: Step | Event): boolean {
 		return e.kind === 'event' && e.action === REVOKED_ACTION;
 	}
+	/** The word of a read's route (U-306 B1(c)), or null when the route has none. */
+	function wordText(action: string): string | null {
+		const word = readWord(action);
+		if (word === null) return null;
+		return 'key' in word ? t(word.key) : tf('access_trail.read.settings', { page: t(word.settings) });
+	}
 	function refusedText(e: Event): string {
-		const reveal = REFUSED_REVEALS[e.action];
-		return t(reveal !== undefined && e.target?.endsWith('?reveal=true') === true ? reveal : 'access_trail.refused');
+		// A HEAD is the GET route without the body: a refused reveal stays the attempted reveal it was.
+		const reveal = REFUSED_REVEALS[e.action.startsWith('HEAD ') ? `GET ${e.action.slice('HEAD '.length)}` : e.action];
+		if (reveal !== undefined && e.target?.endsWith('?reveal=true') === true) return t(reveal);
+		const word = wordText(e.action);
+		return word === null ? t('access_trail.refused') : tf('access_trail.refused_word', { word });
+	}
+	/** The word after the kind: a read's; a refusal carries its word in its kind already. */
+	function eventWord(e: Step | Event): string | null {
+		return e.kind === 'event' && e.phase === 'read' ? wordText(e.action) : null;
+	}
+	/** The route, cut after each `/`, `?`, `&` and `=`, so a narrow screen breaks it there and not inside a name. */
+	function routePieces(e: Step | Event): string[] {
+		return routeText(e.action, e.target).split(/(?<=[/?&=])/);
 	}
 	function kindText(e: Entry): string {
 		if (e.kind === 'event') {
@@ -171,11 +194,18 @@
 	}
 </script>
 
+{#snippet route(e: Step | Event)}
+	<span class="font-mono text-xs text-text-subtle min-w-0 [overflow-wrap:anywhere]" data-route>{#each routePieces(e) as piece, i (i)}{piece}<wbr />{/each}</span>
+{/snippet}
+
 {#snippet line(e: Step | Event)}
+	{@const word = eventWord(e)}
 	<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-entry-kind={e.kind}>
 		<span class="text-xs text-text-subtle tabular-nums">{when(e.at)}</span>
 		<span class="text-text-muted">{kindText(e)}</span>
-		{#if !isRevoke(e)}<span class="font-mono text-xs break-all">{e.action}{#if e.target} · {e.target}{/if}</span>{/if}
+		{#if word !== null}<span data-word>{word}</span>{/if}
+		{#if e.kind === 'event' && e.name !== undefined}<span class="text-text-muted min-w-0 [overflow-wrap:anywhere]" data-name>{e.name}</span>{/if}
+		{#if !isRevoke(e)}{@render route(e)}{/if}
 		{#if e.kind === 'event' && e.count !== undefined}<span class="text-xs text-text-muted" data-poll-day>{e.count === 1 ? tf('access_trail.poll_day_one', { time: when(e.at) }) : tf('access_trail.poll_day', { n: String(e.count), time: when(e.until ?? e.at) })}</span>{/if}
 		{#if e.kind === 'step'}
 			<span class="text-xs" data-status>{statusText(e.status)}</span>
@@ -188,7 +218,8 @@
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('account.back_to_settings')}</a>
 	<header>
 		<h1 class="text-2xl font-semibold mb-1">{t('settings.account.access_trail')}</h1>
-		<p class="text-sm text-text-muted">{t('settings.account.access_trail_desc')}</p>
+		<!-- Who the entries are of means nothing to a person who may not read them (U-306 B5). -->
+		{#if phase !== 'owner-only'}<p class="text-sm text-text-muted">{t('settings.account.access_trail_desc')}</p>{/if}
 	</header>
 
 	{#if phase === 'loading'}
@@ -232,17 +263,35 @@
 				<p class="text-xs text-text-muted" data-legend="interface-polls">{t('access_trail.polls_legend')}</p>
 			{/if}
 			<ul class="divide-y divide-border border-y border-border" aria-label={t('settings.account.access_trail')}>
-				{#each items as item (item.kind === 'polls' ? item.id : item.entry.id)}
-					{#if item.kind === 'polls'}
+				{#each items as item (item.kind === 'entry' ? item.entry.id : item.id)}
+					{#if item.kind === 'repeat'}
+					{@const first = item.entries[0]!}
+					{@const word = eventWord(first)}
+					<li class="py-3 space-y-1" data-entry-kind="repeat">
+						<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+							<span class="text-sm font-medium">{personName(first.person)}</span>
+							{#if first.person.email && first.person.display}<span class="text-xs text-text-subtle">{first.person.email}</span>{/if}
+						</div>
+						<details>
+							<summary class="text-sm cursor-pointer" data-repeat-summary>
+								<span class="text-text-muted">{kindText(first)}</span>
+								<span class="ml-2">{tf('access_trail.repeat', { word: word ?? routeText(first.action, first.target), n: String(item.entries.length), span: span(item.from, item.to) })}</span>
+								{#if first.name !== undefined}<span class="ml-2 text-text-muted" data-name>{first.name}</span>{/if}
+								{#if word !== null}<span class="ml-2">{@render route(first)}</span>{/if}
+							</summary>
+							<div class="space-y-1 pt-1 pl-4">
+								{#each item.entries as r (r.id)}{@render line(r)}{/each}
+							</div>
+						</details>
+					</li>
+					{:else if item.kind === 'polls'}
 					<li class="py-3 space-y-1" data-entry-kind="polls">
 						<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
 							<span class="text-sm font-medium">{personName(item.entries[0]!.person)}</span>
 							{#if item.entries[0]!.person.email && item.entries[0]!.person.display}<span class="text-xs text-text-subtle">{item.entries[0]!.person.email}</span>{/if}
 						</div>
 						<details>
-							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{item.reads === 1
-								? tf('access_trail.polls_one', { time: when(item.to) })
-								: tf('access_trail.polls_many', { n: String(item.reads), span: span(item.from, item.to) })}</summary>
+							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{tf('access_trail.polls_many', { n: String(item.reads), span: span(item.from, item.to) })}</summary>
 							<div class="space-y-1 pt-1 pl-4">
 								{#each item.entries as p (p.id)}{@render line(p)}{/each}
 							</div>

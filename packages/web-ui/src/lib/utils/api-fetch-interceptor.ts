@@ -11,7 +11,7 @@
 // stack a new wrapper on top of the already-wrapped fetch on every
 // change. The sentinel lives on `window` and survives HMR.
 
-import { markMandateMemoryBlocked, markSessionExpired } from '../stores/session.svelte.js';
+import { markAccessEnded, markMandateMemoryBlocked, markSessionExpired } from '../stores/session.svelte.js';
 
 // Routes that legitimately 401 while the session is fine — wrong creds
 // during login, unauth check before login, etc. Triggering the
@@ -40,9 +40,11 @@ export function installApiFetchInterceptor(): void {
 			if (url.includes('/api/') && !AUTH_HANDSHAKE_PATHS.some(p => url.includes(p))) {
 				if (response.status === 401) {
 					markSessionExpired();
-				} else {
+				} else if (sameOrigin(url)) {
+					// Only this instance's own answer: each of these notices stays and holds back the
+					// expired banner with its sign-in, so another origin's body must not set one.
 					const code = await refusalCode(response);
-					if (code === 'mandate_revoked') markSessionExpired();
+					if (code === 'mandate_revoked' || code === 'mandate_ended') markAccessEnded();
 					else if (code === 'mandate_memory_off') markMandateMemoryBlocked('off');
 					else if (code === 'mandate_memory_missing') markMandateMemoryBlocked('missing');
 				}
@@ -52,12 +54,20 @@ export function installApiFetchInterceptor(): void {
 	};
 }
 
+/** Whether a URL is this page's own origin; a relative one is. Without a location (tests), it counts as own. */
+function sameOrigin(url: string): boolean {
+	const here = typeof window !== 'undefined' ? window.location : undefined;
+	if (here === undefined) return true;
+	try { return new URL(url, here.href).origin === here.origin; } catch { return false; }
+}
+
 /**
  * The code of a 403 that is about the session, not the view: `mandate_revoked` (a delegated
- * access that has ended) and `mandate_memory_off`/`_missing` (a delegated access this instance
- * cannot let in while it runs without durable knowledge). Every other 403 is a state of the
- * view that got it (a managed instance, an owner-only action) and stays the view's to show.
- * Reads a clone, so the caller still gets the whole body.
+ * access that has ended, revoked or past its end; the engine sends this code for both) and
+ * `mandate_memory_off`/`_missing` (a delegated access this instance cannot let in while it runs
+ * without durable knowledge). Every other 403 is a state of the view that got it (a managed
+ * instance, an owner-only action) and stays the view's to show. Reads a clone, so the caller
+ * still gets the whole body.
  */
 async function refusalCode(response: Response): Promise<string | null> {
 	try {

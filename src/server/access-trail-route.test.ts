@@ -26,11 +26,14 @@ describe('the owner\'s view of the actor trail (real engine)', () => {
   const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_DURABLE_MEMORY_ENABLED'];
 
   type Inner = {
-    engine: { engineDb: { getDb: () => import('better-sqlite3').Database } };
+    engine: {
+      engineDb: { getDb: () => import('better-sqlite3').Database };
+      getThreadStore: () => import('../core/thread-store.js').ThreadStore | null;
+    };
     rateCounts: Map<string, unknown>;
     server: Server | null;
   };
-  type Entry = { kind: string; target?: string | null; person?: { email: string | null }; writeSteps?: number | null };
+  type Entry = { kind: string; target?: string | null; person?: { email: string | null }; writeSteps?: number | null; name?: string; status?: string | null; action?: string };
   type Page = { entries: Entry[]; before: number | null; complete: boolean };
   const inner = (): Inner => api as unknown as Inner;
 
@@ -126,6 +129,52 @@ describe('the owner\'s view of the actor trail (real engine)', () => {
     const res = await ask('/api/access-trail', mandateCookie);
     expect(res.status).toBe(403);
     await res.arrayBuffer();
+  });
+
+  it('names what a read was about from the store at the time it is asked, and nothing for what is gone', async () => {
+    const db = inner().engine.engineDb.getDb();
+    const threads = inner().engine.getThreadStore();
+    if (threads === null) throw new Error('fixture: no thread store');
+    threads.createThread('th-named', { title: 'Angebot Testfirma' });
+    const insert = db.prepare(
+      `INSERT INTO audit_log (ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, trail_form)
+       VALUES (?, 'mandate', 'ida@example.invalid', 'IDA', 'TEST-MANDATE-VIEW', ?, ?, 'read', ?, ?)`,
+    );
+    const at = new Date().toISOString();
+    insert.run(at, 'GET /api/threads/:id/messages', '/api/threads/th-named/messages', 'c-named', TRAIL_FORM);
+    insert.run(at, 'GET /api/threads/:id', '/api/threads/th-gone', 'c-gone', TRAIL_FORM);
+    const byTarget = async (): Promise<Map<string | null | undefined, Entry>> =>
+      new Map(((await (await ask('/api/access-trail', ownerCookie)).json()) as Page).entries.map((e) => [e.target, e] as const));
+
+    let page = await byTarget();
+    expect(page.get('/api/threads/th-named/messages')?.name).toBe('Angebot Testfirma');
+    // No such chat: no name, and the route with its id is all the entry says.
+    expect(page.get('/api/threads/th-gone')).toBeDefined();
+    expect(page.get('/api/threads/th-gone')?.name).toBeUndefined();
+    // Renamed, then deleted: the name of today, then none.
+    threads.updateThread('th-named', { title: 'Angebot Testfirma, neu' });
+    page = await byTarget();
+    expect(page.get('/api/threads/th-named/messages')?.name).toBe('Angebot Testfirma, neu');
+    threads.deleteThread('th-named');
+    page = await byTarget();
+    expect(page.get('/api/threads/th-named/messages')?.name).toBeUndefined();
+    // Never written into a row.
+    const stored = db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE target LIKE '%Angebot%' OR action LIKE '%Angebot%'").get() as { n: number };
+    expect(stored.n).toBe(0);
+  });
+
+  it('says a remember step whose entry waits for review is saved for review, from the knowledge store', async () => {
+    const db = inner().engine.engineDb.getDb();
+    db.prepare("INSERT INTO knowledge_entries (id, text, status) VALUES ('k-review', 'x', 'pending_review')").run();
+    const insert = db.prepare(
+      `INSERT INTO audit_log (ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, trail_form)
+       VALUES (?, 'mandate', 'ida@example.invalid', 'IDA', 'TEST-MANDATE-VIEW', 'instance:remember#create:create', ?, ?, 'c-review', ?)`,
+    );
+    const at = new Date().toISOString();
+    insert.run(at, 'knowledge', 'attempt', TRAIL_FORM);
+    insert.run(at, 'knowledge wrote=all created=k-review', 'returned', TRAIL_FORM);
+    const page = await (await ask('/api/access-trail', ownerCookie)).json() as Page;
+    expect(page.entries.find((e) => e.kind === 'step' && e.action === 'instance:remember#create:create')?.status).toBe('review');
   });
 
   // Last, as it adds a run past the page bound to the shared engine.

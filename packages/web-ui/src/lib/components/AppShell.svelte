@@ -21,7 +21,8 @@
 	import PublicDemoBanner from './PublicDemoBanner.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
-	import { isSessionExpired, clearSessionExpired, mandateMemoryBlocked } from '../stores/session.svelte.js';
+	import { isSessionExpired, clearSessionExpired, mandateMemoryBlocked, isAccessEnded } from '../stores/session.svelte.js';
+	import AccessEndedNotice from './AccessEndedNotice.svelte';
 	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
 	import { installMandateRenewTimer } from '../utils/mandate-renew-timer.js';
 	import { startApprovalsNav, approvalsNavItem } from '../stores/approvals.svelte.js';
@@ -961,7 +962,7 @@
 						<button
 							onclick={() => (langDropdownOpen = !langDropdownOpen)}
 							class="flex items-center gap-1 text-xs font-mono text-text-subtle hover:text-text transition-colors min-h-[2.5rem] min-w-[2.5rem] justify-center px-2 py-2 rounded hover:bg-bg-muted"
-							aria-label="Switch language"
+							aria-label={t('nav.switch_language')}
 							aria-expanded={langDropdownOpen}
 						>
 							{getLocale().toUpperCase()}
@@ -1032,9 +1033,13 @@
 				PWA cookie eviction; the engine itself is fine). A delegated access this instance
 				refuses while it runs without durable knowledge (engine 403 `mandate_memory_off` /
 				`_missing`) takes its place: signing in again changes nothing there. -->
-			{#if mandateMemoryBlocked() !== null || isSessionExpired()}
-				<div role={mandateMemoryBlocked() !== null ? 'alert' : undefined} class="border-b border-warning bg-warning-subtle px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
-					{#if mandateMemoryBlocked() !== null}
+			<!-- A delegated access that has ended (engine 403 `mandate_revoked`):
+				signing in again does not bring it back, so no button, only who to ask (U-306 B2). -->
+			{#if isAccessEnded() || mandateMemoryBlocked() !== null || isSessionExpired()}
+				<div role={isAccessEnded() || mandateMemoryBlocked() !== null ? 'alert' : undefined} class="border-b border-warning bg-warning-subtle px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+					{#if isAccessEnded()}
+					<AccessEndedNotice />
+					{:else if mandateMemoryBlocked() !== null}
 					<div class="text-[12px] text-warning">{mandateMemoryBlocked() === 'off' ? t('session.mandate_memory_off') : t('session.mandate_memory_missing')}</div>
 					{:else}
 					<div class="text-[12px] text-warning">

@@ -70,21 +70,29 @@ const summaries = (): string[] => [...target.querySelectorAll('[data-polls-summa
 describe('reads on the routes the interface polls by itself', () => {
 	it('groups consecutive marked reads of one person, and leaves steps and other reads single', async () => {
 		await render([poll(1), poll(2), step(3), poll(4), read(5), poll(6), poll(7), poll(8)]);
-		expect(rows()).toEqual(['polls:2', 'step', 'polls:1', 'event', 'polls:3']);
+		expect(rows()).toEqual(['polls:2', 'step', 'event', 'event', 'polls:3']);
 	});
 
-	it('says how many and from when to when, in one form for one read', async () => {
+	it('says how many and from when to when', async () => {
 		await render([poll(1), step(2), poll(3), poll(4)]);
-		const [one, two] = summaries();
-		expect(one).toMatch(new RegExp(`^${tf('access_trail.polls_one', { time: 'X' }).split('X')[0]!.replace(/[()]/g, '\\$&')}`));
-		expect(two!.startsWith(tf('access_trail.polls_many', { n: '2', span: 'X' }).split('X')[0]!)).toBe(true);
+		const all = summaries();
+		expect(all).toHaveLength(1);
+		expect(all[0]!.startsWith(tf('access_trail.polls_many', { n: '2', span: 'X' }).split('X')[0]!)).toBe(true);
 		// t() falls back to the key, so the texts must be real translations.
 		expect(t('access_trail.polls_many')).not.toBe('access_trail.polls_many');
-		expect(t('access_trail.polls_one')).not.toBe('access_trail.polls_one');
+	});
+
+	it('shows one marked read as a line of its own, with its word and nothing to expand (U-306 N1)', async () => {
+		await render([poll(1), step(2)]);
+		expect(rows()).toEqual(['event', 'step']);
+		const li = target.querySelector<HTMLElement>('ul > li[data-entry-kind="event"]')!;
+		expect(li.querySelector('details')).toBeNull();
+		expect(li.querySelector('[data-word]')?.textContent?.trim()).toBe(t('access_trail.read.runs_active'));
+		expect(target.querySelector('[data-legend="interface-polls"]')).toBeNull();
 	});
 
 	it('shows the legend where the list shows a group', async () => {
-		await render([poll(1)]);
+		await render([poll(1), poll(2)]);
 		expect(target.querySelector('[data-legend="interface-polls"]')?.textContent?.trim()).toBe(t('access_trail.polls_legend'));
 	});
 
@@ -95,7 +103,7 @@ describe('reads on the routes the interface polls by itself', () => {
 	});
 
 	it('the legend follows the filter: gone when the chosen person has no group, back with one', async () => {
-		await render([poll(1), read(2, BEN)]);
+		await render([poll(1), poll(1.5), read(2, BEN)]);
 		const select = target.querySelector<HTMLSelectElement>('[data-filter="person"]')!;
 		select.value = 'M-2';
 		select.dispatchEvent(new Event('change'));
@@ -123,7 +131,8 @@ describe('reads on the routes the interface polls by itself', () => {
 	it('says a day row of one read in its own form', async () => {
 		const day = { id: `d${String(nextId++)}`, kind: 'event', action: 'GET /api/runs/active', target: null, phase: 'read', at: ago(60 * 24 * 40), until: ago(60 * 24 * 40), count: 1, person: IDA, auto: true };
 		await render([day]);
-		const [line] = [...target.querySelectorAll('li[data-entry-kind="polls"] details [data-poll-day]')];
+		// One row is no group (U-306 N1): the day row stands as its own line, with its own form.
+		const [line] = [...target.querySelectorAll('li[data-entry-kind="event"] [data-poll-day]')];
 		expect(line!.textContent!.startsWith(tf('access_trail.poll_day_one', { time: 'X' }).split('X')[0]!)).toBe(true);
 		expect(line!.textContent!.startsWith(tf('access_trail.poll_day', { n: '1', time: 'X' }).split('X')[0]!)).toBe(false);
 		expect(t('access_trail.poll_day_one')).not.toBe('access_trail.poll_day_one');
@@ -137,8 +146,8 @@ describe('reads on the routes the interface polls by itself', () => {
 	});
 
 	it('another person\'s read ends a group', async () => {
-		await render([poll(1), poll(2, BEN), poll(3)]);
-		expect(rows()).toEqual(['polls:1', 'polls:1', 'polls:1']);
+		await render([poll(1), poll(1.2), poll(2, BEN), poll(2.2, BEN), poll(3), poll(3.2)]);
+		expect(rows()).toEqual(['polls:2', 'polls:2', 'polls:2']);
 	});
 
 	it('groups after the person filter, so one person\'s reads join across another\'s', async () => {
@@ -153,8 +162,8 @@ describe('reads on the routes the interface polls by itself', () => {
 	it('an unmarked read is never grouped, even on a listed route', async () => {
 		// The engine decides what is marked; the view groups nothing by its route.
 		const unmarked = { ...(poll(1) as Record<string, unknown>), auto: undefined };
-		await render([unmarked, poll(2)]);
-		expect(rows()).toEqual(['event', 'polls:1']);
+		await render([unmarked, poll(2), poll(3)]);
+		expect(rows()).toEqual(['event', 'polls:2']);
 	});
 
 	it('ten minutes of an open tab and one step: the step is in the first rows', async () => {
@@ -170,23 +179,21 @@ describe('reads on the routes the interface polls by itself', () => {
 	});
 });
 
-describe('the texts, as decided (U-047, U-440)', () => {
+describe('the texts, as decided (U-047, U-440, U-306)', () => {
 	it('DE and EN', () => {
 		const before = getLocale();
 		try {
 			setLocale('de');
-			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one'), t('access_trail.poll_day'), t('access_trail.poll_day_one')]).toEqual([
-				'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln. Nach 30 Tagen bleibt von laufender Arbeit und Anbietern eine Zeile je Tag.',
+			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.poll_day'), t('access_trail.poll_day_one')]).toEqual([
+				'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) und Zähler (Posteingang, Freigaben, eingerichtete Schlüssel, Nachladen des Posteingangs) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln. Nach 30 Tagen bleibt von laufender Arbeit und Anbietern eine Zeile je Tag.',
 				'{n} Statusabfragen ({span})',
-				'Eine Statusabfrage ({time})',
 				'{n} Abfragen, die letzte am {time}',
 				'1 Abfrage am {time}',
 			]);
 			setLocale('en');
-			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one'), t('access_trail.poll_day'), t('access_trail.poll_day_one')]).toEqual([
-				'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one. After 30 days, running work and providers keep one line per day.',
+			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.poll_day'), t('access_trail.poll_day_one')]).toEqual([
+				'Status requests (running work, tasks, costs, providers) and counts (inbox, approvals, keys that are set, inbox loading) are grouped. The interface makes most of them by itself. Expand to see each one. After 30 days, running work and providers keep one line per day.',
 				'{n} status requests ({span})',
-				'One status request ({time})',
 				'{n} requests, the last on {time}',
 				'1 request on {time}',
 			]);

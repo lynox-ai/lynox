@@ -204,4 +204,26 @@ describe('the scan against the real route table', () => {
     expect(table.filter((k) => !routes.has(k))).toEqual([]);
     expect([...routes.keys()].filter((k) => !table.includes(k))).toEqual([]);
   });
+
+  // The owner's view says every read of a mandate in a word (U-306 N1): a route without one shows
+  // raw. Every user GET route the table has leaves a read row, so each needs a word. The two
+  // OAuth redirects back are answered before authentication and never leave one
+  // (`mandate-read-trail.test.ts` holds their place there).
+  it('has a word in the owner\'s view for every GET route a mandate leaves a read row on', () => {
+    const NEVER_RECORDED = new Set(['GET /api/google/callback', 'GET /api/oauth/callback']);
+    const wordsSource = readFileSync(new URL('../../packages/web-ui/src/lib/access-trail-words.ts', import.meta.url), 'utf8');
+    // Only the two maps `readWord` asks: a third map of the same form would not count as worded.
+    const map = (name: string): string => {
+      const start = wordsSource.indexOf(`const ${name}: Readonly<Record<string, string>> = {\n`);
+      expect(start, name).toBeGreaterThan(-1);
+      return wordsSource.slice(start, wordsSource.indexOf('\n};\n', start));
+    };
+    const worded = new Set([map('WORDS'), map('SETTINGS_PAGES')].flatMap((block) => [...block.matchAll(/^\t'(GET \/api[^']*)': '[a-z_.]+',$/gm)].map((m) => m[1]!)));
+    const unworded = (routes: readonly string[]): string[] => routes.filter((k) => !NEVER_RECORDED.has(k) && !worded.has(k));
+    const table = api.routeStancesForTesting().filter((r) => r.method === 'GET' && r.scope === 'user').map((r) => `GET ${r.path}`);
+    expect(worded.size).toBeGreaterThan(90);
+    expect(unworded(table)).toEqual([]);
+    // The control: a route the list does not have is found.
+    expect(unworded([...table, 'GET /api/no-word-yet'])).toEqual(['GET /api/no-word-yet']);
+  });
 });

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { buildTrail, INTERFACE_POLLS, type TrailRow, type TrailSources } from './audit-trail-view.js';
+import { buildTrail, INTERFACE_POLLS, INTERFACE_READS, type TrailRow, type TrailSources } from './audit-trail-view.js';
 
 /**
  * Row 1034: `INTERFACE_POLLS` names the routes the web UI polls by itself. It is a list, so it
@@ -116,10 +116,58 @@ describe('the list of routes the web UI polls by itself', () => {
   });
 });
 
+describe('the reads the web UI makes by itself besides its polls (U-306 B1(b), C)', () => {
+  const HTTP_API = readFileSync(join(__dirname, '..', 'server', 'http-api.ts'), 'utf-8');
+
+  it('holds only GET routes without a path parameter, none of them a poll of the status bar or the nav', () => {
+    expect(INTERFACE_READS.size).toBeGreaterThan(0);
+    for (const action of INTERFACE_READS) {
+      expect(action, action).toMatch(/^GET \/api\/[a-z/-]+$/);
+      expect(INTERFACE_POLLS.has(action), action).toBe(false);
+    }
+  });
+
+  it('names routes the engine serves, so a renamed route does not leave a dead entry', () => {
+    for (const action of INTERFACE_READS) {
+      // A static route (`addStatic(scope, 'GET /api/…'`), as all of them are today.
+      expect(new RegExp(`addStatic\\('[a-z]+', '${action}'`).test(HTTP_API), action).toBe(true);
+    }
+  });
+
+  it('leaves out the reads that name things or are a view the person opens', () => {
+    // The chat list carries titles and summaries; the configuration, the plan list and Google's
+    // status are also the first load of a view the person opens (decided 2026-11-28).
+    for (const action of ['GET /api/threads', 'GET /api/config', 'GET /api/triggers', 'GET /api/google/status']) {
+      expect(INTERFACE_READS.has(action), action).toBe(false);
+      expect(INTERFACE_POLLS.has(action), action).toBe(false);
+    }
+  });
+
+  it('marks each of them as read by the interface, and only in the read phase', () => {
+    const quiet: TrailSources = {
+      runStatus: () => undefined, questionOfRun: () => false, questionInSession: () => false,
+      planRunRunning: () => false, bulkRunOpen: () => false, approvalOf: () => undefined, knowledgeStatus: () => undefined,
+    };
+    let n = 0;
+    const rows: TrailRow[] = [...INTERFACE_READS].flatMap((action) => (['read', 'refused'] as const).map((phase) => {
+      n++;
+      return {
+        id: n, ts: `2026-11-28T10:${String(n).padStart(2, '0')}:00.000Z`, actor_kind: 'mandate',
+        actor_email: 'ida@example.invalid', actor_display: 'IDA', mandate_id: 'TEST-MANDATE-READS',
+        action, target: action.slice(4), phase, correlation_id: `r-${String(n)}`, run_id: null, plan_run: null,
+      };
+    }));
+    const marked = buildTrail(rows, quiet).map((e) => ['phase' in e ? e.phase : '', 'auto' in e ? e.auto === true : false]);
+    expect(marked.filter(([p]) => p === 'read').every(([, a]) => a === true)).toBe(true);
+    expect(marked.filter(([p]) => p === 'refused').some(([, a]) => a === true)).toBe(false);
+    expect(marked).toHaveLength(INTERFACE_READS.size * 2);
+  });
+});
+
 describe('the mark in the owner\'s view', () => {
   const quiet: TrailSources = {
     runStatus: () => undefined, questionOfRun: () => false, questionInSession: () => false,
-    planRunRunning: () => false, bulkRunOpen: () => false, approvalOf: () => undefined,
+    planRunRunning: () => false, bulkRunOpen: () => false, approvalOf: () => undefined, knowledgeStatus: () => undefined,
   };
   let id = 1;
   const row = (action: string, phase: string, target: string | null = action.slice(action.indexOf(' ') + 1)): TrailRow => ({
@@ -131,7 +179,7 @@ describe('the mark in the owner\'s view', () => {
   it('marks a listed read, and neither another read nor a listed action in any other phase', () => {
     const entries = buildTrail([
       row('GET /api/runs/active', 'read'),
-      row('GET /api/threads', 'read'),
+      row('GET /api/threads/:id', 'read', '/api/threads/t-1'),
       row('GET /api/tasks', 'denied'),
       // By route: the person opening the Tasks view or the history is grouped too. Their rows are
       // the poll's rows (`/api/tasks`, `/api/history/cost/daily`; the query is not recorded, D15).
@@ -148,7 +196,7 @@ describe('the mark in the owner\'s view', () => {
       ['event', 'GET /api/history/cost/daily', true],
       ['event', 'GET /api/tasks', true],
       ['event', 'GET /api/tasks', undefined],
-      ['event', 'GET /api/threads', undefined],
+      ['event', 'GET /api/threads/:id', undefined],
       ['event', 'GET /api/runs/active', true],
     ]);
   });

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -426,5 +426,46 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
       expect(await res.text()).toContain('another site sent this request');
       expect(newReadRows()).toHaveLength(0);
     });
+  });
+
+  // The owner's view says a read of the run list as what it returns (U-306 N1). Measured on the real
+  // route for three fields: task, answer and cost. Each that the answer carries must be in the route's
+  // declaration and in the word its key gives, so a declaration that grows does not break the test.
+  // This test knows only these three fields; measuring every field of every route is tracked separately.
+  it('the run list a mandate reads carries task, answer and cost, and its declaration and word name each', async () => {
+    const history = (api as unknown as { engine: { getRunHistory: () => { insertRun: (p: { sessionId: string; taskText: string; modelTier: string; modelId: string }) => string; updateRun: (id: string, p: { responseText: string; costUsd: number; status: 'completed' }) => void } } }).engine.getRunHistory();
+    // A run names its chat: one that names none is left out of a mandate's list (fail-closed).
+    const id = history.insertRun({ sessionId: 't-runs-word', taskText: 'Offerte an Brunner vorbereiten', modelTier: 'sonnet', modelId: 'test-model' });
+    history.updateRun(id, { responseText: 'Entwurf mit Preisen erstellt', costUsd: 0.0123, status: 'completed' });
+    const res = await ask('GET', '/api/history/runs?limit=500', mandateCookie);
+    expect(res.status).toBe(200);
+    const { runs } = await res.json() as { runs: Array<Record<string, unknown>> };
+    const run = runs.find((r) => r['id'] === id);
+    expect(run).toMatchObject({ task_text: 'Offerte an Brunner vorbereiten', response_text: 'Entwurf mit Preisen erstellt' });
+    expect(newReadRows().map((r) => r.action)).toContain('GET /api/history/runs');
+
+    // The kinds this answer carries, by the fields that hold them, with the term each needs.
+    const KINDS: Array<{ kind: string; field: string; de: RegExp; en: RegExp }> = [
+      { kind: 'task', field: 'task_text', de: /Auftrag/, en: /instruction/i },
+      { kind: 'answer', field: 'response_text', de: /Antwort/, en: /answer/i },
+      { kind: 'cost', field: 'cost_usd', de: /Kosten/, en: /cost/i },
+    ];
+    const carried = KINDS.filter((k) => run![k.field] !== undefined && run![k.field] !== null && run![k.field] !== '');
+    expect(carried.map((k) => k.kind)).toEqual(['task', 'answer', 'cost']);
+
+    const words = readFileSync(new URL('../../packages/web-ui/src/lib/access-trail-words.ts', import.meta.url), 'utf8');
+    // The word the view shows is the one its key in WORDS gives: the route stays on that key.
+    const key = /^\t'GET \/api\/history\/runs': '([a-z_]+)',$/m.exec(words)?.[1];
+    expect(key).toBe('history_runs');
+    const declared = /'GET \/api\/history\/runs': \[([^\]]*)\],/.exec(words)?.[1]?.match(/'([a-z_]+)'/g)?.map((q) => q.slice(1, -1)) ?? [];
+    for (const k of carried) expect(declared, k.kind).toContain(k.kind);
+    const i18n = readFileSync(new URL('../../packages/web-ui/src/lib/i18n.svelte.ts', import.meta.url), 'utf8');
+    const line = i18n.split('\n').find((l) => l.includes(`'access_trail.read.${key ?? ''}':`)) ?? '';
+    const de = /de: '([^']*)'/.exec(line)?.[1] ?? '';
+    const en = /en: '([^']*)'/.exec(line)?.[1] ?? '';
+    for (const k of carried) {
+      expect(de, `${k.kind} (de)`).toMatch(k.de);
+      expect(en, `${k.kind} (en)`).toMatch(k.en);
+    }
   });
 });
