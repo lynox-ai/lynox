@@ -84,7 +84,7 @@ export async function collectGraphForExport(source: GraphExportSource): Promise<
 }
 
 /**
- * The graph block's free text through the export's mask: an entity's name, aliases and
+ * The graph block's free text through the export's mask: an entity's name, type, aliases and
  * description, a relation's type and description. These are what the graph was told, as the
  * remembered texts beside them are, so they go through the same mask. Ids, counts and times are
  * left as they are.
@@ -100,7 +100,9 @@ export function maskGraphForExport(
     entities: graph.entities.map(e => ({
       ...e,
       canonicalName: text(e.canonicalName),
-      aliases: Array.isArray(e.aliases) ? e.aliases.map(text) : e.aliases,
+      // An older row's type is a free text column, so it is masked too.
+      entityType: text(e.entityType),
+      aliases: Array.isArray(e.aliases) ? e.aliases.map(text) : text(e.aliases),
       description: text(e.description),
     })),
     relationships: graph.relationships.map(r => ({
@@ -343,7 +345,7 @@ export function readMemoryTextsForExport(opts: {
         legacyHalf.metrics = read(legacy, 'metrics', '', 't.computed_at, t.id', 'agent-memory.db metrics');
         if (opts.subjectGraph === true) {
           legacyHalf.entities = read(legacy, 'entities', '', 't.first_seen_at, t.id', 'agent-memory.db entities')
-            .map(row => ['canonical_name', 'aliases', 'description', 'metadata'].reduce(maskField, row));
+            .map(row => ['canonical_name', 'entity_type', 'aliases', 'description', 'metadata'].reduce(maskField, row));
           legacyHalf.relations = read(legacy, 'relations', '', 't.created_at, t.id', 'agent-memory.db relations')
             .map(row => maskField(maskField(row, 'relation_type'), 'description'));
         }
@@ -373,7 +375,7 @@ export function readMemoryTextsForExport(opts: {
       });
     engineHalf.memory_subjects = read(db, 'memory_subjects', '', 't.created_at, t.memory_id, t.subject_id', 'engine.db memory_subjects');
     engineHalf.relationships = read(db, 'relationships', `, CASE WHEN ${sourceDeletedSql('t')} THEN 1 ELSE 0 END AS source_deleted`, 't.created_at, t.id', 'engine.db relationships')
-      .map(row => maskField(maskField(row, 'description'), 'notes'));
+      .map(row => ['kind', 'description', 'since', 'until', 'notes'].reduce(maskField, row));
     engineHalf.supersedes = read(db, 'supersedes', '', 't.created_at, t.new_memory_id, t.old_memory_id', 'engine.db supersedes')
       .map(row => maskField(row, 'reason'));
     engineHalf.subject_cooccurrences = read(db, 'subject_cooccurrences', '', 't.last_seen_at, t.subject_a_id, t.subject_b_id', 'engine.db subject_cooccurrences');

@@ -15127,9 +15127,9 @@ export class LynoxHTTPApi {
       // text could not be decrypted. `enabled` is the setting, as on the durable knowledge block:
       // whether the graph is switched on in the config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
-      // The remembered texts both stores hold, read the same way on either path and masked as the
-      // durable knowledge block is; read before the graph, so a graph read that fails does not
-      // take them with it.
+      // The remembered texts both stores hold, read the same way on either path and masked with the
+      // graph block's mask below; read before the graph, so a graph read that fails does not take
+      // them with it.
       // With the subject graph on, the older store's entities and relations are carried here too.
       // Graph rows no block carries (subjects the graph block does not list) are counted, and any
       // marks the block too: the export says "complete" only when nothing stored is left out.
