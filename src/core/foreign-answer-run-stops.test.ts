@@ -193,6 +193,26 @@ describe('a run that only an answer from another chat made due', () => {
     expect(row(p).last_run_result).not.toBe(`${FOREIGN_ANSWER_RESULT} ${FOREIGN_ANSWER_NEXT_RUN}`);
   });
 
+  it('a mark another process\'s run outlived is cleared when a later re-arm finds the row due on its own', async () => {
+    const p = boot({ 'thread-owner': 'owner' });
+    parkedPlan(p);
+    answeredIn(p, 'thread-owner');
+    await tick(p);
+    // Another process holds the run's lease, so this one does not pick it up, and its mark stays.
+    const until = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    p.db.prepare('UPDATE triggers SET lease_holder = ?, lease_until = ?, lease_since = ? WHERE id = ?').run('other-process', until, new Date().toISOString(), 'p');
+    await tick(p);
+    expect(p.turns, 'held by the other process: not run here').toEqual([]);
+    // That process's run asked again and parked; meanwhile the schedule's own time came.
+    p.db.prepare('UPDATE triggers SET lease_holder = NULL, lease_until = NULL, lease_since = NULL WHERE id = ?').run('p');
+    p.history.updateTrigger('p', { status: 'waiting', waitingUntil: new Date(Date.now() + 24 * H * 1000).toISOString(), nextRunAt: PAST });
+    await tick(p);
+    await tick(p);
+    expect(p.turns, 'due on its own: it ran').toHaveLength(1);
+    expect(p.turns[0], 'without the answer').not.toContain('Last week.');
+    expect(row(p).last_run_status, 'not stopped by the old mark').not.toBe('stopped');
+  });
+
   it('a webhook\'s trigger is not marked: a later run of it runs, without the answer', async () => {
     const p = boot({ 'thread-owner': 'owner' });
     parkedPlan(p, { webhook: true });
