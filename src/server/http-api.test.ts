@@ -11494,19 +11494,31 @@ describe('LynoxHTTPApi', () => {
       it('the list of live runs leaves out, for a helper, the runs and questions of another person\'s contained chat and a run that names no chat; the owner sees all', async () => {
         const at = '2026-03-02 09:00:00';
         const row = (run_id: string, thread_id: string, status: string) => ({ run_id, thread_id, status, started_at: at, last_activity: at, last_persisted_seq: 0 });
-        // `shop`'s run has ended, so the question waiting in it is listed on its own.
-        const active = [row('run-shop', 'shop', 'interrupted'), row('run-evas', 'evas-shop', 'running'), row('run-notes', 'notes', 'running'), row('run-nowhere', '', 'running')];
-        const pending = [{ id: 'q-shop', session_id: 'shop', created_at: at }, { id: 'q-evas', session_id: 'evas-shop', created_at: at }];
+        const ask = (id: string, session_id: string) => ({ id, session_id, created_at: at });
+        let active: Array<ReturnType<typeof row>> = [];
+        let pending: Array<ReturnType<typeof ask>> = [];
         await swapEngine({
           getRunRegistry: () => ({ getActive: () => active }),
           getPromptStore: () => ({ getPending: () => undefined, listPendingSessions: () => pending }),
           getThreadStore: () => ({ getThread: (id: string) => THREADS[id] ?? null }),
-          getRunHistory: () => ({ getPipelineRunOrigins: () => new Map() }),
+          getRunHistory: () => ({
+            getPipelineRunOrigins: (ids: readonly string[]) => new Map(ids.flatMap((id): Array<[string, string]> => { const o = PIPELINES[id]; return typeof o === 'string' ? [[id, o]] : []; })),
+          }),
           getToolContext: () => ({ tools: [], containment }),
         }, async () => {
           const listed = async (who: RequestPrincipal): Promise<string[]> => ((await as(who, '/api/runs/active')).body['runs'] as Array<{ runId: string }>).map((r) => r.runId);
-          expect(await listed(EVA)).toEqual(['run-evas', 'run-notes']);
-          expect(await listed(OWNER_PRINCIPAL)).toEqual(['run-shop', 'run-evas', 'run-notes', 'run-nowhere', 'q-shop']);
+          // Runs at work: another person's contained chat, the helper's own, one not contained, one
+          // that names no chat.
+          active = [row('run-shop', 'shop', 'running'), row('run-evas', 'evas-shop', 'running'), row('run-notes', 'notes', 'running'), row('run-nowhere', '', 'running')];
+          pending = [];
+          expect(await listed(EVA), 'runs at work').toEqual(['run-evas', 'run-notes']);
+          expect(await listed(OWNER_PRINCIPAL), 'runs at work').toEqual(['run-shop', 'run-evas', 'run-notes', 'run-nowhere']);
+          // Questions, each in a chat no live run holds: in another person's contained chat, in the
+          // helper's own, in one not contained, and in a workflow that `shop` started.
+          active = [row('run-shop', 'shop', 'interrupted'), row('run-evas', 'evas-shop', 'interrupted')];
+          pending = [ask('q-shop', 'shop'), ask('q-evas', 'evas-shop'), ask('q-notes', 'notes'), ask('q-wf', 'wf-shop')];
+          expect(await listed(EVA), 'questions').toEqual(['run-evas', 'q-evas', 'q-notes']);
+          expect(await listed(OWNER_PRINCIPAL), 'questions').toEqual(['run-shop', 'run-evas', 'q-shop', 'q-evas', 'q-notes', 'q-wf']);
         });
       });
     });

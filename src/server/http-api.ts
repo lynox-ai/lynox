@@ -1373,10 +1373,12 @@ export const CONTAINED_THREAD_READ_REFUSAL = 'This chat was marked as holding da
 /** The `code` beside {@link CONTAINED_THREAD_READ_REFUSAL}, which the Web UI shows in its own language (ux U-091). */
 export const CONTAINED_THREAD_CODE = 'contained_thread';
 /**
- * The one answer a helper gets for a live run it may not follow: an id no live run has, a run that
- * names no chat, a run in a contained chat of another. No reason, so it does not tell which (U-492).
+ * The one answer a helper gets for a live run it may not follow: an id the run registry does not
+ * hold, a run that names no chat, a run in a contained chat of another. No reason, so it does not
+ * tell which (U-492).
  */
 export const RUN_CHAT_UNKNOWN_REFUSAL = 'You cannot follow this run live. If it belongs to a chat of yours, open that chat from the chat list.';
+/** The `code` beside {@link RUN_CHAT_UNKNOWN_REFUSAL}, for all three cases despite its name: the Web UI keys its text on it. */
 export const RUN_CHAT_UNKNOWN_CODE = 'run_chat_unknown';
 
 /** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
@@ -6338,7 +6340,7 @@ export class LynoxHTTPApi {
     // scoping — see PRD-RUN-RESILIENCE N5), except that a helper is not shown
     // the runs and questions of a contained chat of another, nor a run that
     // names no chat (`_unreadableChats`): it cannot follow them, and the list
-    // would tell it which of those chats are working.
+    // would hand it their run ids and which of them wait on a question.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/active', async (req, res) => {
       const registry = this.engine?.getRunRegistry();
       if (!registry) { jsonResponse(res, 200, { runs: [] }); return; }
@@ -6425,6 +6427,9 @@ export class LynoxHTTPApi {
     // Ownership (S3, D-S3): an unknown / not-live runId returns 404 — never 403
     // (no existence oracle). The buffer is the liveness source of truth: it
     // exists only while the run is live, so a completed/never-existed run 404s.
+    // A helper is refused before this handler, with one 403 for an id the
+    // registry does not hold and for a run it may not follow
+    // (`_containedReadRefusal`), so it reaches the 404 only for a chat it may read.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/:runId/stream', async (req, res, params) => {
       const runId = params['runId'] ?? '';
       const buffer = this.engine?.getRunBufferManager()?.get(runId);
@@ -9957,8 +9962,7 @@ export class LynoxHTTPApi {
       // same line the stop route (one 403) and a delete (`not_stopped`) draw. This keeps
       // the controls consistent; it is NOT a confidentiality boundary: the `READS` routes
       // are tenant-wide for a mandate (`GET /api/runs/active` lists every run in a chat it
-      // may read). Who
-      // started a run is not added to the row either way.
+      // may read). Who started a run is not added to the row either way.
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
       const history = engine.getRunHistory();
