@@ -35,7 +35,7 @@ export interface ConnectionLine {
 /**
  * The line for a profile's connection, or null when it was never connected (no consent on
  * record). A grant from before `connected_by` was recorded reads as the owner's, as it does in
- * the engine. Also null for one the engine says no request uses (`unused`): an owner's connection on
+ * the engine. Also null for one the engine says its profile does not use (`unused`): an owner's connection on
  * a profile a person with access set up is not shown as a connection.
  */
 export function connectionLine(grant: OAuthGrantView | undefined): ConnectionLine | null {

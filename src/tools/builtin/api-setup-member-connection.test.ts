@@ -425,3 +425,124 @@ describe('the owner asking for a link on a member\'s profile', () => {
     expect(reply).not.toContain('was set up by a person with access');
   });
 });
+
+// The token exchange on a profile a person with access set up, outside that person's session: the
+// tokens would carry nothing (`ownerConnectionCarries`), and the author could not connect it again.
+describe('fetch_token by the owner on a member\'s profile', () => {
+  const vaultOf = (values: Record<string, string>, sets: string[]) => ({
+    resolve: (n: string) => values[n] ?? null,
+    resolveSecretRefs: (input: unknown) => JSON.parse(JSON.stringify(input).replace(/secret:([A-Z_][A-Z0-9_]*)/g, (m, n: string) => values[n] ?? m)) as unknown,
+    extractSecretNames: (input: unknown) => [...JSON.stringify(input).matchAll(/secret:([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]!),
+    isEnvironmentSecret: () => false,
+    set: (n: string, v: string) => { sets.push(n); values[n] = v; },
+    listNames: () => Object.keys(values),
+    maskSecrets: (t: string) => t,
+  });
+
+  it.each([['the owner', OWNER_PRINCIPAL], ['the control plane', { kind: 'cp-admin' } as RequestPrincipal]])('%s, client pair released, no grant: refused before anything is read or sent, nothing stored', async (_label, principal) => {
+    const store = storeWith(crmProfile({ oauth_grant: undefined }));
+    const sets: string[] = [];
+    const vault = vaultOf({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_API_REFRESH_TOKEN: 'rt-1' }, sets);
+    const post = vi.spyOn(globalThis, 'fetch');
+    const { releaseBinding } = await import('../../core/profile-secret-view.js');
+    const agent = agentWith(store, principal, ['M-1'], vault) as unknown as { toolContext: Record<string, unknown> };
+    agent.toolContext['secretReleases'] = {
+      releaseOf: (id: string, _author: string, name: string) => {
+        const p = store.get(id);
+        const binding = p ? releaseBinding(p, name) : null;
+        return binding === null ? undefined : { binding, mandateId: 'M-1' };
+      },
+      requestOf: () => undefined, replaceRequests: () => 0, pendingReleases: () => [], activeReleases: () => [], forgetProfile: () => undefined,
+    };
+    const reply = await run(agent as never, { action: 'fetch_token', id: 'crm-api' });
+
+    expect(reply).toBe('Error: profile "crm-api" was set up by a person with access, so a connection the owner makes on it would not be used. If the user wants to take it over, save it as theirs first (action=update with this id), then ask for the link again.');
+    expect(post).not.toHaveBeenCalled();
+    expect(sets).toEqual([]);
+    expect(store.get('crm-api')?.oauth_grant).toBeUndefined();
+  });
+
+  // The write itself asks too (`consentOf`), apart from the refusal before it: here the profile is
+  // the owner's when the exchange starts and a person with access sets it up while it runs.
+  it('stores nothing when the profile becomes a member\'s while the exchange runs', async () => {
+    const { EngineDb } = await import('../../core/engine-db.js');
+    const { ConnectionStore } = await import('../../core/connection-store.js');
+    const { GrantLedger } = await import('../../core/grant-ledger.js');
+    const { AuditLog } = await import('../../core/audit-log.js');
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    try {
+      const conn = new ConnectionStore(db);
+      const store = new ApiStore();
+      store.loadFromConnections(conn);
+      store.setConnectionStore(conn);
+      store.setGrantLedger(new GrantLedger(db.getDb()));
+      store.setAuditLog(new AuditLog(db.getDb()));
+      expect(store.save(crmProfile({ oauth_grant: undefined, created_by: undefined })).ok).toBe(true);
+      const sets: string[] = [];
+      const vault = vaultOf({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_API_REFRESH_TOKEN: 'rt-1' }, sets);
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        expect(store.save(crmProfile({ oauth_grant: undefined })).ok).toBe(true);
+        return new Response(JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+      const reply = await run(agentWith(store, OWNER_PRINCIPAL, [], vault), { action: 'fetch_token', id: 'crm-api' });
+
+      expect(reply).toContain('nothing was stored');
+      expect(sets).toEqual([]);
+      expect(store.get('crm-api')?.oauth_grant?.connected_by).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  // The renewal before a request runs the same exchange, and without a grant whenever the profile
+  // carries an expiry on record, which a save can write. In the owner's turn it is not reached: the
+  // attach refuses the profile's token slot first. Were it reached, the exchange refuses as above.
+  it('a request in the owner\'s turn is refused before any renewal, and nothing is stored', async () => {
+    const due = crmProfile({ oauth_grant: undefined });
+    const store = storeWith({ ...due, auth: { ...due.auth!, oauth: { ...due.auth!.oauth!, token_expires_at: Date.now() - 60_000 } } } as ApiProfile);
+    const sets: string[] = [];
+    const vault = vaultOf({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_API_REFRESH_TOKEN: 'rt-1', CRM_API_ACCESS_TOKEN: 'at-old' }, sets);
+    const sent: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: string | URL | Request) => {
+      sent.push(String(input));
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { written.push(String(chunk)); return true; });
+    const { httpRequestTool } = await import('./http.js');
+    const agent = { ...(agentWith(store, OWNER_PRINCIPAL, ['M-1'], vault) as object), getAvailableTools: () => ['http_request', 'api_setup'].map((name) => ({ definition: { name } })) } as never;
+
+    await expect(httpRequestTool.handler({ url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never, agent)).rejects.toThrow(/would send CRM_API_ACCESS_TOKEN to api\.crm\.example/);
+
+    expect(written.join('')).not.toMatch(/oauth token renewal/);
+    expect(sent).toEqual([]);
+    expect(sets).toEqual([]);
+    expect(store.get('crm-api')?.oauth_grant).toBeUndefined();
+  });
+
+  it('control: the same exchange on a profile that stays the owner\'s is stored and stamped as the owner\'s', async () => {
+    const { EngineDb } = await import('../../core/engine-db.js');
+    const { ConnectionStore } = await import('../../core/connection-store.js');
+    const { GrantLedger } = await import('../../core/grant-ledger.js');
+    const { AuditLog } = await import('../../core/audit-log.js');
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    try {
+      const conn = new ConnectionStore(db);
+      const store = new ApiStore();
+      store.loadFromConnections(conn);
+      store.setConnectionStore(conn);
+      store.setGrantLedger(new GrantLedger(db.getDb()));
+      store.setAuditLog(new AuditLog(db.getDb()));
+      expect(store.save(crmProfile({ oauth_grant: undefined, created_by: undefined })).ok).toBe(true);
+      const sets: string[] = [];
+      const vault = vaultOf({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_API_REFRESH_TOKEN: 'rt-1' }, sets);
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } }));
+      const reply = await run(agentWith(store, OWNER_PRINCIPAL, [], vault), { action: 'fetch_token', id: 'crm-api' });
+
+      expect(sets.length, reply).toBeGreaterThan(0);
+      expect(store.get('crm-api')?.oauth_grant?.connected_by).toBe('owner');
+    } finally {
+      db.close();
+    }
+  });
+});

@@ -61,7 +61,7 @@ describe('connectionLine', () => {
 	});
 });
 
-describe('a grant the engine says no request uses', () => {
+describe('a grant the engine says its profile does not use', () => {
 	it('is no connection line, also when the reader gave the consent', () => {
 		expect(connectionLine({ connected_by: 'owner', connected_by_reader: true, unused: true })).toBeNull();
 	});

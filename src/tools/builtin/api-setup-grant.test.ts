@@ -4570,7 +4570,8 @@ describe('mandates and stored credentials', () => {
     // profile a mandate wrote only through the owner's release. The client id is released in
     // both cases, so the one difference between them is the release of the client secret.
     const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'stored-secret' });
-    const agent = makeAgent(apiStore, v as never) as unknown as { toolContext: { secretReleases: { releaseOf: (id: string, author: string, name: string) => unknown } } };
+    // In the author's own turn: the owner's exchange on such a profile is refused before any read.
+    const agent = makeAgent(apiStore, v as never, undefined, undefined, mandate) as unknown as { toolContext: { secretReleases: { releaseOf: (id: string, author: string, name: string) => unknown } } };
     const releases = agent.toolContext.secretReleases;
     const releaseOf = releases.releaseOf.bind(releases);
     releases.releaseOf = (id, author, name) => (name === 'CRM_CLIENT_SECRET' && !secretReleased ? undefined : releaseOf(id, author, name));
@@ -4759,7 +4760,8 @@ describe('mandates and stored credentials', () => {
       // A name released to the profile, so the view lets it through and only the own-slot rule
       // can refuse it.
       const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CLIENT_SECRET' }, makeAgent(apiStore, v as never));
-      expect(out).toContain('is not available for this profile');
+      // The owner is refused on such a profile before the name is asked about at all.
+      expect(out).toContain('was set up by a person with access');
       expect(calls).toEqual([]);
       expect(v.peek('CRM_CLIENT_SECRET')).toBe('sec');
     });
@@ -4894,16 +4896,27 @@ describe('fetch_token — whose consent a grant records', () => {
     expect(consent(store)).toEqual({ connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' });
   });
 
+  it('records the owner for the first exchange of a mandate on the owner\'s profile', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({}, 'client_credentials'));
+    ok();
+    expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, A))).toContain('Token exchange OK');
+    expect(consent(store)).toEqual({ connected_by: 'owner', connected_mandate_id: undefined });
+  });
+
+  // On a mandate's profile nobody but its author's first consent is recorded: such a connection
+  // would carry nothing and keep the author from connecting it again (`consentOf`).
   it.each([
-    ['a mandate on the owner\'s profile', undefined, A],
     ['a mandate on another mandate\'s profile', 'mandate:b@example.invalid', A],
     ['the owner on a mandate\'s profile', TAG_A, OWNER_PRINCIPAL],
-  ])('records the owner for the first exchange of %s', async (_label, author, actor) => {
+  ])('stores no first exchange of %s', async (_label, author, actor) => {
     const store = new ApiStore();
-    store.register(crmProfile(author === undefined ? {} : { created_by: author }, 'client_credentials'));
+    store.register(crmProfile({ created_by: author }, 'client_credentials'));
     ok();
-    expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, actor))).toContain('Token exchange OK');
-    expect(consent(store)).toEqual({ connected_by: 'owner', connected_mandate_id: undefined });
+    const v = vault();
+    expect(await fetchToken(makeAgent(store, v, undefined, undefined, actor))).toContain('was set up by a person with access');
+    expect(consent(store).connected_by).toBeUndefined();
+    expect(v.peek('CRM_API_ACCESS_TOKEN') ?? null).toBeNull();
   });
 
   // A connection a mandate made with its own login is renewed by that mandate only: another

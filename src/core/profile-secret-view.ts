@@ -1216,7 +1216,7 @@ export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
  *
  * A grant the profile's view hides from every reader says so (`unused`): one whose consent is not
  * the author's on a profile a person with access set up, such as an owner's connection made there
- * before the owner's connect was refused ({@link hiddenFromProfile}). No request uses its tokens, so
+ * before the owner's connect was refused ({@link hiddenFromProfile}). This profile does not use its tokens, so
  * it is not shown as a connection; once the owner has taken the profile over it carries again.
  */
 export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ProfileForReader {

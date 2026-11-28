@@ -6,7 +6,7 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 
 // An owner's connection made on a profile a person with access set up, before the owner's connect
 // was refused there: the profile's view hides its tokens from every reader, the owner included.
-// It is shown as no connection and no read uses it, until the owner takes the profile over (the
+// It is shown as no connection and no read through the profile uses it, until the owner takes the profile over (the
 // owner's save drops `created_by`); from then on it carries.
 const M = 'mandate:setup@example.org';
 const TOKEN = accessTokenKey('crm-api');
