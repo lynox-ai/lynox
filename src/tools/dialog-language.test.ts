@@ -301,11 +301,16 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     const started = performance.now();
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(10_000_000), [], 'D'))).toContain(`saving “${'x'.repeat(63)}…” needs`);
     expect(performance.now() - started).toBeLessThan(2000);
-    // Nor does a long run of marks that composing would have to reorder. A leading space (any run
-    // of them is one by then) is dropped before the head is taken.
+    // Nor does a long run of marks: past four on one letter they are cut before the head is
+    // taken, so the letter shows with four. A leading space (any run of them is one by then) is
+    // dropped before the head is taken.
     const marks = performance.now();
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301'.repeat(100_000)}${'\u0316'.repeat(100_000)}`, [], 'D'))).toContain('saving “…” needs');
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301'.repeat(100_000)}${'\u0316'.repeat(100_000)}`, [], 'D'))).toContain(`saving “${'a\u0301\u0301\u0301\u0301'.normalize('NFC')}” needs`);
     expect(performance.now() - marks).toBeLessThan(2000);
+    // A spacing mark that composing reorders is not cut: only the raw head is composed.
+    const spacing = performance.now();
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301\u{1D16D}'.repeat(100_000)}`, [], 'D'))).toContain('saving “…” needs');
+    expect(performance.now() - spacing).toBeLessThan(2000);
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', ' Wetter', [], 'D'))).toContain('saving “Wetter” needs');
     const huge = flattenPrompt(API_SETUP_DIALOG.en.save('API', `क${'ा'.repeat(200_000)}`, [], 'D'));
     expect(huge.length).toBeLessThan(400);
@@ -327,5 +332,24 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(1), SPAWN_DIALOG.de.tierUnknownBand, '1.20', 'X', '')).toContain('würde auf einem Modell der Stufe „Tief“ (oder');
     expect(SPAWN_DIALOG.en.sentence('Delegation', SPAWN_DIALOG.en.children(1), SPAWN_DIALOG.en.tierUnknownBand, '1.20', 'X', '')).toContain('would run on a model in the Deep tier (or');
     expect([CONSENT_LABELS.en.deep, CONSENT_LABELS.en.balanced, CONSENT_LABELS.de.deep, CONSENT_LABELS.de.balanced]).toEqual(['Allow Deep', 'Run on Balanced', 'Stufe Tief erlauben', 'Mit Ausgewogen ausführen']);
+  });
+});
+
+describe('the refused flagged request', () => {
+  it('has words for every reason the content check can flag, in both languages', async () => {
+    const { FLAGGED_LABELS } = await import('../core/input-guard.js');
+    const { CONTENT_FLAG_TEXT } = await import('./dialog-text.js');
+    expect(FLAGGED_LABELS.length).toBeGreaterThan(0);
+    for (const language of ['en', 'de'] as const) {
+      for (const label of FLAGGED_LABELS) expect(CONTENT_FLAG_TEXT[language].found[label], `${language} ${label}`).toBeTruthy();
+      // No phrase left for a reason that is gone.
+      expect(Object.keys(CONTENT_FLAG_TEXT[language].found).sort()).toEqual([...FLAGGED_LABELS].sort());
+    }
+  });
+
+  it('never puts an English reason into the German sentence', async () => {
+    const { contentFlagRefusal } = await import('./dialog-text.js');
+    expect(contentFlagRefusal('de', 'declined', 'some new reason')).toBe('Nicht an das KI-Modell geschickt: Du hast abgelehnt. lynox hatte in deiner Nachricht verdächtigen Inhalt gefunden.');
+    expect(contentFlagRefusal('en', 'declined', undefined)).toBe('Not sent to the AI model: you declined. lynox had found suspicious content in your message.');
   });
 });

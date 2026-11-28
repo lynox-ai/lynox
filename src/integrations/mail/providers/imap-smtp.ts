@@ -1153,6 +1153,7 @@ export class ImapSmtpProvider implements MailProvider {
       internal instanceof Date ? internal :
       typeof internal === 'string' ? new Date(internal) :
       new Date(0);
+    const arrived = internal instanceof Date ? internal : typeof internal === 'string' ? new Date(internal) : undefined;
 
     // Extract snippet from BODYPART '1' if requested in the fetch. Decode the
     // part's Content-Transfer-Encoding BEFORE charset — the BODYSTRUCTURE node
@@ -1199,6 +1200,7 @@ export class ImapSmtpProvider implements MailProvider {
       replyTo: toAddresses(env?.replyTo),
       subject: env?.subject ?? '',
       date,
+      arrivedAt: arrived !== undefined && Number.isFinite(arrived.getTime()) ? arrived : undefined,
       flags: toFlags(msg.flags),
       snippet: snippetText,
       hasAttachments: hasAttachments(msg.bodyStructure),

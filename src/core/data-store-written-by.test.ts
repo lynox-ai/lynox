@@ -167,6 +167,23 @@ describe('DataStore: who wrote a row', () => {
       expect(ds.sourceOfRow('leads', 'email', 'a@x')?.writtenBy).toBeNull();
     });
 
+    // The upsert form of an older binary's write: the conflict branch sets a user column and
+    // `_updated_at`, and does not know the stamp columns. The trigger still clears the stamp.
+    it('an older binary\'s upsert over a putRowVerbatim row leaves _written_at NULL and no known writer', () => {
+      keyed();
+      ds.putRowVerbatim('leads', { email: 'a@x', source: 'one' }, { grants: ['gA'], runId: null, writtenBy: 'owner', untrusted: false });
+      const writtenAt = (): string | null => (db().prepare('SELECT _written_at AS wa FROM ds_leads WHERE email = ?').get('a@x') as { wa: string | null }).wa;
+      expect(writtenAt()).not.toBeNull();
+      expect(ds.sourceOfRow('leads', 'email', 'a@x')?.writtenBy).toBe('owner');
+      db().prepare(
+        'INSERT INTO ds_leads (email, source, _created_at, _updated_at) VALUES (?, ?, ?, ?) '
+        + 'ON CONFLICT(email) DO UPDATE SET source = excluded.source, _updated_at = excluded._updated_at',
+      ).run('a@x', 'two', '2099-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
+      expect((db().prepare('SELECT source FROM ds_leads WHERE email = ?').get('a@x') as { source: string }).source).toBe('two');
+      expect(writtenAt()).toBeNull();
+      expect(ds.sourceOfRow('leads', 'email', 'a@x')?.writtenBy).toBeNull();
+    });
+
     // Every UPDATE path, whatever it changes: the database clears the stamp of any UPDATE that does
     // not write a new one, so a path that forgets the stamp cannot leave the last writer standing.
     it.each([

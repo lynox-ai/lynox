@@ -77,11 +77,19 @@ export interface ClassifierQueueOptions<T> {
   maxQueueDepth?: number | undefined;
   /** When true (default), each job gets one retry on a thrown attempt. */
   retryOnce?: boolean | undefined;
+  /**
+   * Jobs with the same key run one at a time, in the order they were queued: a job waits while
+   * one of its key is running, and the next free slot goes to the first waiting job whose key is
+   * idle. Jobs without a key, or with different keys, run in parallel as before. Its callbacks
+   * run inside the job, so a later job of the key sees what the earlier one wrote.
+   */
+  serialKey?: ((input: T) => string | undefined) | undefined;
 }
 
 interface QueueJob<T> {
   id: string;
   input: T;
+  key: string | undefined;
 }
 
 let _jobCounter = 0;
@@ -120,8 +128,11 @@ export class ClassifierQueue<T> {
   private readonly perJobTimeoutMs: number;
   private readonly maxQueueDepth: number;
   private readonly retryOnce: boolean;
+  private readonly serialKey: ((input: T) => string | undefined) | undefined;
 
   private readonly pending: QueueJob<T>[] = [];
+  /** The keys (`serialKey`) of the jobs running now. */
+  private readonly runningKeys = new Set<string>();
   private active = 0;
   private draining = false;
   private drainResolvers: Array<() => void> = [];
@@ -136,6 +147,7 @@ export class ClassifierQueue<T> {
     this.perJobTimeoutMs = options.perJobTimeoutMs ?? DEFAULT_PER_JOB_TIMEOUT_MS;
     this.maxQueueDepth = options.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH;
     this.retryOnce = options.retryOnce ?? true;
+    this.serialKey = options.serialKey;
   }
 
   /**
@@ -146,7 +158,7 @@ export class ClassifierQueue<T> {
   enqueue(input: T): boolean {
     if (this.draining) return false;
     if (this.depth >= this.maxQueueDepth) return false;
-    this.pending.push({ id: nextJobId(), input });
+    this.pending.push({ id: nextJobId(), input, key: this.serialKey?.(input) });
     queueMicrotask(() => this._tryStart());
     return true;
   }
@@ -217,15 +229,25 @@ export class ClassifierQueue<T> {
     this.cutOff.abort(reason);
   }
 
+  /** The first waiting job that may start now: its key, if it has one, has no job running. */
+  private _nextStartable(): number {
+    return this.pending.findIndex((job) => job.key === undefined || !this.runningKeys.has(job.key));
+  }
+
   private _tryStart(): void {
-    while (this.active < this.maxConcurrency && this.pending.length > 0) {
-      const job = this.pending.shift();
+    while (this.active < this.maxConcurrency) {
+      const at = this._nextStartable();
+      if (at < 0) break;
+      const [job] = this.pending.splice(at, 1);
       if (!job) break;
       this.active += 1;
+      const key = job.key;
+      if (key !== undefined) this.runningKeys.add(key);
       // Outside any run group: a job runs in the context of whoever started this chain, not of
       // the one who enqueued it, so a chain started inside a chat run would otherwise report
       // every later mail's classification spend in that run's group (see `run-group.ts`).
       void runOutsideGroup(() => this._runJob(job)).finally(() => {
+        if (key !== undefined) this.runningKeys.delete(key);
         this.active -= 1;
         this._maybeResolveDrain();
         this._tryStart();

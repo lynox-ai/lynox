@@ -30,6 +30,10 @@ let refuseNextRunForReview: Promise<void> | null;
 let changedIn: Map<string, Array<{ file: string; status: string; diff: string }>>;
 /** While set, every run after the first streams until it resolves. */
 let holdLaterRuns: Promise<void> | null;
+/** While true, the first run's own stream drops before its end, once it is released. */
+let dropFirstRun: boolean;
+/** The transcript the server gives for a thread without a live run. */
+let serverTranscript: Array<{ role: string; content: string }>;
 let reviewStatus: number;
 let changesetFails: boolean;
 let saved: Map<string, string>;
@@ -87,6 +91,7 @@ function serve(): void {
 			const stream = new ReadableStream<Uint8Array>({
 				async start(c) {
 					if (held) await held;
+					if (dropFirstRun && runTasks.length === 1) { c.error(new Error('dropped')); return; }
 					const files = changed; // what the run changed is known when it ends
 					if (files.length > 0) c.enqueue(enc.encode(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: files.length })}\n\n`));
 					c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`));
@@ -129,7 +134,7 @@ function serve(): void {
 			liveRunIn = null; // re-attached once; the reconcile after it sees no live run
 			return json({ messages: liveTranscript, activeRun: { runId: 'r-live', status: 'running', lastPersistedSeq: 0 } });
 		}
-		return json({ messages: [], activeRun: null });
+		return json({ messages: serverTranscript, activeRun: null });
 	}));
 }
 
@@ -157,6 +162,8 @@ beforeEach(async () => {
 	refuseNextRunForReview = null;
 	changedIn = new Map();
 	holdLaterRuns = null;
+	dropFirstRun = false;
+	serverTranscript = [];
 	holdReopen = new Map();
 	holdReview = null;
 	liveRunIn = null;
@@ -307,6 +314,31 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
 		expect(store.getMessages().find((m) => m.content === 'then this')?.queued, 'the turn keeps its place').toBe(true);
 	}, 20_000);
+
+	for (const how of ['a reconcile', 'opening the thread again'] as const) {
+		it(`${how}: a queued turn the review holds keeps its bubble, waiting, once, when the server transcript is taken`, async () => {
+			const release = await queueBehindRun();
+			changed = notes;
+			release();
+			await settle();
+			await wait(200);
+			await settle();
+			expect(store.getPendingChangeset(), 'positive control: the review is open').not.toBeNull();
+			expect(store.getQueueLength(), 'positive control: the turn waits').toBe(1);
+			// The server has every message the chat sent, and not the waiting one: as many as the
+			// chat shows without it, so the transcript is taken only when the waiting one is not counted.
+			const own = store.getMessages().filter((m) => m.content !== 'then this').length;
+			serverTranscript = Array.from({ length: own }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `server ${i}` }));
+			if (how === 'a reconcile') await store.reconcileThread();
+			else await store.resumeThread('t1');
+			await settle();
+			expect(store.getMessages().some((m) => m.content === `server ${own - 1}`), 'the server transcript was taken').toBe(true);
+			const bubbles = store.getMessages().filter((m) => m.content === 'then this');
+			expect(bubbles, 'the waiting turn keeps one bubble').toHaveLength(1);
+			expect(bubbles[0]?.queued, 'shown waiting').toBe(true);
+			expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+		});
+	}
 
 	it('with no review the queued turn is sent after the run (control)', async () => {
 		const release = await queueBehindRun();
@@ -794,17 +826,61 @@ describe('a turn queued before a reload waits for the review the server holds', 
 			expect(activeGets - asked, 'one wait: an ask every two seconds, not two').toBeLessThanOrEqual(11);
 		});
 
-		it('the queued turn is not sent after the run\'s end while a review is open', async () => {
-			await reopenAndLose('aborted');
-			changed = notes;
-			liveRunActive = false;
-			await wait(2300);
+		for (const stream of ['aborted', 'unreachable', 'refused'] as const) {
+			it(`${stream}: the queued turn is not sent after the run's end while a review is open`, async () => {
+				await reopenAndLose(stream);
+				changed = notes;
+				liveRunActive = false;
+				await wait(2300);
+				await settle();
+				await wait(200);
+				await settle();
+				expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
+				expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
+				expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+			});
+		}
+	});
+
+	describe('a turn queued behind a run whose own stream drops, when the re-attach lets go before the run ends', () => {
+		const dropAndLose = async (stream: 'aborted' | 'unreachable' | 'refused'): Promise<void> => {
+			const release = await queueBehindRun(); // t1's run streams on, a turn queued behind it
+			dropFirstRun = true;
+			liveStream = stream;
+			liveRunActive = true; // the server still runs it
+			release(); // the run's own stream drops here, without its end
 			await settle();
-			await wait(200);
+			expect(liveStreamGets, 'positive control: the run tried to re-attach').toBe(1);
+			await wait(2300); // past one ask of the registry
 			await settle();
-			expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
-			expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
-		});
+		};
+
+		for (const stream of ['aborted', 'unreachable', 'refused'] as const) {
+			it(`${stream}: the queued turn waits while the run runs, and goes once it ended and no review holds it`, async () => {
+				await dropAndLose(stream);
+				expect(runTasks, 'nothing sent while the server still runs the run').toEqual(['edit the notes']);
+				expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+				liveRunActive = false; // the run ends on the server
+				await wait(2300);
+				await settle();
+				await wait(200);
+				await settle();
+				expect(runTasks, 'the turn goes once, after the run\'s end').toEqual(['edit the notes', 'then this']);
+			});
+
+			it(`${stream}: the queued turn is not sent after the run's end while a review is open`, async () => {
+				await dropAndLose(stream);
+				changed = notes;
+				liveRunActive = false;
+				await wait(2300);
+				await settle();
+				await wait(200);
+				await settle();
+				expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
+				expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
+				expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+			});
+		}
 	});
 
 	it('with no review the restored turn is sent (control)', async () => {

@@ -76,7 +76,7 @@ function insertItem(threadKey = 't1', bucket: 'requires_user' | 'auto_handled' |
     reasonDe: 'r',
     classifiedAt: new Date('2026-05-10'),
     classifierVersion: 'v',
-  });
+  }).id;
 }
 
 describe('handleListItems', () => {
@@ -151,7 +151,7 @@ describe('ruleWithheld on the item payloads (as sent: JSON)', () => {
       accountId: ACCOUNT.id, channel: 'email', threadKey: 'w', bucket: 'requires_user', confidence: 0, reasonDe: 'r',
       classifiedAt: new Date('2026-05-11'), classifierVersion: 'v',
       ruleWithheld: { id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' },
-    });
+    }).id;
     const plainId = insertItem('p');
     const full = wire(handleGetItemFull(deps, withheldId).body);
     expect((full['item'] as Record<string, unknown>)['ruleWithheld']).toEqual({ id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' });
@@ -168,7 +168,7 @@ describe('ruleWithheld on the item payloads (as sent: JSON)', () => {
       accountId: ACCOUNT.id, channel: 'email', threadKey: 'w', bucket: 'requires_user', confidence: 0, reasonDe: 'r',
       classifiedAt: new Date('2026-05-11'), classifierVersion: 'v',
       ruleWithheld: { id: ruleId, name: 'Alt', reason: 'rule_withheld_sensitive' },
-    });
+    }).id;
     expect(handleDeleteRule(deps, ruleId).status).toBe(204);
     const full = wire(handleGetItemFull(deps, id).body);
     expect((full['item'] as Record<string, unknown>)['ruleWithheld']).toEqual({ id: null, name: 'Alt', reason: 'rule_withheld_sensitive' });
@@ -193,7 +193,7 @@ describe('handleGetItemContext', () => {
       fromAddress: 'sender@x.example',
       fromName: 'Sender',
       subject: 'hello',
-    });
+    }).id;
     const r = handleGetItemContext(deps, id);
     expect(r.status).toBe(200);
     const body = r.body as {
@@ -222,7 +222,7 @@ describe('handleGetItemContext', () => {
       classifiedAt: new Date('2026-05-10'),
       classifierVersion: 'v',
       // fromAddress omitted → defaults to '' per insertItem
-    });
+    }).id;
     const r = handleGetItemContext(deps, id);
     expect(r.status).toBe(200);
     const body = r.body as { sender: { address: string }; recentThreads: ReadonlyArray<unknown> };
@@ -242,7 +242,7 @@ describe('handleGetItemContext', () => {
       classifierVersion: 'v',
       fromAddress: 'sender@x.example',
       subject: 'open thread',
-    });
+    }).id;
     state.insertItem({
       accountId: ACCOUNT.id,
       channel: 'email',
@@ -266,7 +266,7 @@ describe('handleGetItemContext', () => {
       classifierVersion: 'v',
       fromAddress: 'sender@x.example',
       subject: 'reminded thread',
-    });
+    }).id;
     state.setSnooze(remind, new Date(Date.now() + 86_400_000), null, true, true);
 
     const r = handleGetItemContext(deps, open);
@@ -287,7 +287,7 @@ describe('handleGetItemThread', () => {
       accountId: ACCOUNT.id, channel: 'email', threadKey: 'thr-conf', bucket: 'requires_user', confidence: 0.5,
       reasonDe: 'r', classifiedAt: new Date('2026-05-10T12:00:00Z'), classifierVersion: 'v',
       fromAddress: 'sender@x', subject: 'hello', messageId: '<own@x>',
-    });
+    }).id;
     const add = (messageId: string, extra: Partial<Parameters<typeof state.insertThreadMessage>[0]> = {}): void => {
       state.insertThreadMessage({
         accountId: ACCOUNT.id, threadKey: 'thr-conf', messageId, fromAddress: 'sender@x', subject: 'Re: hello',
@@ -335,7 +335,7 @@ describe('handleGetItemThread', () => {
       fromAddress: 'sender@x',
       subject: 'Re: hello',
       messageId: '<m2@example.com>',
-    });
+    }).id;
     state.insertThreadMessage({
       accountId: ACCOUNT.id,
       threadKey: 'thr-multi',
@@ -381,7 +381,7 @@ describe('handleGetItemThread', () => {
       subject: 'reply',
       messageId: '<reply@example.com>',
       inReplyTo: '<lost-parent@example.com>',
-    });
+    }).id;
     state.insertThreadMessage({
       accountId: ACCOUNT.id,
       threadKey: 'thr-partial',
