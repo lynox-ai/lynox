@@ -1563,7 +1563,7 @@ let _resendProbeInFlight = false;
  * attached. A scheduled run's question waiting there holds it back too: the user is told and
  * the question's card is brought back. Resolves whether to send; never rejects.
  */
-async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promise<boolean> {
+async function askBeforeResend(opts: { unreachableSends?: boolean; sayTurnStarted?: boolean } = {}): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
 	const sid = sessionId;
 	// No session yet: the failed turn never reached one, so nothing can be running.
@@ -1588,8 +1588,16 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 	} finally {
 		_resendProbeInFlight = false;
 	}
-	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
-	if (sessionId !== sid || isStreaming) return false;
+	// The thread changed meanwhile: the message belongs to a chat no longer shown, so nothing is said.
+	if (sessionId !== sid) return false;
+	// A turn started meanwhile: that is now the turn in charge, and the message is not sent again.
+	// A tap or a Retry the user made is told why it did nothing (`sayTurnStarted`); the re-send on
+	// reconnect is not the user's action, and the turn running is usually the one they just sent;
+	// the failed message keeps its tap either way.
+	if (isStreaming) {
+		if (opts.sayTurnStarted === true) addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
+		return false;
+	}
 	if (live === null && scheduledQuestion) {
 		// A scheduled run's question has no stream to attach: the way on is to answer it, so
 		// its card is brought back rather than a turn sent past it.
@@ -1644,7 +1652,7 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 		return;
 	}
 	if (sendBlockedByReview()) return;
-	if (!await askBeforeResend()) return;
+	if (!await askBeforeResend({ sayTurnStarted: true })) return;
 	const shown = messages.includes(msg);
 	if (!shown) {
 		msg.failed = false;
@@ -1656,9 +1664,10 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	// The message on screen is the one sent again, not a copy added under it: it goes out as a
 	// queued turn, which the run finds by its id, as the automatic re-send does. The checks
 	// sendMessage makes are made again here, after the question to the server: a review may
-	// have opened meanwhile.
+	// have opened meanwhile. A turn that started during the question is already said by
+	// askBeforeResend; this guards the step between its answer and here.
 	if (isStreaming) {
-		addToast(t('chat.still_running'), 'info', 6000);
+		addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
 		return;
 	}
 	if (sendBlockedByReview()) return;
@@ -4486,7 +4495,7 @@ export async function retryInterruptedRun(): Promise<void> {
 	// keeps the banner and its Retry, and nothing is sent. The chat is checked after each await,
 	// so the retry never goes into a chat opened meanwhile.
 	const sid = sessionId;
-	if (lastUserText && !await askBeforeResend()) return;
+	if (lastUserText && !await askBeforeResend({ sayTurnStarted: true })) return;
 	await dismissInterruptedRun();
 	if (sessionId !== sid) return;
 	if (lastUserText) await sendMessage(lastUserText);
