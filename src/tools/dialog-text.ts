@@ -16,7 +16,7 @@ import type { ConsentAction, ConsentKey, ConsentKind } from '../contract/prompt.
 import type { NoticeLanguage } from '../core/notice-language.js';
 import type { SendRoleKind, SendSlot } from '../core/profile-secret-view.js';
 import { pv, singleLine } from '../core/prompt-value.js';
-import type { PromptText } from '../types/agent.js';
+import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 
 /** The language a confirmation dialog is asked in. */
 export type DialogLanguage = NoticeLanguage;
@@ -1077,5 +1077,82 @@ export const PLAN_DIALOG: Readonly<Record<DialogLanguage, PlanDialog>> = {
     inputAt: (steps) => pv`Deine Eingabe ist bei Schritt ${steps} nötig.`,
     cost: (usd) => pv`Geschätzte Kosten: ~$${usd}`,
     proceed: pv`Soll ich loslegen?`,
+  },
+};
+
+/** Why a refused flagged request was refused: the person declined, answered with none of the
+ *  choices, or nobody answered. */
+export type ContentFlagRefusal = 'declined' | 'unrecognised' | 'unanswered';
+
+interface ContentFlagText {
+  /** What the content check found, as a whole phrase, by the check's label. */
+  readonly found: Readonly<Record<string, string>>;
+  /** For a label without its own phrase. */
+  readonly foundFallback: string;
+  readonly refused: (why: ContentFlagRefusal, found: string) => string;
+}
+
+/**
+ * The run's result after the content check flagged a request and it was not allowed. A person
+ * reads it in the chat; it is not stored, and the model never sees it (the run ends before the
+ * model is called). It starts with what happened, then the reason, then the way out.
+ */
+export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>> = {
+  en: {
+    found: {
+      'social engineering script': 'signs of a social engineering script',
+      'credential attack': 'signs of an attack on credentials',
+      'denial of service': 'signs of a denial-of-service attack',
+      'privacy violation': 'signs of a privacy violation',
+    },
+    foundFallback: 'suspicious content',
+    refused: (why, found) => why === 'declined'
+      ? `Not sent to the AI model: you declined. lynox had found ${found} in your message.`
+      : why === 'unrecognised'
+        ? `Not sent to the AI model. lynox had found ${found} in your message. If you meant it, send it again and allow it with the button.`
+        : `Not sent to the AI model: nobody answered the question. lynox had found ${found} in your message. If you meant it, send it again and allow it.`,
+  },
+  de: {
+    found: {
+      'social engineering script': 'Hinweise auf eine Täuschungsmasche (Social Engineering)',
+      'credential attack': 'Hinweise auf einen Angriff auf Zugangsdaten',
+      'denial of service': 'Hinweise auf eine Überlastungsattacke (Denial of Service)',
+      'privacy violation': 'Hinweise auf eine Verletzung der Privatsphäre',
+    },
+    foundFallback: 'verdächtigen Inhalt',
+    refused: (why, found) => why === 'declined'
+      ? `Nicht an das KI-Modell geschickt: Du hast abgelehnt. lynox hatte in deiner Nachricht ${found} gefunden.`
+      : why === 'unrecognised'
+        ? `Nicht an das KI-Modell geschickt. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie mit dem Knopf.`
+        : `Nicht an das KI-Modell geschickt: Niemand hat die Frage beantwortet. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie.`,
+  },
+};
+
+/** The refused flagged request's result in `language`; `label` is the content check's reason. */
+export function contentFlagRefusal(language: DialogLanguage, why: ContentFlagRefusal, label: string | undefined): string {
+  const text = CONTENT_FLAG_TEXT[language];
+  return text.refused(why, (label !== undefined ? text.found[label] : undefined) ?? text.foundFallback);
+}
+
+/** What the content check found, as engine text: a fixed phrase from the table, so it is
+ *  frame, like a tool word — never the label itself. */
+export function contentFlagFound(language: DialogLanguage, label: string | undefined): PromptText {
+  const text = CONTENT_FLAG_TEXT[language];
+  const found = (label !== undefined ? text.found[label] : undefined) ?? text.foundFallback;
+  return { [PROMPT_TEXT_BRAND]: true, segments: [{ kind: 'frame', text: found }] };
+}
+
+/** The content check's question before a flagged request goes to the model. `found` comes
+ *  from `contentFlagFound`, so the whole question is engine text. */
+export interface ContentFlagDialog {
+  readonly question: (found: PromptText) => PromptText;
+}
+
+export const CONTENT_FLAG_DIALOG: Readonly<Record<DialogLanguage, ContentFlagDialog>> = {
+  en: {
+    question: (found) => pv`⚠ Flagged message: lynox found ${found} in it. Send it to the AI model anyway?`,
+  },
+  de: {
+    question: (found) => pv`⚠ Auffällige Nachricht: lynox hat darin ${found} gefunden. Trotzdem an das KI-Modell schicken?`,
   },
 };

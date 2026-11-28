@@ -70,6 +70,12 @@ export interface MailEnvelope {
   replyTo: MailAddress[];
   subject: string;
   date: Date;
+  /**
+   * When the receiving server took the mail in: IMAP INTERNALDATE, Gmail `internalDate`, Graph
+   * `receivedDateTime`. The server sets it, where `date` on IMAP is the sender's Date header, so it
+   * is what orders mails by arrival. Unset when the provider gave none.
+   */
+  arrivedAt?: Date | undefined;
   flags: ReadonlyArray<MailFlag>;
   /** Up to 500 chars of cleaned text/plain body, or empty string if none. */
   snippet: string;

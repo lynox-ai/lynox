@@ -42,15 +42,36 @@ async function render(props: Record<string, unknown>): Promise<HTMLElement> {
 
 describe('the review card while a message waits for it', () => {
 	it('says the message goes out once the changes are decided', async () => {
-		const root = await render({ messageWaiting: true });
+		const root = await render({ messagesWaiting: 1 });
 		expect(t('changeset.message_waiting'), 'positive control: the key has a text').not.toBe('changeset.message_waiting');
 		expect(root.querySelector('[data-testid="changeset-message-waiting"]')?.textContent).toBe(t('changeset.message_waiting'));
+	});
+
+	it('says the messages go out, in the plural, when two wait', async () => {
+		const root = await render({ messagesWaiting: 2 });
+		expect(t('changeset.messages_waiting'), 'positive control: the key has a text').not.toBe('changeset.messages_waiting');
+		expect(t('changeset.messages_waiting')).not.toBe(t('changeset.message_waiting'));
+		expect(root.querySelector('[data-testid="changeset-message-waiting"]')?.textContent).toBe(t('changeset.messages_waiting'));
 	});
 
 	it('says nothing of the kind when no message waits', async () => {
 		const root = await render({});
 		expect(root.textContent, 'positive control: the card is there').toContain('notes.md');
 		expect(root.querySelector('[data-testid="changeset-message-waiting"]')).toBeNull();
+	});
+});
+
+describe('the review card title', () => {
+	it('is German in German and English in English', async () => {
+		const { setLocale } = await import('../i18n.svelte.js');
+		setLocale('de');
+		const de = (await render({})).querySelector('h3')?.textContent;
+		svelte.unmount(component!);
+		component = undefined;
+		setLocale('en');
+		const en = (await render({})).querySelector('h3')?.textContent;
+		expect(de).toBe('Änderungen prüfen');
+		expect(en).toBe('Review changes');
 	});
 });
 

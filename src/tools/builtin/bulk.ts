@@ -18,6 +18,7 @@ import { htmlFieldsOfFormName } from '../../core/bulk-html.js';
 import { JUDGE_MAX_HTML, contextFieldsOfListForm, judgeFields, judgeRuleFromArtifact, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule, type JudgeRuleSource } from '../../core/bulk-judge-rule.js';
 import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_STATUS_VALUES, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
+import { UNKNOWN_GRANT } from '../../core/conversation-grants.js';
 
 /**
  * The model-facing half of a bulk run's dry run (PRD bulk-changes-reversible §3.2,
@@ -153,6 +154,37 @@ function queryAllRows(agent: IAgent, collection: string, filter: Record<string, 
     rows.push(...page.rows);
     if (page.rows.length < BULK_QUERY_PAGE || rows.length > BULK_MAX_TARGETS || offset + BULK_QUERY_PAGE >= page.total) return rows;
   }
+}
+
+/**
+ * The stamps of the source rows a run copies, as their union ({@link DataStore.sourceGrantsOfIds}).
+ * Read by `_id`, which every row {@link queryAllRows} returns, so the read is bounded as the
+ * source read is. A row without a usable `_id` counts as unknown: a guard, which no real read
+ * reaches today (`_id` is the table's integer primary key and every query selects it), kept so
+ * a later read that drops it errs toward unknown instead of toward no source.
+ */
+function sourceGrantsOfRows(agent: IAgent, collection: string, rows: readonly Record<string, unknown>[]): string[] {
+  const store = agent.toolContext.dataStore;
+  if (!store) throw new BulkSourceError('The data store is not available.');
+  const ids: number[] = [];
+  let unknown = false;
+  for (const r of rows) {
+    const id = r['_id'];
+    if (typeof id === 'number' && Number.isInteger(id)) ids.push(id);
+    else unknown = true;
+  }
+  const grants = store.sourceGrantsOfIds(collection, ids, BULK_QUERY_PAGE);
+  return unknown ? [...new Set([...grants, UNKNOWN_GRANT])].sort() : grants;
+}
+
+/**
+ * The grant set a run's data-store writes are stamped with: the planning conversation's and its
+ * source's together. A conversation with no set is unknown, so with a source that adds anything
+ * the result holds `unknown`; with neither it stays null (unknown as well).
+ */
+function plannerGrantsOf(conversation: readonly string[] | null, source: readonly string[]): string[] | null {
+  if (conversation === null && source.length === 0) return null;
+  return [...new Set([...(conversation ?? [UNKNOWN_GRANT]), ...source])].sort();
 }
 
 /**
@@ -552,6 +584,9 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       }
       if (input.judge !== undefined && input.atomic === true) throw new BulkSourceError('A run with judge cannot be atomic.');
       let rows: Record<string, unknown>[];
+      // Where the source's values came from, beside the conversation: a file carries no stamp,
+      // so it is unknown; a collection's rows carry their own (`_source_grants`).
+      let sourceGrants: string[];
       if (input.source_file !== undefined) {
         const path = bulkFileKey(input.source_file);
         if (path === null) throw new BulkSourceError('The source file must be inside the workspace.');
@@ -566,8 +601,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         if (image.absent) throw new BulkSourceError('The source file does not exist.');
         const format = input.source_format ?? (path.toLowerCase().endsWith('.csv') ? 'csv' : 'json');
         rows = parseSourceText(image.value, format);
+        sourceGrants = [UNKNOWN_GRANT];
       } else {
         rows = queryAllRows(agent, input.source_collection!, input.source_filter);
+        sourceGrants = sourceGrantsOfRows(agent, input.source_collection!, rows);
       }
       // With a judge, a row names only its target: the model decides the values.
       const source = input.judge === undefined ? rowsToSource(rows) : rowsToSource(rows).map((r) => ({ target: r.target, after: {} }));
@@ -606,7 +643,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           const template = judgeTemplate(judge);
           // A verdict replaces F on an existing row; a row that is not there has nothing to judge.
           targets = planDataStore(source, store, input.target_collection).map((t): PlannedTarget =>
-            'invalid' in t ? t : t.before.absent ? { key: t.key, invalid: 'not_found' } : { key: t.key, before: t.before, after: template });
+            'invalid' in t ? t : t.before.absent ? { key: t.key, invalid: 'not_found' } : { key: t.key, before: t.before, after: template, beforeGrants: t.beforeGrants });
         } else {
           targets = planDataStore(source, store, input.target_collection);
         }
@@ -648,6 +685,12 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         targetCollection: input.target_system === 'data_store' ? input.target_collection ?? null : null,
         atomic: input.atomic === true,
         judge,
+        // The worker that writes the run holds no conversation: its data-store writes are stamped
+        // with this one's grant set and its source's, or a row made from what either read would
+        // escape that connection's erasure. A rule read from a saved artifact is read here, not
+        // in the conversation, and the artifact keeps no stamp: the verdicts it decides are
+        // unknown beside the rest.
+        plannerGrants: plannerGrantsOf(agent.conversationGrants?.members() ?? null, fromArtifact === null ? sourceGrants : [...sourceGrants, UNKNOWN_GRANT]),
       });
       return [
         'Dry run recorded — nothing was written to any target.',

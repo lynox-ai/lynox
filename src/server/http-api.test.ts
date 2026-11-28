@@ -35,6 +35,7 @@ import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { getModelId } from '../types/index.js';
 import type { MailConnectPromptData } from '../types/agent.js';
+import { RunAbortedError } from '../core/agent.js';
 import { AuditLog } from '../core/audit-log.js';
 import { CpRefusalTally, CpTrail } from '../core/cp-trail.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
@@ -611,6 +612,8 @@ vi.mock('../tools/builtin/pipeline.js', async (importActual) => {
     getPipeline: mockGetPipeline,
     workflowRunTrail: actual.workflowRunTrail,
     WORKFLOW_RUN_UNRECORDED_RESULT: actual.WORKFLOW_RUN_UNRECORDED_RESULT,
+    // The chat delete forgets the deleted chat's retry outputs (thread-delete-provenance.test.ts).
+    forgetExecutedStatesOfChat: actual.forgetExecutedStatesOfChat,
   };
 });
 
@@ -1029,6 +1032,201 @@ describe('LynoxHTTPApi', () => {
       } finally {
         await own.shutdown();
       }
+    });
+  });
+
+  describe('shutdown with a run whose client is gone', () => {
+    type Slot = { streamAlive: boolean; takeover: (reason: string) => void; lastEventAt: number };
+    const slotsOf = (a: LynoxHTTPApi): Map<string, Slot> => (a as unknown as { runningSessions: Map<string, Slot> }).runningSessions;
+    const engineOf = (a: LynoxHTTPApi): { shutdown: ReturnType<typeof vi.fn>; getRunRegistry: ReturnType<typeof vi.fn>; getPromptStore: () => unknown } =>
+      (a as unknown as { engine: { shutdown: ReturnType<typeof vi.fn>; getRunRegistry: ReturnType<typeof vi.fn>; getPromptStore: () => unknown } }).engine;
+
+    /** Its own instance, on a real registry of live runs and a real prompt store, with a key for
+     *  the provider (so a run passes the check for one). `down` shuts it down once. */
+    async function bootOwn(): Promise<{
+      own: LynoxHTTPApi;
+      registry: InstanceType<typeof import('../core/run-registry.js').RunRegistry>;
+      prompts: InstanceType<typeof import('../core/prompt-store.js').PromptStore>;
+      reboot: () => InstanceType<typeof import('../core/run-registry.js').RunRegistry>;
+      down: () => Promise<void>;
+      close: () => Promise<void>;
+    }> {
+      vi.stubEnv('ANTHROPIC_API_KEY', 'test-only-placeholder');
+      const { RunHistory } = await import('../core/run-history.js');
+      const { RunRegistry } = await import('../core/run-registry.js');
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const history = new RunHistory(':memory:');
+      const own = new LynoxHTTPApi();
+      let isDown = false;
+      const down = async (): Promise<void> => { if (!isDown) { isDown = true; await own.shutdown(); } };
+      await own.init();
+      await own.start(0);
+      const registry = new RunRegistry(history.getDb());
+      const prompts = new PromptStore(history.getDb());
+      const engine = engineOf(own) as unknown as { getRunRegistry: ReturnType<typeof vi.fn>; getPromptStore: () => unknown };
+      engine.getRunRegistry.mockReturnValue(registry);
+      engine.getPromptStore = (): unknown => prompts;
+      return {
+        own, registry, prompts, down,
+        // The boot after, on the same store.
+        reboot: () => new RunRegistry(history.getDb()),
+        close: async () => {
+          await down().catch(() => undefined);
+          history.close();
+          vi.stubEnv('ANTHROPIC_API_KEY', undefined);
+          // A once-implementation a test did not use must not reach the next one.
+          mockSessionRun.mockReset();
+          mockSessionRun.mockResolvedValue('Agent response');
+          mockSessionAbort.mockReset();
+        },
+      };
+    }
+
+    /**
+     * A run in `sid` that works until it is told to end, and whose client then goes away. The
+     * `endsOnStop`-th stop ends it: `aborted` throws as an aborted run does, `answered` returns
+     * an answer all the same, as a run whose last step does not stop on the abort.
+     */
+    async function headlessRun(own: LynoxHTTPApi, registry: { getByThread: (id: string) => { status: string } | undefined }, sid: string, endsAs: 'aborted' | 'answered', endsOnStop = 1): Promise<void> {
+      let end!: () => void;
+      mockSessionRun.mockImplementationOnce(() => new Promise((resolve, reject) => {
+        end = () => { if (endsAs === 'aborted') reject(new RunAbortedError()); else resolve('done'); };
+      }));
+      let stops = 0;
+      mockSessionAbort.mockImplementation(() => { if (++stops === endsOnStop) end(); });
+      const client = new AbortController();
+      // The run writes nothing, so the answer's head is not awaited: the request stays open.
+      const req = fetch(`http://127.0.0.1:${portOf(own)}/api/sessions/${sid}/run`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: 'go' }),
+        signal: client.signal,
+      }).catch(() => null);
+      await vi.waitFor(() => { expect(registry.getByThread(sid)?.status, 'positive control: the run started').toBe('running'); });
+      client.abort(); // the client goes away: the run goes on without it
+      await req;
+      await vi.waitFor(() => { expect(slotsOf(own).get(sid)?.streamAlive, 'positive control: its stream is gone').toBe(false); });
+    }
+
+    it('a run ended by shutdown frees its slot, keeps its row for the boot after, and that boot marks it interrupted', async () => {
+      const t = await bootOwn();
+      try {
+        await headlessRun(t.own, t.registry, 'headless-3', 'aborted');
+        let slotsAtEngineDown = -1;
+        engineOf(t.own).shutdown.mockImplementationOnce(async () => { slotsAtEngineDown = slotsOf(t.own).size; });
+        await t.down();
+        expect(slotsAtEngineDown, 'the slot was free before the engine shut down').toBe(0);
+        expect(t.registry.getByThread('headless-3')?.status, 'its row stays, as a crash leaves it').toBe('running');
+        const booted = t.reboot();
+        expect(booted.sweepInterrupted(), 'the boot sweep finds it').toBe(1);
+        expect(booted.getByThread('headless-3')?.status, 'the chat is told it was interrupted').toBe('interrupted');
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('a run told to end by shutdown that answers all the same leaves no row for the boot after', async () => {
+      const t = await bootOwn();
+      try {
+        await headlessRun(t.own, t.registry, 'headless-4', 'answered');
+        await t.down();
+        expect(slotsOf(t.own).size, 'positive control: its slot is free').toBe(0);
+        expect(t.registry.getByThread('headless-4'), 'an answered run is not offered again').toBeUndefined();
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('a run the user had stopped leaves no row for the boot after, though shutdown ends it too', async () => {
+      const t = await bootOwn();
+      try {
+        // The user's stop does not end it at once (a tool still unwinds); shutdown's does.
+        await headlessRun(t.own, t.registry, 'headless-6', 'aborted', 2);
+        slotsOf(t.own).get('headless-6')!.takeover('run_stopped');
+        expect(slotsOf(t.own).has('headless-6'), 'positive control: it is still ending').toBe(true);
+        await t.down();
+        expect(slotsOf(t.own).size, 'positive control: shutdown ended it').toBe(0);
+        expect(t.registry.getByThread('headless-6'), 'a stopped run is not offered again').toBeUndefined();
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('a run that reaches its slot after shutdown began is refused with 503, and nothing runs', async () => {
+      const t = await bootOwn();
+      try {
+        // Shutdown began while this request was still being set up.
+        (t.own as unknown as { _stopping: boolean })._stopping = true;
+        const res = await fetch(`http://127.0.0.1:${portOf(t.own)}/api/sessions/late-1/run`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task: 'go' }),
+        });
+        expect(res.status, 'refused').toBe(503);
+        const body = await res.json() as { error?: string };
+        expect(body.error, 'the client is told the message was not run').toBe('The instance is restarting, so the message was not run. Send it again in a moment.');
+        expect(slotsOf(t.own).has('late-1'), 'it took no slot').toBe(false);
+        expect(mockSessionRun, 'nothing ran').not.toHaveBeenCalled();
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('ending a run leaves the question a scheduled run is parked on in the same chat open', async () => {
+      const t = await bootOwn();
+      try {
+        // A scheduled run waits on its question in this chat, across the restart.
+        const parked = t.prompts.insertAskUser('headless-5', 'Which list?', undefined, undefined, undefined, undefined, 'trigger-1');
+        await headlessRun(t.own, t.registry, 'headless-5', 'aborted');
+        await t.down();
+        expect(slotsOf(t.own).size, 'positive control: the run was ended').toBe(0);
+        expect(t.prompts.getById(parked)?.status, 'the parked question stays open for the restart').toBe('pending');
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('ends the run, waits until its slot is free, and only then shuts the engine down, on the same clock', async () => {
+      const own = new LynoxHTTPApi();
+      await own.init();
+      const slots = slotsOf(own);
+      const reasons: string[] = [];
+      let freedAt = 0;
+      slots.set('headless-1', {
+        streamAlive: false,
+        lastEventAt: Date.now(),
+        takeover: (reason) => {
+          reasons.push(reason);
+          // The run unwinds on the next turns of the loop, as a stopped run does.
+          setTimeout(() => { freedAt = performance.now(); slots.delete('headless-1'); }, 50);
+        },
+      });
+      let engineDownAt = 0;
+      engineOf(own).shutdown.mockImplementationOnce(async () => { engineDownAt = performance.now(); });
+      const began = Date.now();
+      await own.shutdown({ inboxBacklog: 'bounded' });
+      expect(reasons, 'the run is ended, as a restart ends it').toEqual(['process_restarted']);
+      expect(slots.size, 'its slot is free').toBe(0);
+      expect(engineDownAt, 'positive control: the engine was shut down').toBeGreaterThan(0);
+      expect(freedAt, 'the slot was free before the engine shut down').toBeLessThanOrEqual(engineDownAt);
+      const [opts] = engineOf(own).shutdown.mock.calls[0] as [{ inboxBacklog?: string; deadlineFrom?: number }];
+      expect(opts.inboxBacklog, 'the signal\'s bound reaches the engine').toBe('bounded');
+      expect(opts.deadlineFrom, 'the engine counts from when shutdown began, not from its own start').toBeLessThanOrEqual(began + 5);
+      expect(opts.deadlineFrom).toBeGreaterThanOrEqual(began - 5);
+    });
+
+    it('does not wait past its bound for a run that does not end', async () => {
+      const own = new LynoxHTTPApi();
+      await own.init();
+      const slots = slotsOf(own);
+      const takeover = vi.fn();
+      slots.set('headless-2', { streamAlive: false, lastEventAt: Date.now(), takeover });
+      const started = performance.now();
+      await own.shutdown();
+      expect(takeover, 'the run is told to end').toHaveBeenCalledWith('process_restarted');
+      expect(engineOf(own).shutdown, 'the engine is shut down all the same').toHaveBeenCalled();
+      expect(performance.now() - started, 'within the bound, not until the run ends').toBeLessThan(4_000);
+      slots.delete('headless-2');
     });
   });
 
@@ -4037,6 +4235,41 @@ describe('LynoxHTTPApi', () => {
         engineRef.getPromptStore = originalGetPromptStore;
         runningSessions.delete('stale-1');
         db.close();
+      }
+    });
+
+    // A taken-over run whose tool ignores the stop for longer than the takeover waits (1 s): the
+    // follow-up is answered 409 like any busy session, and the chat asks again every few seconds
+    // (its busy wait), so the message goes once the old run has ended.
+    it('a follow-up whose taken-over run outlasts the wait gets a 409, and runs once the old run has ended', async () => {
+      const runningSessions = (api as unknown as {
+        runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>;
+      }).runningSessions;
+      let takeovers = 0;
+      try {
+        runningSessions.set('test', {
+          streamAlive: false,
+          lastEventAt: 0, // silent far past the stale window
+          takeover: () => {
+            takeovers++;
+            // Its tool ignores the stop: the run unwinds 1.5 s later, past the 1 s wait.
+            if (takeovers === 1) setTimeout(() => runningSessions.delete('test'), 1500);
+          },
+        });
+        const first = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'second' }) });
+        expect(first.status, 'the old run still ends: busy').toBe(409);
+        await first.text();
+        expect(takeovers, 'positive control: the old run was told to end').toBe(1);
+        expect(runningSessions.has('test'), 'the old run is still ending').toBe(true);
+        await vi.waitFor(() => { expect(runningSessions.has('test')).toBe(false); }, { timeout: 3000 });
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const next = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'second' }) });
+        expect(next.status, 'once it ended, the follow-up runs').toBe(200);
+        await next.text();
+        expect(mockSessionRun, 'the follow-up ran').toHaveBeenCalled();
+        expect(takeovers, 'the old run was told to end once, by the first follow-up; the second found its slot free').toBe(1);
+      } finally {
+        runningSessions.delete('test');
       }
     });
 
@@ -14200,6 +14433,27 @@ describe('LynoxHTTPApi', () => {
       expect(due.map((d) => [d.id, d.effect, d.bulk_run_id])).toEqual([[`bulk-${id}`, 'bulk_apply', id]]);
 
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
+    });
+
+    it('sends a refused approval and a refused resume with their reason as the code the page words', async () => {
+      const id = planRun();
+      const checksum = bulkLedger.computeChecksum(id)!;
+      const approve = vi.spyOn(bulkLedger, 'approve').mockReturnValue({ ok: false, reason: 'shopify_off' });
+      const resume = vi.spyOn(bulkLedger, 'resume').mockReturnValue({ ok: false, reason: 'shopify_off' });
+      try {
+        const msg = 'Bulk runs on a Shopify store are switched off on this instance, so this run cannot be approved or resumed.';
+        for (const act of ['approve', 'resume']) {
+          const res = await jsonFetch(`/api/bulk/runs/${id}/${act}`, { method: 'POST', body: JSON.stringify({ checksum }) });
+          expect([act, res.status, await res.json()]).toEqual([act, 409, { error: msg, code: 'shopify_off' }]);
+        }
+        // A reason the table does not know keeps its generic refusal, with no code.
+        approve.mockReturnValue({ ok: false, reason: 'no_such_reason' } as unknown as ReturnType<typeof bulkLedger.approve>);
+        const unknown = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect([unknown.status, await unknown.json()]).toEqual([400, { error: 'Refused.' }]);
+      } finally {
+        approve.mockRestore();
+        resume.mockRestore();
+      }
     });
 
     it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb, and its filters as an empty set', async () => {
