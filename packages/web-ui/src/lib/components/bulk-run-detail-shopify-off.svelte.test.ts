@@ -119,12 +119,14 @@ describe('a Shopify run refused while bulk changes are off', () => {
 			expect(target.textContent).not.toContain(ENGINE);
 		});
 
-		it(`words the refused approval of a planned run in ${lang}, followed by the way to turn the changes on`, async () => {
+		it(`words the refused approval of a planned run in ${lang}, followed by the way to turn the changes on and approve it`, async () => {
 			setLocale(lang);
 			await render();
 			await press(t('bulk.approve.write_only'));
 			expect(posts).toEqual([expect.stringMatching(/\/bulk\/runs\/r1\/approve$/)]);
-			expect(errorLine()).toBe(`${t('bulk.resume.refused.shopify_off')} ${t('bulk.halt.shopifyWriteOff_before_managed')}`);
+			expect(errorLine()).toBe(lang === 'de'
+				? 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Darum lässt sich der Lauf gerade nicht freigeben oder fortsetzen. Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du den Lauf freigeben.'
+				: 'Bulk changes to Shopify stores are not enabled on this instance, so the run cannot be approved or continued right now. If lynox should write to Shopify stores, write to support@lynox.ai. Then you can approve the run.');
 			expect(target.textContent).not.toContain(ENGINE);
 		});
 	}
@@ -134,6 +136,14 @@ describe('a Shopify run refused while bulk changes are off', () => {
 		await render();
 		await press(t('bulk.approve.write_only'));
 		expect(errorLine()).toBe(`${t('bulk.resume.refused.shopify_off')} ${t('bulk.halt.shopifyWriteOff_before_selfhost')}`);
+	});
+
+	it('follows the refused resume of a run halted on another reason with the way to turn the changes on and continue it', async () => {
+		run = makeRun({ phase: 'writing', haltKey: 'runUnrecorded', haltReason: 'engine reason', probeConfirmed: true });
+		await render();
+		await press(t('bulk.resume.write'));
+		expect(posts).toEqual([expect.stringMatching(/\/bulk\/runs\/r1\/resume$/)]);
+		expect(errorLine()).toBe(`${t('bulk.resume.refused.shopify_off')} ${t('bulk.halt.shopifyWriteOff_before_managed')}`);
 	});
 
 	it('control: a refusal of another kind keeps its own sentence alone, with no way to turn the changes on', async () => {

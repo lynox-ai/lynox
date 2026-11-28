@@ -312,10 +312,12 @@
 		shopify_off: 'bulk.resume.refused.shopify_off',
 	};
 	/** After the refusal of a run while Shopify bulk changes are off, the way to turn them on —
-	 *  unless the run halted on that switch, whose halt already says it above. */
+	 *  unless the run halted on that switch, whose halt already says it above. A preview is
+	 *  approved, not continued, once they are on: the support sentence says so. */
 	const refusalWayOf = (code: string | undefined): string | null =>
-		code === 'shopify_off' && run?.haltKey !== 'shopifyWriteOff'
-			? t(`bulk.halt.shopifyWriteOff_before_${managed === false ? 'selfhost' : 'managed'}`) : null;
+		code === 'shopify_off' && run !== null && run.haltKey !== 'shopifyWriteOff'
+			? t(managed === false ? 'bulk.halt.shopifyWriteOff_before_selfhost'
+				: run.phase === 'previewed' ? 'bulk.halt.shopifyWriteOff_before_approve_managed' : 'bulk.halt.shopifyWriteOff_before_managed') : null;
 	const hopelessReason = $derived.by(() => {
 		if (hopeless === null || run === null || hopeless.id !== run.id) return null;
 		const key = bulkReachRefusalKey(hopeless.code);
