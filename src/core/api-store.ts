@@ -2903,7 +2903,14 @@ export class ApiStore {
           throw err;
         }
       } else {
-        saved = persist();
+        // `_persist` registers the profile before it writes: a write that throws (the row or the
+        // file) leaves the store as it was, so memory goes back to it too, as in the branches above.
+        try {
+          saved = persist();
+        } catch (err: unknown) {
+          this._restoreAfterThrow(profile.id, prev, heldBefore);
+          throw err;
+        }
       }
       // The readers of what a known renewal wrote follow it; nothing else a kept save does
       // writes a credential.
