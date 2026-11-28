@@ -756,8 +756,8 @@ export const bulkVisibleText: (text: string) => string = visibleText;
 export const BULK_KEY_PARTS_MAX = 256;
 
 /** A target key cut after each hyphen, dot and underscore, where it may break (U-341). A key longer
- *  than {@link BULK_KEY_PARTS_MAX} stays whole: in the table its column grows, in the undo lists it
- *  wraps where it would leave its box. */
+ *  than {@link BULK_KEY_PARTS_MAX} stays whole: in the table its column grows, in the list of what an
+ *  undo deletes it wraps where it would leave its box. */
 export function bulkKeyParts(key: string): string[] {
 	if (key.length > BULK_KEY_PARTS_MAX) return [key];
 	return key.split(/(?<=[-._])/);

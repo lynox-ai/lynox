@@ -314,13 +314,13 @@ describe('a target key in the preview', () => {
 		expect(before).toEqual(['tee-', 'abendruhe.', 'sommer_']);
 	});
 
-	// In an undo's approval list, which does not scroll, a key with no hyphen, dot or underscore gets
+	// In the list of what an undo deletes, which does not scroll, a key with no hyphen, dot or underscore gets
 	// no break point of its own but `break-words`, so the browser may cut it where it would leave its
 	// box. Where a browser then breaks the key needs a layout and is not checked here.
 	it('gives a key with no hyphen, dot or underscore in the list of what an undo deletes no break point of its own and the break-words class', async () => {
 		run = makeRun({ kind: 'undo', phase: 'previewed', undone: 0, undoneBy: null, sourceRunId: 'r0', targetSystem: 'workspace', total: 1, applied: 0,
 			changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 } });
-		targets = [{ seq: 1, key: handle.replace(/[-._]/g, ''), change: 'delete', diff: null, error: null, deselected: false } as unknown as BulkTarget];
+		targets = [{ seq: 1, key: handle.replace(/[-._]/g, ''), change: 'delete', diff: { kind: 'none' }, error: null, deselected: false } as unknown as BulkTarget];
 		await render();
 		const key = target.querySelector('[data-testid="bulk-undo-creates"]')?.parentElement?.querySelector('[data-testid="bulk-target-key"]');
 		expect(key?.textContent).toBe('teeabendruhesommer2026');
@@ -339,6 +339,18 @@ describe('a target key in the preview', () => {
 		expect(title?.querySelectorAll('wbr').length).toBe(0);
 		expect(target.querySelector('[data-testid="bulk-target-key"]')).toBeNull();
 		expect(adminLinks().map((x) => x.getAttribute('href'))).toEqual(['https://demo.myshopify.com/admin/products/1']);
+	});
+
+	// An undo's approval lists its targets in the same table, as blocks on a narrow screen (U-466).
+	it('breaks a key in an undo\'s approval table only after a hyphen, a dot or an underscore', async () => {
+		run = makeRun({ kind: 'undo', phase: 'previewed', undone: 0, undoneBy: null, sourceRunId: 'r0', targetSystem: 'workspace', total: 1, applied: 0,
+			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: handle, change: 'update', diff: fieldsDiff('', 'Neu'), error: null, deselected: false } as BulkTarget];
+		await render();
+		const key = target.querySelector('[data-testid="bulk-target-row"] [data-testid="bulk-target-key"]');
+		expect(key?.textContent).toBe(handle);
+		const before = [...(key?.childNodes ?? [])].flatMap((n, i, all) => (n.nodeName === 'WBR' ? [all[i - 1]?.textContent ?? ''] : []));
+		expect(before).toEqual(['tee-', 'abendruhe.', 'sommer_']);
 	});
 
 	it('gives the target column a minimum width', async () => {
