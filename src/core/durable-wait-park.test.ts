@@ -328,8 +328,9 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // both implementations — measured, the mutation survived it.
     //
     // A deadline no clock would produce is the discriminator. If the park reads
-    // the row, this is what it writes; if it computes, it cannot be.
-    const DOCTORED = '2031-03-03T03:03:03.000Z';
+    // the row, this is what it writes; if it computes, it cannot be. It stays ahead
+    // of the clock on any day, a week and 3.003 s out on a whole second.
+    const DOCTORED = new Date(Math.floor(Date.now() / 1000) * 1000 + 7 * 86_400_000 + 3003).toISOString();
     const h = makeHarness({ doctorExpiry: DOCTORED });
     await h.parked;
     const trigger = h.history.getTrigger('trg-1');

@@ -65,7 +65,7 @@ describe('RetrievalEngine — context-hierarchy walk-up weighting (Slice C)', ()
         id, text: `memory ${id}`, namespace: 'knowledge',
         scopeType: 'context', scopeId: 'ctx1',
         subjectId, embedding: embedToBlob(sharedVec),
-        createdAt: '2026-07-04T12:00:00Z', confidence: 0.9, confirmationCount: 1, isActive: 1,
+        createdAt: new Date(Date.now() - 60_000).toISOString(), confidence: 0.9, confirmationCount: 1, isActive: 1,
       });
     };
     seed('m-A', projektA);      // Projekt A

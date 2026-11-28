@@ -50,7 +50,9 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
     const db = (ks as unknown as { db: Database.Database }).db;
     const activeIds = (db.prepare("SELECT id FROM knowledge_entries WHERE status = 'active' ORDER BY rowid LIMIT 2").all() as Array<{ id: string }>).map(r => r.id);
     db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2026-01-02 03:04:05', activeIds[0]);
-    db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2027-06-07 08:09:10', activeIds[1]);
+    // The latest end lies after every other row's own `datetime('now')`, whatever day the test runs.
+    const last = new Date(Date.now() + 400 * 86_400_000).toISOString().slice(0, 19).replace('T', ' ');
+    db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run(last, activeIds[1]);
     db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2026-03-03 00:00:00', keptHere[0]!.id);
     db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2026-04-04 00:00:00', keptHere[1]!.id);
 
@@ -61,7 +63,7 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
     const all = block.status_counts!.active_all_threads;
     expect(all.count, 'threadless, this thread\'s and the other thread\'s').toBe(ACTIVE + 2 + 1);
     expect(all.first_created_at).toBe('2026-01-02 03:04:05');
-    expect(all.last_created_at).toBe('2027-06-07 08:09:10');
+    expect(all.last_created_at).toBe(last);
     const here = block.status_counts!.captured_in_this_thread;
     expect(here.pending_review.count).toBe(1);
     expect(here.rejected.count).toBe(1);

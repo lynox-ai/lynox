@@ -6322,7 +6322,8 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     await tick;
     expect(rearmed).not.toBeNull();
     expect(Date.parse(rearmed!)).toBeGreaterThanOrEqual(before - 1000);
-    expect(Date.parse(rearmed!)).toBeLessThan(Date.parse('2030-01-01T00:00:00.000Z'));
+    expect(Date.parse(rearmed!)).toBeLessThan(Date.now() + 60_000);
+    expect(rearmed).not.toBe('2030-01-01T00:00:00.000Z');
     b.loop.stop();
   });
 
@@ -6433,7 +6434,8 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const next = tm.getTrigger(h.t.id)!.next_run_at;
     expect(next).not.toBeNull();
     expect(Date.parse(next!)).toBeGreaterThanOrEqual(before - 1000);
-    expect(Date.parse(next!)).toBeLessThan(Date.parse('2030-01-01T00:00:00.000Z'));
+    expect(Date.parse(next!)).toBeLessThan(Date.now() + 60_000);
+    expect(next).not.toBe('2030-01-01T00:00:00.000Z');
     h.loop.stop();
   });
 
