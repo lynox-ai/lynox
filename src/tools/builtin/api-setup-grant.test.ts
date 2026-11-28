@@ -4753,7 +4753,7 @@ describe('mandates and stored credentials', () => {
       expect(filled).not.toContain('already holds a value');
     });
 
-    it('refuses the owner a name of their choosing on a profile a mandate wrote: its token endpoint is the mandate\'s', async () => {
+    it('refuses its author a name of their choosing on a profile a mandate wrote: its tokens go to its own slots', async () => {
       const apiStore = mandateStore();
       const calls = minting();
       const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec' });
@@ -4907,14 +4907,14 @@ describe('fetch_token — whose consent a grant records', () => {
   // On a mandate's profile nobody but its author's first consent is recorded: such a connection
   // would carry nothing and keep the author from connecting it again (`consentOf`).
   it.each([
-    ['a mandate on another mandate\'s profile', 'mandate:b@example.invalid', A],
-    ['the owner on a mandate\'s profile', TAG_A, OWNER_PRINCIPAL],
-  ])('stores no first exchange of %s', async (_label, author, actor) => {
+    ['a mandate on another mandate\'s profile', 'mandate:b@example.invalid', A, 'was set up by another person with access'],
+    ['the owner on a mandate\'s profile', TAG_A, OWNER_PRINCIPAL, 'was set up by a person with access'],
+  ])('stores no first exchange of %s', async (_label, author, actor, says) => {
     const store = new ApiStore();
     store.register(crmProfile({ created_by: author }, 'client_credentials'));
     ok();
     const v = vault();
-    expect(await fetchToken(makeAgent(store, v, undefined, undefined, actor))).toMatch(/was set up by (a|another) person with access/);
+    expect(await fetchToken(makeAgent(store, v, undefined, undefined, actor))).toContain(says);
     expect(consent(store).connected_by).toBeUndefined();
     expect(v.peek('CRM_API_ACCESS_TOKEN') ?? null).toBeNull();
   });
