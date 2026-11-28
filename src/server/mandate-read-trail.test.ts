@@ -429,10 +429,10 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
   });
 
   // The owner's view says a read of the run list as what it returns (U-306 N1). Measured on the real
-  // route: the kinds of content the answer carries are read off the run it returns, and the route's
-  // declaration and its word must name each, so a new field the route starts to return is noticed
-  // here, and a declaration that grows with it does not break the test.
-  it('the run list a mandate reads names in its word every kind of content the route returns', async () => {
+  // route for three fields: task, answer and cost. Each that the answer carries must be in the route's
+  // declaration and in the word its key gives, so a declaration that grows does not break the test.
+  // This test knows only these three fields; measuring every field of every route is tracked separately.
+  it('the run list a mandate reads carries task, answer and cost, and its declaration and word name each', async () => {
     const history = (api as unknown as { engine: { getRunHistory: () => { insertRun: (p: { sessionId: string; taskText: string; modelTier: string; modelId: string }) => string; updateRun: (id: string, p: { responseText: string; costUsd: number; status: 'completed' }) => void } } }).engine.getRunHistory();
     // A run names its chat: one that names none is left out of a mandate's list (fail-closed).
     const id = history.insertRun({ sessionId: 't-runs-word', taskText: 'Offerte an Brunner vorbereiten', modelTier: 'sonnet', modelId: 'test-model' });
@@ -454,10 +454,13 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
     expect(carried.map((k) => k.kind)).toEqual(['task', 'answer', 'cost']);
 
     const words = readFileSync(new URL('../../packages/web-ui/src/lib/access-trail-words.ts', import.meta.url), 'utf8');
+    // The word the view shows is the one its key in WORDS gives: the route stays on that key.
+    const key = /^\t'GET \/api\/history\/runs': '([a-z_]+)',$/m.exec(words)?.[1];
+    expect(key).toBe('history_runs');
     const declared = /'GET \/api\/history\/runs': \[([^\]]*)\],/.exec(words)?.[1]?.match(/'([a-z_]+)'/g)?.map((q) => q.slice(1, -1)) ?? [];
     for (const k of carried) expect(declared, k.kind).toContain(k.kind);
     const i18n = readFileSync(new URL('../../packages/web-ui/src/lib/i18n.svelte.ts', import.meta.url), 'utf8');
-    const line = i18n.split('\n').find((l) => l.includes("'access_trail.read.history_runs':")) ?? '';
+    const line = i18n.split('\n').find((l) => l.includes(`'access_trail.read.${key ?? ''}':`)) ?? '';
     const de = /de: '([^']*)'/.exec(line)?.[1] ?? '';
     const en = /en: '([^']*)'/.exec(line)?.[1] ?? '';
     for (const k of carried) {

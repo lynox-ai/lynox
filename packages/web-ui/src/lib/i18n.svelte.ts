@@ -2294,7 +2294,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.read.run_tool_calls': { de: 'Werkzeugaufrufe eines Laufs mit Ein- und Ausgaben', en: 'Tool calls of a run with their inputs and outputs' },
 	'access_trail.read.file_read': { de: 'Inhalt einer Datei', en: 'Content of a file' },
 	'access_trail.read.file_download': { de: 'Download einer Datei', en: 'Download of a file' },
-	'access_trail.read.workflow': { de: 'Ein Workflow-Lauf mit Schritten und Aufträgen', en: 'A workflow run with its steps and tasks' },
+	'access_trail.read.workflow': { de: 'Ein Workflow-Lauf mit Schritten und Aufträgen', en: 'A workflow run with its steps and instructions' },
 	'access_trail.read.workflow_steps': { de: 'Ergebnisse der Schritte eines Workflow-Laufs', en: 'Step results of a workflow run' },
 	'access_trail.read.artifact': { de: 'Ein Artefakt', en: 'An artifact' },
 	'access_trail.read.kg_entity': { de: 'Ein Eintrag im Wissensgraphen', en: 'A knowledge graph entry' },
