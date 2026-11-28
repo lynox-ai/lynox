@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -66,6 +66,92 @@ describe('AgentMemoryDb', () => {
       const after = (check.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v;
       check.close();
       expect(after).toBe(latest - 1); // rolled back to the pre-migration version
+    });
+
+    it('rolls back the v9 stamp when its table is already there', () => {
+      // The newest migration, v9, creates `untrusted_lines`: with its stamp gone and the table
+      // left, re-running it throws, and the file stays at v8.
+      const path = join(tempDir, 'rollback-v9.db');
+      const fresh = new AgentMemoryDb(path);
+      fresh.setEmbeddingDimensions(3);
+      fresh.close();
+      const raw = new Database(path);
+      expect((raw.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v, 'a fresh file is at v9').toBe(9);
+      raw.prepare('DELETE FROM schema_version WHERE version >= 9').run();
+      raw.close();
+
+      expect(() => new AgentMemoryDb(path)).toThrow();
+
+      const check = new Database(path);
+      const after = (check.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v;
+      check.close();
+      expect(after).toBe(8);
+    });
+
+    it('brings a file from v8 (the relations move, no untrusted_lines) to v9, keeping its rows, and a second start changes nothing', () => {
+      const path = join(tempDir, 'upgrade-v8.db');
+      const fresh = new AgentMemoryDb(path);
+      fresh.setEmbeddingDimensions(3);
+      fresh.createEntity({ canonicalName: 'Kept', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
+      fresh.close();
+      // A file as v8 leaves it: `origin_memory_id` on relations, no `untrusted_lines`, stamped 8.
+      const raw = new Database(path);
+      raw.exec('DROP TABLE untrusted_lines');
+      raw.prepare('DELETE FROM schema_version WHERE version = 9').run();
+      const columns = (raw.prepare('PRAGMA table_info(relations)').all() as Array<{ name: string }>).map((c) => c.name);
+      expect(columns, 'the v8 shape').toContain('origin_memory_id');
+      const tablesOf = (d: Database.Database): string[] => (d.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
+      const before = { tables: tablesOf(raw), entities: raw.prepare('SELECT * FROM entities ORDER BY id').all() };
+      expect(before.tables).not.toContain('untrusted_lines');
+      raw.close();
+
+      const state = (): { version: number; tables: string[]; entities: unknown[] } => {
+        const d = new Database(path);
+        try {
+          return {
+            version: (d.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v,
+            tables: tablesOf(d),
+            entities: d.prepare('SELECT * FROM entities ORDER BY id').all(),
+          };
+        } finally { d.close(); }
+      };
+      const upgraded = new AgentMemoryDb(path);
+      upgraded.close();
+      const first = state();
+      expect(first.version).toBe(9);
+      expect(first.tables).toEqual([...before.tables, 'untrusted_lines'].sort());
+      expect(first.entities, 'rows unchanged').toEqual(before.entities);
+
+      const again = new AgentMemoryDb(path);
+      again.close();
+      expect(state(), 'a second start changes nothing').toEqual(first);
+    });
+
+    it('counts the relations it moves only on the step to v8, not on the step from v8 to v9', () => {
+      const CHAIN_LOG = '[lynox:memory] agent-memory.db: relations of replaced memories moved';
+      const startLogs = (path: string): string[] => {
+        const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          new AgentMemoryDb(path).close();
+          return spy.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith(CHAIN_LOG));
+        } finally { spy.mockRestore(); }
+      };
+      // A file at v7: before the relations move, so without `origin_memory_id`.
+      const v7 = join(tempDir, 'at-v7.db');
+      new AgentMemoryDb(v7).close();
+      let raw = new Database(v7);
+      raw.exec('DROP TABLE untrusted_lines; DROP INDEX idx_relations_origin; ALTER TABLE relations DROP COLUMN origin_memory_id');
+      raw.prepare('DELETE FROM schema_version WHERE version >= 8').run();
+      raw.close();
+      expect(startLogs(v7), 'v7 → v9 counts once, before the move').toHaveLength(1);
+      // A file at v8: the move is done, so v9 alone runs and counts nothing.
+      const v8 = join(tempDir, 'at-v8.db');
+      new AgentMemoryDb(v8).close();
+      raw = new Database(v8);
+      raw.exec('DROP TABLE untrusted_lines');
+      raw.prepare('DELETE FROM schema_version WHERE version = 9').run();
+      raw.close();
+      expect(startLogs(v8), 'v8 → v9').toEqual([]);
     });
 
     it('idempotent init', () => {

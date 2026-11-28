@@ -6,7 +6,7 @@ import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, bulkLabelParts, bulkUndoApproveText, bulkUndoExplainText,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
-	bulkSentenceParts, bulkSecretInContextKey, bulkListUnread,
+	bulkSentenceParts, bulkSecretInContextKey, bulkListUnread, bulkFieldShapeText,
 	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
 	bulkRefusalText, bulkRefusalSentence, BULK_REFUSAL_KINDS,
 } from './bulk-runs.js';
@@ -506,9 +506,14 @@ describe('going on from a run that halted', () => {
 		}
 		// The words decided for the page, one of each kind.
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete' }, DE)!.cause)
-			.toBe('lynox konnte nicht alles zurücknehmen. Bei den markierten Zielen hat lynox die Änderung nicht zurückgenommen. Prüf sie und korrigiere sie falls nötig von Hand.');
+			.toBe('lynox konnte nicht alles zurücknehmen. Bei den Zielen mit der Marke „nicht zurückgenommen“ hat lynox die Änderung nicht zurückgenommen. Prüf sie und korrigiere sie falls nötig von Hand.');
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicTimeRollbackIncomplete' }, EN)!.cause)
-			.toBe('The time for this run ran out. lynox could not take everything back. lynox did not take the change back on the marked targets. Check them and correct them by hand if needed.');
+			.toBe('The time for this run ran out. lynox could not take everything back. On the targets marked “not taken back”, lynox did not take the change back. Check them and correct them by hand if needed.');
+		// The sentence points at the mark „not taken back“ by its name, in every form: a target taken back carries a mark too.
+		for (const haltKey of ['atomicRollbackIncomplete', 'atomicStoppedRollbackIncomplete', 'atomicTimeRollbackIncomplete']) {
+			expect(bulkRollbackText({ phase: 'aborted', haltKey }, DE)!.cause, haltKey).toContain('Bei den Zielen mit der Marke „nicht zurückgenommen“ hat lynox die Änderung nicht zurückgenommen.');
+			expect(bulkRollbackText({ phase: 'aborted', haltKey }, EN)!.cause, haltKey).toContain('On the targets marked “not taken back”, lynox did not take the change back.');
+		}
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicTimeRolledBack' }, DE)!.cause.startsWith('Die Zeit für diesen Lauf ist abgelaufen. ')).toBe(true);
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicStoppedRolledBack' }, EN)!.cause)
 			.toBe('The run was stopped. Because it is meant to apply completely or not at all, lynox took everything back. Nothing is changed.');
@@ -725,14 +730,14 @@ describe('going on from a run that halted', () => {
 			.toBe('You can continue. If the run halts again right away, shop.example.invalid or the AI model is not answering yet; try again later.');
 		expect(bulkHaltText(at('unrecorded'), true, EN, true)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE, true)?.cause)
-			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, angerechnet sind 0.0034 USD.');
+			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00\u00a0USD, angerechnet sind 0.0034\u00a0USD.');
 		// What counts toward the limit, not what was paid: a judge call without an answer counts at
 		// its worst case (ux U-174).
 		expect([de['bulk.halt.costCap'], en['bulk.halt.costCap'], de['bulk.halt.costCap_mandate'], en['bulk.halt.costCap_mandate']]).toEqual([
-			'Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: {cap} USD, angerechnet sind {spent} USD.',
-			'The run reached the AI cost limit you set at its start: {cap} USD, with {spent} USD counted toward it.',
-			'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap} USD, angerechnet sind {spent} USD.',
-			'The run reached the AI cost limit the owner set at its start: {cap} USD, with {spent} USD counted toward it.',
+			'Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: {cap}\u00a0USD, angerechnet sind {spent}\u00a0USD.',
+			'The run reached the AI cost limit you set at its start: {cap}\u00a0USD, with {spent}\u00a0USD counted toward it.',
+			'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap}\u00a0USD, angerechnet sind {spent}\u00a0USD.',
+			'The run reached the AI cost limit the owner set at its start: {cap}\u00a0USD, with {spent}\u00a0USD counted toward it.',
 		]);
 		expect(bulkHaltText(at('blocked'), true, DE, true)).toEqual({
 			cause: 'Deine Instanz darf shop.example.invalid nicht erreichen.',
@@ -1665,7 +1670,7 @@ describe('what the preview says about a target lynox leaves out', () => {
 	it('holds the released link sentences word for word, in both languages', () => {
 		const released: [string, string, string][] = [
 			["new_link_domain", "Der neue Text verweist auf eine Domain, auf die dieses Produkt bisher nicht verweist: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf ohne diesen Verweis neu zu planen. Gehört er so hinein, schreib den Text von Hand {where}.", "The new text points to a domain this product did not point to before: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. lynox does not write the text. Ask lynox in the chat to plan the run again without it. If it belongs there as it is, write the text by hand {where}."],
-			["new_link_domain_judged", "Der neue Text verweist auf eine Domain, auf die dieses Produkt bisher nicht verweist und die nicht unter den erlaubten Link-Domains des Laufs steht: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf neu zu planen: ohne diesen Verweis, oder, wenn er so hineingehört, mit der Domain unter „Erlaubte Link-Domains“, die du beim Start des Beurteilens einträgst. Du kannst den Text auch von Hand schreiben {where}.", "The new text points to a domain this product did not point to before and that is not among the run's allowed link domains: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. lynox does not write the text. Ask lynox in the chat to plan the run again: without it, or, if it belongs there as it is, with the domain added under “Allowed link domains” when you start judging. You can also write the text by hand {where}."],
+			["new_link_domain_judged", "Der neue Text verweist auf eine Domain, auf die dieses Produkt bisher nicht verweist und die nicht unter den erlaubten Link-Domains des Laufs steht: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf neu zu planen: ohne diesen Verweis, oder, wenn er so hineingehört, mit der Domain unter „Erlaubte Link-Domains“, die du beim Start der Beurteilung einträgst. Du kannst den Text auch von Hand schreiben {where}.", "The new text points to a domain this product did not point to before and that is not among the run's allowed link domains: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. lynox does not write the text. Ask lynox in the chat to plan the run again: without it, or, if it belongs there as it is, with the domain added under “Allowed link domains” when you start judging. You can also write the text by hand {where}."],
 			["url_scheme", "Der neue Text enthält eine Adresse, die kein gewöhnlicher Web- oder Mail-Link ist, etwa „javascript:“, oder in einem Shortcode einen Wert mit Doppelpunkt wie „a:b“. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf ohne diese Adresse neu zu planen. Gehört der Wert so in den Shortcode, schreib den Text von Hand {where}.", "The new text contains an address that is not a plain web or mail link, such as “javascript:”, or a value with a colon in a shortcode, such as “a:b”. lynox does not write it. Ask lynox in the chat to plan the run again without this address. If the value belongs in the shortcode as it is, write the text by hand {where}."],
 			["url_control_char", "Der neue Text enthält in einer Adresse oder einem Shortcode-Wert unsichtbare Steuerzeichen, das Ersatzzeichen � oder einen Backslash \\, oder eine Mail-Adresse mit Leerzeichen. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf neu zu planen, und sag dazu, dass Adressen und Shortcode-Werte keine solchen Zeichen und Mail-Adressen keine Leerzeichen enthalten sollen.", "The new text contains invisible control characters, the replacement character � or a backslash \\ in an address or a shortcode value, or a mail address with a space. lynox does not write it. Ask lynox in the chat to plan the run again and say that addresses and shortcode values must not contain such characters, and mail addresses no spaces."],
 		];
@@ -1982,7 +1987,7 @@ describe('the sentences the page words by the list\'s form, the judge and the re
 	it('names a refused link\'s domain in both sentences and languages, and falls back to the sentence without it (U-311)', () => {
 		const named = { de: 'Der neue Text verweist auf „fremd.example“, eine Domain, auf die dieses Produkt bisher nicht verweist: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. Gibt es weitere solche Verweise, nennt lynox sie erst, wenn du den Lauf neu planen lässt. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf ohne diesen Verweis neu zu planen. Gehört er so hinein, schreib den Text von Hand im Shopify-Admin.',
 			en: 'The new text points to “fremd.example”, a domain this product did not point to before: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. If there are more such references, lynox names them only once you have the run planned again. lynox does not write the text. Ask lynox in the chat to plan the run again without it. If it belongs there as it is, write the text by hand in the Shopify admin.' };
-		const judgedNamed = { de: 'Der neue Text verweist auf „fremd.example“, eine Domain, auf die dieses Produkt bisher nicht verweist und die nicht unter den erlaubten Link-Domains des Laufs steht: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. Gibt es weitere solche Verweise, nennt lynox sie erst, wenn du den Lauf neu planen lässt. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf neu zu planen: ohne diesen Verweis, oder, wenn er so hineingehört, mit „fremd.example“ unter „Erlaubte Link-Domains“, die du beim Start des Beurteilens einträgst. Du kannst den Text auch von Hand schreiben im Shopify-Admin.',
+		const judgedNamed = { de: 'Der neue Text verweist auf „fremd.example“, eine Domain, auf die dieses Produkt bisher nicht verweist und die nicht unter den erlaubten Link-Domains des Laufs steht: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. Gibt es weitere solche Verweise, nennt lynox sie erst, wenn du den Lauf neu planen lässt. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf neu zu planen: ohne diesen Verweis, oder, wenn er so hineingehört, mit „fremd.example“ unter „Erlaubte Link-Domains“, die du beim Start der Beurteilung einträgst. Du kannst den Text auch von Hand schreiben im Shopify-Admin.',
 			en: 'The new text points to “fremd.example”, a domain this product did not point to before and that is not among the run\'s allowed link domains: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. If there are more such references, lynox names them only once you have the run planned again. lynox does not write the text. Ask lynox in the chat to plan the run again: without it, or, if it belongs there as it is, with “fremd.example” added under “Allowed link domains” when you start judging. You can also write the text by hand in the Shopify admin.' };
 		const linkDomain = 'fremd.example';
 		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ linkDomain }))).toBe(named.de);
@@ -2194,6 +2199,23 @@ describe('bulkSecretInContextKey', () => {
 	});
 });
 
+// A schema arrives as JSON, where -0 survives `JSON.parse`; the shape reads 0, as it did before
+// numbers were formatted in the UI language. So does a negative value too small to show, while a
+// negative bound keeps its sign.
+describe('bulkFieldShapeText with a negative zero or a negative bound', () => {
+	const words: BulkI18n = { t: (k) => k, tf: (k, v) => `${k}:${Object.values(v).join('|')}` };
+	it('reads a schema\'s -0 as 0 in both UI languages', () => {
+		const shape = JSON.parse('{"type":"integer","minimum":-0,"maximum":9}') as unknown;
+		expect(Object.is((shape as { minimum: number }).minimum, -0)).toBe(true);
+		expect(bulkFieldShapeText(shape, words, 'de-CH')).toBe('bulk.shape.integer_range:0|9');
+		expect(bulkFieldShapeText(shape, words, 'en-GB')).toBe('bulk.shape.integer_range:0|9');
+	});
+	it('reads a negative value too small to show as 0, and keeps the sign of a negative bound', () => {
+		expect(bulkFieldShapeText({ type: 'number', minimum: -1e-30, maximum: 1 }, words, 'de-CH')).toBe('bulk.shape.number_range:0|1');
+		expect(bulkFieldShapeText({ type: 'number', minimum: -5, maximum: -0.5 }, words, 'en-GB')).toBe('bulk.shape.number_range:-5|-0.5');
+	});
+});
+
 // A start refused because the run's rule came from a saved artifact that changed, is gone or
 // cannot be read now, and the sentence under such a rule: the page words each itself, and names
 // the artifact by the title it had at planning, a value an access can write.
@@ -2224,7 +2246,7 @@ describe('the sentences about a rule taken from a saved artifact', () => {
 	// the sentence says the rule was taken when the run was planned, with no pointer to Artifacts (U-461).
 	it('says at a restart and at the approval that the rule was taken when the run was planned, word for word', () => {
 		const fr = 'Prüf, ob sie sagt, was du willst, bevor du die Beurteilung fortsetzt.';
-		const fe = 'Check that it says what you want before you continue the judging.';
+		const fe = 'Check that it says what you want before you continue judging.';
 		const ar = 'Prüf, ob sie sagt, was du willst, bevor du freigibst.';
 		const ae = 'Check that it says what you want before you approve.';
 		expect([de['bulk.restart.rule_from_artifact'], en['bulk.restart.rule_from_artifact']]).toEqual([`Diese Regel wurde beim Planen wörtlich aus {title} übernommen. ${fr}`, `This rule was taken word for word from {title} when the run was planned. ${fe}`]);
@@ -2346,5 +2368,71 @@ describe('the sentence for an answer the rule refused', () => {
 		);
 		// A Shopify run keeps its own sentence about the product.
 		expect(bulkInvalidText('verdict_invalid', true, true, EN)).toBe(en['bulk.invalid.verdict_invalid']);
+	});
+});
+
+// The step that decides each target's values has one name: „Beurteilung“ / "judging" (U-339).
+// „Urteil“ stays for the result of one target. A sweep over every bulk sentence, so a sentence
+// that arrives later with another word for the step fails here, not in a review.
+describe('every bulk sentence names the judging step with one word', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const Q = String.raw`'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"`;
+	// Some keys are aligned with more than one space before their brace.
+	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.[^']+)':\s+\{ de: (?:${Q}), en: (?:${Q}) \},$`);
+	const KEY = /^\s*'(bulk\.[^']+)':\s+\{/;
+	const read = (lines: readonly string[]): Record<string, { de: string; en: string }> => {
+		const out: Record<string, { de: string; en: string }> = {};
+		for (const l of lines) {
+			const m = ENTRY.exec(l);
+			if (m) out[m[1]!] = { de: (m[2] ?? m[3])!, en: (m[4] ?? m[5])! };
+		}
+		return out;
+	};
+	const sentences = read(source.split('\n'));
+	// „urteilt“ only as a word of its own, so „beurteilt“ passes; „bewertet“ in any case.
+	const banned = (s: { de: string; en: string }): string[] => [
+		...(/(?<!\p{L})urteilt/u.test(s.de) ? ['urteilt'] : []),
+		...(/(?<!\p{L})[Bb]ewertet/u.test(s.de) ? ['bewertet'] : []),
+		...(/the judging/.test(s.en) ? ['the judging'] : []),
+	];
+
+	it('reads every bulk sentence of the table, one line each, as many as a plain count of the keys finds', () => {
+		const lines = source.split('\n');
+		const keys = lines.flatMap((l) => KEY.exec(l)?.[1] ?? []);
+		// A count that knows nothing of the format: every line that starts with a bulk key.
+		const counted = lines.filter((l) => /^\s*'bulk\./.test(l)).length;
+		expect(keys.length).toBeGreaterThan(500);
+		expect(keys.length).toBe(counted);
+		expect(Object.keys(sentences).length).toBe(counted);
+		expect(Object.keys(sentences).sort()).toEqual([...new Set(keys)].sort());
+	});
+
+	it('reads an aligned line and one in double quotes with an escape', () => {
+		expect(read([
+			"\t'bulk.x.aligned':        { de: 'ausgerichtet', en: 'aligned' },",
+			`\t'bulk.x.quoted': { de: "Er sagt \\"nein\\" und es\\'s", en: "it\\'s" },`,
+		])).toEqual({
+			'bulk.x.aligned': { de: 'ausgerichtet', en: 'aligned' },
+			'bulk.x.quoted': { de: 'Er sagt \\"nein\\" und es\\\'s', en: "it\\'s" },
+		});
+	});
+
+	it('says neither „urteilt“ nor „bewertet“ in German, nor "the judging" in English, in any bulk sentence', () => {
+		expect(Object.entries(sentences).flatMap(([k, s]) => banned(s).map((w) => `${k}: ${w}`))).toEqual([]);
+	});
+
+	it('catches each word it bans, and lets „beurteilt“ and „Urteil“ pass', () => {
+		expect(banned({ de: 'lynox urteilt …', en: '' })).toEqual(['urteilt']);
+		expect(banned({ de: 'Bewertet wurde nichts.', en: '' })).toEqual(['bewertet']);
+		expect(banned({ de: 'nichts bewertet', en: '' })).toEqual(['bewertet']);
+		expect(banned({ de: '', en: 'before you start the judging.' })).toEqual(['the judging']);
+		expect(banned({ de: 'lynox beurteilt die Ziele … das Urteil steht', en: 'start judging' })).toEqual([]);
+	});
+
+	it('words the sentences bound for the working line, an unreadable rule and a missing model', () => {
+		expect(sentences['bulk.working.judge']!.de).toBe('lynox beurteilt die Ziele … {k} von {n}');
+		expect(sentences['bulk.working.judge_open']!.de).toBe('lynox beurteilt die Ziele …');
+		expect(sentences['bulk.rule_source.unreadable']!.de).toContain(' Beurteilt wurde nichts. ');
+		expect(sentences['bulk.start.no_judge_model']!.en).toMatch(/^No AI model is available right now to judge the targets of this run, so it cannot be started\. /);
 	});
 });

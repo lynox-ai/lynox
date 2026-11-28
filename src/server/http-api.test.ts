@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, o
 import { recipientConfirmDigest } from '../core/recipient-confirm.js';
 import { CP_ADMIN_PRINCIPAL, principalFromTag, principalTag, OWNER_PRINCIPAL, ownerInstructionCounts, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartTokenV2 } from '../contract/broker-start.js';
-import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
+import { exportMaskValues, maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
@@ -35,6 +35,7 @@ import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { getModelId } from '../types/index.js';
 import type { MailConnectPromptData } from '../types/agent.js';
+import { RunAbortedError } from '../core/agent.js';
 import { AuditLog } from '../core/audit-log.js';
 import { CpRefusalTally, CpTrail } from '../core/cp-trail.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
@@ -295,6 +296,7 @@ const mockSessionInstance = {
   getModelTier: vi.fn().mockReturnValue('balanced'),
   getChangesetManager: vi.fn().mockReturnValue(null),
   getLastRunUsage: vi.fn().mockReturnValue(null),
+  getLastRunNotice: vi.fn().mockReturnValue(undefined),
   getAgent: vi.fn().mockReturnValue(null),
   sessionId: 'mock-session-id',
 };
@@ -368,6 +370,12 @@ vi.mock('../core/engine.js', () => ({
       containsSecret: mockSecretContains,
       maskSecrets: mockSecretMask,
       maskAll: mockSecretMask,
+      // The export's masker (`SecretStore.exportGuard`), over the same value list and its written forms.
+      exportGuard: () => ({
+        mask: (t: string) => maskSecretsAndPatterns(t, exportMaskValues(mockStoreValues)),
+        holds: () => false,
+        maxNeedle: 0,
+      }),
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       // No workflow run in this history: every id is a chat's own (register 1112).
@@ -611,6 +619,8 @@ vi.mock('../tools/builtin/pipeline.js', async (importActual) => {
     getPipeline: mockGetPipeline,
     workflowRunTrail: actual.workflowRunTrail,
     WORKFLOW_RUN_UNRECORDED_RESULT: actual.WORKFLOW_RUN_UNRECORDED_RESULT,
+    // The chat delete forgets the deleted chat's retry outputs (thread-delete-provenance.test.ts).
+    forgetExecutedStatesOfChat: actual.forgetExecutedStatesOfChat,
   };
 });
 
@@ -1029,6 +1039,201 @@ describe('LynoxHTTPApi', () => {
       } finally {
         await own.shutdown();
       }
+    });
+  });
+
+  describe('shutdown with a run whose client is gone', () => {
+    type Slot = { streamAlive: boolean; takeover: (reason: string) => void; lastEventAt: number };
+    const slotsOf = (a: LynoxHTTPApi): Map<string, Slot> => (a as unknown as { runningSessions: Map<string, Slot> }).runningSessions;
+    const engineOf = (a: LynoxHTTPApi): { shutdown: ReturnType<typeof vi.fn>; getRunRegistry: ReturnType<typeof vi.fn>; getPromptStore: () => unknown } =>
+      (a as unknown as { engine: { shutdown: ReturnType<typeof vi.fn>; getRunRegistry: ReturnType<typeof vi.fn>; getPromptStore: () => unknown } }).engine;
+
+    /** Its own instance, on a real registry of live runs and a real prompt store, with a key for
+     *  the provider (so a run passes the check for one). `down` shuts it down once. */
+    async function bootOwn(): Promise<{
+      own: LynoxHTTPApi;
+      registry: InstanceType<typeof import('../core/run-registry.js').RunRegistry>;
+      prompts: InstanceType<typeof import('../core/prompt-store.js').PromptStore>;
+      reboot: () => InstanceType<typeof import('../core/run-registry.js').RunRegistry>;
+      down: () => Promise<void>;
+      close: () => Promise<void>;
+    }> {
+      vi.stubEnv('ANTHROPIC_API_KEY', 'test-only-placeholder');
+      const { RunHistory } = await import('../core/run-history.js');
+      const { RunRegistry } = await import('../core/run-registry.js');
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const history = new RunHistory(':memory:');
+      const own = new LynoxHTTPApi();
+      let isDown = false;
+      const down = async (): Promise<void> => { if (!isDown) { isDown = true; await own.shutdown(); } };
+      await own.init();
+      await own.start(0);
+      const registry = new RunRegistry(history.getDb());
+      const prompts = new PromptStore(history.getDb());
+      const engine = engineOf(own) as unknown as { getRunRegistry: ReturnType<typeof vi.fn>; getPromptStore: () => unknown };
+      engine.getRunRegistry.mockReturnValue(registry);
+      engine.getPromptStore = (): unknown => prompts;
+      return {
+        own, registry, prompts, down,
+        // The boot after, on the same store.
+        reboot: () => new RunRegistry(history.getDb()),
+        close: async () => {
+          await down().catch(() => undefined);
+          history.close();
+          vi.stubEnv('ANTHROPIC_API_KEY', undefined);
+          // A once-implementation a test did not use must not reach the next one.
+          mockSessionRun.mockReset();
+          mockSessionRun.mockResolvedValue('Agent response');
+          mockSessionAbort.mockReset();
+        },
+      };
+    }
+
+    /**
+     * A run in `sid` that works until it is told to end, and whose client then goes away. The
+     * `endsOnStop`-th stop ends it: `aborted` throws as an aborted run does, `answered` returns
+     * an answer all the same, as a run whose last step does not stop on the abort.
+     */
+    async function headlessRun(own: LynoxHTTPApi, registry: { getByThread: (id: string) => { status: string } | undefined }, sid: string, endsAs: 'aborted' | 'answered', endsOnStop = 1): Promise<void> {
+      let end!: () => void;
+      mockSessionRun.mockImplementationOnce(() => new Promise((resolve, reject) => {
+        end = () => { if (endsAs === 'aborted') reject(new RunAbortedError()); else resolve('done'); };
+      }));
+      let stops = 0;
+      mockSessionAbort.mockImplementation(() => { if (++stops === endsOnStop) end(); });
+      const client = new AbortController();
+      // The run writes nothing, so the answer's head is not awaited: the request stays open.
+      const req = fetch(`http://127.0.0.1:${portOf(own)}/api/sessions/${sid}/run`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: 'go' }),
+        signal: client.signal,
+      }).catch(() => null);
+      await vi.waitFor(() => { expect(registry.getByThread(sid)?.status, 'positive control: the run started').toBe('running'); });
+      client.abort(); // the client goes away: the run goes on without it
+      await req;
+      await vi.waitFor(() => { expect(slotsOf(own).get(sid)?.streamAlive, 'positive control: its stream is gone').toBe(false); });
+    }
+
+    it('a run ended by shutdown frees its slot, keeps its row for the boot after, and that boot marks it interrupted', async () => {
+      const t = await bootOwn();
+      try {
+        await headlessRun(t.own, t.registry, 'headless-3', 'aborted');
+        let slotsAtEngineDown = -1;
+        engineOf(t.own).shutdown.mockImplementationOnce(async () => { slotsAtEngineDown = slotsOf(t.own).size; });
+        await t.down();
+        expect(slotsAtEngineDown, 'the slot was free before the engine shut down').toBe(0);
+        expect(t.registry.getByThread('headless-3')?.status, 'its row stays, as a crash leaves it').toBe('running');
+        const booted = t.reboot();
+        expect(booted.sweepInterrupted(), 'the boot sweep finds it').toBe(1);
+        expect(booted.getByThread('headless-3')?.status, 'the chat is told it was interrupted').toBe('interrupted');
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('a run told to end by shutdown that answers all the same leaves no row for the boot after', async () => {
+      const t = await bootOwn();
+      try {
+        await headlessRun(t.own, t.registry, 'headless-4', 'answered');
+        await t.down();
+        expect(slotsOf(t.own).size, 'positive control: its slot is free').toBe(0);
+        expect(t.registry.getByThread('headless-4'), 'an answered run is not offered again').toBeUndefined();
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('a run the user had stopped leaves no row for the boot after, though shutdown ends it too', async () => {
+      const t = await bootOwn();
+      try {
+        // The user's stop does not end it at once (a tool still unwinds); shutdown's does.
+        await headlessRun(t.own, t.registry, 'headless-6', 'aborted', 2);
+        slotsOf(t.own).get('headless-6')!.takeover('run_stopped');
+        expect(slotsOf(t.own).has('headless-6'), 'positive control: it is still ending').toBe(true);
+        await t.down();
+        expect(slotsOf(t.own).size, 'positive control: shutdown ended it').toBe(0);
+        expect(t.registry.getByThread('headless-6'), 'a stopped run is not offered again').toBeUndefined();
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('a run that reaches its slot after shutdown began is refused with 503, and nothing runs', async () => {
+      const t = await bootOwn();
+      try {
+        // Shutdown began while this request was still being set up.
+        (t.own as unknown as { _stopping: boolean })._stopping = true;
+        const res = await fetch(`http://127.0.0.1:${portOf(t.own)}/api/sessions/late-1/run`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task: 'go' }),
+        });
+        expect(res.status, 'refused').toBe(503);
+        const body = await res.json() as { error?: string };
+        expect(body.error, 'the client is told the message was not run').toBe('The instance is restarting, so the message was not run. Send it again in a moment.');
+        expect(slotsOf(t.own).has('late-1'), 'it took no slot').toBe(false);
+        expect(mockSessionRun, 'nothing ran').not.toHaveBeenCalled();
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('ending a run leaves the question a scheduled run is parked on in the same chat open', async () => {
+      const t = await bootOwn();
+      try {
+        // A scheduled run waits on its question in this chat, across the restart.
+        const parked = t.prompts.insertAskUser('headless-5', 'Which list?', undefined, undefined, undefined, undefined, 'trigger-1');
+        await headlessRun(t.own, t.registry, 'headless-5', 'aborted');
+        await t.down();
+        expect(slotsOf(t.own).size, 'positive control: the run was ended').toBe(0);
+        expect(t.prompts.getById(parked)?.status, 'the parked question stays open for the restart').toBe('pending');
+      } finally {
+        await t.close();
+      }
+    });
+
+    it('ends the run, waits until its slot is free, and only then shuts the engine down, on the same clock', async () => {
+      const own = new LynoxHTTPApi();
+      await own.init();
+      const slots = slotsOf(own);
+      const reasons: string[] = [];
+      let freedAt = 0;
+      slots.set('headless-1', {
+        streamAlive: false,
+        lastEventAt: Date.now(),
+        takeover: (reason) => {
+          reasons.push(reason);
+          // The run unwinds on the next turns of the loop, as a stopped run does.
+          setTimeout(() => { freedAt = performance.now(); slots.delete('headless-1'); }, 50);
+        },
+      });
+      let engineDownAt = 0;
+      engineOf(own).shutdown.mockImplementationOnce(async () => { engineDownAt = performance.now(); });
+      const began = Date.now();
+      await own.shutdown({ inboxBacklog: 'bounded' });
+      expect(reasons, 'the run is ended, as a restart ends it').toEqual(['process_restarted']);
+      expect(slots.size, 'its slot is free').toBe(0);
+      expect(engineDownAt, 'positive control: the engine was shut down').toBeGreaterThan(0);
+      expect(freedAt, 'the slot was free before the engine shut down').toBeLessThanOrEqual(engineDownAt);
+      const [opts] = engineOf(own).shutdown.mock.calls[0] as [{ inboxBacklog?: string; deadlineFrom?: number }];
+      expect(opts.inboxBacklog, 'the signal\'s bound reaches the engine').toBe('bounded');
+      expect(opts.deadlineFrom, 'the engine counts from when shutdown began, not from its own start').toBeLessThanOrEqual(began + 5);
+      expect(opts.deadlineFrom).toBeGreaterThanOrEqual(began - 5);
+    });
+
+    it('does not wait past its bound for a run that does not end', async () => {
+      const own = new LynoxHTTPApi();
+      await own.init();
+      const slots = slotsOf(own);
+      const takeover = vi.fn();
+      slots.set('headless-2', { streamAlive: false, lastEventAt: Date.now(), takeover });
+      const started = performance.now();
+      await own.shutdown();
+      expect(takeover, 'the run is told to end').toHaveBeenCalledWith('process_restarted');
+      expect(engineOf(own).shutdown, 'the engine is shut down all the same').toHaveBeenCalled();
+      expect(performance.now() - started, 'within the bound, not until the run ends').toBeLessThan(4_000);
+      slots.delete('headless-2');
     });
   });
 
@@ -3231,6 +3436,37 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('Approve the refund?');
     });
 
+    /** The `done` frame's data, parsed. */
+    function doneFrame(text: string): Record<string, unknown> {
+      const lines = text.split('\n');
+      const at = lines.findIndex((l) => l === 'event: done');
+      expect(at, 'a done frame').toBeGreaterThanOrEqual(0);
+      return JSON.parse(lines[at + 1]!.replace(/^data:\s*/, '')) as Record<string, unknown>;
+    }
+
+    it('done says when the result is lynox\'s own sentence, as the session reports it', async () => {
+      mockSessionRun.mockResolvedValueOnce('⚠ Request blocked by content policy: x. This request was not sent to the AI model.');
+      mockSessionInstance.getLastRunNotice.mockReturnValueOnce('content_refused');
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'x' }) });
+      expect(doneFrame(await res.text())).toMatchObject({ notice: 'content_refused' });
+    });
+
+    it('control: a model reply\'s done carries no notice', async () => {
+      mockSessionRun.mockResolvedValueOnce('Paris.');
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'capital of France' }) });
+      const done = doneFrame(await res.text());
+      expect(done['result']).toBe('Paris.');
+      expect('notice' in done).toBe(false);
+    });
+
+    it('a run that ended needing input carries no notice: its question may be the model\'s own words', async () => {
+      mockSessionRun.mockImplementationOnce(async () => { throw new InputRequiredError('Approve the refund?'); });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'refund' }) });
+      const done = doneFrame(await res.text());
+      expect(done['result']).toContain('Approve the refund?');
+      expect('notice' in done).toBe(false);
+    });
+
     it('echoes the run usage in the done event', async () => {
       // The done event carries getLastRunUsage() so the per-message footer
       // survives a lost turn_end frame (PR #518).
@@ -4037,6 +4273,41 @@ describe('LynoxHTTPApi', () => {
         engineRef.getPromptStore = originalGetPromptStore;
         runningSessions.delete('stale-1');
         db.close();
+      }
+    });
+
+    // A taken-over run whose tool ignores the stop for longer than the takeover waits (1 s): the
+    // follow-up is answered 409 like any busy session, and the chat asks again every few seconds
+    // (its busy wait), so the message goes once the old run has ended.
+    it('a follow-up whose taken-over run outlasts the wait gets a 409, and runs once the old run has ended', async () => {
+      const runningSessions = (api as unknown as {
+        runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>;
+      }).runningSessions;
+      let takeovers = 0;
+      try {
+        runningSessions.set('test', {
+          streamAlive: false,
+          lastEventAt: 0, // silent far past the stale window
+          takeover: () => {
+            takeovers++;
+            // Its tool ignores the stop: the run unwinds 1.5 s later, past the 1 s wait.
+            if (takeovers === 1) setTimeout(() => runningSessions.delete('test'), 1500);
+          },
+        });
+        const first = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'second' }) });
+        expect(first.status, 'the old run still ends: busy').toBe(409);
+        await first.text();
+        expect(takeovers, 'positive control: the old run was told to end').toBe(1);
+        expect(runningSessions.has('test'), 'the old run is still ending').toBe(true);
+        await vi.waitFor(() => { expect(runningSessions.has('test')).toBe(false); }, { timeout: 3000 });
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const next = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'second' }) });
+        expect(next.status, 'once it ended, the follow-up runs').toBe(200);
+        await next.text();
+        expect(mockSessionRun, 'the follow-up ran').toHaveBeenCalled();
+        expect(takeovers, 'the old run was told to end once, by the first follow-up; the second found its slot free').toBe(1);
+      } finally {
+        runningSessions.delete('test');
       }
     });
 
@@ -6965,9 +7236,9 @@ describe('LynoxHTTPApi', () => {
       mockGetApiStore.mockReturnValue({ getAll: () => [profile], importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
       try {
         const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
-        expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true });
+        expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true, connection: false });
         const one = await (await jsonFetch('/api/api-profiles/shop')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
-        expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true });
+        expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true, connection: false });
       } finally {
         mockGetApiStore.mockReturnValue(null);
       }
@@ -7074,7 +7345,7 @@ describe('LynoxHTTPApi', () => {
         mockGetApiStore.mockReturnValue({ getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES, get: () => PROFILES[3] });
         api.setPrincipalResolverForTesting(() => EVA);
         const body = await (await jsonFetch('/api/api-profiles/toms')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
-        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', connected_by_reader: false, account_withheld: true });
+        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', connected_by_reader: false, account_withheld: true, connection: true });
       });
 
       // The page cannot tell who reads it, so the engine says whether this reader gave the
@@ -7284,7 +7555,91 @@ describe('LynoxHTTPApi', () => {
       };
       try {
         expect(await mayConnect(true)).toEqual({ own: true, owners: false, others: false });
-        expect(await mayConnect(false)).toEqual({ own: true, owners: true, others: true });
+        // The owner starts on its own profile only: a connection on one a person with access set up would carry nothing.
+        expect(await mayConnect(false)).toEqual({ own: false, owners: true, others: false });
+      } finally {
+        eng['getMandateEnds'] = priorEnds;
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
+    // Whether the client pair is still withheld from the person who set an oauth2 profile up, so
+    // the page offers that person the first connect only once the owner released it. Nobody else
+    // gets the field: not another mandate, not the owner.
+    it.each([[true, false], [false, true]])('tells only the profile\'s author whether its client pair is withheld (released: %s)', async (released, withheld) => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const { releaseBinding } = await import('../core/profile-secret-view.js');
+      const store = new ApiStore();
+      const oauth = (id: string, author: string | undefined) => ({
+        id, name: id, base_url: 'https://api.bexio.com/3.0', description: 'd',
+        auth: { type: 'oauth2' as const, vault_keys: [`${id.toUpperCase()}_CLIENT_ID`, `${id.toUpperCase()}_CLIENT_SECRET`], oauth: { token_url: 'https://auth.bexio.com/token', client_id_key: `${id.toUpperCase()}_CLIENT_ID`, client_secret_key: `${id.toUpperCase()}_CLIENT_SECRET` } },
+        ...(author === undefined ? {} : { created_by: author }),
+      });
+      store.register(oauth('own', TAG));
+      store.register(oauth('owners', undefined));
+      store.register(oauth('others', 'mandate:someone-else@example.invalid'));
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((n: string) => (n.endsWith('_CLIENT_ID') || n.endsWith('_CLIENT_SECRET') ? 'stored' : null));
+      const eng = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const priorEnds = eng['getMandateEnds'];
+      const priorReleases = eng['getSecretReleases'];
+      eng['getMandateEnds'] = () => ({ isLive: (mid: string) => mid === 'TEST-MANDATE-1' });
+      eng['getSecretReleases'] = () => ({
+        releaseOf: (pid: string, author: string, name: string) => {
+          const p = store.get(pid);
+          if (!released || !p || p.created_by !== author) return undefined;
+          const binding = releaseBinding(p, name);
+          return binding === null || binding === undefined ? undefined : { binding, mandateId: 'TEST-MANDATE-1' };
+        },
+      });
+      const fields = async (asMandate: boolean): Promise<Record<string, unknown>> => {
+        const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
+        const res = await fetch(`${baseUrl}/api/api-profiles`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        const list = await res.json() as { profiles: Record<string, unknown>[] };
+        return Object.fromEntries(list.profiles.map((p) => [p['id'] as string, 'reader_client_withheld' in p ? p['reader_client_withheld'] : 'absent']));
+      };
+      try {
+        expect(await fields(true)).toEqual({ own: withheld, owners: 'absent', others: 'absent' });
+        expect(await fields(false)).toEqual({ own: 'absent', owners: 'absent', others: 'absent' });
+      } finally {
+        eng['getMandateEnds'] = priorEnds;
+        eng['getSecretReleases'] = priorReleases;
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
+    // Whether the owner's save would take a profile a person with access set up over: the page
+    // offers that way only there. The same condition the save asks (`ownerSaveHeldByMemberConnection`):
+    // held while that person's connection (or its revoked record) stands and their access lasts.
+    it('tells only the owner, per profile a person with access set up, whether the owner may take it over', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      const oauth = (id: string, author: string | undefined, grant?: Record<string, unknown>) => ({
+        id, name: id, base_url: `https://${id}.example/v1`, description: 'd',
+        auth: { type: 'oauth2' as const, oauth: { token_url: `https://${id}.example/token`, client_id_key: `${id.toUpperCase()}_CLIENT_ID`, client_secret_key: `${id.toUpperCase()}_CLIENT_SECRET` } },
+        ...(author === undefined ? {} : { created_by: author }),
+        ...(grant === undefined ? {} : { oauth_grant: grant }),
+      });
+      store.register(oauth('never', TAG) as never);
+      store.register(oauth('live', TAG, { state: 'connected', connected_by: TAG, connected_mandate_id: 'TEST-MANDATE-1' }) as never);
+      store.register(oauth('revoked', TAG, { state: 'revoked', connected_by: TAG, connected_mandate_id: 'TEST-MANDATE-1' }) as never);
+      store.register(oauth('ended', TAG, { state: 'connected', connected_by: TAG, connected_mandate_id: 'TEST-MANDATE-OLD' }) as never);
+      store.register(oauth('owners', undefined) as never);
+      mockGetApiStore.mockReturnValue(store);
+      const eng = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const priorEnds = eng['getMandateEnds'];
+      eng['getMandateEnds'] = () => ({ isLive: (mid: string) => mid === 'TEST-MANDATE-1' });
+      const fields = async (asMandate: boolean): Promise<Record<string, unknown>> => {
+        const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
+        const res = await fetch(`${baseUrl}/api/api-profiles`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        const list = await res.json() as { profiles: Record<string, unknown>[] };
+        return Object.fromEntries(list.profiles.map((p) => [p['id'] as string, 'owner_may_take_over' in p ? p['owner_may_take_over'] : 'absent']));
+      };
+      try {
+        expect(await fields(false)).toEqual({ never: true, live: false, revoked: false, ended: true, owners: 'absent' });
+        expect(await fields(true)).toEqual({ never: 'absent', live: 'absent', revoked: 'absent', ended: 'absent', owners: 'absent' });
       } finally {
         eng['getMandateEnds'] = priorEnds;
         mockGetApiStore.mockReturnValue(null);
@@ -7424,9 +7779,19 @@ describe('LynoxHTTPApi', () => {
       expect(r.state).toBeNull();
     });
 
-    it('control: the owner\'s session starts on a mandate\'s profile, signed as the owner', async () => {
-      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+    it('the owner\'s session does not start on a mandate\'s profile, and is told the way', async () => {
       const r = await connect(TAG, false, 'books', { lang: 'de-CH' });
+      // A connection the owner made here would carry nothing (`ownerConnectionCarries`): refused
+      // before anything goes to the provider, with the way to take the profile over.
+      expect(r.status).toBe(403);
+      expect(r.location ?? '').toBe('');
+      expect(r.state).toBeNull();
+      expect(r.text).toContain('A person with access set up this connection');
+    });
+
+    it('control: the owner\'s session starts on the owner\'s own profile, signed as the owner', async () => {
+      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const r = await connect(undefined, false, 'books', { lang: 'de-CH' });
       // Straight to the provider: the owner's session never gets the note page.
       expect(r.status).toBe(302);
       expect(r.text).not.toContain('data-connect-note');
@@ -7494,7 +7859,8 @@ describe('LynoxHTTPApi', () => {
         });
         const location = res.headers.get('location') ?? '';
         expect(location.includes('client-id-from-env')).toBe(sent);
-        expect(res.status).toBe(sent ? 302 : 409);
+        // The owner's session is refused on a profile a mandate wrote before the client id is read at all.
+        expect(res.status).toBe(sent ? 302 : 403);
       } finally {
         mockSecretIsEnvironment.mockReset();
         mockSecretIsEnvironment.mockReturnValue(false);
@@ -12694,7 +13060,7 @@ describe('LynoxHTTPApi', () => {
         const res = await fetch(`${baseUrl}/api/triggers`, { headers: { cookie: `lynox_session=${mandate}` } });
         expect(res.status).toBe(200);
         const asMandate = (await res.json()) as Flags;
-        expect(asMandate.triggers[0]!['last_run_result']).toBe(WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates);
+        expect(asMandate.triggers[0]!['last_run_result']).toBe(WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates('ended'));
         expect(JSON.stringify(asMandate)).not.toContain('jo@kanzlei.example');
         expect(JSON.stringify(asMandate)).not.toContain('shop-jo');
       });
@@ -14144,6 +14510,27 @@ describe('LynoxHTTPApi', () => {
       expect(due.map((d) => [d.id, d.effect, d.bulk_run_id])).toEqual([[`bulk-${id}`, 'bulk_apply', id]]);
 
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
+    });
+
+    it('sends a refused approval and a refused resume with their reason as the code the page words', async () => {
+      const id = planRun();
+      const checksum = bulkLedger.computeChecksum(id)!;
+      const approve = vi.spyOn(bulkLedger, 'approve').mockReturnValue({ ok: false, reason: 'shopify_off' });
+      const resume = vi.spyOn(bulkLedger, 'resume').mockReturnValue({ ok: false, reason: 'shopify_off' });
+      try {
+        const msg = 'Bulk runs on a Shopify store are switched off on this instance, so this run cannot be approved or resumed.';
+        for (const act of ['approve', 'resume']) {
+          const res = await jsonFetch(`/api/bulk/runs/${id}/${act}`, { method: 'POST', body: JSON.stringify({ checksum }) });
+          expect([act, res.status, await res.json()]).toEqual([act, 409, { error: msg, code: 'shopify_off' }]);
+        }
+        // A reason the table does not know keeps its generic refusal, with no code.
+        approve.mockReturnValue({ ok: false, reason: 'no_such_reason' } as unknown as ReturnType<typeof bulkLedger.approve>);
+        const unknown = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect([unknown.status, await unknown.json()]).toEqual([400, { error: 'Refused.' }]);
+      } finally {
+        approve.mockRestore();
+        resume.mockRestore();
+      }
     });
 
     it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb, and its filters as an empty set', async () => {
@@ -23325,6 +23712,35 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       expect(grant?.connected_mandate_id).toBeUndefined();
     });
 
+    // A connection the owner made on a profile a person with access set up would carry nothing
+    // (`ownerConnectionCarries`): the callback stores none, asked before the exchange and again
+    // just before the tokens are written.
+    it('stores no owner\'s consent on a profile a mandate set up, and spends no code', async () => {
+      const { cookie, store } = await arrange();
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      mockExchangeToken.mockClear();
+      const res = await complete(cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('A person with access set up this connection');
+      expect(mockExchangeToken).not.toHaveBeenCalled();
+      expect(mockSecretSet).not.toHaveBeenCalled();
+      expect(store.get(PROFILE)?.oauth_grant?.connected_by).toBeUndefined();
+    });
+
+    it('stores no owner\'s consent on a profile a mandate set up while the provider\'s page was open', async () => {
+      const { cookie, store } = await arrange();
+      const exchange = mockExchangeToken.getMockImplementation();
+      mockExchangeToken.mockImplementationOnce(async (...args: unknown[]) => {
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        return (exchange as (...a: unknown[]) => unknown)(...args);
+      });
+      const res = await complete(cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('A person with access set up this connection');
+      expect(mockSecretSet).not.toHaveBeenCalled();
+      expect(store.get(PROFILE)?.oauth_grant?.connected_by).toBeUndefined();
+    });
+
     it.each([
       ['the mandate has ended', TAG, false],
       ['the profile is no longer the mandate\'s', undefined, true],
@@ -23823,6 +24239,22 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       oauthProfileMayBeRenewedUnattended(saved!, false),
       'a user-authorized profile with no refresh token was cleared for an unattended client-credentials swap',
     ).toBe(false);
+  });
+
+  // Each path that connects a profile leaves a record `isConnection` reads as one; the record a
+  // save mints before anyone connected does not. A new connecting path that sets none of the
+  // fields it reads fails its own case here (and in the tool's).
+  it.each([
+    ['connected', JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 })],
+    ['no-refresh', JSON.stringify({ access_token: 'at-1', expires_in: 3600 })],
+  ])('a callback that leaves %s reads as a connection', async (state, tokenBody) => {
+    const { isConnection } = await import('../core/api-store.js');
+    const { cookie, store } = await arrange({ tokenBody });
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+    expect(res.status).toBe(200);
+    const grant = store.get(PROFILE)?.oauth_grant;
+    expect(grant?.state).toBe(state);
+    expect(isConnection(grant)).toBe(true);
   });
 
   /**

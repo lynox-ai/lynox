@@ -44,11 +44,13 @@ let svelte: SvelteClient;
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 
-/** Runs one turn whose stream is a `run_blocked` warning (with `reason`, when given) and `done`. */
-async function blockedTurn(reason: string | undefined): Promise<typeof import('../stores/chat.svelte.js')> {
+/** Runs one turn whose stream is a `run_blocked` warning (with `reason`, when given) and `done`
+ *  (with the engine's `notice`, when given). */
+async function blockedTurn(reason: string | undefined, notice?: string): Promise<typeof import('../stores/chat.svelte.js')> {
 	const enc = new TextEncoder();
 	const warning = { code: 'run_blocked', detail: ENGINE_SENTENCE, agent: 'lynox', ...(reason ? { reason } : {}) };
-	const body = `event: warning\ndata: ${JSON.stringify(warning)}\n\nevent: done\ndata: ${JSON.stringify({ result: `Run blocked: ${ENGINE_SENTENCE}` })}\n\n`;
+	const done = { result: `Run blocked: ${ENGINE_SENTENCE}`, ...(notice ? { notice } : {}) };
+	const body = `event: warning\ndata: ${JSON.stringify(warning)}\n\nevent: done\ndata: ${JSON.stringify(done)}\n\n`;
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
 		const url = String(input);
 		if (url.endsWith('/sessions')) return json({ sessionId: 'hold' });
@@ -123,6 +125,23 @@ describe('a run refused because nothing of the AI budget is free', () => {
 		expect(target.textContent?.split(ENGINE_SENTENCE).length).toBe(2);
 		const details = [...target.querySelectorAll('.font-mono')].map((el) => el.textContent ?? '');
 		expect(details.some((t) => t.includes(ENGINE_SENTENCE))).toBe(false);
+	});
+
+	it('stays one note when the engine also marks its result as its own sentence', async () => {
+		// The engine sends `notice: 'run_blocked'` for this run too. Kills: `done` turning that
+		// result into a lynox note of its own after the hold_exhausted note (two notes, the
+		// sentence twice).
+		const store = await blockedTurn('hold_exhausted', 'run_blocked');
+		const last = store.getMessages().at(-1);
+		expect(last?.note).toEqual({ code: 'hold_exhausted', detail: ENGINE_SENTENCE });
+		expect(last?.content ?? '').toBe('');
+		expect(last?.blocks?.some((b) => b.type === 'notice') ?? false).toBe(false);
+		await mountChat();
+		expect(target.querySelector('[data-engine-notice]')).toBeNull();
+		expect(target.querySelector('.ai-badge')).toBeNull();
+		expect(target.textContent?.split(DE).length).toBe(2);
+		expect(target.textContent?.split(TITLE_DE).length).toBe(2);
+		expect(target.textContent).not.toContain(ENGINE_SENTENCE);
 	});
 
 	it('a run_blocked without that reason stays a toast and the inline reply, as before', async () => {

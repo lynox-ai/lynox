@@ -82,7 +82,7 @@
 		// A completed plan that keeps its pause: the workflow whose takeover comes before a new plan,
 		// or null when none does (U-275 N6). Absent when the engine could not read it, or is older:
 		// the line then gives the condition.
-		paused_done_workflow?: { name: string | null } | null;
+		paused_done_workflow?: { name: string | null; refused?: 'foreign' | 'unreadable' } | null;
 		// Whose ended access paused it, for the owner only (a helper is not told about another's).
 		paused_who?: string[];
 		// How and when each of those accesses ended, for the owner only: the notices above the list.
@@ -359,14 +359,23 @@
 
 	// Which line a completed, paused plan gets (U-275 N6): its workflow's takeover first, by name;
 	// no workflow sentence; or, when the engine could not say, the condition as before.
-	function pausedDoneCase(trigger: Trigger): 'workflow' | 'none' | 'unknown' {
-		return trigger.paused_done_workflow === undefined ? 'unknown' : trigger.paused_done_workflow === null ? 'none' : 'workflow';
+	// `foreign` / `unreadable` (U-489): the engine says so only to a person with access, whose new
+	// plan on that workflow it would refuse; the owner reads `none` there.
+	function pausedDoneCase(trigger: Trigger): 'workflow' | 'none' | 'unknown' | 'foreign' | 'unreadable' {
+		const wf = trigger.paused_done_workflow;
+		if (wf !== undefined && wf !== null && wf.refused !== undefined && ownerActs) return 'none';
+		return wf === undefined ? 'unknown' : wf === null ? 'none' : wf.refused ?? 'workflow';
 	}
 	function pausedDoneHint(trigger: Trigger): string {
 		const wf = trigger.paused_done_workflow;
 		const takeover = { tab: t('hub.automation.workflows'), button: t('workflow_library.takeover.button') };
 		if (wf === undefined) return ownerActs ? tf('triggers.paused_done_hint', takeover) : t('triggers.paused_done_hint_helper');
 		if (wf === null) return t('triggers.paused_done_hint_none');
+		if (wf.refused !== undefined && !ownerActs) {
+			if (wf.refused === 'foreign') return wf.name === null ? t('triggers.paused_done_hint_foreign_its_workflow_helper') : tf('triggers.paused_done_hint_foreign_workflow_helper', { workflow: shownWhole(wf.name) });
+			return wf.name === null ? t('triggers.paused_done_hint_unreadable_its_workflow_helper') : tf('triggers.paused_done_hint_unreadable_workflow_helper', { workflow: shownWhole(wf.name) });
+		}
+		if (wf.refused !== undefined) return t('triggers.paused_done_hint_none');
 		// Without a name its workflow is "its workflow", in lynox's own words.
 		if (wf.name === null) return ownerActs ? tf('triggers.paused_done_hint_its_workflow', takeover) : t('triggers.paused_done_hint_its_workflow_helper');
 		return ownerActs ? tf('triggers.paused_done_hint_workflow', { ...takeover, workflow: shownWhole(wf.name) }) : tf('triggers.paused_done_hint_workflow_helper', { workflow: shownWhole(wf.name) });
@@ -817,10 +826,11 @@
 									{/if}
 								</div>
 							{/if}
-							{#if ownerActs && trigger.recipients_unconfirmed === true}
+							{#if ownerActs && trigger.recipients_unconfirmed === true && trigger.status !== 'completed'}
 								<!-- The engine does not count this trigger's instruction as the owner's, so its run
 								     sends to none of the recipients it names. The hint leads to the button; the
-								     button opens the instruction to confirm. -->
+								     button opens the instruction to confirm. Not at a completed plan: it has no
+								     run left for a confirmation to act on, as its switch is hidden there too. -->
 								<div class="mt-2 text-xs" data-recipients-unconfirmed>
 									<p class="text-warning">{t('recipients.unconfirmed_hint')}</p>
 									{#if confirmingRecipients[trigger.id]}

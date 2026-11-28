@@ -891,6 +891,7 @@ export class OAuthGraphProvider implements MailProvider {
       replyTo: toAddresses(msg.replyTo),
       subject: typeof msg.subject === 'string' ? msg.subject : '',
       date: Number.isNaN(received.getTime()) ? new Date() : received,
+      arrivedAt: Number.isNaN(received.getTime()) ? undefined : received,
       flags: flagsOf(msg),
       // Graph's own `bodyPreview`, rendered on the server: unlike `fetch`, it does
       // NOT pass through the hidden-text stripper. Same gap as the Gmail snippet.

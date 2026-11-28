@@ -139,6 +139,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       conversation_grants: { about: 'permissions you gave within a conversation' },
       tenants: { about: 'separate budgets an older version of the software could set up; current versions no longer write here' },
       deleted_threads: { about: 'which conversations were deleted, and when' },
+      deleted_chat_runs: { about: 'which runs and workflows belonged to a deleted conversation' },
       security_events: { about: 'security checks that stopped or flagged something' },
       threads: { about: 'older copy of your conversations, from before a software update' },
       thread_messages: { about: 'older copy of conversation messages, from before a software update' },
@@ -168,6 +169,9 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       memories: { about: 'remembered facts in the knowledge graph' },
       cooccurrences: { about: 'which ones appear together' },
       supersedes: { about: 'which fact replaced an older one' },
+      // Fingerprints, not text: part of the person's memory data. A move carries this table with
+      // the whole file (the migration bundle), not through this list.
+      untrusted_lines: { about: 'which remembered notes came from a source that was not checked (as fingerprints, without their text)' },
       metrics: { about: 'counters the software kept, for example how often reading people and companies from a remembered fact was refused' },
     },
     name: {

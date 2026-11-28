@@ -6,7 +6,7 @@ import { noticeLanguage } from './notice-language.js';
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, SAID_WORKFLOW_ID_MAX, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, eventModeRefusedReason, inQuotes, firstRunUnconfirmedReason,
-  type WorkerNotices,
+  MEMBER_ENDS, memberEndOfStatus, type WorkerNotices,
 } from './worker-notices.js';
 import { BULK_NOTICES, BULK_STORE_REACH_REFUSALS, bulkHaltForReaders, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
@@ -44,7 +44,7 @@ function workerSamples(n: WorkerNotices): Record<string, string> {
   return {
     consentManyTitle: n.consentManyTitle(4), consentManyBody: n.consentManyBody, consentOneTitle: n.consentOneTitle,
     consentOneBody: n.consentOneBody('Wochenbericht', true), failed: n.failed('E'), stoppedWith: n.stoppedWith('E'),
-    stopped: n.stopped, memberEndForMandates: n.memberEndForMandates, titleWithNote: n.titleWithNote('Wochenbericht'), chipRunAgain: n.chipRunAgain, chipRetry: n.chipRetry, chipExplain: n.chipExplain,
+    stopped: n.stopped, ...Object.fromEntries(MEMBER_ENDS.map((e) => [`memberEndForMandates.${e}`, n.memberEndForMandates(e)])), titleWithNote: n.titleWithNote('Wochenbericht'), chipRunAgain: n.chipRunAgain, chipRetry: n.chipRetry, chipExplain: n.chipExplain,
     containedResult: n.containedResult, containedQuestion: n.containedQuestion, containedQuestionInquiry: n.containedQuestionInquiry,
     workflowIncomplete: n.workflowIncomplete('Wochenbericht', 'failed'), errorLabel: n.errorLabel,
     affectedStepsLabel: n.affectedStepsLabel, writesLabel: n.writesLabel, workflowRef: n.workflowRef('r-1', 'w-1'),
@@ -118,11 +118,11 @@ const DE_WORKER: Readonly<Record<string, string>> = {
 const DE_HALT_REST: Readonly<Partial<Record<keyof typeof BULK_HALT_REASONS, string>>> = {
   checksum: 'Der Lauf hat sich seit der Freigabe geändert.',
   atomicRolledBack: 'Ein Ziel liess sich nicht schreiben; alle zuvor geschriebenen sind zurückgenommen. Geändert ist nichts.',
-  atomicRollbackIncomplete: 'Ein Ziel liess sich nicht schreiben, und das Zurücknehmen gelang nicht ganz. Die markierten Ziele unter Massenläufe von Hand prüfen.',
+  atomicRollbackIncomplete: 'Ein Ziel liess sich nicht schreiben, und das Zurücknehmen gelang nicht ganz. Ziele mit der Marke „nicht zurückgenommen“ unter Massenläufe von Hand prüfen.',
   atomicStoppedRolledBack: 'Von Hand gestoppt; alle zuvor geschriebenen Ziele sind zurückgenommen. Geändert ist nichts.',
-  atomicStoppedRollbackIncomplete: 'Von Hand gestoppt, und das Zurücknehmen gelang nicht ganz. Die markierten Ziele unter Massenläufe von Hand prüfen.',
+  atomicStoppedRollbackIncomplete: 'Von Hand gestoppt, und das Zurücknehmen gelang nicht ganz. Ziele mit der Marke „nicht zurückgenommen“ unter Massenläufe von Hand prüfen.',
   atomicTimeRolledBack: 'Zeitbudget aufgebraucht; alle zuvor geschriebenen Ziele sind zurückgenommen. Geändert ist nichts.',
-  atomicTimeRollbackIncomplete: 'Zeitbudget aufgebraucht, und das Zurücknehmen gelang nicht ganz. Die markierten Ziele unter Massenläufe von Hand prüfen.',
+  atomicTimeRollbackIncomplete: 'Zeitbudget aufgebraucht, und das Zurücknehmen gelang nicht ganz. Ziele mit der Marke „nicht zurückgenommen“ unter Massenläufe von Hand prüfen.',
   unrecorded: 'Ein Lesezugriff liess sich nicht im Protokoll der Instanz festhalten und wurde deshalb nicht gesendet.',
   runUnrecorded: 'Der Lauf liess sich nicht im Protokoll der Instanz festhalten; nichts gelesen, nichts geschrieben.',
   listed: 'Liste gelesen. Wartet, bis die Ziele geprüft sind und das Lesen gestartet wird.',
@@ -198,6 +198,41 @@ function bulkSamples(n: BulkNotices): Record<string, string> {
     bulkOff: n.bulkOff, previewEnded: n.previewEnded, judgeEnded: n.judgeEnded, writeError: n.writeError,
   };
 }
+
+describe('a grant\'s sentence for a run that noted the owner\'s member-connection lines (U-411 N3)', () => {
+  const rest = {
+    de: 'Eine Verbindung durfte er nicht nutzen, darum kann sein Ergebnis unvollständig sein. Wende dich an den Inhaber dieser Instanz.',
+    en: 'It was not allowed to use one of the connections, so its result may be incomplete. Contact the owner of this instance.',
+  };
+  it('leads with why the run ended, as its class only, in both languages', () => {
+    expect(MEMBER_ENDS.map((e) => WORKER_NOTICES.de.memberEndForMandates(e))).toEqual([
+      `Der Lauf ist fertig. ${rest.de}`,
+      `Der Lauf wurde gestoppt. ${rest.de}`,
+      `Der Lauf hat seine Kostengrenze erreicht und ist angehalten. ${rest.de}`,
+      `Der Lauf hat sein Rundenlimit erreicht und ist angehalten. ${rest.de}`,
+      `Eine Frage des Laufs blieb unbeantwortet, darum ist er beendet. ${rest.de}`,
+      `Der Lauf ist fehlgeschlagen. ${rest.de}`,
+      `Der Lauf hat sein Zeitlimit überschritten und wurde abgebrochen. ${rest.de}`,
+      `Der Lauf wurde unterbrochen. ${rest.de}`,
+      `Der Lauf ist beendet. ${rest.de}`,
+    ]);
+    expect(MEMBER_ENDS.map((e) => WORKER_NOTICES.en.memberEndForMandates(e))).toEqual([
+      `The run finished. ${rest.en}`,
+      `The run was stopped. ${rest.en}`,
+      `The run reached its cost ceiling and stopped. ${rest.en}`,
+      `The run reached its turn limit and stopped. ${rest.en}`,
+      `A question of the run went unanswered, so it ended. ${rest.en}`,
+      `The run failed. ${rest.en}`,
+      `The run exceeded its time limit and was cut off. ${rest.en}`,
+      `The run was interrupted. ${rest.en}`,
+      `The run ended. ${rest.en}`,
+    ]);
+  });
+  it('reads only a named stored status as its reason, and any other, a halt too, as ended, never as finished', () => {
+    expect(['success', 'stopped', 'failed', 'timeout', 'interrupted', 'halted', 'paused', '', null, undefined].map(memberEndOfStatus))
+      .toEqual(['finished', 'stopped', 'failed', 'timeout', 'interrupted', 'ended', 'ended', 'ended', 'ended', 'ended']);
+  });
+});
 
 describe('the notice tables', () => {
   // A sentence that is the same in both languages was not translated — except one that is the
