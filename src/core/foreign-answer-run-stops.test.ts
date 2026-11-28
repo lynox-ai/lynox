@@ -98,11 +98,11 @@ function boot(threads: Record<string, string> = {}): Proc {
 }
 
 /** A stamped agent plan Eva shaped (it runs for her), parked on a question. */
-function parkedPlan(p: Proc, over: { once?: boolean; nextRunAt?: string; createdBy?: string; webhook?: boolean } = {}): void {
+function parkedPlan(p: Proc, over: { once?: boolean; nextRunAt?: string; createdBy?: string; webhook?: boolean; cron?: string } = {}): void {
   const createdBy = over.createdBy ?? tag(EVA);
   p.history.insertTrigger({
     id: 'p', title: 'Weekly report', source: over.webhook === true ? 'webhook' : 'cron', effect: 'run_agent',
-    ...(over.once === true || over.webhook === true ? {} : { scheduleCron: CRON }),
+    ...(over.once === true || over.webhook === true ? {} : { scheduleCron: over.cron ?? CRON }),
     nextRunAt: over.nextRunAt ?? (over.once === true ? null : ahead()),
     confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner',
     createdBy, ...(createdBy === tag(EVA) ? { createdMandateId: `g-${EVA}` } : {}),
@@ -182,7 +182,7 @@ describe('a run that only an answer from another chat made due', () => {
     expect(p.turns, 'and the schedule did not run it again').toHaveLength(1);
   });
 
-  it('a run due on its own schedule (its time came while it waited) that finds such an answer runs its scheduled work', async () => {
+  it('a run due on its own schedule (the next time its last run recorded has come) that finds such an answer runs its scheduled work', async () => {
     const p = boot({ 'thread-owner': 'owner' });
     parkedPlan(p, { nextRunAt: PAST });
     answeredIn(p, 'thread-owner');
@@ -193,18 +193,56 @@ describe('a run that only an answer from another chat made due', () => {
     expect(row(p).last_run_result).not.toBe(`${FOREIGN_ANSWER_RESULT} ${FOREIGN_ANSWER_NEXT_RUN}`);
   });
 
+  /** The lease a process that died mid-run leaves: taken when the asking run started, never given back, run out. */
+  const deadLease = (p: Proc, since: string): void => {
+    p.db.prepare('UPDATE triggers SET lease_holder = ?, lease_since = ?, lease_until = ? WHERE id = ?')
+      .run('dead-process', since, new Date(Math.min(Date.parse(since) + 10 * 60_000, Date.now() - 1_000)).toISOString(), 'p');
+  };
+  const YEARLY = '0 9 1 1 *';
+
   it('after a process died while the run waited, the time that started it is not its own schedule: not run', async () => {
     const p = boot({ 'thread-owner': 'owner' });
-    parkedPlan(p, { nextRunAt: PAST });
-    // The dead process's lease: taken when the asking run started, after its time, never given back.
-    p.db.prepare('UPDATE triggers SET lease_holder = ?, lease_since = ?, lease_until = ? WHERE id = ?')
-      .run('dead-process', '2026-01-05T09:00:05.000Z', '2026-01-05T09:10:00.000Z', 'p');
+    const since = new Date(Date.now() - 60_000).toISOString();
+    // The asking run's time, just before it took its lease; the schedule's next one is a year on.
+    parkedPlan(p, { cron: YEARLY, nextRunAt: new Date(Date.now() - 65_000).toISOString() });
+    deadLease(p, since);
     answeredIn(p, 'thread-owner');
     await tick(p);
     await tick(p);
     expect(p.turns, 'not run').toEqual([]);
     expect(row(p).last_run_status).toBe('stopped');
+    expect(row(p).last_run_result).toBe(`${FOREIGN_ANSWER_RESULT} ${FOREIGN_ANSWER_NEXT_RUN}`);
     expect(Date.parse(row(p).next_run_at!), 'the schedule\'s own next run, ahead').toBeGreaterThan(Date.now());
+  });
+
+  it('after a process died while the run waited, and the schedule\'s next time came before the answer: that time runs', async () => {
+    const p = boot({ 'thread-owner': 'owner' });
+    // Asked on 1 January 2025; the dead run never recorded its end; 1 January 2026 has come since.
+    parkedPlan(p, { cron: YEARLY, nextRunAt: '2025-01-01T09:00:00.000Z' });
+    deadLease(p, '2025-01-01T09:00:05.000Z');
+    answeredIn(p, 'thread-owner');
+    await tick(p);
+    await tick(p);
+    expect(p.turns, 'the schedule\'s own run ran').toHaveLength(1);
+    expect(p.turns[0], 'without the answer').not.toContain('Last week.');
+    expect(row(p).last_run_status).not.toBe('stopped');
+  });
+
+  it('while the asking run still holds a live lease, the re-arm does not mark: a later run due on its own runs', async () => {
+    const p = boot({ 'thread-owner': 'owner' });
+    parkedPlan(p, { nextRunAt: new Date(Date.now() - 65_000).toISOString() });
+    // The asking run is alive (in this process or another): its lease runs on.
+    p.db.prepare('UPDATE triggers SET lease_holder = ?, lease_since = ?, lease_until = ? WHERE id = ?')
+      .run('live-run', new Date(Date.now() - 60_000).toISOString(), new Date(Date.now() + 10 * 60_000).toISOString(), 'p');
+    answeredIn(p, 'thread-owner');
+    await tick(p);
+    expect(p.turns, 'held by the live run').toEqual([]);
+    // That run ends: its lease is given back, and the row's next own time has come.
+    p.db.prepare('UPDATE triggers SET lease_holder = NULL, lease_since = NULL, lease_until = NULL, next_run_at = ? WHERE id = ?')
+      .run(new Date(Date.now() - 1_000).toISOString(), 'p');
+    await tick(p);
+    expect(p.turns, 'the run due on its own ran').toHaveLength(1);
+    expect(row(p).last_run_status).not.toBe('stopped');
   });
 
   it('a webhook\'s trigger is not marked: a later run of it runs, without the answer', async () => {
@@ -277,6 +315,16 @@ describe('dueOnItsOwn', () => {
     expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:00:00.000Z' }, now, '2026-03-02T09:00:01.000Z')).toBe(false);
     expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:00:00.000Z' }, now, '2026-03-02T09:00:00.000Z')).toBe(false);
     expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:30:00.000Z' }, now, '2026-03-02T09:00:01.000Z')).toBe(true);
+  });
+  it('after a dead run\'s lease, the schedule\'s next time counts from the lease, and is due once it has come — at that time exactly', () => {
+    const monday = { schedule_cron: CRON, watch_config: undefined, next_run_at: '2026-03-02T09:00:00.000Z' };
+    const since = '2026-03-02T09:00:05.000Z';
+    expect(dueOnItsOwn(monday, Date.parse('2026-03-09T09:00:00.000Z'), since), 'the next Monday has come').toBe(true);
+    expect(dueOnItsOwn(monday, Date.parse('2026-03-09T09:00:00.000Z') - 1, since), 'a moment before it').toBe(false);
+    const watch = { schedule_cron: undefined, watch_config: '{"interval_minutes":60}', next_run_at: '2026-03-02T09:00:00.000Z' };
+    expect(dueOnItsOwn(watch, Date.parse(since) + 60 * 60_000, since), 'a watch: its interval after the lease has passed').toBe(true);
+    expect(dueOnItsOwn(watch, Date.parse(since) + 60 * 60_000 - 1, since), 'a moment before it').toBe(false);
+    expect(dueOnItsOwn({ ...watch, watch_config: 'broken' }, Date.parse(since), since), 'a watch whose interval cannot be read counts as due').toBe(true);
   });
   it('a next run that cannot be read counts as due, so the row runs as before', () => {
     expect(dueOnItsOwn({ schedule_cron: CRON, watch_config: undefined, next_run_at: null }, now, null)).toBe(true);

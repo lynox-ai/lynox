@@ -43,6 +43,7 @@ import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, cla
 import { filingContextFor } from './approval-filing.js';
 import { runAsWorkerRun, type WorkerRunStart } from './worker-run-start.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
+import { nextOccurrence } from './cron-parser.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { RunAbortedError } from './agent.js';
@@ -173,7 +174,9 @@ const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access,
  * the asking run: a run that ended moved the row to its next time, but a process that died while
  * the run waited wrote no end, so the row still holds that time, no later than when the run
  * took its lease (`leaseSince`, kept by the dead process; `claimLease` reads it the same way).
- * A next run that cannot be read counts as due, so such a row runs as it did before.
+ * Then the schedule's own time is the one after that lease: once it has come, the row is due on
+ * its own, as it would be had the dead run recorded its end.
+ * A time that cannot be read counts as due, so such a row runs as it did before.
  */
 export function dueOnItsOwn(trigger: Pick<TriggerRecord, 'schedule_cron' | 'watch_config' | 'next_run_at'>, now: number, leaseSince: string | null): boolean {
   if (!trigger.schedule_cron && !trigger.watch_config) return false;
@@ -181,8 +184,23 @@ export function dueOnItsOwn(trigger: Pick<TriggerRecord, 'schedule_cron' | 'watc
   const at = Date.parse(trigger.next_run_at);
   if (Number.isNaN(at)) return true;
   const since = leaseSince === null ? Number.NaN : Date.parse(leaseSince);
-  if (!Number.isNaN(since) && at <= since) return false;
+  if (!Number.isNaN(since) && at <= since) {
+    const own = ownTimeAfter(trigger, since);
+    return own === null || own <= now;
+  }
   return at <= now;
+}
+
+/** The schedule's next time after `after` (ms): a cron's next occurrence, a watch's interval on;
+ *  null when it cannot be read. */
+function ownTimeAfter(trigger: Pick<TriggerRecord, 'schedule_cron' | 'watch_config'>, after: number): number | null {
+  try {
+    if (trigger.schedule_cron) return nextOccurrence(trigger.schedule_cron, new Date(after)).getTime();
+    const minutes = (JSON.parse(trigger.watch_config ?? '') as { interval_minutes?: unknown }).interval_minutes;
+    return typeof minutes === 'number' && Number.isFinite(minutes) ? after + minutes * 60_000 : null;
+  } catch {
+    return null;
+  }
 }
 
 /** What a run records that only an answer from another chat made due, and that does not take it (U-484). */
@@ -1469,8 +1487,14 @@ export class WorkerLoop {
               // Read before the write below moves it: whether the row was due on its own schedule.
               // A one-shot has none left (its run is the one that asked); a cron or a watch is due
               // on its own once its next run has come. A webhook's runs come from its events, never
-              // from this, so it is not marked. Marked only once the write went through.
-              const onlyByAnswer = parked.source !== 'webhook' && !dueOnItsOwn(parked, Date.now(), taskManager.leaseSince(parked.id));
+              // from this, so it is not marked. Nor while the asking run still holds a live lease
+              // (in this process or another): that run records its own end and moves the row on,
+              // so a mark would only wait for a later run that the answer did not make due.
+              // Marked only once the write went through.
+              const nowMs = Date.now();
+              const leaseUntil = taskManager.leaseUntil(parked.id);
+              const leaseLive = leaseUntil !== null && Date.parse(leaseUntil) > nowMs;
+              const onlyByAnswer = parked.source !== 'webhook' && !leaseLive && !dueOnItsOwn(parked, nowMs, taskManager.leaseSince(parked.id));
               this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
               if (onlyByAnswer) this.#dueOnlyByAnswer.add(parked.id);
               else this.#dueOnlyByAnswer.delete(parked.id);
@@ -2145,8 +2169,9 @@ export class WorkerLoop {
     };
     this.activeTasks.set(task.id, entry);
     // Taken by whichever run comes next, so it never outlives that run. A run started by hand is
-    // the starter's, not the answer's, and runs; so does a webhook's run of an event.
-    if (this.#dueOnlyByAnswer.delete(task.id) && !isStartedByHand(task.id) && event === undefined) entry.dueOnlyByAnswer = true;
+    // the starter's, not the answer's, and runs. (A webhook's runs are never marked: the re-arm
+    // skips them.)
+    if (this.#dueOnlyByAnswer.delete(task.id) && !isStartedByHand(task.id)) entry.dueOnlyByAnswer = true;
     // A renewal fails for two reasons, and only one is another process: the row can also
     // be gone, because the schedule was deleted while the run went on. That is said once,
     // since every later interval would only repeat it.
