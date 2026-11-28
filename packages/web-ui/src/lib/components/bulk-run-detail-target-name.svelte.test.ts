@@ -347,8 +347,11 @@ describe('a target key in the preview', () => {
 			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		targets = [{ seq: 1, key: handle, change: 'update', diff: fieldsDiff('', 'Neu'), error: null, deselected: false } as BulkTarget];
 		await render();
+		expect(target.querySelector('[data-testid="bulk-target-row"]')?.classList.contains('block')).toBe(true);
 		const key = target.querySelector('[data-testid="bulk-target-row"] [data-testid="bulk-target-key"]');
 		expect(key?.textContent).toBe(handle);
+		expect(key?.classList.contains('break-all')).toBe(false);
+		expect(key?.classList.contains('break-normal')).toBe(true);
 		const before = [...(key?.childNodes ?? [])].flatMap((n, i, all) => (n.nodeName === 'WBR' ? [all[i - 1]?.textContent ?? ''] : []));
 		expect(before).toEqual(['tee-', 'abendruhe.', 'sommer_']);
 	});
