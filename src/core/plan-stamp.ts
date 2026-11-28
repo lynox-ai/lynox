@@ -385,7 +385,9 @@ export function workflowAsksOnSchedule(planned: { mode?: PipelineMode | undefine
  * Who may be asked a workflow's questions besides the owner when it runs on a schedule, one entry
  * per person: whom each plan of it asks ({@link planAsks}), and whom a plan without a mark of its
  * own would ask, the workflow's mandate. Empty when the workflow's own mandate has ended or names no
- * grant (no plan of it runs), or its authorship cannot be read.
+ * grant (no plan of it runs), or the workflow has no authorship to read. A read of it that fails
+ * throws on, as a workflow that cannot be read does for the plan's stamp: the preview fails instead
+ * of saying that only the owner answers, and the run reads the authorship again for itself.
  */
 export async function workflowAsks(
   workflowId: string,
@@ -404,12 +406,7 @@ export function workflowAsksWith(
   runHistory: RunHistory | null,
   isLive: (mandateId: string) => boolean,
 ): RequestPrincipal[] {
-  let a: ReturnType<RunHistory['getWorkflowAuthorship']>;
-  try {
-    a = runHistory?.getWorkflowAuthorship(workflowId);
-  } catch {
-    return [];
-  }
+  const a = runHistory?.getWorkflowAuthorship(workflowId);
   if (a === undefined) return [];
   const own = planMandate(planAuthorshipOfWorkflow(a))?.principal;
   if (own !== undefined && principalHasEnded(own, isLive)) return [];

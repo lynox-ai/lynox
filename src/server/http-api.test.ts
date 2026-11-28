@@ -708,15 +708,6 @@ async function confirmBody(id: string): Promise<string> {
 }
 
 /**
- * Give the rate-limit window back when the calling test ends: every count goes back to
- * what it was at the call, never a `clear()`. The tests here share one loopback window
- * of 600. Call it first in a test added after this helper, when its describe does not
- * repay its own spend; some describes do, with a snapshot in `beforeAll` restored in
- * `afterAll` or `afterEach`. Tests that predate the helper do not call it, on purpose:
- * the comment in the `tasks` describe explains how handing back their spend weakens the
- * `rate limiting` describe.
- */
-/**
  * {@link repayRateWindow}, and the window opened for the calling test: for a test that reads many
  * previews in a row, which would otherwise depend on how much the tests before it spent.
  */
@@ -725,6 +716,15 @@ function freshRateWindow(): void {
   for (const e of (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts.values()) e.count = 0;
 }
 
+/**
+ * Give the rate-limit window back when the calling test ends: every count goes back to
+ * what it was at the call, never a `clear()`. The tests here share one loopback window
+ * of 600. Call it first in a test added after this helper, when its describe does not
+ * repay its own spend; some describes do, with a snapshot in `beforeAll` restored in
+ * `afterAll` or `afterEach`. Tests that predate the helper do not call it, on purpose:
+ * the comment in the `tasks` describe explains how handing back their spend weakens the
+ * `rate limiting` describe.
+ */
 function repayRateWindow(): void {
   const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
   const before = new Map([...window].map(([k, v]) => [k, v.count]));
@@ -24858,6 +24858,44 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       }
     });
 
+    it('fails a preview instead of saying only the owner answers, when the workflow or its authorship cannot be read', async () => {
+      freshRateWindow();
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const asking = { id: 'wf-arno', name: 'W', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, template: true, confirmedAt: '2026-10-07T00:00:00.000Z', mode: 'interactive', steps: [{ id: 's1', task: 'ask', tools: ['ask_user'] }] };
+      const arnoWf = { createdBy: 'mandate:arno@kanzlei.example', createdMandateId: 'M-ARNO', createdAt: '2026-10-01 00:00:00', mandateEditor: null, mandateEditorId: null, mandateEditedAt: null };
+      let authorship = (): unknown => arnoWf;
+      const trigger = { id: 'p-own', effect: 'run_workflow', pipeline_id: 'wf-arno', title: 'Report', description: 'Weekly', created_by: 'owner', created_at: '2026-10-02T00:00:00.000Z' };
+      ref['getRunHistory'] = () => ({
+        getTrigger: (id: string) => (id === 'p-own' ? trigger : undefined),
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => authorship(),
+        getWorkflowExact: (id: string) => (id === 'wf-arno' ? asking : undefined),
+        workflowStampDigest: () => 'd'.repeat(64),
+        workflowStampState: () => 'holds',
+        workflowMandateShaped: () => true,
+        getPlansOfWorkflow: () => [],
+      });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      ref['getMandateEnds'] = () => ({ isLive: () => true, record: (): void => {} });
+      try {
+        // Read: both stamps name Arno.
+        mockGetPipeline.mockImplementation((id: string) => (id === 'wf-arno' ? asking : undefined));
+        expect(((await (await jsonFetch('/api/tasks/p-own/stamp-preview')).json()) as { asks: unknown }).asks).toBe('arno@kanzlei.example');
+        expect(((await (await jsonFetch('/api/workflows/wf-arno/stamp-preview')).json()) as { asks: unknown }).asks).toEqual({ count: 1, name: 'arno@kanzlei.example' });
+        // The workflow the plan names cannot be read: the plan's preview fails, it answers no `asks: null`.
+        mockGetPipeline.mockImplementation(() => { throw new Error('disk I/O error'); });
+        expect((await jsonFetch('/api/tasks/p-own/stamp-preview')).status).toBe(500);
+        // The workflow's authorship cannot be read: its preview fails, it does not say only the owner answers.
+        mockGetPipeline.mockImplementation((id: string) => (id === 'wf-arno' ? asking : undefined));
+        authorship = () => { throw new Error('disk I/O error'); };
+        expect((await jsonFetch('/api/workflows/wf-arno/stamp-preview')).status).toBe(500);
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
+    });
+
     it('names no one for a paused plan whose person\'s access was extended, in neither stamp: it never runs as that person again', async () => {
       freshRateWindow();
       const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
@@ -24901,7 +24939,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       }
     });
 
-    it('refuses a confirm when the person its questions reach changed since the preview, with nothing else changed', async () => {
+    it('refuses a confirm when the person its questions reach changed since the preview with nothing it shows changed, and when the plan changes during the confirm', async () => {
       freshRateWindow();
       const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
       const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
