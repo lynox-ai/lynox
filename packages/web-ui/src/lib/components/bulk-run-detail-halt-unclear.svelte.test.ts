@@ -268,6 +268,21 @@ describe('the step to check the targets with an error', () => {
 		expect(shown()).toContain(t('bulk.halt.failures_before_write'));
 		expect(target.textContent).toContain('/products/11');
 	});
+
+	for (const haltKey of ['failureRate', 'consecutiveFailures'] as const) {
+		it(`does not load an aborted run halted on ${haltKey} whole, and opens it on the targets it wrote first`, async () => {
+			run = halted(1, 0, { phase: 'aborted', haltKey, total: 12, changes: UPDATES(12), applied: 3, heads: { ...NONE, written: 3, failed: 1, open: 8 } });
+			allTargets = [...Array.from({ length: 10 }, (_, i) => field(i)), unread(10, 'write_failed'), field(11)];
+			await render();
+			const asked = vi.mocked(fetch).mock.calls.map(([u]) => String(u)).filter((u) => /\/targets\?/.test(u));
+			// One first page of the changed targets, the written ones first; never the whole run.
+			expect(asked).toHaveLength(1);
+			expect(asked[0]).toMatch(/\/bulk\/runs\/r1\/targets\?offset=0&limit=6&changed=1$/);
+			expect(target.textContent).not.toContain('/products/11');
+			// An ended run offers no step to check its failed targets.
+			expect(shown()).not.toContain(t('bulk.halt.failures_before_write'));
+		});
+	}
 });
 
 describe('an aborted run', () => {

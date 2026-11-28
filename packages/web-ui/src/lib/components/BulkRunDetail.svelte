@@ -218,9 +218,12 @@
 				|| (r.body.hiddenAddsTargets ?? 0) > 0
 				// So does one with a field that could not be checked for them: its sentence stands under it.
 				|| (r.body.hiddenUncheckedTargets ?? 0) > 0
-				// So does one halted on its failures: the step to check the targets with an error
-				// stands only where one is marked, and a marked one may lie past the first page.
-				|| r.body.haltKey === 'failureRate' || r.body.haltKey === 'consecutiveFailures';
+				// So does one halted on its failures while the page may still offer the step to check the
+				// targets with an error: it stands only where one is marked, and a marked one may lie past
+				// the first page. A run that ended keeps its halt but offers no step, and opens on the
+				// targets it wrote.
+				|| ((r.body.haltKey === 'failureRate' || r.body.haltKey === 'consecutiveFailures')
+					&& (r.body.phase === 'planned' || r.body.phase === 'approved' || r.body.phase === 'writing'));
 			// Every page is asked for the run this load opened, never for one the page has moved to since.
 			let firstChanged = !whole && (r.body.changes.unchanged > 0 || r.body.applied > 0);
 			let shown = whole ? await loadFrom(id, 0, r.body.total) : await loadTargets(id, 0, FIRST_PAGE, firstChanged);
