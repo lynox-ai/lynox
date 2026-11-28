@@ -30,6 +30,8 @@ let refuseNextRunForReview: Promise<void> | null;
 let changedIn: Map<string, Array<{ file: string; status: string; diff: string }>>;
 /** While set, every run after the first streams until it resolves. */
 let holdLaterRuns: Promise<void> | null;
+/** While true, the first run's own stream drops before its end, once it is released. */
+let dropFirstRun: boolean;
 let reviewStatus: number;
 let changesetFails: boolean;
 let saved: Map<string, string>;
@@ -87,6 +89,7 @@ function serve(): void {
 			const stream = new ReadableStream<Uint8Array>({
 				async start(c) {
 					if (held) await held;
+					if (dropFirstRun && runTasks.length === 1) { c.error(new Error('dropped')); return; }
 					const files = changed; // what the run changed is known when it ends
 					if (files.length > 0) c.enqueue(enc.encode(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: files.length })}\n\n`));
 					c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`));
@@ -157,6 +160,7 @@ beforeEach(async () => {
 	refuseNextRunForReview = null;
 	changedIn = new Map();
 	holdLaterRuns = null;
+	dropFirstRun = false;
 	holdReopen = new Map();
 	holdReview = null;
 	liveRunIn = null;
@@ -805,6 +809,47 @@ describe('a turn queued before a reload waits for the review the server holds', 
 			expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
 			expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
 		});
+	});
+
+	describe('a turn queued behind a run whose own stream drops, when the re-attach lets go before the run ends', () => {
+		const dropAndLose = async (stream: 'aborted' | 'unreachable' | 'refused'): Promise<void> => {
+			const release = await queueBehindRun(); // t1's run streams on, a turn queued behind it
+			dropFirstRun = true;
+			liveStream = stream;
+			liveRunActive = true; // the server still runs it
+			release(); // the run's own stream drops here, without its end
+			await settle();
+			expect(liveStreamGets, 'positive control: the run tried to re-attach').toBe(1);
+			await wait(2300); // past one ask of the registry
+			await settle();
+		};
+
+		for (const stream of ['aborted', 'unreachable', 'refused'] as const) {
+			it(`${stream}: the queued turn waits while the run runs, and goes once it ended and no review holds it`, async () => {
+				await dropAndLose(stream);
+				expect(runTasks, 'nothing sent while the server still runs the run').toEqual(['edit the notes']);
+				expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+				liveRunActive = false; // the run ends on the server
+				await wait(2300);
+				await settle();
+				await wait(200);
+				await settle();
+				expect(runTasks, 'the turn goes once, after the run\'s end').toEqual(['edit the notes', 'then this']);
+			});
+
+			it(`${stream}: the queued turn is not sent after the run's end while a review is open`, async () => {
+				await dropAndLose(stream);
+				changed = notes;
+				liveRunActive = false;
+				await wait(2300);
+				await settle();
+				await wait(200);
+				await settle();
+				expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
+				expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
+				expect(store.getQueueLength(), 'the turn still waits').toBe(1);
+			});
+		}
 	});
 
 	it('with no review the restored turn is sent (control)', async () => {

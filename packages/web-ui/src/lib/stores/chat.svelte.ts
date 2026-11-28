@@ -1381,13 +1381,15 @@ async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<R
 	// `since` = what THIS client already rendered, so no event double-renders.
 	const since = lastAppliedSeq > 0 ? lastAppliedSeq : target.lastPersistedSeq;
 	const epochBefore = streamEpoch;
-	await reattachRun(sid, target.runId, since, _resumeGeneration);
+	const gen = _resumeGeneration;
+	const reattach = await reattachRun(sid, target.runId, since, gen);
 	if (streamEpoch !== epochBefore) return 'took-over'; // reattachRun took over + owns teardown
 	// Non-takeover: the run finished in the tiny /runs/active → /stream gap
-	// (reattachRun 404'd before claiming the stream). We already spliced the empty
+	// (reattachRun 404'd before claiming the stream), or the stream could not be
+	// reached or read and the run may still go on. We already spliced the empty
 	// bubble and may have restored a now-stale prompt, so reconcile to the
-	// authoritative persisted transcript instead of leaving the just-finished turn
-	// invisible until a manual reload. Return true so the caller skips its own
+	// authoritative persisted transcript instead of leaving the turn invisible
+	// until a manual reload. Return true so the caller skips its own
 	// (now stale-indexed) cleanup + tail.
 	endStreaming();
 	streamingActivity = 'idle';
@@ -1396,6 +1398,11 @@ async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<R
 	pendingPermission = null;
 	pendingTabsPrompt = null;
 	await reconcileThread();
+	// The stream could not be reached or its reading was refused: the run may still go on. When
+	// this turn still streamed, the wait for its end that reattachRun started stopped at once; now
+	// that it does not, a turn queued behind it waits for the run's end from here (a wait that
+	// already runs for this run is not started twice).
+	if (reattach === 'let-go') drainWhenRunEnds(target.runId, gen);
 	return 'took-over';
 }
 
@@ -4585,7 +4592,11 @@ function drainWhenRunEnds(runId: string, gen: number): void {
 	void ask();
 }
 
-async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<void> {
+/**
+ * How a re-attach that did not take over the stream ended: `let-go` when the stream could not be
+ * reached or its reading was refused (the run may still go on), `other` otherwise.
+ */
+async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<'let-go' | 'other'> {
 	// userIdx for handleSSEEvent's error path = the last user message.
 	let userIdx = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -4606,16 +4617,16 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 		// Network drop — nav poll still reflects the run; user can reload. A turn queued here
 		// waits for the run's end.
 		drainWhenRunEnds(runId, gen);
-		return;
+		return 'let-go';
 	}
 	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
 	const refused = res.ok ? null : await containedReadKey(res);
-	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; drainWhenRunEnds(runId, gen); return; }
+	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; drainWhenRunEnds(runId, gen); return 'let-go'; }
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
-	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); drainAfterReattach(gen); return; }
-	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return; }
+	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); drainAfterReattach(gen); return 'other'; }
+	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return 'other'; }
 
 	const myEpoch = ++streamEpoch;
 	isStreaming = true;
@@ -4721,6 +4732,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 		}
 		persistChat();
 	}
+	return 'other';
 }
 
 /**
