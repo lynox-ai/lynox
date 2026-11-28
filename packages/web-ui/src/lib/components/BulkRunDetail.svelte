@@ -311,7 +311,15 @@
 		planner_unknown: 'bulk.resume.refused.planner_unknown',
 		start_domains_invalid: 'bulk.start_domains.invalid',
 		start_domains_frozen: 'bulk.start_domains.frozen',
+		shopify_off: 'bulk.resume.refused.shopify_off',
 	};
+	/** After the refusal of a run while Shopify bulk changes are off, the way to turn them on —
+	 *  unless the run halted on that switch, whose halt already says it above. A preview is
+	 *  approved, not continued, once they are on: the support sentence says so. */
+	const refusalWayOf = (code: string | undefined): string | null =>
+		code === 'shopify_off' && run !== null && run.haltKey !== 'shopifyWriteOff'
+			? t(managed === false ? 'bulk.halt.shopifyWriteOff_before_selfhost'
+				: run.phase === 'previewed' ? 'bulk.halt.shopifyWriteOff_before_approve_managed' : 'bulk.halt.shopifyWriteOff_before_managed') : null;
 	const hopelessReason = $derived.by(() => {
 		if (hopeless === null || run === null || hopeless.id !== run.id) return null;
 		const key = bulkReachRefusalKey(hopeless.code);
@@ -324,7 +332,9 @@
 		const ruleSourceKey = bulkRuleSourceKey(code, title !== null);
 		if (ruleSourceKey !== null) return title !== null ? tf(ruleSourceKey, { title: shownValue(title) }) : t(ruleSourceKey);
 		const key = code !== undefined && Object.hasOwn(REFUSAL_KEYS, code) ? REFUSAL_KEYS[code] : code !== undefined ? bulkReachRefusalKey(code) ?? undefined : undefined;
-		return key !== undefined ? t(key) : (r.body.error ?? t('common.load_failed'));
+		if (key === undefined) return r.body.error ?? t('common.load_failed');
+		const way = refusalWayOf(code);
+		return way !== null ? `${t(key)} ${way}` : t(key);
 	};
 
 	function approve(oneFirst: boolean): Promise<void> {

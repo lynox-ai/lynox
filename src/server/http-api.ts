@@ -10886,9 +10886,11 @@ export class LynoxHTTPApi {
       const found = shopifyConnectedBy(engine.getApiStore()?.getByHostname(host), host, displayNameOf);
       return found === null ? null : { provider: 'Shopify', by: found.by };
     };
+    // A known refusal carries its reason as `code`, so the page can word it in its own language.
     const refuse = (res: import('node:http').ServerResponse, reason: string): void => {
-      const [code, msg] = BULK_REFUSALS[reason] ?? [400, 'Refused.'];
-      errorResponse(res, code, msg);
+      const known = Object.hasOwn(BULK_REFUSALS, reason) ? BULK_REFUSALS[reason] : undefined;
+      const [status, msg] = known ?? [400, 'Refused.'];
+      errorResponse(res, status, msg, known !== undefined ? reason : undefined);
     };
     /** A refusal for want of a probe, with the engine's reason: what each kind of entry lacks and
      *  where the run stands, from the same check that refused it. */
