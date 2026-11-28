@@ -71,8 +71,8 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  *    controls (U+0085 NEL, U+0084, U+009B) pass `\s`, and as line ends they are
  *    inert anyway, because neither JS's LineTerminator set nor CSS's
  *    segment-break set contains them, so `marked` can never see one as a line
- *    end and no renderer breaks on one. They are named below for another reason
- *    (point 4).
+ *    end and no renderer breaks on one. DEL and the C1 controls other than NEL
+ *    are named below for another reason (point 4).
  *    That is a property of the ENVIRONMENT, not of this class. Anyone extending
  *    this to a consumer that does treat C1 as a break (a terminal, a CSV or
  *    header export) has to re-derive the class, not trust this one.

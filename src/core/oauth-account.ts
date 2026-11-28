@@ -38,7 +38,7 @@ export const ACCOUNT_LABEL_MAX = 200;
  */
 export function accountLabel(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
-  const line = singleLine(raw.replace(/[\u0080-\u0084\u0086-\u009f]/gu, '')).replace(/ {2,}/gu, ' ').trim();
+  const line = singleLine(raw).replace(/[\u0080-\u009f]/gu, '').replace(/ {2,}/gu, ' ').trim();
   if (line === '') return undefined;
   return [...line].slice(0, ACCOUNT_LABEL_MAX).join('');
 }
