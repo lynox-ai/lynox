@@ -687,8 +687,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         judge,
         // The worker that writes the run holds no conversation: its data-store writes are stamped
         // with this one's grant set and its source's, or a row made from what either read would
-        // escape that connection's erasure.
-        plannerGrants: plannerGrantsOf(agent.conversationGrants?.members() ?? null, sourceGrants),
+        // escape that connection's erasure. A rule read from a saved artifact is read here, not
+        // in the conversation, and the artifact keeps no stamp: the verdicts it decides are
+        // unknown beside the rest.
+        plannerGrants: plannerGrantsOf(agent.conversationGrants?.members() ?? null, fromArtifact === null ? sourceGrants : [...sourceGrants, UNKNOWN_GRANT]),
       });
       return [
         'Dry run recorded — nothing was written to any target.',
