@@ -4264,7 +4264,7 @@ describe('LynoxHTTPApi', () => {
         expect(next.status, 'once it ended, the follow-up runs').toBe(200);
         await next.text();
         expect(mockSessionRun, 'the follow-up ran').toHaveBeenCalled();
-        expect(takeovers, 'the old run was told to end once more, by the retry while it still ended, and not again').toBeLessThanOrEqual(2);
+        expect(takeovers, 'the old run was told to end once, by the first follow-up; the second found its slot free').toBe(1);
       } finally {
         runningSessions.delete('test');
       }

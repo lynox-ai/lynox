@@ -615,7 +615,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     }
   });
 
-  it('a signal shutdown that began earlier counts its deadlines from then, and without that from now', async () => {
+  it('a signal shutdown that began earlier counts its deadlines from then', async () => {
     const { engine, usRuntime, releaseDrain } = await engineMidRebootstrap('releases');
     try {
       const began = Date.now() - 3_000; // the chat runs were ended first
