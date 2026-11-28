@@ -697,4 +697,16 @@ describe('the record each connecting path leaves reads as a connection; the fres
     expect(isConnection({ minted_by: 'fp-c', minted_for: 'fp-r' } as OAuthGrantRecord)).toBe(true);
     expect(isConnection({ written: [] } as unknown as OAuthGrantRecord)).toBe(false);
   });
+
+  // Each of the four fields marks a connection on its own; the paths above often set several.
+  it.each([
+    ['state', { grant_id: 'g-1', state: 'no-refresh' }],
+    ['connected_by', { grant_id: 'g-1', connected_by: 'owner' }],
+    ['written', { grant_id: 'g-1', written: [{ name: 'CRM_API_ACCESS_TOKEN', fp: 'fp-a' }] }],
+    ['minted_for', { grant_id: 'g-1', minted_for: 'fp-r' }],
+  ])('%s alone marks a connection, on top of the record a save makes', async (_field, grant) => {
+    const { isConnection } = await import('../../core/api-store.js');
+    expect(isConnection(grant as unknown as OAuthGrantRecord)).toBe(true);
+    expect(isConnection({ grant_id: 'g-1', fingerprints: { CRM_CLIENT_ID: 'fp' }, fingerprint_check: 'c' } as unknown as OAuthGrantRecord)).toBe(false);
+  });
 });
