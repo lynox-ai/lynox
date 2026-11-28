@@ -9,7 +9,7 @@ import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateId
 import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, isPaused, pausedDoneReaderOf, pausedDoneUpdateRefusal, pausedDoneWorkflow, pausedModelText, type PausedDoneWorkflowReader } from '../../core/plan-pause.js';
 import { lastRunResultFor } from '../../core/member-connection-notes.js';
 import { noticeLanguage } from '../../core/notice-language.js';
-import { MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WEBHOOK_ASKS_RESULT, WORKER_NOTICES } from '../../core/worker-notices.js';
+import { MANDATE_ENDED_RESULT, MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WAIT_EXPIRED_RESULT, WATCH_READ_UNRECORDED_RESULT, WATCH_URL_MISSING_RESULT, WEBHOOK_ASKS_RESULT, WORKER_NOTICES } from '../../core/worker-notices.js';
 import { otherRunTextBlock, setUpByPhrase } from '../../core/other-run-text.js';
 import { planMakerOf } from './diagnose-workflow.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
@@ -180,7 +180,7 @@ otherRun?: string | undefined): string {
     const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
     // Someone else's plan: its run's text is that person's or from outside. It goes into the fenced
     // block, so it does not read as a fact of this listing; a sentence lynox itself stores stays here.
-    if (otherRun !== undefined && raw.length > 0 && !ENGINE_RUN_RESULTS.has(stored ?? '')) fenced = reason;
+    if (otherRun !== undefined && raw.length > 0 && !engineRunResults().has(stored ?? '')) fenced = reason;
     parts.push(`last run ${ENDED_LABEL.get(t.last_run_status ?? '') ?? 'FAILED'}${when}: ${fenced !== undefined ? 'its text is in the block below' : reason}`);
     // …and whether that failure was the last word. `last run FAILED` alone does
     // not say: a cron row keeps its next run through a failure and tries again, a
@@ -250,11 +250,24 @@ otherRun?: string | undefined): string {
   return `\n    ↳ ${parts.join(FIELD_SEPARATOR)}${fenced !== undefined && otherRun !== undefined ? `\n${otherRunTextBlock(otherRun, fenced)}` : ''}`;
 }
 
-/** The results lynox itself stores on a plan's run: its own sentences, shown as they are. */
-const ENGINE_RUN_RESULTS: ReadonlySet<string> = new Set([
-  ACCESS_ENDED_RESULT, ACCESS_ENDED_PAUSED_RESULT, PLAN_ENDED_RESULT,
-  MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WEBHOOK_ASKS_RESULT,
-]);
+/**
+ * The results lynox itself stores on a plan's run: its own sentences, shown as they are. Only
+ * fixed sentences, matched whole: every fixed notice of the worker in every language (it records
+ * them in the instance's language, and one of another language is lynox's own just the same),
+ * and the fixed English results. A notice that puts in a name, an id or any other value is not
+ * here, so a result built from one stays in the block. Built on first use, after the modules it
+ * reads have loaded.
+ */
+let engineResults: ReadonlySet<string> | undefined;
+export function engineRunResults(): ReadonlySet<string> {
+  engineResults ??= new Set([
+    ...Object.values(WORKER_NOTICES).flatMap((notices) => Object.values(notices).filter((v): v is string => typeof v === 'string')),
+    ACCESS_ENDED_RESULT, ACCESS_ENDED_PAUSED_RESULT, PLAN_ENDED_RESULT,
+    MANDATE_UNSTAMPED_RESULT, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, WEBHOOK_ASKS_RESULT,
+    WAIT_EXPIRED_RESULT, MANDATE_ENDED_RESULT, WATCH_URL_MISSING_RESULT, WATCH_READ_UNRECORDED_RESULT,
+  ]);
+  return engineResults;
+}
 
 /**
  * Which run a trigger's stored result comes from, when someone other than the owner set up or

@@ -12,7 +12,7 @@ import { OWNER_PRINCIPAL, mandateNeedsOwnerStamp, ownerInstructionCounts } from 
 import { recipientsConfirmable } from '../../core/recipient-confirm.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { testAuditLog } from '../../../tests/helpers/audit-log.js';
-import { MANDATE_UNSTAMPED_RESULT } from '../../core/worker-notices.js';
+import { MANDATE_UNSTAMPED_RESULT, WATCH_URL_MISSING_RESULT, WORKER_NOTICES } from '../../core/worker-notices.js';
 
 let sharedTaskManager: TaskManager | null = null;
 let sharedHistory: RunHistory | null = null;
@@ -1600,6 +1600,62 @@ describe('Task Tools', () => {
         failWith(id, MANDATE_UNSTAMPED_RESULT);
         const out = await taskListTool.handler({}, makeAgent());
         expect(after(out, 'Unstamped check')[0]).toBe(`    ↳ last run FAILED (2026-09-21T08:00): ${MANDATE_UNSTAMPED_RESULT}`);
+        expect(out).not.toContain('other_run_text');
+      });
+
+      // The worker records its notices in the instance's language. Each language's fixed sentence
+      // is lynox's own, matched whole; anything appended to it is not.
+      describe.each([
+        { lang: 'de' as const, other: 'en' as const },
+        { lang: 'en' as const, other: 'de' as const },
+      ])('lynox\'s own sentences in $lang', ({ lang, other }) => {
+        const asReadOn = (language: 'de' | 'en'): IAgent => ({ ...makeAgent(), noticeLanguage: language }) as IAgent;
+        const own = WORKER_NOTICES[lang].planAuthorsUnreadable;
+
+        it(`the ${lang} sentence on a mandate's trigger stays on the line, outside the fence`, async () => {
+          const id = await mkSchedule(`Own ${lang} sentence`);
+          setTrigger(id, 'created_by', 'mandate:eva@firm.example');
+          failWith(id, own);
+          const out = await taskListTool.handler({}, asReadOn(lang));
+          expect(after(out, `Own ${lang} sentence`)[0]).toBe(`    ↳ last run FAILED (2026-09-21T08:00): ${own}`);
+          expect(out).not.toContain('other_run_text');
+        });
+
+        it(`the ${lang} sentence with text appended is fenced`, async () => {
+          const id = await mkSchedule(`Appended ${lang} sentence`);
+          setTrigger(id, 'created_by', 'mandate:eva@firm.example');
+          failWith(id, `${own} ${NOTE}`);
+          const rest = after(await taskListTool.handler({}, asReadOn(lang)), `Appended ${lang} sentence`);
+          expect(rest[0]).toBe(POINTER);
+          expect(rest[3]).toBe(`${own} ${NOTE}`);
+        });
+
+        it(`the ${lang} sentence read on an instance in ${other} stays outside the fence too, by intent: it is still lynox's own`, async () => {
+          const id = await mkSchedule(`Other-language ${lang} sentence`);
+          setTrigger(id, 'created_by', 'mandate:eva@firm.example');
+          failWith(id, own);
+          const out = await taskListTool.handler({}, asReadOn(other));
+          expect(after(out, `Other-language ${lang} sentence`)[0]).toBe(`    ↳ last run FAILED (2026-09-21T08:00): ${own}`);
+          expect(out).not.toContain('other_run_text');
+        });
+
+        it(`a ${lang} notice that puts in a value stays fenced`, async () => {
+          const id = await mkSchedule(`Inserted ${lang} value`);
+          setTrigger(id, 'created_by', 'mandate:eva@firm.example');
+          const gone = WORKER_NOTICES[lang].workflowGone('wf-gone');
+          failWith(id, gone);
+          const rest = after(await taskListTool.handler({}, asReadOn(lang)), `Inserted ${lang} value`);
+          expect(rest[0]).toBe(POINTER);
+          expect(rest[3]).toBe(gone);
+        });
+      });
+
+      it('a fixed English result the worker records outside its notices stays on the line', async () => {
+        const id = await mkSchedule('Watch without page');
+        setTrigger(id, 'created_by', 'mandate:eva@firm.example');
+        failWith(id, WATCH_URL_MISSING_RESULT);
+        const out = await taskListTool.handler({}, makeAgent());
+        expect(after(out, 'Watch without page')[0]).toBe(`    ↳ last run FAILED (2026-09-21T08:00): ${WATCH_URL_MISSING_RESULT}`);
         expect(out).not.toContain('other_run_text');
       });
     });
