@@ -905,6 +905,15 @@ describe('a watch change, marked as the page\'s summary that lynox did not check
     }
   });
 
+  it('a long address with a short summary that fits together is not cut', () => {
+    // Long enough that the lead alone would leave the summary less than its few characters.
+    const url = `https://shop.example/${'p'.repeat(110)}`;
+    expect(`${url} changed. ${EN_MARK}\n\n`.length).toBeGreaterThan(PUSH_BODY_MAX - 21);
+    const push = WORKER_NOTICES.en.watchChanged(url, 'Up.');
+    expect(push).toBe(`${url} changed. ${EN_MARK}\n\nUp.`);
+    expect(push.length).toBeLessThanOrEqual(PUSH_BODY_MAX);
+  });
+
   it('an address that fits is not cut, even with a long summary', () => {
     const url = `https://shop.example/${'p'.repeat(90)}`;
     expect(WORKER_NOTICES.en.watchChanged(url, 'x'.repeat(500))).toContain(`${url} changed. ${EN_MARK}`);
