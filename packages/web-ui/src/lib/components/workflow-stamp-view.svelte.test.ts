@@ -716,14 +716,14 @@ describe('the stamp part names settings, and shows no stored value', () => {
 		it('with no one left besides the owner, the marked box says only the owner answers', async () => {
 			await refusedTo({ count: 1, name: 'arno@kanzlei.example' }, null);
 			expect(q('stamp-asks')).toBeNull();
-			expect(q('stamp-asks-none')?.textContent?.trim()).toBe('Die Fragen dieses Workflows beantwortest jetzt nur du.');
+			expect(q('stamp-asks-none')?.textContent?.trim()).toBe('Läuft er geplant, beantwortest jetzt nur du seine Fragen.');
 			expect(q('stamp-settings')?.hasAttribute('data-stamp-changed')).toBe(true);
 			if (component) unmount(component);
 			component = undefined;
 			target.innerHTML = '';
 			await inEnglish(async () => {
 				await refusedTo({ count: 1, name: 'arno@kanzlei.example' }, null);
-				expect(q('stamp-asks-none')?.textContent?.trim()).toBe('Only you answer this workflow’s questions now.');
+				expect(q('stamp-asks-none')?.textContent?.trim()).toBe('When it runs on a schedule, only you answer its questions now.');
 			});
 		});
 

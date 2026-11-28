@@ -3135,7 +3135,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.stamp.asks': { de: 'Fragen', en: 'Questions' },
 	'workflow_library.stamp.asks_one': { de: 'Läuft er geplant, kann auch {name} seine Fragen beantworten; wer zuerst antwortet, lenkt den Lauf.', en: 'When it runs on a schedule, {name} can answer its questions too; whoever answers first steers the run.' },
 	// After asks_changed only (U-498): the line the box holds when no one besides the owner answers any more.
-	'workflow_library.stamp.asks_none': { de: 'Die Fragen dieses Workflows beantwortest jetzt nur du.', en: 'Only you answer this workflow’s questions now.' },
+	'workflow_library.stamp.asks_none': { de: 'Läuft er geplant, beantwortest jetzt nur du seine Fragen.', en: 'When it runs on a schedule, only you answer its questions now.' },
 	'workflow_library.stamp.asks_many': { de: 'Läuft er geplant, kann je nach Plan auch eine von {n}\u00a0Personen mit Zugang seine Fragen beantworten. Wer zuerst antwortet, lenkt den Lauf.', en: 'When it runs on a schedule, one of {n}\u00a0people with access may also answer its questions, depending on the plan. Whoever answers first steers the run.' },
 	'stamp.asks': { de: 'Fragen dieses Plans beantworten du und {name}. Wer zuerst antwortet, lenkt den Lauf.', en: 'You and {name} can answer this plan’s questions. Whoever answers first steers the run.' },
 	'workflow_library.stamp.on_failure': { de: 'Bei Fehler', en: 'On failure' },
