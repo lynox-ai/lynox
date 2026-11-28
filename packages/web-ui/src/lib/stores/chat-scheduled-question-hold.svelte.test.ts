@@ -354,10 +354,13 @@ describe('the reconnect with a failed message', () => {
 		release();
 		await new Promise((r) => setTimeout(r, 700));
 		await settle();
+		expect(failedOne('again').map((m) => m.failed), 'the failed message keeps its tap').toEqual([true]);
 		expect(runPosts(), 'only the first message and the turn that started').toBe(2);
 		expect(toasts).toEqual([]);
 		finishRun?.();
+		await new Promise((r) => setTimeout(r, 700));
 		await settle();
+		expect(runPosts(), 'not sent once that turn ends either').toBe(2);
 	});
 
 	it('with nothing waiting: sent again, as before', async () => {

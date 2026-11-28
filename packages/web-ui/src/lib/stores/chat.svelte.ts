@@ -1592,7 +1592,8 @@ async function askBeforeResend(opts: { unreachableSends?: boolean; sayTurnStarte
 	if (sessionId !== sid) return false;
 	// A turn started meanwhile: that is now the turn in charge, and the message is not sent again.
 	// A tap or a Retry the user made is told why it did nothing (`sayTurnStarted`); the re-send on
-	// reconnect is not the user's action, and the turn running is the one they just sent.
+	// reconnect is not the user's action, and the turn running is usually the one they just sent;
+	// the failed message keeps its tap either way.
 	if (isStreaming) {
 		if (opts.sayTurnStarted === true) addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
 		return false;
